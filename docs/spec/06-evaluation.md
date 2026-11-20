@@ -220,6 +220,8 @@ Client-side execution with the SDK (10, D18); the server stores results. There a
   - A request whose messages are all system messages is sent, and the provider answers with status 400.
   - In `tool` mode the forced tool replaces the request's tool choice.
 
+**Connection limits (D-V-35, D-V-36).** A playground run and a judge job share their connection's concurrency slot and rate token. `interactive::acquire` waits at most 10 s for both, ahead of queued rule jobs, and the run answers `429 rate_limited` when it cannot get them. A run uses the connection whatever its status and never marks it failing; a pause-class error reaches the user only in the run's `error` event.
+
 ## Library
 
 `cetra-eval` implements evaluator execution, variable mapping, prompt templating and judge traces, and it has no database (D155). Given an evaluator, its variables or trace data, and a connection, it returns a score value and the normalized spans of the judge trace. The server track owns the job queue, the evaluation tables, secret encryption and the API handlers (D156).

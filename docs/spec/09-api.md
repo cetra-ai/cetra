@@ -150,6 +150,22 @@ Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md) § AP
 | `GET /prompt-settings` | the project's protected labels, `["production"]` until set (D-V-10) |
 | `PUT /prompt-settings` | `{protected_labels}`, at most 20 valid labels; project admins only (D-V-10) |
 
+### Playground
+
+Track V M6 (D-V-20 to D-V-26, D-V-33 to D-V-37). One route, answered as a stream, and the rules around it.
+
+| Method & path | Notes |
+|---|---|
+| `POST /playground/runs` | `RunPlayground` (D-V-26): members and above, through a session or a read-write PAT, never an API key. The body is `{connection_id, model, messages, variables?, placeholders?, params?, tools?, tool_choice?, response_format?, source?}` (D-V-21). The answer is `text/event-stream`: `start` `{trace_id}`, `text` `{delta}`, `tool_call` `{id, name, arguments}`, then `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}`, with a `ping` every 15 s (D-V-20). A refusal before the stream is a problem answer: `400` with field errors, or `429 rate_limited` (D-V-24). |
+
+- **Messages.** Each `messages` entry is a canonical message (01) or `{"type": "placeholder", "name": …}`, which is replaced in place by the messages given under that name in `placeholders`. `{{name}}` in the text parts written in `messages` is rendered from `variables`; placeholder messages are not rendered. A missing variable or placeholder is a `400` before the stream starts, with the field of the part (`messages[i].parts[j]`). At most 200 messages after placeholders, and a 2 MiB body (D-V-21, D-V-37).
+- **Limits.** Per user, 60 runs a minute and 4 at once; per org, 16 at once. A run waits at most 10 s for its connection's slot and rate token, then answers `429` (D-V-24, D-V-35). A call takes at most 300 s and fails after 60 s of silence. `max_tokens` defaults to 4 096 and is at most 65 536.
+- **Trace.** Each run is one trace with one `llm` span in the reserved environment `cetra-playground` (D-V-22, D-V-33). Playground spans are not units: they never count against the units cap or the usage counter (D-V-23). The default trace lists leave them out, and `include_eval` shows them. The run's trace is committed after the stream ends, also when the client cancelled. A cancelled run has status error and the message `cancelled`, and its provider call is dropped.
+- **Connection status.** A run uses the connection whatever its `status`, and never marks it failing (D-V-36).
+- **Tools.** Tools are never run. A tool-mode response format forces its own tool, so the user's tools are not callable in the same run. Media and unknown parts are refused (D-V-25).
+- **Notes.** Playground traces carry no end-user id, so a delete-by-user never matches them; they go with project and trace deletions. The overview's "Evaluation cost" widget counts `cetra-eval` only.
+- **Audit and restore.** The audit log records `playground run` with ids, the outcome and the latency, never the payload. Restore mode refuses runs (D-N-25).
+
 ### Evaluation & alerts
 
 | Method & path | Notes |

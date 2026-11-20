@@ -1089,3 +1089,126 @@ async fn online_rules_and_backfill_end_to_end() {
     server.running.shutdown().await.unwrap();
     provider.abort();
 }
+
+/// Track V M6 end to end (D-V-20, D-V-22, D-V-33): a playground run streams from the capture
+/// mock through the org's connection, and its trace lives in the reserved environment
+/// `cetra-playground`, which the default trace list leaves out.
+#[tokio::test(flavor = "multi_thread")]
+async fn playground_run_end_to_end() {
+    let mock = cetra_capture::Mock::new(vec![
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": "Hello from cetra."},
+            "finish": "stop",
+            "usage": {"input": 12, "output": 4},
+            "chunks": 3,
+            "ttft_ms": 0,
+            "chunk_delay_ms": 5
+        }))
+        .unwrap(),
+    ]);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let provider_addr = listener.local_addr().unwrap();
+    let router = mock.router();
+    let provider = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    // The mock listens on 127.0.0.1, a private address the run may reach only when allowed.
+    let server = start(
+        dir.path(),
+        "\n[security]\nallow_private_network_egress = true\n",
+    )
+    .await;
+    let project = format!("/api/v1/projects/{}", server.proto_id);
+
+    let connection = server
+        .api
+        .post(
+            "/api/v1/orgs/acme/llm-connections",
+            &json!({
+                "name": "Mock",
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": format!("http://{provider_addr}/v1"),
+                "default_model": "gpt-test",
+                "max_concurrency": 4,
+                "requests_per_minute": 600
+            }),
+        )
+        .await;
+
+    // The admin's run: a system message with a variable, a user message, and a prompt source.
+    let body = json!({
+        "connection_id": connection["id"],
+        "model": "gpt-test",
+        "messages": [
+            {"role": "system", "parts": [{"type": "text", "content": "You are a support agent for {{product}}."}]},
+            {"role": "user", "parts": [{"type": "text", "content": "Say hello."}]}
+        ],
+        "variables": {"product": "cetra"},
+        "params": {"temperature": 0.2},
+        "source": {"prompt": {"name": "support-reply", "version": 2}}
+    });
+    let mut response = server
+        .client
+        .post(format!("{}{project}/playground/runs", server.http))
+        .header("cookie", &server.api.cookie)
+        .header("origin", ORIGIN)
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success(), "{}", response.status());
+    let events = read_until(&mut response, "event: done", Duration::from_secs(30)).await;
+    assert!(events.contains("event: start"), "{events}");
+    assert!(events.contains("event: text"), "{events}");
+    assert!(events.contains("Hello from cetra."), "{events}");
+    drop(response);
+
+    // The run's trace is in the reserved environment: listed with evaluation traces only.
+    let with_eval = poll_json(
+        &server.api,
+        &format!("{project}/traces?include_eval=true"),
+        |body| {
+            body["data"].as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["environment"] == "cetra-playground")
+            })
+        },
+        Duration::from_secs(10),
+    )
+    .await;
+    let playground = with_eval["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["environment"] == "cetra-playground")
+        .unwrap();
+    let trace_id = playground["trace_id"].as_str().unwrap().to_owned();
+    let detail = server
+        .api
+        .get(&format!("{project}/traces/{trace_id}?include_eval=true"))
+        .await;
+    assert!(detail.to_string().contains("for cetra."), "{detail}");
+
+    let default = server.api.get(&format!("{project}/traces")).await;
+    assert!(
+        default["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["environment"] != "cetra-playground"),
+        "{default}"
+    );
+
+    // The mock served exactly the one run, with no error.
+    let log = mock.finish();
+    assert!(log.errors.is_empty(), "{:?}", log.errors);
+    assert_eq!(log.served.len(), 1, "{:?}", log.served);
+
+    drop(server.api);
+    drop(server.client);
+    server.running.shutdown().await.unwrap();
+    provider.abort();
+}
