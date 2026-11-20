@@ -1,8 +1,11 @@
 //! `cetra agents`: connects coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra
-//! (track CA, M4). `hook` posts a session's repository, branch and person; `agents.toml` holds
-//! the server, key and person it posts with.
+//! (track CA, M4). `setup` writes the agent's user settings and `remove` takes them back;
+//! `hook` posts a session's repository, branch and person. `agents.toml` holds the server, key
+//! and person the hook posts with.
 
+mod codex;
 pub(crate) mod hook;
+mod setup;
 
 use std::fmt;
 use std::fs;
@@ -12,6 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::client::Token;
 use crate::credentials::write_private_file;
 
 /// The coding agents `cetra agents` configures (D-CA-1). Wire names are D-CA-4's.
@@ -57,12 +61,36 @@ impl fmt::Debug for AgentsFile {
     }
 }
 
-/// The `cetra agents` subcommands. A2 adds `setup` and `remove`.
+/// The `cetra agents` subcommands.
 #[derive(Debug, clap::Subcommand)]
 pub(crate) enum AgentsCommand {
     /// Run by an agent's hook: send the session's repository, branch and person to cetra.
     #[command(hide = true)]
     Hook { agent: Agent },
+    /// Configure an agent to send its traces to cetra (writes the agent's user settings).
+    Setup(SetupArgs),
+    /// Remove what `cetra agents setup` wrote for an agent.
+    Remove { agent: Agent },
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct SetupArgs {
+    pub(crate) agent: Agent,
+    /// cetra server URL, for example `https://cetra.example.com`.
+    #[arg(long)]
+    pub(crate) url: String,
+    /// Project secret key with the `ingest` scope. A value given as a flag is visible to other local users in the process list; prefer CETRA_INGEST_KEY.
+    #[arg(long, env = "CETRA_INGEST_KEY", hide_env_values = true)]
+    pub(crate) key: Token,
+    /// The person to attribute sessions to (default: `git config --global user.email`).
+    #[arg(long)]
+    pub(crate) user: Option<String>,
+    /// Do not turn on prompt and tool content capture.
+    #[arg(long)]
+    pub(crate) no_content: bool,
+    /// Print the settings, including the key, instead of writing them. The printed key is what makes them work.
+    #[arg(long)]
+    pub(crate) print: bool,
 }
 
 /// Runs an `agents` subcommand. `out` receives results and `err` notes. The hook never
@@ -71,7 +99,7 @@ pub(crate) async fn run(
     command: &AgentsCommand,
     paths: &Paths,
     stdin: impl Read + Send + 'static,
-    _out: &mut dyn Write, // Written by `setup` and `remove` (A2).
+    out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> anyhow::Result<()> {
     match command {
@@ -79,6 +107,8 @@ pub(crate) async fn run(
             hook::hook(*agent, paths, stdin, err).await;
             Ok(())
         }
+        AgentsCommand::Setup(args) => setup::setup(args, paths, out),
+        AgentsCommand::Remove { agent } => setup::remove(*agent, paths, out),
     }
 }
 
@@ -96,8 +126,7 @@ impl AgentsFile {
             .map_err(|_| anyhow::anyhow!("agents.toml is invalid"))
     }
 
-    /// Written by `setup` (A2); only tests call it until then.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Written with mode 0600 through `write_private_file`.
     pub(crate) fn save(&self, path: &Path) -> anyhow::Result<()> {
         let text = toml::to_string(self).map_err(|_| anyhow::anyhow!("encoding agents.toml"))?;
         write_private_file(path, text.as_bytes())
@@ -108,13 +137,11 @@ impl AgentsFile {
 /// pass temporary directories.
 #[derive(Debug, Clone)]
 pub(crate) struct Paths {
-    /// Read by `setup` and `remove` (A2).
-    #[allow(dead_code)]
+    /// The home directory: the agents' user settings live under it.
     pub(crate) home: PathBuf,
-    /// The directory of `credentials.toml`.
+    /// The directory of `credentials.toml` and `agents.toml`.
     pub(crate) cetra_dir: PathBuf,
-    /// Written into the agents' hooks by `setup` (A2).
-    #[allow(dead_code)]
+    /// The cetra executable, written into the agents' hooks.
     pub(crate) exe: PathBuf,
 }
 
