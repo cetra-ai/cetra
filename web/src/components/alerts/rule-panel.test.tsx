@@ -16,6 +16,8 @@ import { server } from "@/mocks/node";
 import { FIRING_RULE_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import ruleFixture from "../../../../fixtures/api/static/alert-rule.json";
+import issueSourceFixture from "../../../../fixtures/api/static/issue-source.json";
+import issueFixture from "../../../../fixtures/api/static/issue.json";
 import projectFixture from "../../../../fixtures/api/static/project.json";
 import { RulePanel } from "./rule-panel";
 
@@ -23,6 +25,24 @@ const ORG = "acme";
 const PROJECT = "support-bot";
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
 const WIDGET = "/api/v1/projects/:project/dashboards/query";
+const ISSUE = "/api/v1/projects/:project/issues/:id";
+const SOURCE = "/api/v1/projects/:project/issue-sources/:id";
+const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
+const SOURCE_ID = "01900000-0000-7000-8000-000000001c00";
+
+/** The rule fixture with an issue occurrences condition over the given scope. */
+function scopedRule(scope: { issue_id: string } | { source_id: string }) {
+  return {
+    ...ruleFixture,
+    condition: {
+      metric: "issue_occurrences",
+      window: "1h",
+      comparator: "gt",
+      threshold: 0,
+      ...scope,
+    },
+  };
+}
 
 /** Renders the panel inside the project context, with a root route for its links. */
 async function renderPanel(
@@ -181,4 +201,45 @@ it("shows a history error in place of the events table", async () => {
     within(panel).queryByText("No events yet. Events appear when the rule fires or resolves."),
   ).not.toBeInTheDocument();
   expect(within(panel).getByText("Team Slack, Pager webhook")).toBeInTheDocument();
+});
+
+it("shows the title of the issue an issue rule counts", async () => {
+  server.use(
+    http.get(RULE, () => HttpResponse.json(scopedRule({ issue_id: ISSUE_ID }))),
+    http.get(ISSUE, () => HttpResponse.json(issueFixture)),
+  );
+
+  await renderPanel();
+
+  const panel = await screen.findByRole("region", { name: "Alert rule" });
+  const link = await within(panel).findByRole("link", { name: issueFixture.title });
+  expect(link).toHaveAttribute("href", `/acme/support-bot/issues/${ISSUE_ID}`);
+});
+
+it("shows the short id of the issue while it cannot be loaded", async () => {
+  server.use(
+    http.get(RULE, () => HttpResponse.json(scopedRule({ issue_id: ISSUE_ID }))),
+    http.get(ISSUE, () => problemResponse(500, "internal")),
+  );
+
+  await renderPanel();
+
+  const panel = await screen.findByRole("region", { name: "Alert rule" });
+  expect(await within(panel).findByRole("link", { name: "01900000" })).toHaveAttribute(
+    "href",
+    `/acme/support-bot/issues/${ISSUE_ID}`,
+  );
+});
+
+it("links a source rule to its source", async () => {
+  server.use(
+    http.get(RULE, () => HttpResponse.json(scopedRule({ source_id: SOURCE_ID }))),
+    http.get(SOURCE, () => HttpResponse.json(issueSourceFixture)),
+  );
+
+  await renderPanel();
+
+  const panel = await screen.findByRole("region", { name: "Alert rule" });
+  const link = await within(panel).findByRole("link", { name: issueSourceFixture.name });
+  expect(link).toHaveAttribute("href", `/acme/support-bot/issue-sources/${SOURCE_ID}`);
 });

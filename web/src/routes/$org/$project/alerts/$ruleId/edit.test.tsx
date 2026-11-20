@@ -6,10 +6,13 @@ import { FIRING_RULE_ID, SLACK_CHANNEL_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import ruleFixture from "../../../../../../../fixtures/api/static/alert-rule.json";
+import issuesFixture from "../../../../../../../fixtures/api/static/issues.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const PAGE = `/acme/support-bot/alerts/${FIRING_RULE_ID}/edit`;
 const RULE = "/api/v1/projects/:project/alert-rules/:id";
+const ISSUES = "/api/v1/projects/:project/issues";
+const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
 const LIST = "/acme/support-bot/alerts";
 
 it("edits the name only", async () => {
@@ -119,6 +122,50 @@ it("warns that a new condition resets the state", async () => {
         comparator: "gt",
         threshold: 0.1,
         min_count: 20,
+      },
+    }),
+  );
+});
+
+it("edits the threshold of an issue rule and keeps its issue", async () => {
+  let body: unknown;
+  const issueRule = {
+    ...ruleFixture,
+    condition: {
+      metric: "issue_occurrences",
+      window: "1h",
+      comparator: "gt",
+      threshold: 0,
+      issue_id: ISSUE_ID,
+    },
+  };
+  server.use(
+    http.get(RULE, () => HttpResponse.json(issueRule)),
+    http.get(ISSUES, () => HttpResponse.json(issuesFixture)),
+    http.patch(RULE, async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json(issueRule);
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  expect(await screen.findByRole("combobox", { name: "Issue" })).toHaveTextContent(
+    "ValueError: could not parse the reply",
+  );
+  const threshold = screen.getByRole("textbox", { name: "Threshold" });
+  expect(threshold).toHaveValue("0");
+  await user.clear(threshold);
+  await user.type(threshold, "2");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() =>
+    expect(body).toEqual({
+      condition: {
+        metric: "issue_occurrences",
+        window: "1h",
+        comparator: "gt",
+        threshold: 2,
+        issue_id: ISSUE_ID,
       },
     }),
   );
