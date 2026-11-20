@@ -20,6 +20,7 @@ mod check;
 mod config;
 mod egress;
 mod error;
+pub mod issue;
 mod judge;
 mod mapping;
 mod runner;
