@@ -5,6 +5,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { sessionListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
   lockedColumnIds,
@@ -14,6 +20,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
 import {
@@ -36,6 +43,7 @@ import {
   sessionScoreNames,
 } from "@/components/session-columns";
 import { useProject } from "@/components/shell/project-context";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
@@ -66,13 +74,15 @@ const COLUMN_SORT: Record<string, Schema<"SessionSort">> = {
   cost: "cost_total",
 };
 
+const NO_SESSIONS: ReadonlySet<string> = new Set();
+
 export const Route = createFileRoute("/$org/$project/sessions/")({
   validateSearch: (search) => parseSessionsSearch(search),
   component: SessionsPage,
 });
 
 function SessionsPage() {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const router = useRouter();
@@ -137,6 +147,19 @@ function SessionsPage() {
     includeEval: search.eval === 1,
     includeExperiments: search.exp === 1,
   };
+  // Checked sessions belong to the list they were checked in: a new filter, range or
+  // eval/experiment flag clears them.
+  const selectionKey = JSON.stringify([search.filter, rangeKey, search.eval, search.exp]);
+  const [selection, setSelection] = useState<{ key: string; ids: ReadonlySet<string> }>({
+    key: selectionKey,
+    ids: NO_SESSIONS,
+  });
+  const checkedIds = selection.key === selectionKey ? selection.ids : NO_SESSIONS;
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
   const list = useInfiniteQuery({
     ...sessionListOptions(org, project, {
       from: resolved.from,
@@ -271,7 +294,60 @@ function SessionsPage() {
           }
           columns={<ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />}
           views={<SavedViewsMenu kind="sessions" search={search} onApply={applyView} />}
+          actions={
+            <>
+              {checkedIds.size > 0 ? (
+                <DisabledReason reason={queueReason}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={queueReason !== undefined}
+                    onClick={() => {
+                      setQueueItems([...checkedIds].map((sessionId) => ({ session_id: sessionId })));
+                      setQueueOpen(true);
+                    }}
+                  >
+                    {`Add ${checkedIds.size} to queue`}
+                  </Button>
+                </DisabledReason>
+              ) : null}
+              <DisabledReason reason={matchingQueueReason}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={matchingQueueReason !== undefined}
+                  onClick={() => {
+                    setMatchOpen(true);
+                  }}
+                >
+                  Add matching to queue…
+                </Button>
+              </DisabledReason>
+            </>
+          }
           loaded={list.data ? rows.length : undefined}
+        />
+        <AddToQueueDialog
+          open={queueOpen}
+          onOpenChange={setQueueOpen}
+          target="session"
+          items={queueItems}
+          onAdded={() => {
+            setSelection({ key: selectionKey, ids: NO_SESSIONS });
+          }}
+        />
+        <AddMatchingDialog
+          open={matchOpen}
+          onOpenChange={setMatchOpen}
+          target="session"
+          selection={{
+            filter: search.filter,
+            from: resolved.from,
+            to: resolved.to,
+            includeExperiments: search.exp === 1,
+          }}
         />
         <div className="flex min-h-0 flex-1">
           {facetsOpen && !hold ? (
@@ -308,6 +384,10 @@ function SessionsPage() {
                   columns={tableColumns}
                   rows={rows}
                   getRowId={(row) => row.session_id}
+                  checkedIds={checkedIds}
+                  onCheckedChange={(ids) => {
+                    setSelection({ key: selectionKey, ids });
+                  }}
                   onScrollAnchor={onScrollAnchor}
                   restoreAnchor={restoreAnchor}
                   highlightedRowIds={restoredHighlight}

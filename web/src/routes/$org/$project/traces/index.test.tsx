@@ -18,6 +18,7 @@ import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
+import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 
 const FIRST = "a1000000000000000000000000000006";
 
@@ -1676,4 +1677,89 @@ it("keeps the facet panel and its typed value search when the filter changes", a
   // The same panel node, with the typed text still in its value search.
   expect(screen.getByRole("complementary", { name: "Filter facets" })).toBe(panel);
   expect(within(panel).getByRole("searchbox", { name: "Search Status values" })).toHaveValue("er");
+});
+
+const QUEUE_LIST = "/api/v1/projects/:project/annotation-queues";
+const QUEUE_ITEMS = "/api/v1/projects/:project/annotation-queues/:id/items";
+const QUEUE_PREVIEW = "/api/v1/projects/:project/annotation-queues/:id/items/matching/preview";
+const QUEUE: Schema<"AnnotationQueue"> = queuesFixture.data[0] as Schema<"AnnotationQueue">;
+
+/** Serves one trace queue for every list request. */
+function serveQueue() {
+  server.use(http.get(QUEUE_LIST, () => HttpResponse.json({ data: [QUEUE], next_cursor: null })));
+}
+
+/** Records the body of each add to a queue. */
+function captureQueueAdds() {
+  const calls: { id: string; body: { items: { trace_id?: string }[] } }[] = [];
+  server.use(
+    http.post(QUEUE_ITEMS, async ({ request, params }) => {
+      const body = (await request.json()) as { items: { trace_id?: string }[] };
+      calls.push({ id: String(params.id), body });
+      return HttpResponse.json(
+        { added: body.items.length, existing: 0, skipped: [] },
+        { status: 201 },
+      );
+    }),
+  );
+  return calls;
+}
+
+it("adds the checked traces to a trace queue", async () => {
+  serveQueue();
+  const calls = captureQueueAdds();
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(1));
+  await user.click(screen.getByRole("button", { name: "Add 2 to queue" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: QUEUE.name }));
+  await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  expect(await within(dialog).findByText(`Added 2 to ${QUEUE.name}.`)).toBeInTheDocument();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.id).toBe(QUEUE.id);
+  expect(calls[0]?.body.items).toHaveLength(2);
+  for (const item of calls[0]?.body.items ?? []) {
+    expect(item.trace_id).toMatch(/^[0-9a-f]{32}$/);
+  }
+  expect(router.state.location.search.trace).toBeUndefined();
+});
+
+it("adds the traces the list matches to a queue with the list's filter and search", async () => {
+  serveQueue();
+  const previews: unknown[] = [];
+  server.use(
+    http.post(QUEUE_PREVIEW, async ({ request }) => {
+      previews.push(await request.json());
+      return HttpResponse.json({ matched: 2, capped: false });
+    }),
+  );
+  const { user } = await renderApp(
+    "/acme/support-bot/traces?filter=status%20%3D%20'error'&search=refund&range=24h&exp=1",
+  );
+  await user.click(await screen.findByRole("button", { name: "Add matching to queue…" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: QUEUE.name }));
+
+  expect(await within(dialog).findByText("2 traces match.")).toBeInTheDocument();
+  expect(previews).toHaveLength(1);
+  expect(previews[0]).toMatchObject({
+    filter: "status = 'error'",
+    search: "refund",
+    include_experiments: true,
+  });
+});
+
+it("disables the queue actions for viewers and says why", async () => {
+  server.use(projectAs("viewer"));
+  await renderApp("/acme/support-bot/traces");
+
+  const button = await screen.findByRole("button", { name: "Add matching to queue…" });
+  expect(button).toBeDisabled();
+  expect(button.parentElement).toHaveAccessibleDescription("Only members can add to queues");
 });
