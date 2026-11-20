@@ -270,7 +270,7 @@ fn crash_recovery() {
         let before = complete_acks(&dir.path().join("acked.log"));
         let mut child = Command::new(std::env::current_exe().unwrap())
             .arg("--exact")
-            .arg("crash_child")
+            .arg("crash::crash_child")
             .arg("--ignored")
             .arg("--nocapture")
             .arg("--test-threads=1")
@@ -359,7 +359,12 @@ fn a_child_that_aborts_is_not_a_kill() {
     let spawn = |abort: bool| {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
-            .args(["--exact", "aborting_child", "--ignored", "--test-threads=1"])
+            .args([
+                "--exact",
+                "crash::aborting_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         if abort {

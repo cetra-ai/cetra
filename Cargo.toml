@@ -54,6 +54,11 @@ cetra-capture = { path = "tools/capture" }
 # `datafusion` crate; this is the crate that defines it. Keep default features
 # off so the compression codecs DataFusion's own pin excludes stay out.
 datafusion-datasource = { version = "55.2", default-features = false }
+# The `*_expressions` features are the SQL console's function set: it offers every built-in
+# scalar and nested function except a deny-list (spec 05, D-A2-2), so dropping one removes
+# functions users can call. `recursive_protection` guards planning against stack overflow.
+# `datafusion` and `datafusion-common` turn on the default features of `arrow` and `parquet`
+# themselves, so trimming those pins below saves no build time.
 datafusion = { version = "55.2", default-features = false, features = [
     "nested_expressions",
     "crypto_expressions",

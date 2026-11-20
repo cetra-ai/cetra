@@ -21,7 +21,7 @@
 //! Then run:
 //!
 //! ```text
-//! CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-test AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret cargo test -p cetra-storage --test s3 -- --nocapture
+//! CETRA_TEST_S3_ENDPOINT=http://127.0.0.1:7070 CETRA_TEST_S3_BUCKET=cetra-test AWS_ACCESS_KEY_ID=cetra AWS_SECRET_ACCESS_KEY=cetra-secret cargo test -p cetra-storage --test it -- s3:: --nocapture
 //! ```
 //!
 //! A remote provider needs its region and addressing style: `CETRA_TEST_S3_REGION` (default

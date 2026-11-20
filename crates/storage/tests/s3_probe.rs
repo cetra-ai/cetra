@@ -587,7 +587,7 @@ async fn leave_an_incomplete_upload() {
     );
 }
 
-/// Deletes every object under `prefix`, as `tests/s3.rs` does.
+/// Deletes every object under `prefix`, as `tests/it/s3.rs` does.
 async fn delete_under(store: &AmazonS3, prefix: &str) -> Result<(), String> {
     let root = Path::from(prefix);
     let locations: Vec<Path> = store
