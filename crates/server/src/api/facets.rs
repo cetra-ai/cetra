@@ -178,7 +178,7 @@ mod tests {
     }
 
     /// A batch over the hour the tests share.
-    fn request(view: &str, fields: Json) -> Json {
+    fn request(view: &str, fields: &Json) -> Json {
         json!({
             "view": view,
             "from": "2026-01-01T10:00:00Z",
@@ -208,7 +208,7 @@ mod tests {
         let (status, body) = facets(
             &app,
             &seeded,
-            &request("traces", json!([{ "field": "status" }])),
+            &request("traces", &json!([{ "field": "status" }])),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -239,7 +239,7 @@ mod tests {
         let (status, body) = facets(
             &app,
             &seeded,
-            &request("traces", json!([{ "field": "duration_ms" }])),
+            &request("traces", &json!([{ "field": "duration_ms" }])),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -261,7 +261,7 @@ mod tests {
         let (status, body) = facets(
             &app,
             &seeded,
-            &request("traces", json!([{ "field": "metadata" }])),
+            &request("traces", &json!([{ "field": "metadata" }])),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -279,7 +279,7 @@ mod tests {
             &seeded,
             &request(
                 "traces",
-                json!([{ "field": "status" }, { "field": "input" }]),
+                &json!([{ "field": "status" }, { "field": "input" }]),
             ),
         )
         .await;
@@ -295,7 +295,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn bad_filter_is_400_invalid_filter() {
         let (app, seeded) = loaded().await;
-        let mut batch = request("traces", json!([{ "field": "status" }]));
+        let mut batch = request("traces", &json!([{ "field": "status" }]));
         batch["filter"] = json!("name = 'x' )");
         let (status, body) = facets(&app, &seeded, &batch).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -318,12 +318,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn empty_or_too_many_fields_is_400() {
         let (app, seeded) = loaded().await;
-        let (status, body) = facets(&app, &seeded, &request("traces", json!([]))).await;
+        let (status, body) = facets(&app, &seeded, &request("traces", &json!([]))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["code"], "bad_request");
 
         let too_many: Vec<Json> = (0..21).map(|_| json!({ "field": "status" })).collect();
-        let (status, body) = facets(&app, &seeded, &request("traces", Json::Array(too_many))).await;
+        let (status, body) =
+            facets(&app, &seeded, &request("traces", &Json::Array(too_many))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["code"], "bad_request");
     }
@@ -334,7 +335,7 @@ mod tests {
         let (status, body) = facets(
             &app,
             &seeded,
-            &request("traces", json!([{ "field": "status", "size": 3 }])),
+            &request("traces", &json!([{ "field": "status", "size": 3 }])),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -380,7 +381,7 @@ mod tests {
                 &format!("/api/v1/projects/{}/facets", seeded.project.id),
             )
             .header("cookie", &member.cookie)
-            .json(&request("traces", json!([{ "field": "status" }])))
+            .json(&request("traces", &json!([{ "field": "status" }])))
             .send()
             .await;
         // A project the caller cannot view is hidden: 404, as on the other project routes.
@@ -395,7 +396,7 @@ mod tests {
                 Method::POST,
                 &format!("/api/v1/projects/{}/facets", seeded.project.id),
             )
-            .json(&request("traces", json!([{ "field": "status" }])))
+            .json(&request("traces", &json!([{ "field": "status" }])))
             .send()
             .await;
         assert_eq!(response.status, StatusCode::UNAUTHORIZED);
