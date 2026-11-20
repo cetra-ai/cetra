@@ -27384,7 +27384,8 @@
           "end_user",
           "llm_judge",
           "check",
-          "webhook"
+          "webhook",
+          "issue"
         ]
       },
       "ScoreSummary": {

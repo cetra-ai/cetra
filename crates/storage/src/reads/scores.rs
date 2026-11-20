@@ -290,7 +290,9 @@ async fn latest(
         .filter(
             col(scores::TARGET)
                 .eq(lit(kind.as_str()))
-                .and(col(key_column).in_list(keys, false)),
+                .and(col(key_column).in_list(keys, false))
+                // Issue occurrences never show as score columns or briefs (D-IC-18).
+                .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str()))),
         )
         .map_err(classify)?
         .select(vec![
@@ -812,6 +814,28 @@ mod tests {
             Err(RunError::InvalidRequest(message)) => assert_eq!(message, "at most 1000 ids"),
             other => panic!("expected too many ids, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn latest_scores_leave_out_issue_occurrences() {
+        // Trace 0 is `00010001000100010001000100010001` (see `trace_id_of` in test_support).
+        let trace = "00010001000100010001000100010001";
+        let mut occurrence = score_row(1, 0, 100, 100, 100, false, "issue:a");
+        occurrence.source = ScoreSource::Issue;
+        let mut api = score_row(2, 0, 100, 100, 100, false, "quality");
+        api.source = ScoreSource::Api;
+        let query = ProjectQuery {
+            scores: live_scores_table(&[occurrence, api]),
+            ..example_query()
+        };
+        let ctx = QueryContext::new(query, None).expect("context");
+        let batches = latest_scores(&ctx, ScoreTargets::Traces(&[trace]), TIMEOUT)
+            .await
+            .expect("latest");
+        let rows = json_rows(&batches);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["name"], "quality");
+        assert_eq!(rows[0]["source"], "api");
     }
 
     #[tokio::test]

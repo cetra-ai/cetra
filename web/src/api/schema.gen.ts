@@ -7145,7 +7145,7 @@ export interface components {
          *     Spec 01 § Score `source` and spec 06 § Scores.
          * @enum {string}
          */
-        ScoreSource: "api" | "sdk" | "human" | "end_user" | "llm_judge" | "check" | "webhook";
+        ScoreSource: "api" | "sdk" | "human" | "end_user" | "llm_judge" | "check" | "webhook" | "issue";
         /** @description One score of an experiment, over its rows. */
         ScoreSummary: {
             /**

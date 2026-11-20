@@ -289,6 +289,16 @@ These are fixed here so the plans copy them, not choose them.
 - **Vectors.** `cetra-eval` L2-normalizes every embedding it returns, so cosine similarity is a dot product. It refuses an answer of more than 4 096 dimensions or with a non-finite value (`EmbeddingInvalid`, permanent). The server checks the dimension against the source's (`embedding_dimension_changed`).
 - **Call traces.** A summary, embedding or naming call writes one trace in environment `cetra-eval`: a root `chain` span named `cetra.issue.summarize`, `cetra.issue.embed` or `cetra.issue.name`, with one `llm` or `embedding` child, built the way judge traces are (D161) and priced by `normalize`. A provider that reports no token count leaves the span unpriced. The budget then charges the estimate of D-IC-12.
 
+### D-IC-18 Occurrence ids, hiding and counts
+
+- **An occurrence score id is a UUIDv7** whose 48-bit millisecond timestamp is the occurrence time and whose other bits come from SHA-256(`cetra.issue-occurrence.v1` ‖ project id (16 bytes) ‖ trace id (16) ‖ issue id (16)), with the version and variant bits set. `scores::write` then takes `created_at` from the id (the D-G-26 path) and a rewrite of the same (trace, issue) replaces the same row.
+- **The occurrence time of an error issue is the `start_time` of the trace's earliest error span with that fingerprint**, clamped to `now`. It is stable across re-sweeps. When a late span of the same fingerprint starts earlier still, a second row is written for the trace, and the count is one too high (accepted, rare). Occurrences older than the project's retention are not written (`scores::write` refuses them).
+- **Occurrences carry the trace's user and session**: from the first error span of the group (in `(start_time, span_id)` order) with a non-null `user_id`, and likewise for `session_id`.
+- **`latest_scores` and the users' `scores_of` leave out source `issue`.** The list columns and briefs never see issue scores. The trace view gets its chips from `GET …/scores?trace_id=…&source=issue`, and the scores tab hides rows of source `issue`. The dashboard scores source leaves out source `issue` too.
+- **No `occurrence_count` column.** Counts come from storage (`score_name_counts`), so deletions are reflected.
+- **`issue_sources.kind` has no SQL CHECK**, so M3 adds kinds without rebuilding the table. The Rust enum is the only gate.
+- **Regression compares trace times.** A trace that started before `resolved_at` but completes after it does not reopen the issue.
+
 ## Architecture
 
 ```

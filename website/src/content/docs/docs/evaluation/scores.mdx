@@ -16,7 +16,7 @@ A score has a name, a value, an optional reason, and a target.
 | Name | A string of 1 to 255 bytes, for example `correct` or `helpfulness`. |
 | Value | Numeric (a finite number), boolean, categorical (a label) or text. |
 | Target | A trace, a span of a trace, or a session. |
-| Source | `sdk`, `api`, `human` (annotation), `end_user` (browser feedback), or `llm_judge`, `check` and `webhook` (evaluators). cetra sets the source from how the score arrived. |
+| Source | `sdk`, `api`, `human` (annotation), `end_user` (browser feedback), or `llm_judge`, `check` and `webhook` (evaluators), or `issue` (an occurrence of an issue, written by an issue source; clients cannot set it). cetra sets the source from how the score arrived. |
 
 You can also attach a reason, a user ID and string metadata.
 

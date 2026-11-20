@@ -986,6 +986,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn issue_source_is_refused_from_clients() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let sdk = Writer::Sdk { key_id: author() };
+        for writer in [api_writer(), sdk] {
+            let errors = refused(
+                write(
+                    &app.state,
+                    &seeded.project,
+                    writer,
+                    vec![ScoreCreate {
+                        source: Some(ScoreSource::Issue),
+                        ..item("accuracy", 0.5)
+                    }],
+                )
+                .await,
+            );
+            assert_eq!(
+                errors,
+                vec![(
+                    "scores[0].source".to_owned(),
+                    "source issue is not allowed here".to_owned()
+                )]
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn sources_follow_the_caller() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;

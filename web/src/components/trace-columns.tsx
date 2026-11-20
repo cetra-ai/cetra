@@ -67,6 +67,7 @@ const SOURCE_LABEL: Record<Schema<"ScoreSource">, string> = {
   llm_judge: "LLM judge",
   check: "Check",
   webhook: "Webhook",
+  issue: "Issue",
 };
 
 export function scoreNames(rows: readonly Schema<"TraceSummary">[]): string[] {

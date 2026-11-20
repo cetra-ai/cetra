@@ -41,6 +41,46 @@ describe("scores tab", () => {
     );
   });
 
+  it("does not list issue occurrences", async () => {
+    const base = {
+      project_id: "01900000-0000-7000-8000-000000000001",
+      target: { type: "trace", trace_id: TRACE },
+      deleted: false,
+      created_at: "2026-01-01T10:11:00.000000000Z",
+      updated_at: "2026-01-01T10:11:00.000000000Z",
+      ingest_time: "2026-01-01T10:11:00.000000000Z",
+    };
+    server.use(
+      http.get("/api/v1/projects/:project/scores", () =>
+        HttpResponse.json({
+          data: [
+            {
+              ...base,
+              score_id: "01900000-0000-7000-8000-0000000003f1",
+              name: "issue:4f2a9c",
+              value: { data_type: "numeric", value: 1 },
+              source: "issue",
+            },
+            {
+              ...base,
+              score_id: "01900000-0000-7000-8000-0000000003f2",
+              name: "accuracy",
+              value: { data_type: "numeric", value: 0.5 },
+              source: "api",
+            },
+          ],
+          next_cursor: null,
+        }),
+      ),
+    );
+    await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}`);
+    const panel = await screen.findByRole("region", { name: "Span" });
+    fireEvent.mouseDown(within(panel).getByRole("tab", { name: "Scores" }));
+
+    expect(await within(panel).findByText("accuracy")).toBeInTheDocument();
+    expect(within(panel).queryByText("issue:4f2a9c")).not.toBeInTheDocument();
+  });
+
   it("says there are no scores when both groups are empty", async () => {
     server.use(
       http.get("/api/v1/projects/:project/scores", () =>

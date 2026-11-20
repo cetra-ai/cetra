@@ -138,7 +138,7 @@ One row per live score.
 | `value_num` | `float` | yes | Numeric value. Booleans are 0 or 1. |
 | `value_str` | `string` | yes | Categorical label or text. |
 | `reason` | `string` | yes | Explanation. |
-| `source` | `string` | no | api, sdk, human, end_user, llm_judge, check, or webhook. |
+| `source` | `string` | no | api, sdk, human, end_user, llm_judge, check, webhook or issue. |
 | `evaluator_id` | `string` | yes | Evaluator that produced the score. |
 | `rule_id` | `string` | yes | Online rule that produced the score. |
 | `experiment_id` | `string` | yes | Experiment the score belongs to. |
