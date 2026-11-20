@@ -316,6 +316,7 @@ W1a, W1b, W4b and W5 run alone and finish with `just check-web` (W5 with `just c
 **Edit:**
 - `web/src/routes/$org/$project/annotation-queues/$queueId/review/$itemId.tsx` and `$itemId.test.tsx` (new)
 - `web/src/components/annotation-queues/reviewer.tsx`, `reviewer-target.tsx`, `next-item.tsx`, `use-lease.ts`, `skip-dialog.tsx`, and a test per component that has logic (new)
+- `web/src/components/trace/split-pane.tsx` (only: add the `annotation-review` entry to `SplitName` and `PANES`)
 
 **Steps.**
 1. **Route** `"/$org/$project/annotation-queues/$queueId/review/$itemId"`, `validateSearch: parseReviewSearch`:
