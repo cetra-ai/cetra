@@ -824,6 +824,8 @@ Decisions of track AS (`docs/plans/as-assistant/00-design.md`), numbered `D-AS-<
 | D-AS-16 | Data window | Every read goes through `entitlements::query_options` with `Visibility::window` (D-P-21, D-P-44). Restore mode refuses turns and the setting test (`503`, D-N-25); conversations stay readable and deletable. |
 | D-AS-17 | Licence (user) | MIT core on every plan: nothing under `ee/`, no D-P-12 feature, no message cap. |
 | D-AS-18 | Panel | A resizable right-hand panel in the project shell (top bar button, `Ctrl/Cmd + I`) that stays open across navigation: history, Markdown answers, collapsed tool steps, draft cards, Stop, thumbs, context chips, and a line naming the connection and its provider. |
+| D-AS-19 | Config cut | `get_evaluator`, `get_online_rule` and `get_dashboard` cut strings at 4,000 characters; other read tools at 200 like MCP. |
+| D-AS-20 | Tool limits | Lists 1–100 rows (evaluators 1–50); `query_metrics` at most 30 days; results fitted to 20,000 characters, not raisable by the model. |
 
 ## Open
 

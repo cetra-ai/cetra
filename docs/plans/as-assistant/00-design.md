@@ -103,10 +103,10 @@ Every tool runs with the caller's `AuthUser` and the conversation's project inje
 | `list_dashboards`, `get_dashboard` | read | the dashboard reads (D-C-16) (`routes/dashboards.rs`) | `View` |
 | `list_alert_rules` | read | K's reads (`routes/alert_rules.rs`); channel secrets stay sealed | `View` |
 | `get_project_settings` | read | what `GET /projects/{p}` answers (`routes/projects.rs`) | `View` |
-| `draft_filter` | draft | a filter (DSL text), search and range for the traces, spans, sessions or users list | none beyond `UseAssistant` |
-| `draft_sql` | draft | a SQL query with params and range for the console | none |
-| `draft_dashboard` | draft | a new dashboard definition, or an edited definition of an existing one (with its `version`) | `View` when it edits an existing dashboard |
-| `draft_evaluator` | draft | an evaluator (judge or check; never a webhook, whose secret the model must not handle) | none |
+| `draft_filter` | draft | a filter (DSL text), search and range for the traces, spans, sessions or users list | `View` (it reads the project to validate) |
+| `draft_sql` | draft | a SQL query with params and range for the console | `View` (it reads the project to validate) |
+| `draft_dashboard` | draft | a new dashboard definition, or an edited definition of an existing one (with its `version`) | `View` (it reads the project, and the dashboard when it edits one) |
+| `draft_evaluator` | draft | an evaluator (judge or check; never a webhook, whose secret the model must not handle) | `View` (it reads the project to validate) |
 | `draft_online_rule` | draft | an online rule over an existing evaluator | `View` (it reads the evaluator) |
 
 The MCP functions already have the in-process shape `(state, user, arguments)`. The other route handlers take axum extractors (`State`, `Extension<ProjectAccess>`), so M2 extracts, from each route module named above, one function that both the route and the tool call; nothing in those modules is duplicated. The exact argument schemas and result shapes are M2's plan.
@@ -137,6 +137,8 @@ Each read keeps its route's exclusions: `search_traces` and the session reads ap
 | D-AS-16 | **Data window, exclusions and restore mode.** Every read goes through the shared read functions and `entitlements::query_options` with `Visibility::window` (D-P-21, D-P-44), so the assistant sees what its user sees. Restore mode refuses turns and the setting test (`503`), as it closes egress (D-N-25); `GET /projects/{p}/assistant` reports `restore_mode`, and conversations can still be read, renamed and deleted. | |
 | D-AS-17 | **MIT core, on every plan (user).** Nothing under `ee/`, no new feature name in D-P-12, no message cap: the org pays its provider. | A paid-only feature or a free message cap: competitors that gate it fragment the product, and BYO already bounds cetra's cost to nothing. |
 | D-AS-18 | **The panel.** A right-hand side panel in the project shell, opened from the top bar or with `Ctrl/Cmd + I`, resizable, open across navigation within the project. It shows: the history list and "New chat"; the transcript with Markdown answers (D-AS-7); each tool call as a collapsed step (name, arguments, SQL shown as code, result summary, a link to the trace or the console); draft cards; a Stop button; thumbs on answers; context chips above the composer; and one line under it naming the connection and its provider ("Answers use *OpenAI prod*; the data it reads is sent to that provider"), with the connection's `adapter`. An off assistant shows why (not enabled, with a link for admins; no connection; restore mode). | A full page: loses the page context the user is looking at. |
+| D-AS-19 | **Config tools cut at 4,000 characters.** `get_evaluator`, `get_online_rule` and `get_dashboard` cut strings at 4,000 characters instead of MCP's 200, so the model can read and redraft a judge template or a widget query; the other read tools cut at 200. | Cutting at 200: the model would redraft a template it cannot read. |
+| D-AS-20 | **Tool limits.** List tools take `limit` 1–100 (default 20; `list_evaluators` 1–50, the stats read's cap); `query_metrics` needs `from` and `to` at most 30 days apart, like `query_sql` (D-H-9); every result is fitted to 20,000 characters and the model cannot raise `max_chars`. | The routes' 1,000 rows and open windows: an agent would flood its context or scan without bound. |
 
 ## Open questions for the user
 

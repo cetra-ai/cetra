@@ -1,4 +1,7 @@
 //! The in-app assistant (track AS). M1: conversation expiry and tool-result stubbing (D-AS-10, D-AS-12).
+//! M2: the tool registry (`tools`, D-AS-5, D-AS-6).
+
+pub(crate) mod tools;
 
 use std::time::Duration;
 
