@@ -16,8 +16,8 @@ import { server } from "@/mocks/node";
 import { FIRING_RULE_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
 import ruleFixture from "../../../../fixtures/api/static/alert-rule.json";
-import issueSourceFixture from "../../../../fixtures/api/static/issue-source.json";
 import issueFixture from "../../../../fixtures/api/static/issue.json";
+import issueSourceFixture from "../../../../fixtures/api/static/issue-source.json";
 import projectFixture from "../../../../fixtures/api/static/project.json";
 import { RulePanel } from "./rule-panel";
 

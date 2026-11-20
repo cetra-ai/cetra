@@ -149,9 +149,8 @@ it("edits the threshold of an issue rule and keeps its issue", async () => {
   );
 
   const { user } = await renderApp(PAGE);
-  expect(await screen.findByRole("combobox", { name: "Issue" })).toHaveTextContent(
-    "ValueError: could not parse the reply",
-  );
+  const issue = await screen.findByRole("combobox", { name: "Issue" });
+  await waitFor(() => expect(issue).toHaveTextContent("ValueError: could not parse the reply"));
   const threshold = screen.getByRole("textbox", { name: "Threshold" });
   expect(threshold).toHaveValue("0");
   await user.clear(threshold);

@@ -513,6 +513,9 @@ it("validates the threshold, the scope ids and the min count of issue occurrence
 
 it("round-trips an issue rule and a source rule through the form", () => {
   const base = rules[0];
+  if (!base) {
+    throw new Error("fixture rule missing");
+  }
   const issueCondition: Condition = { ...ISSUE_OCCURRENCES, threshold: 2 };
   const sourceCondition: Condition = {
     metric: "issue_occurrences",

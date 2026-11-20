@@ -8,10 +8,10 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import ruleFixture from "../../../../../../fixtures/api/static/alert-rule.json";
 import channelsFixture from "../../../../../../fixtures/api/static/channels.json";
-import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
-import issueSourcesFixture from "../../../../../../fixtures/api/static/issue-sources.json";
 import issueFixture from "../../../../../../fixtures/api/static/issue.json";
+import issueSourcesFixture from "../../../../../../fixtures/api/static/issue-sources.json";
 import issuesFixture from "../../../../../../fixtures/api/static/issues.json";
+import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const PAGE = "/acme/support-bot/alerts/new";

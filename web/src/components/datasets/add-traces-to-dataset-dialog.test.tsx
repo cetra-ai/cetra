@@ -6,9 +6,9 @@ import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import datasetFixture from "../../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
-import eventsFixture from "../../../../fixtures/api/static/issue-events.json";
 import fromTracesFixture from "../../../../fixtures/api/static/dataset-items-from-traces.json";
 import issueFixture from "../../../../fixtures/api/static/issue.json";
+import eventsFixture from "../../../../fixtures/api/static/issue-events.json";
 import occurrencesFixture from "../../../../fixtures/api/static/issue-occurrences.json";
 import { addTracesReason } from "./add-traces-to-dataset-dialog";
 
@@ -222,6 +222,7 @@ describe("add issue examples to dataset dialog", () => {
   });
 
   it("lists skipped traces from the issue route", async () => {
+    server.use(http.post(ISSUE_ITEMS, () => HttpResponse.json(fromTracesFixture, { status: 201 })));
     const { user, dialog } = await openIssueDialog();
 
     await choose(user, dialog, "Dataset", "faq");

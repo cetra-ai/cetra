@@ -11,7 +11,7 @@ import projectFixture from "../../../../../../../fixtures/api/static/project.jso
 const SOURCE_ID = sourceFixture.id;
 const EDIT_URL = `/acme/support-bot/issue-sources/${SOURCE_ID}/edit`;
 const LIST_URL = "/acme/support-bot/issue-sources";
-const EMAIL_ID = channelsFixture.data[0].id;
+const EMAIL_ID = channelsFixture.data[0]?.id ?? "";
 
 /** Serves the fixture source on its detail route. */
 function found() {

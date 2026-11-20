@@ -11,7 +11,7 @@ import entitlementsFixture from "../../../../../../fixtures/api/static/org-entit
 
 const NEW_URL = "/acme/support-bot/issue-sources/new";
 const LIST_URL = "/acme/support-bot/issue-sources";
-const EMAIL_ID = channelsFixture.data[0].id;
+const EMAIL_ID = channelsFixture.data[0]?.id ?? "";
 
 /** Records the body of the next create request and answers it with `answer`. */
 function captureCreate(answer?: () => Response): { body: () => unknown; calls: () => number } {

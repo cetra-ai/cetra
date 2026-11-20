@@ -94,6 +94,7 @@ it("creates a topic source with its connections, models and defaults", async () 
       name: "Topics",
       kind: "topic",
       enabled: true,
+      channel_ids: [],
       sample_rate: 1,
       daily_cap: 500,
       floor: 0.8,
