@@ -1,0 +1,154 @@
+---
+import { AREAS, type loadProduct, UNKNOWN_TEXT } from "../data/compare.mjs";
+
+type Product = ReturnType<typeof loadProduct>;
+interface Props {
+  them: Product;
+  cetra: Product;
+}
+const { them, cetra } = Astro.props;
+
+// One number per distinct source URL, in document order: row by row, cetra's sources before theirs.
+const numbers = new Map<string, number>();
+function numberOf(source: string): number {
+  const known = numbers.get(source);
+  if (known !== undefined) return known;
+  const n = numbers.size + 1;
+  numbers.set(source, n);
+  return n;
+}
+
+type Fact = Product["facts"][string];
+function cell(fact: Fact) {
+  const seen = new Set<string>();
+  const links: { n: number; href: string }[] = [];
+  for (const source of fact.sources) {
+    if (seen.has(source)) continue;
+    seen.add(source);
+    links.push({ n: numberOf(source), href: source });
+  }
+  const unknown = fact.value === "Unknown";
+  return { text: unknown ? UNKNOWN_TEXT : fact.value, unknown, links };
+}
+
+const rows = AREAS.map(([key, label]) => {
+  const ours = cell(cetra.facts[key]);
+  const theirs = cell(them.facts[key]);
+  return { label, cells: [ours, theirs] };
+});
+
+const sources = [...numbers].map(([href, n]) => ({
+  n,
+  href,
+  label: href.startsWith("/") ? `cetra.sh${href}` : href,
+}));
+---
+
+<div class="table-wrap" tabindex="0">
+  <table>
+    <caption class="visually-hidden">cetra and {them.name} compared</caption>
+    <thead>
+      <tr>
+        <th scope="col">Area</th>
+        <th scope="col">cetra</th>
+        <th scope="col">{them.name}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        rows.map((row) => (
+          <tr>
+            <th scope="row">{row.label}</th>
+            {row.cells.map((c) => (
+              <td class:list={[c.unknown && "muted"]}>
+                {c.text}
+                {c.links.map((link) => (
+                  <sup>
+                    <a
+                      href={link.href}
+                      aria-label={`Source ${link.n}`}
+                      rel={link.href.startsWith("https://") ? "noopener" : undefined}
+                    >
+                      [{link.n}]
+                    </a>
+                  </sup>
+                ))}
+              </td>
+            ))}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</div>
+
+<ol class="sources">
+  {
+    sources.map((source) => (
+      <li>
+        <a
+          href={source.href}
+          rel={source.href.startsWith("https://") ? "noopener" : undefined}
+        >
+          {source.label}
+        </a>
+      </li>
+    ))
+  }
+</ol>
+
+<style>
+  .table-wrap {
+    overflow-x: auto;
+    margin-top: var(--space-7);
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+  }
+  th,
+  td {
+    text-align: left;
+    vertical-align: top;
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--line);
+  }
+  thead th {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-label);
+    color: var(--fg-muted);
+  }
+  tbody th {
+    font-weight: 600;
+    width: 22%;
+  }
+  td {
+    width: 39%;
+  }
+  sup {
+    margin-left: 0.15em;
+    font-size: 0.7em;
+  }
+  sup a {
+    text-decoration: none;
+  }
+  @media (max-width: 720px) {
+    table {
+      min-width: 640px;
+    }
+  }
+  .sources {
+    margin: var(--space-6) 0 0;
+    padding-left: var(--space-6);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    overflow-wrap: anywhere;
+    color: var(--fg-muted);
+  }
+  .sources li + li {
+    margin-top: var(--space-1);
+  }
+</style>

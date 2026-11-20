@@ -1,0 +1,52 @@
+---
+import Card from "../../marketing/components/Card.astro";
+import Section from "../../marketing/components/Section.astro";
+import SectionHeading from "../../marketing/components/SectionHeading.astro";
+import { COMPETITORS, formatDate, loadProduct } from "../../marketing/data/compare.mjs";
+import MarketingLayout from "../../marketing/layouts/MarketingLayout.astro";
+
+const products = COMPETITORS.map((slug) => loadProduct(slug));
+---
+
+<MarketingLayout
+  title="Compare"
+  description="How cetra compares with Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar and MLflow."
+  route="/compare/"
+>
+  <Section tone="ink" pad="md" labelledby="compare-title">
+    <SectionHeading
+      level={1}
+      eyebrow="Compare"
+      title="How cetra compares."
+      id="compare-title"
+      lede="Fact by fact, from each product's own documentation, with sources and the date we checked."
+    />
+  </Section>
+
+  <Section tone="raised" divider labelledby="list-title">
+    <SectionHeading title="Nine comparisons" id="list-title" />
+    <div class="grid">
+      {
+        products.map((product) => (
+          <Card title={`cetra vs ${product.name}`} href={`/compare/${product.slug}/`}>
+            <p>{product.oneLine}</p>
+            <p class="checked">Checked on {formatDate(product.checkedOn)}</p>
+          </Card>
+        ))
+      }
+    </div>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-4);
+    margin-top: var(--space-7);
+  }
+  .checked {
+    font-size: var(--text-sm);
+    margin-top: var(--space-3);
+  }
+</style>
