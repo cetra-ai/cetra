@@ -97,6 +97,7 @@ W1a, W1b, W4b and W5 run alone and finish with `just check-web` (W5 with `just c
 - `web/src/components/shell/nav.ts`, `web/src/lib/shortcuts.ts`, `web/src/lib/shortcuts.test.ts`
 - `web/src/mocks/writes.ts`, `web/src/mocks/writes.test.ts`
 - `web/src/routes/$org/settings/plan.tsx`, `web/src/routes/$org/settings/plan.test.tsx`
+- `web/src/components/command/palette.test.tsx` (only: tolerate two shortcut rows with the same key text, "⌘↵")
 
 **Steps.**
 1. **Queries** (`api/queries-annotation-queues.ts`). Mirror `api/queries-datasets.ts`; every path parameter `project` is `projectRef(org, project)`. Export:
