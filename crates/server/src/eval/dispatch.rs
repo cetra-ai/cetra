@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
-use cetra_core::ids::ProjectId;
+use cetra_core::ids::{OrgId, ProjectId};
 use futures::FutureExt;
 use sqlx::SqliteConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -16,10 +16,13 @@ use uuid::Uuid;
 use super::execute::{self, ClaimedJob};
 use super::{budget, lock};
 use crate::api::evaluators::EvaluatorKind;
+use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::eval_jobs::{self, Candidate, Finish, JobUsage, PruneReport};
+use crate::meta::issues;
 use crate::meta::online_rules;
+use crate::meta::projects;
 
 /// Webhook evaluators run at most this many jobs at once (D-I-6).
 pub(crate) const WEBHOOK_SLOTS: usize = 4;
@@ -468,20 +471,51 @@ pub(crate) async fn janitor_once(state: &AppState, now: i64) -> Result<(u64, u64
     Ok((requeued, failed))
 }
 
-/// Hourly pruning (D-I-28).
+/// Hourly pruning (D-I-28): the eval jobs, then the issue candidates (D-IC-6, A7), then the
+/// candidates older than the data window of each org that has one.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError`] when the write fails.
+/// Returns [`MetaError`] when a write fails.
 pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<PruneReport, MetaError> {
-    state
+    let report = state
         .meta
         .write(move |conn| Box::pin(async move { eval_jobs::prune(conn, now).await }))
-        .await
+        .await?;
+    let pruned = state
+        .meta
+        .write(move |conn| Box::pin(async move { issues::prune_candidates(conn, now).await }))
+        .await?;
+    if pruned > 0 {
+        tracing::info!(removed = pruned, "issue candidates pruned");
+    }
+    let mut orgs: Vec<OrgId> = projects::projects_for_retention(state.meta.reader())
+        .await?
+        .into_iter()
+        .map(|(org, _, _)| org)
+        .collect();
+    orgs.sort_unstable();
+    orgs.dedup();
+    for org in orgs {
+        let Some(visible_from) = Visibility::window(state, org).visible_from() else {
+            continue;
+        };
+        let removed = state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { issues::prune_to_window(conn, org, visible_from).await })
+            })
+            .await?;
+        if removed > 0 {
+            tracing::info!(org_id = %org, removed, "issue candidates outside the data window pruned");
+        }
+    }
+    Ok(report)
 }
 
-/// Clears `'budget'` pauses whose period has turned (D-I-15), and wakes the dispatcher when it
-/// cleared one. Returns how many rules were resumed.
+/// Clears `'budget'` pauses whose period has turned (D-I-15) on rules and on issue sources, and
+/// wakes the dispatcher and the issue workers when it cleared one. Returns how many rules were
+/// resumed.
 ///
 /// # Errors
 ///
@@ -506,6 +540,21 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
     }
     if !cleared.is_empty() {
         state.eval.wake();
+    }
+    let sources = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { issues::clear_budget_pauses(conn, day, month, now).await })
+        })
+        .await?;
+    if sources > 0 {
+        tracing::info!(
+            target: "audit",
+            sources,
+            reason = "budget period",
+            "issue sources resumed"
+        );
+        state.issues_wake();
     }
     Ok(cleared.len())
 }

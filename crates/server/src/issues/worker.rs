@@ -6,7 +6,7 @@ use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cetra_core::ids::TraceId;
+use cetra_core::ids::{OrgId, TraceId};
 use cetra_core::score::Score;
 use cetra_core::span::Span;
 use cetra_eval::issue::cluster;
@@ -146,14 +146,35 @@ async fn claim_all(
     Ok(claims)
 }
 
-/// How a run stops early: with the candidate's finish to write, with nothing to write because the
-/// claim is no longer current, or with a `meta.db` failure that leaves the candidate `running` for
-/// the janitor (A5, A12).
+/// How a run stops early: with the candidate's finish to write, with that finish and a source pause
+/// to write with it, with nothing to write because the claim is no longer current, or with a
+/// `meta.db` failure that leaves the candidate `running` for the janitor (A5, A12).
 enum Exit {
     End(CandidateFinish),
+    Paused {
+        finish: CandidateFinish,
+        pause: SourcePause,
+    },
     Lost,
     Meta(MetaError),
 }
+
+/// The source pause a run's finish writes with it (M3.6a, D-I-14, D-I-15).
+enum SourcePause {
+    /// The budget is reached: the source pauses with `budget`.
+    Budget,
+    /// A connection's pause error: the sources that use `connection` pause with `connection`, and
+    /// the connection is `failing`, when it still has the `updated_at` the call read.
+    Connection {
+        org: OrgId,
+        connection: Uuid,
+        updated_at: i64,
+        detail: String,
+    },
+}
+
+/// The `budget` pause detail of a source (as a rule's, D-I-15).
+pub(crate) const BUDGET_DETAIL: &str = "budget reached";
 
 impl From<MetaError> for Exit {
     fn from(error: MetaError) -> Self {
@@ -216,39 +237,112 @@ async fn execute_candidate(
     claims: u32,
 ) -> Result<(), MetaError> {
     let mut spent_usd = 0.0;
-    match steps(state, candidate, claims, &mut spent_usd).await {
-        Ok(()) => Ok(()),
-        Err(Exit::End(finish)) => {
-            let status = finish_label(&finish);
-            let class = match &finish {
-                CandidateFinish::Failed { class } | CandidateFinish::Skipped { class } => *class,
-                _ => "none",
-            };
-            let stored = write_finish(
-                state,
-                candidate.source_id,
-                candidate.id,
-                claims,
-                finish,
-                spent_usd,
-            )
-            .await?;
-            tracing::debug!(
-                candidate_id = %candidate.id,
-                source_id = %candidate.source_id,
-                status,
-                class,
-                stored,
-                "issue candidate finished"
+    let (finish, pause) = match steps(state, candidate, claims, &mut spent_usd).await {
+        Ok(()) => return Ok(()),
+        Err(Exit::End(finish)) => (finish, None),
+        Err(Exit::Paused { finish, pause }) => (finish, Some(pause)),
+        Err(Exit::Lost) => {
+            tracing::debug!(candidate_id = %candidate.id, "issue candidate claim is no longer current");
+            return Ok(());
+        }
+        Err(Exit::Meta(error)) => return Err(error),
+    };
+    let status = finish_label(&finish);
+    let class = match &finish {
+        CandidateFinish::Failed { class } | CandidateFinish::Skipped { class } => *class,
+        _ => "none",
+    };
+    let stored = write_end(state, candidate, claims, finish, pause, spent_usd).await?;
+    tracing::debug!(
+        candidate_id = %candidate.id,
+        source_id = %candidate.source_id,
+        status,
+        class,
+        stored,
+        "issue candidate finished"
+    );
+    Ok(())
+}
+
+/// Writes a run's finish, its spend and, when there is one, its source pause, in one write. The
+/// pause follows only a finish that stored, as an eval job's does (D-I-14). Returns whether the
+/// finish stored.
+async fn write_end(
+    state: &AppState,
+    candidate: &CandidateRow,
+    claims: u32,
+    finish: CandidateFinish,
+    pause: Option<SourcePause>,
+    spent_usd: f64,
+) -> Result<bool, MetaError> {
+    let source = candidate.source_id;
+    let id = candidate.id;
+    let now = state.clock.now_ns();
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let stored =
+                    finish_with_spend(conn, source, id, claims, finish, spent_usd, now).await?;
+                if stored && let Some(pause) = pause {
+                    apply_pause(conn, source, pause, now).await?;
+                }
+                Ok(stored)
+            })
+        })
+        .await
+}
+
+/// The source pause of a run, in the caller's write (M3.6a).
+async fn apply_pause(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    pause: SourcePause,
+    now: i64,
+) -> Result<(), MetaError> {
+    match pause {
+        SourcePause::Budget => {
+            issues::pause_source(conn, source, "budget", Some(BUDGET_DETAIL), now).await?;
+            tracing::info!(
+                target: "audit",
+                source_id = %source,
+                reason = "budget",
+                "issue source paused"
             );
             Ok(())
         }
-        Err(Exit::Lost) => {
-            tracing::debug!(candidate_id = %candidate.id, "issue candidate claim is no longer current");
-            Ok(())
-        }
-        Err(Exit::Meta(error)) => Err(error),
+        SourcePause::Connection {
+            org,
+            connection,
+            updated_at,
+            detail,
+        } => pause_connection_sources(conn, org, connection, updated_at, &detail, now).await,
     }
+}
+
+/// Pauses the sources that use `connection` with reason `connection`, and marks the connection
+/// `failing` with `detail`. Nothing changes when the connection no longer has `updated_at`, the
+/// one the call read (D-I-14). Runs in the caller's write; shared with the refits.
+pub(crate) async fn pause_connection_sources(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    connection: Uuid,
+    updated_at: i64,
+    detail: &str,
+    now: i64,
+) -> Result<(), MetaError> {
+    if !execute::connection_unchanged(conn, org, connection, Some(updated_at)).await? {
+        return Ok(());
+    }
+    let paused = issues::pause_sources_of_connection(conn, connection, Some(detail), now).await?;
+    connections::set_connection_status(conn, connection, "failing", Some(detail), now).await?;
+    tracing::info!(
+        target: "audit",
+        connection_id = %connection,
+        sources = paused.len(),
+        "issue sources paused by a connection error"
+    );
+    Ok(())
 }
 
 /// The status name of a finish, for the debug log.
@@ -614,12 +708,18 @@ async fn summarize(job: &Job<'_>, loaded: &Loaded, spent_usd: &mut f64) -> Resul
     let answer = match run.outcome {
         Ok(answer) => answer,
         Err(error) => {
-            return Err(Exit::End(failure(
+            return Err(failure(
                 candidate,
                 attempts,
                 state.clock.now_ns(),
                 error.class(),
-            )));
+                || SourcePause::Connection {
+                    org: project.org_id,
+                    connection: chat_id,
+                    updated_at: row.updated_at,
+                    detail: error.to_string(),
+                },
+            ));
         }
     };
     let is_issue = answer
@@ -736,12 +836,18 @@ async fn embed(
     commit_call(job, loaded, trace_id, run.trace, attempts).await?;
     match run.outcome {
         Ok(vector) => Ok(vector),
-        Err(error) => Err(Exit::End(failure(
+        Err(error) => Err(failure(
             candidate,
             attempts,
             state.clock.now_ns(),
             error.class(),
-        ))),
+            || SourcePause::Connection {
+                org: project.org_id,
+                connection: connection_id,
+                updated_at: row.updated_at,
+                detail: error.to_string(),
+            },
+        )),
     }
 }
 
@@ -892,11 +998,14 @@ pub(crate) enum BudgetStop {
 }
 
 impl BudgetStop {
-    /// The exit of a candidate that could not reserve: a skip when over budget, a requeue while the
-    /// spend loads.
+    /// The exit of a candidate that could not reserve: a skip that pauses the source when over
+    /// budget (M3.6a), a requeue while the spend loads.
     fn exit(self, now: i64) -> Exit {
         match self {
-            Self::Over => skip("budget"),
+            Self::Over => Exit::Paused {
+                finish: CandidateFinish::Skipped { class: "budget" },
+                pause: SourcePause::Budget,
+            },
             Self::NotLoaded => Exit::End(CandidateFinish::Requeue { not_before: now }),
             Self::Meta(error) => Exit::Meta(error),
         }
@@ -1005,18 +1114,23 @@ async fn commit_call(
     Ok(())
 }
 
-/// The finish of a failed call (A5): a retry while attempts are left, else a failure by class.
-/// `Pause` fails the candidate until the source pauses (M3.6).
+/// The exit of a failed call (A5, M3.6a): a retry while attempts are left, else a failure by class.
+/// A `Pause` requeues the candidate without its attempt (`PauseRequeue`) and pauses the sources of
+/// the call's connection, with `pause` built only then.
 fn failure(
     candidate: &CandidateRow,
     attempts: u32,
     now: i64,
     class: ErrorClass,
-) -> CandidateFinish {
+    pause: impl FnOnce() -> SourcePause,
+) -> Exit {
     match class {
-        ErrorClass::Retryable => retry_or_fail(candidate, attempts, now),
-        ErrorClass::Permanent => CandidateFinish::Failed { class: "permanent" },
-        ErrorClass::Pause => CandidateFinish::Failed { class: "pause" },
+        ErrorClass::Retryable => Exit::End(retry_or_fail(candidate, attempts, now)),
+        ErrorClass::Permanent => Exit::End(CandidateFinish::Failed { class: "permanent" }),
+        ErrorClass::Pause => Exit::Paused {
+            finish: CandidateFinish::PauseRequeue { not_before: now },
+            pause: pause(),
+        },
     }
 }
 
@@ -1854,7 +1968,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unauthorized_key_fails_the_candidate_as_pause() {
+    async fn an_unauthorized_key_requeues_the_candidate_and_pauses_the_source() {
         let mock = MockLlm::start(vec![error_reply(401, "bad key")]).await;
         let (app, seeded) = llm_app().await;
         let conn = connection(&app, &seeded, &mock).await;
@@ -1867,15 +1981,31 @@ mod tests {
 
         run_once(&app, &row).await;
 
-        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
-        assert_eq!(status, "failed");
-        assert_eq!(error_class.as_deref(), Some("pause"));
+        // A pause requeues the candidate without the attempt it made (A5).
+        let (status, error_class, _, _, attempts) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "queued");
+        assert_eq!(error_class, None);
+        assert_eq!(attempts, 0);
+        let stored =
+            crate::meta::issues::get_source(app.state.meta.reader(), seeded.project.id, source.id)
+                .await
+                .expect("source read")
+                .expect("source");
+        assert_eq!(stored.paused_reason.as_deref(), Some("connection"));
+        assert!(stored.paused_detail.is_some());
+        let connection_status: String =
+            sqlx::query_scalar("SELECT status FROM llm_connections WHERE id = ?")
+                .bind(conn.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("connection read");
+        assert_eq!(connection_status, "failing");
         assert_eq!(mock.requests().len(), 1);
         assert!(mock.embedding_requests().is_empty());
     }
 
     #[tokio::test]
-    async fn a_run_over_the_budget_is_skipped_before_any_call() {
+    async fn a_run_over_the_budget_is_skipped_and_pauses_the_source() {
         let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
         let (app, seeded) = llm_app().await;
         let conn = connection(&app, &seeded, &mock).await;
@@ -1901,6 +2031,12 @@ mod tests {
         assert_eq!(status, "skipped");
         assert_eq!(error_class.as_deref(), Some("budget"));
         assert!(mock.requests().is_empty());
+        let stored =
+            crate::meta::issues::get_source(app.state.meta.reader(), seeded.project.id, source.id)
+                .await
+                .expect("source read")
+                .expect("source");
+        assert_eq!(stored.paused_reason.as_deref(), Some("budget"));
     }
 
     #[tokio::test]

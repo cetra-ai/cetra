@@ -8,6 +8,7 @@ use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::eval_jobs::DAY_NS;
 use super::{MetaError, unique_or};
 
 const SOURCES: &str = "issue_sources";
@@ -1846,6 +1847,246 @@ pub(crate) async fn llm_sources(
         .collect()
 }
 
+/// Pauses an enabled, unpaused source with `reason` (`connection`, `budget` or `errors`) and
+/// `detail` as its `paused_detail`. A source that is already paused keeps its first pause.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+pub(crate) async fn pause_source(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    reason: &str,
+    detail: Option<&str>,
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE issue_sources SET paused_reason = ?1, paused_at = ?2, paused_detail = ?3, \
+         updated_at = ?2 WHERE id = ?4 AND enabled = 1 AND paused_reason IS NULL",
+    )
+    .bind(reason)
+    .bind(now)
+    .bind(detail)
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Pauses the enabled, unpaused sources whose chat or embedding connection is `connection`, with
+/// reason `connection` and `detail`. Returns their ids.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+pub(crate) async fn pause_sources_of_connection(
+    conn: &mut SqliteConnection,
+    connection: Uuid,
+    detail: Option<&str>,
+    now: i64,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE issue_sources SET paused_reason = 'connection', paused_at = ?1, paused_detail = ?2, \
+         updated_at = ?1 WHERE enabled = 1 AND paused_reason IS NULL \
+         AND (chat_connection_id = ?3 OR embed_connection_id = ?3) RETURNING id",
+    )
+    .bind(now)
+    .bind(detail)
+    .bind(connection.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    source_ids(ids)
+}
+
+/// Clears the `connection` pauses of the sources whose chat or embedding connection is
+/// `connection`. Returns their ids.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn resume_connection_pauses(
+    conn: &mut SqliteConnection,
+    connection: Uuid,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "UPDATE issue_sources SET paused_reason = NULL, paused_at = NULL, paused_detail = NULL \
+         WHERE paused_reason = 'connection' AND (chat_connection_id = ?1 OR embed_connection_id = ?1) \
+         RETURNING id",
+    )
+    .bind(connection.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    source_ids(ids)
+}
+
+/// Clears the `budget` pauses whose period has turned (as `online_rules::clear_budget_pauses`):
+/// a `day` source paused before `day_start`, a `month` source paused before `month_start`, and any
+/// source whose budget was removed. Returns how many sources were resumed.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+pub(crate) async fn clear_budget_pauses(
+    conn: &mut SqliteConnection,
+    day_start: i64,
+    month_start: i64,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let result = sqlx::query(
+        "UPDATE issue_sources SET paused_reason = NULL, paused_at = NULL, paused_detail = NULL, \
+         updated_at = ?1 WHERE paused_reason = 'budget' AND \
+         ((budget_period = 'day' AND paused_at < ?2) OR \
+          (budget_period = 'month' AND paused_at < ?3) OR budget_usd IS NULL)",
+    )
+    .bind(now)
+    .bind(day_start)
+    .bind(month_start)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Deletes the candidates of a project whose traces a deletion removed. Returns how many.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the delete fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn delete_candidates_of_deletion(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    deletion: Uuid,
+) -> Result<u64, MetaError> {
+    let result = sqlx::query(
+        "DELETE FROM issue_candidates WHERE project_id = ?1 AND trace_id IN \
+         (SELECT trace_id FROM deletion_traces WHERE deletion_id = ?2)",
+    )
+    .bind(project.to_string())
+    .bind(deletion.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// A queued candidate expires after this long (A7).
+const QUEUED_NS: i64 = DAY_NS;
+/// A pending candidate loses its vector after this long (D-IC-6).
+const PENDING_VECTOR_NS: i64 = 7 * DAY_NS;
+/// An assigned candidate loses its vector, and every candidate is deleted, after this long
+/// (D-IC-6).
+const CANDIDATE_NS: i64 = 30 * DAY_NS;
+/// The per-day counters of a source are deleted after this long (D-IC-6).
+const DAY_ROW_NS: i64 = 62 * DAY_NS;
+/// Refits kept per source (D-IC-6).
+const REFITS_KEPT: i64 = 50;
+
+/// Prunes the candidate data (D-IC-6, A7):
+/// 1. a `queued` candidate created more than a day ago is `skipped` with `expired`;
+/// 2. the vector of a `pending` candidate older than 7 days, and of an `assigned` one older than
+///    30 days, is cleared;
+/// 3. candidates older than 30 days are deleted;
+/// 4. `issue_source_days` rows older than 62 days are deleted;
+/// 5. each source keeps its newest 50 refits.
+///
+/// Returns how many candidates were expired or deleted.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a statement fails.
+pub(crate) async fn prune_candidates(
+    conn: &mut SqliteConnection,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let expired = sqlx::query(
+        "UPDATE issue_candidates SET status = 'skipped', error_class = 'expired', updated_at = ?1 \
+         WHERE status = 'queued' AND created_at < ?2",
+    )
+    .bind(now)
+    .bind(now.saturating_sub(QUEUED_NS))
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    sqlx::query(
+        "UPDATE issue_candidates SET vector = NULL \
+         WHERE vector IS NOT NULL AND ((status = 'pending' AND created_at < ?1) \
+         OR (status = 'assigned' AND created_at < ?2))",
+    )
+    .bind(now.saturating_sub(PENDING_VECTOR_NS))
+    .bind(now.saturating_sub(CANDIDATE_NS))
+    .execute(&mut *conn)
+    .await?;
+    let deleted = sqlx::query("DELETE FROM issue_candidates WHERE created_at < ?")
+        .bind(now.saturating_sub(CANDIDATE_NS))
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    sqlx::query("DELETE FROM issue_source_days WHERE day < ?")
+        .bind(now.saturating_sub(DAY_ROW_NS))
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "DELETE FROM issue_refits WHERE id IN (\
+         SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY source_id \
+         ORDER BY started_at DESC, id DESC) AS rn FROM issue_refits) WHERE rn > ?)",
+    )
+    .bind(REFITS_KEPT)
+    .execute(&mut *conn)
+    .await?;
+    Ok(expired.saturating_add(deleted))
+}
+
+/// Deletes the candidates of the org's projects whose trace starts before `visible_from`
+/// (the org's data window). Returns how many.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the delete fails.
+pub(crate) async fn prune_to_window(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    visible_from: i64,
+) -> Result<u64, MetaError> {
+    let result = sqlx::query(
+        "DELETE FROM issue_candidates WHERE trace_start < ?1 AND project_id IN \
+         (SELECT id FROM projects WHERE org_id = ?2)",
+    )
+    .bind(visible_from)
+    .bind(org.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Whether any of `ids` is still `pending`. A refit checks this inside its create write, so no
+/// issue is written for members that a deletion or an earlier assignment removed.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails.
+pub(crate) async fn any_pending(
+    conn: &mut SqliteConnection,
+    ids: &[Uuid],
+) -> Result<bool, MetaError> {
+    for id in ids {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM issue_candidates WHERE id = ? AND status = 'pending'",
+        )
+        .bind(id.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+        if pending > 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Parses the ids a `RETURNING id` update gave back.
+fn source_ids(ids: Vec<String>) -> Result<Vec<Uuid>, MetaError> {
+    ids.iter().map(|id| parse_uuid(id, SOURCES, "id")).collect()
+}
+
 // rows
 
 #[derive(sqlx::FromRow)]
@@ -2241,6 +2482,10 @@ mod tests {
         ready_candidates, retarget_merged, set_candidate_target, set_candidates_assigned,
         set_embed_dimension, set_next_refit, source_centroids, spent_between,
         start_candidate_attempt, sweep_sources, update_issue, update_source,
+    };
+    use super::{
+        any_pending, clear_budget_pauses, pause_source, pause_sources_of_connection,
+        prune_candidates, prune_to_window, resume_connection_pauses,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{delete_project, insert_project, mark_project_deleting};
@@ -3914,5 +4159,292 @@ mod tests {
             assert_eq!(*org_id, org);
             assert_eq!(*timeout, None);
         }
+    }
+
+    /// The status text of candidate `id`.
+    async fn status_text(db: &MetaDb, id: Uuid) -> String {
+        sqlx::query_scalar("SELECT status FROM issue_candidates WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.reader())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_connection_pause_keeps_the_first_pause_and_resumes_with_its_connection() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["a"]).await;
+        let project = projects[0];
+        let chat = Uuid::from_u128(70);
+        let embed = Uuid::from_u128(71);
+        connection(&db, org, chat).await;
+        connection(&db, org, embed).await;
+        let mut on_chat = scored_source(project, "chat", SourceKind::Score);
+        on_chat.chat_connection_id = Some(chat);
+        let mut on_embed = scored_source(project, "embed", SourceKind::Score);
+        on_embed.embed_connection_id = Some(embed);
+        let other = scored_source(project, "other", SourceKind::Score);
+        for row in [&on_chat, &on_embed, &other] {
+            put_source(&db, row.clone()).await;
+        }
+        let (chat_source, chat_pause, embed_pause) = (on_chat.id, chat, embed);
+
+        let paused = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    pause_sources_of_connection(conn, chat_pause, Some("bad key"), NOW).await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(paused, vec![chat_source]);
+        // A budget pause does not replace the connection pause.
+        db.write(move |conn| {
+            Box::pin(async move {
+                pause_source(conn, chat_source, "budget", Some("budget reached"), NOW + 1).await
+            })
+        })
+        .await
+        .unwrap();
+        let row = get_source(db.reader(), project, chat_source)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.paused_reason.as_deref(), Some("connection"));
+        assert_eq!(row.paused_detail.as_deref(), Some("bad key"));
+
+        let paused = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    pause_sources_of_connection(conn, embed_pause, None, NOW + 2).await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(paused, vec![on_embed.id]);
+
+        let resumed = db
+            .write(move |conn| {
+                Box::pin(async move { resume_connection_pauses(conn, chat_pause).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(resumed, vec![chat_source]);
+        let resumed_row = get_source(db.reader(), project, chat_source)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resumed_row.paused_reason, None);
+        assert_eq!(resumed_row.paused_detail, None);
+        let still = get_source(db.reader(), project, on_embed.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.paused_reason.as_deref(), Some("connection"));
+        let untouched = get_source(db.reader(), project, other.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(untouched.paused_reason, None);
+    }
+
+    #[tokio::test]
+    async fn a_budget_pause_clears_when_its_period_turns() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_org, projects) = seed(&db, &["a"]).await;
+        let project = projects[0];
+        let mut daily = scored_source(project, "daily", SourceKind::Score);
+        daily.budget_usd = Some(1.0);
+        daily.budget_period = Some("day".to_owned());
+        let mut monthly = scored_source(project, "monthly", SourceKind::Score);
+        monthly.budget_usd = Some(1.0);
+        monthly.budget_period = Some("month".to_owned());
+        for row in [&daily, &monthly] {
+            put_source(&db, row.clone()).await;
+        }
+        for id in [daily.id, monthly.id] {
+            db.write(move |conn| {
+                Box::pin(async move {
+                    pause_source(conn, id, "budget", Some("budget reached"), NOW).await
+                })
+            })
+            .await
+            .unwrap();
+        }
+
+        // The day has turned; the month has not.
+        let cleared = db
+            .write(move |conn| {
+                Box::pin(async move { clear_budget_pauses(conn, NOW + 1, 0, NOW + 2).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(cleared, 1);
+        let day = get_source(db.reader(), project, daily.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(day.paused_reason, None);
+        let month = get_source(db.reader(), project, monthly.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(month.paused_reason.as_deref(), Some("budget"));
+    }
+
+    #[tokio::test]
+    async fn prune_clears_old_vectors_expires_queued_candidates_and_keeps_fifty_refits() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_org, projects) = seed(&db, &["a"]).await;
+        let source = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, source.clone()).await;
+        let now = 100 * DAY;
+        let with_vector = |mut row: CandidateRow| {
+            row.vector = Some(vec![1.0, 0.0]);
+            row
+        };
+        let old_pending = with_vector(candidate(
+            1,
+            &source,
+            "old-pending",
+            CandidateStatus::Pending,
+            now - 8 * DAY,
+        ));
+        let new_pending = with_vector(candidate(
+            2,
+            &source,
+            "new-pending",
+            CandidateStatus::Pending,
+            now - DAY,
+        ));
+        let old_queued = candidate(
+            3,
+            &source,
+            "old-queued",
+            CandidateStatus::Queued,
+            now - 2 * DAY,
+        );
+        let new_queued = candidate(
+            4,
+            &source,
+            "new-queued",
+            CandidateStatus::Queued,
+            now - DAY / 24,
+        );
+        let ancient = candidate(
+            5,
+            &source,
+            "ancient",
+            CandidateStatus::Pending,
+            now - 40 * DAY,
+        );
+        for row in [
+            old_pending,
+            new_pending,
+            old_queued,
+            new_queued,
+            ancient.clone(),
+        ] {
+            assert!(put_candidate(&db, row).await);
+        }
+        for i in 0..52_u64 {
+            let row = refit(
+                1_000 + u128::from(i),
+                source.id,
+                "schedule",
+                i64::try_from(i).unwrap(),
+            );
+            db.write(move |conn| Box::pin(async move { insert_refit(conn, &row).await }))
+                .await
+                .unwrap();
+        }
+
+        // One queued candidate expires and the ancient one is deleted.
+        let changed = db
+            .write(move |conn| Box::pin(async move { prune_candidates(conn, now).await }))
+            .await
+            .unwrap();
+        assert_eq!(changed, 2);
+        assert!(
+            read_candidate(&db, Uuid::from_u128(1))
+                .await
+                .vector
+                .is_none()
+        );
+        assert_eq!(status_text(&db, Uuid::from_u128(1)).await, "pending");
+        assert!(
+            read_candidate(&db, Uuid::from_u128(2))
+                .await
+                .vector
+                .is_some()
+        );
+        assert_eq!(status_text(&db, Uuid::from_u128(3)).await, "skipped");
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(3))
+                .await
+                .error_class
+                .as_deref(),
+            Some("expired")
+        );
+        assert_eq!(status_text(&db, Uuid::from_u128(4)).await, "queued");
+        let left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_candidates WHERE id = ?")
+            .bind(ancient.id.to_string())
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM issue_refits").await, 50);
+        assert_eq!(
+            count(
+                &db,
+                "SELECT COUNT(*) FROM issue_refits WHERE started_at < 2"
+            )
+            .await,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn prune_to_window_deletes_the_candidates_before_the_data_window() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["a"]).await;
+        let source = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, source.clone()).await;
+        let before = candidate(1, &source, "before", CandidateStatus::Pending, 10);
+        let inside = candidate(2, &source, "inside", CandidateStatus::Pending, 500);
+        for row in [before, inside] {
+            assert!(put_candidate(&db, row).await);
+        }
+
+        let removed = db
+            .write(move |conn| Box::pin(async move { prune_to_window(conn, org, 100).await }))
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM issue_candidates").await, 1);
+    }
+
+    #[tokio::test]
+    async fn any_pending_sees_only_pending_candidates() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_org, projects) = seed(&db, &["a"]).await;
+        let source = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, source.clone()).await;
+        let pending = candidate(1, &source, "pending", CandidateStatus::Pending, NOW);
+        let (pending_id, gone) = (pending.id, Uuid::from_u128(9));
+        assert!(put_candidate(&db, pending).await);
+
+        let found = db
+            .write(move |conn| {
+                Box::pin(async move { any_pending(conn, &[gone, pending_id]).await })
+            })
+            .await
+            .unwrap();
+        assert!(found);
+        let missing = db
+            .write(move |conn| Box::pin(async move { any_pending(conn, &[gone]).await }))
+            .await
+            .unwrap();
+        assert!(!missing);
     }
 }

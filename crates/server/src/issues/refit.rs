@@ -13,7 +13,9 @@ use uuid::Uuid;
 
 use super::errors::{self, Occurrence};
 use super::prompts;
-use super::worker::{BudgetStop, CENTROID_MEMBERS, call_trace_id, reserve};
+use super::worker::{
+    BUDGET_DETAIL, BudgetStop, CENTROID_MEMBERS, call_trace_id, pause_connection_sources, reserve,
+};
 use crate::eval::budget;
 use crate::eval::execute::{self, JudgeUsage};
 use crate::http::AppState;
@@ -458,9 +460,10 @@ async fn name(
     let estimate = budget::model_price(&prices, model, adapter, now)
         .map(|price| budget::estimate_usd(prompt.chars().count(), NAME_TOKENS, price));
     let reservation = match estimate {
-        Some(estimate) => reserve(state, source, estimate, now)
-            .await
-            .map_err(budget_stop)?,
+        Some(estimate) => match reserve(state, source, estimate, now).await {
+            Ok(reservation) => reservation,
+            Err(stop) => return Err(budget_stop(state, source, stop, now).await),
+        },
         None => None,
     };
     // Step 7.3.4: the call and its trace, which holds only the summaries (not guarded, as M3.5
@@ -525,7 +528,28 @@ async fn name(
     }
     let answer = match run.outcome {
         Ok(answer) => answer,
-        Err(error) => return Err(Stop::Class(class_name(error.class()))),
+        Err(error) => {
+            let class = error.class();
+            if class == ErrorClass::Pause {
+                // A connection error pauses the sources that use the chat connection (M3.6a).
+                let detail = error.to_string();
+                let (org, updated_at) = (project.org_id, connection_row.updated_at);
+                let paused_at = state.clock.now_ns();
+                state
+                    .meta
+                    .write(move |conn| {
+                        Box::pin(async move {
+                            pause_connection_sources(
+                                conn, org, chat, updated_at, &detail, paused_at,
+                            )
+                            .await
+                        })
+                    })
+                    .await
+                    .map_err(Stop::Meta)?;
+            }
+            return Err(Stop::Class(class_name(class)));
+        }
     };
     // Step 7.3.6: the title and the description.
     let title = answer
@@ -551,8 +575,8 @@ async fn name(
 /// cluster's, and its candidates are assigned to it in the same write. Returns the issue and the
 /// candidates assigned.
 ///
-/// When a deletion removes every member between the read and this write, the issue is written
-/// with no members. Nothing prevents that today.
+/// When no member is still `pending` in this write (a deletion removed them since the read), no
+/// issue is written and the returned list is empty.
 async fn create_issue(
     scope: Scope<'_>,
     group: &[&CandidateRow],
@@ -589,6 +613,9 @@ async fn create_issue(
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                if !issues::any_pending(conn, &ids).await? {
+                    return Ok((issue_id, Vec::new()));
+                }
                 issues::insert_issue(conn, &issue).await?;
                 let assigned = issues::set_candidates_assigned(conn, &ids, issue_id, now).await?;
                 issue.member_count = u64::try_from(assigned.len()).unwrap_or(u64::MAX);
@@ -721,11 +748,36 @@ fn class_name(class: ErrorClass) -> &'static str {
     }
 }
 
-/// The refit's stop for a budget that does not reserve. A spend that is not loaded counts as
-/// over budget for the refit, which then stops; the source is not paused here (M3.6a).
-fn budget_stop(stop: BudgetStop) -> Stop {
+/// The refit's stop for a budget that does not reserve (D-I-15). Over budget, the source pauses
+/// with `budget` (M3.6a) and the refit stops with that class. A spend that is not loaded yet stops
+/// the refit with the same class, without a pause.
+async fn budget_stop(state: &AppState, source: &SourceRow, stop: BudgetStop, now: i64) -> Stop {
     match stop {
-        BudgetStop::Over | BudgetStop::NotLoaded => Stop::Class("budget"),
+        BudgetStop::Over => {
+            let source_id = source.id;
+            let paused = state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        issues::pause_source(conn, source_id, "budget", Some(BUDGET_DETAIL), now)
+                            .await
+                    })
+                })
+                .await;
+            match paused {
+                Ok(()) => {
+                    tracing::info!(
+                        target: "audit",
+                        source_id = %source_id,
+                        reason = "budget",
+                        "issue source paused"
+                    );
+                    Stop::Class("budget")
+                }
+                Err(error) => Stop::Meta(error),
+            }
+        }
+        BudgetStop::NotLoaded => Stop::Class("budget"),
         BudgetStop::Meta(error) => Stop::Meta(error),
     }
 }
@@ -1234,5 +1286,49 @@ mod tests {
             titles(&app, source.id).await,
             vec!["Refund refused".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn no_issue_is_created_when_no_member_is_still_pending() {
+        let (app, seeded) = llm_app().await;
+        let mock = MockLlm::start(Vec::new()).await;
+        let chat = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, llm_source(seeded.project.id, chat, now)).await;
+        let project = projects::project_by_id(app.state.meta.reader(), seeded.project.id)
+            .await
+            .expect("project read")
+            .expect("project");
+        // A member the refit read but a deletion removed before the create write: it is never
+        // stored, so the write finds it not pending.
+        let member = pending(&app, &source, 90, near(0, 0.0), now - MINUTE).await;
+        let member_id = member.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("DELETE FROM issue_candidates WHERE id = ?")
+                        .bind(member_id.to_string())
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("candidate deleted");
+        let scope = Scope {
+            state: &app.state,
+            source: &source,
+            project: &project,
+            now,
+        };
+
+        let (_, assigned) = create_issue(scope, &[&member], &near(0, 0.0), "Ghost", None)
+            .await
+            .expect("create runs");
+
+        assert!(assigned.is_empty());
+        assert_eq!(count(&app, "SELECT COUNT(*) FROM issues").await, 0);
     }
 }
