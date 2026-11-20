@@ -7,3 +7,10 @@ minimumReleaseAge: 10080
 # depends on 1.9.0. One copy has to be the global tracer.
 overrides:
   "@opentelemetry/api": "1.9.0"
+
+# The coding agents' install scripts stay off: the captures run the agents from
+# node_modules/.bin, and the spike ran them without any of these scripts.
+allowBuilds:
+  "@anthropic-ai/claude-code@2.1.323": false
+  "@github/keytar@7.10.6": false
+  "node-pty@1.0.0": false

@@ -38,6 +38,11 @@ export async function finish(
 ): Promise<void> {
   await provider.forceFlush();
   await provider.shutdown();
+  writeMeta(aliases);
+}
+
+/** Writes `CETRA_CAPTURE_META` with the versions of `CETRA_CAPTURE_LIBRARIES`. */
+export function writeMeta(aliases: Record<string, string> = {}): void {
   const listed = process.env.CETRA_CAPTURE_LIBRARIES;
   const metaPath = process.env.CETRA_CAPTURE_META;
   if (listed === undefined) {
