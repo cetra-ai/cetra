@@ -262,3 +262,22 @@ pub struct AddedQueueItems {
     /// Targets that were not added: unknown, hidden, evaluation or guarded.
     pub skipped: Vec<SkippedQueueItem>,
 }
+
+/// Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/next`. `{}` is enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NextQueueItem {
+    /// The item to move on from: the next free item after it by id, wrapping around. Need not
+    /// exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Uuid>,
+}
+
+/// Body of `POST .../items/{item_id}/skip`. `{}` is enough.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SkipQueueItem {
+    /// Why the item is skipped. Free text, 0 to 1 000 characters after trimming; blank is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}

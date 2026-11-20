@@ -18,6 +18,7 @@ use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAd
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
+    NextQueueItem, SkipQueueItem,
 };
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
@@ -481,6 +482,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
     roundtrip::<CreateAnnotationQueue>("requests/annotation-queue-create.json");
     roundtrip::<AddQueueItems>("requests/annotation-queue-items-add.json");
+    roundtrip::<NextQueueItem>("requests/annotation-queue-next.json");
+    roundtrip::<SkipQueueItem>("requests/annotation-queue-skip.json");
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
@@ -552,6 +555,14 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "add_annotation_queue_items",
             "requests/annotation-queue-items-add.json",
+        ),
+        (
+            "next_annotation_queue_item",
+            "requests/annotation-queue-next.json",
+        ),
+        (
+            "skip_annotation_queue_item",
+            "requests/annotation-queue-skip.json",
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
@@ -705,6 +716,7 @@ fn generated_files_roundtrip() {
             "list_annotation_queue_items" => roundtrip::<Page<AnnotationQueueItem>>(&example.file),
             "get_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "add_annotation_queue_items" => roundtrip::<AddedQueueItems>(&example.file),
+            "next_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
             "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),

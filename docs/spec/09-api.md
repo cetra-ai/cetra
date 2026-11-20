@@ -117,6 +117,12 @@ Spec 04 § Annotation queues, D-AQ-2–D-AQ-11. Reads are `View`; queue writes a
 | `POST /annotation-queues/{id}/items` | `{items}` of 1–1 000 targets; `201` with `added`, `existing` and `skipped` (by request index, with a message) whatever the counts; a target that is unknown, hidden, an evaluation trace, of the wrong kind for the queue (a trace queue takes `trace_id`, a span queue `trace_id` and `span_id`, a session queue `session_id`) or blocked by a deletion is skipped; past 100 000 items `422` `too_many_items` and nothing is added |
 | `GET /annotation-queues/{id}/items/{item_id}` | one item; an unknown id, an item of another queue and an item the data window hides are `404` |
 | `DELETE /annotation-queues/{id}/items/{item_id}` | `204`; `404` when the item is absent |
+| `POST /annotation-queues/{id}/next` | `Review` (member and above, a session or a read-write PAT, never a key); body `{after?}`; `200` with the item it leases for 5 minutes, or `204` when nothing is free; releases the caller's other leases in the queue |
+| `POST /annotation-queues/{id}/items/{item_id}/lease` | `200`; takes or renews the lease when it is free, expired or the caller's; another reviewer's live lease is `409` with the holder in `errors[0]` (`leased_by_user_id`) |
+| `DELETE /annotation-queues/{id}/items/{item_id}/lease` | `204` whether or not the caller holds the lease |
+| `POST /annotation-queues/{id}/items/{item_id}/complete` | `200`; the pending item becomes `completed` by the caller and loses its lease; `409` when it is not pending or another reviewer holds it |
+| `POST /annotation-queues/{id}/items/{item_id}/skip` | `200`; body `{reason?}`, trimmed, at most 1 000 characters (`400` on `reason`); the same `409`s as complete |
+| `POST /annotation-queues/{id}/items/{item_id}/reopen` | `200`; a completed or skipped item becomes pending again; `409` when it is pending |
 
 ### Datasets & experiments
 

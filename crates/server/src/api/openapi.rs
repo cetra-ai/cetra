@@ -40,7 +40,8 @@ use super::alerts::{
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
 use super::annotation_queues::{
-    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, NextQueueItem,
+    SkipQueueItem,
     AnnotationQueueListParams, CreateAnnotationQueue, QueueCounts, QueueItemAddedBy,
     QueueItemStatus, QueueItemTarget, QueueTarget, SkippedQueueItem, UpdateAnnotationQueue,
 };
@@ -305,6 +306,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AddQueueItems>();
     set.insert::<SkippedQueueItem>();
     set.insert::<AddedQueueItems>();
+    set.insert::<NextQueueItem>();
+    set.insert::<SkipQueueItem>();
     set.insert::<CreateDashboard>();
     set.insert::<UpdateDashboard>();
     set.insert::<SaveOverview>();
@@ -4025,6 +4028,123 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 429],
     ))
     .build();
+    let next = operation(
+        "next_annotation_queue_item",
+        "annotation_queues",
+        "Claim the next item of an annotation queue",
+    )
+    .description(Some(
+        "Leases the first free pending item after `after` (by id), wrapping to the first when none follows, for 5 minutes, and releases the caller's other leases in the queue. Answers 204 with no body when nothing is free. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .request_body(Some(json_body("NextQueueItem")))
+    .responses(responses_with(
+        [
+            ("200", json_of::<AnnotationQueueItem>("The claimed item.")),
+            ("204", ResponseBuilder::new().description("Nothing is free.").build()),
+        ],
+        &[400, 401, 403, 404, 413, 415, 429],
+    ))
+    .build();
+    let lease = operation(
+        "lease_annotation_queue_item",
+        "annotation_queues",
+        "Lease an annotation queue item",
+    )
+    .description(Some(
+        "Takes or renews the 5-minute lease of a pending item that is free, expired or already the caller's. Another reviewer's live lease is 409 with the holder in `errors`. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueueItem>("The leased item."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let release = operation(
+        "release_annotation_queue_item",
+        "annotation_queues",
+        "Release an annotation queue item lease",
+    )
+    .description(Some(
+        "Clears the lease when the caller holds it; otherwise changes nothing. Answers 204 either way. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Released.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let complete = operation(
+        "complete_annotation_queue_item",
+        "annotation_queues",
+        "Complete an annotation queue item",
+    )
+    .description(Some(
+        "Marks a pending item completed by the caller and clears its lease. Refused with 409 while another reviewer holds a live lease, or when the item is not pending. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueueItem>("The completed item."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let skip = operation(
+        "skip_annotation_queue_item",
+        "annotation_queues",
+        "Skip an annotation queue item",
+    )
+    .description(Some(
+        "Marks a pending item skipped, with an optional reason, and clears its lease. The same 409s as complete. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .request_body(Some(json_body("SkipQueueItem")))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueueItem>("The skipped item."),
+        &[400, 401, 403, 404, 409, 413, 415, 429],
+    ))
+    .build();
+    let reopen = operation(
+        "reopen_annotation_queue_item",
+        "annotation_queues",
+        "Reopen an annotation queue item",
+    )
+    .description(Some(
+        "Sets a completed or skipped item back to pending, clearing its reason and done fields. A pending item is 409. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueueItem>("The reopened item."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/annotation-queues"),
@@ -4061,6 +4181,30 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}"),
             PathItem::new(HttpMethod::Delete, remove_item),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/next"),
+            PathItem::new(HttpMethod::Post, next),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}/lease"),
+            PathItem::new(HttpMethod::Post, lease),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}/lease"),
+            PathItem::new(HttpMethod::Delete, release),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}/complete"),
+            PathItem::new(HttpMethod::Post, complete),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}/skip"),
+            PathItem::new(HttpMethod::Post, skip),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}/reopen"),
+            PathItem::new(HttpMethod::Post, reopen),
         )
 }
 

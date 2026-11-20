@@ -1038,6 +1038,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/annotation-queue-item.json",
             "application/json",
         ),
+        example(
+            "next_annotation_queue_item",
+            params(&[("id", "01900000-0000-7000-8000-000000000a01")]),
+            BTreeMap::new(),
+            "static/annotation-queue-item.json",
+            "application/json",
+        ),
         example_created(
             "add_annotation_queue_items",
             params(&[("id", "01900000-0000-7000-8000-000000000a01")]),

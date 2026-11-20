@@ -21,8 +21,8 @@ use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use crate::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
     AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue,
-    QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueTarget,
-    SkippedQueueItem, UpdateAnnotationQueue,
+    NextQueueItem, QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueTarget,
+    SkipQueueItem, SkippedQueueItem, UpdateAnnotationQueue,
 };
 use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
@@ -41,6 +41,10 @@ use crate::routes::read::{Deadline, open_query, page_limit};
 const QUEUE_BODY_LIMIT: usize = 64 * 1024;
 /// An add body is up to 1 000 targets of a few hundred bytes each (D-AQ-8).
 const ITEMS_BODY_LIMIT: usize = 1024 * 1024;
+/// A reviewer body is `{}` or a short reason (D-AQ-5).
+const REVIEW_BODY_LIMIT: usize = 16 * 1024;
+/// Longest skip reason, in characters after trimming.
+const MAX_REASON_CHARS: usize = 1_000;
 /// Longest queue name, in characters after trimming.
 const MAX_NAME_CHARS: usize = 100;
 /// Longest queue description, in characters after trimming.
@@ -142,6 +146,66 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: delete(remove_item),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/next",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(next_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(lease_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(release_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(complete_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(skip_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+            access: Access::Project {
+                perm: ProjectPerm::Review,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(reopen_item).layer(DefaultBodyLimit::max(REVIEW_BODY_LIMIT)),
         },
     ]
 }
@@ -883,6 +947,199 @@ fn decode_item_cursor(text: &str) -> Result<Uuid, ApiError> {
     Ok(cursor.id)
 }
 
+/// `POST /annotation-queues/{id}/next`: leases the first free pending item after `after`, wrapping
+/// to the first when none follows, and releases the caller's other leases in the queue. Answers
+/// 200 with the item, or 204 with no body when nothing is free (D-AQ-4).
+async fn next_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<QueuePath>,
+    error::Json(body): error::Json<NextQueueItem>,
+) -> Result<Response, ApiError> {
+    let user = reviewer(&principal)?;
+    let project = access.project.id;
+    let queue_id = path.id;
+    ensure_queue(&state, project, queue_id).await?;
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
+    let now = state.clock.now_ns();
+    let after = body.after;
+    let claimed = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::claim_next_tx(conn, queue_id, user, after, visible_from, now).await
+            })
+        })
+        .await?;
+    match claimed {
+        Some(row) => Ok((StatusCode::OK, error::Json(item_json(&row, now))).into_response()),
+        None => Ok(StatusCode::NO_CONTENT.into_response()),
+    }
+}
+
+/// `POST /annotation-queues/{id}/items/{item_id}/lease`: takes or renews the item's lease for the
+/// caller. Another reviewer's live lease is 409 with the holder.
+async fn lease_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    let user = reviewer(&principal)?;
+    let project = access.project.id;
+    let (queue_id, item_id) = (path.id, path.item_id);
+    ensure_queue(&state, project, queue_id).await?;
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
+    let now = state.clock.now_ns();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::lease_tx(conn, queue_id, item_id, user, visible_from, now).await
+            })
+        })
+        .await?;
+    review_answer(outcome, now).map(error::Json)
+}
+
+/// `DELETE /annotation-queues/{id}/items/{item_id}/lease`: releases the caller's lease. Answers
+/// 204 even when the caller holds none (D-AQ-4).
+async fn release_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<StatusCode, ApiError> {
+    let user = reviewer(&principal)?;
+    let project = access.project.id;
+    let (queue_id, item_id) = (path.id, path.item_id);
+    ensure_queue(&state, project, queue_id).await?;
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { store::release_tx(conn, queue_id, item_id, user).await })
+        })
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /annotation-queues/{id}/items/{item_id}/complete`: completes a pending item (D-AQ-5).
+async fn complete_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    finish(&state, &principal, &access, path, store::Finish::Complete).await
+}
+
+/// `POST /annotation-queues/{id}/items/{item_id}/skip`: skips a pending item, with an optional
+/// reason (D-AQ-5).
+async fn skip_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+    error::Json(body): error::Json<SkipQueueItem>,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    let mut errors = Vec::new();
+    let reason = body
+        .reason
+        .as_deref()
+        .and_then(|text| checked_text(text, "reason", MAX_REASON_CHARS, &mut errors))
+        .flatten();
+    refuse_if_any(errors)?;
+    finish(&state, &principal, &access, path, store::Finish::Skip(reason)).await
+}
+
+/// `POST /annotation-queues/{id}/items/{item_id}/reopen`: sets a completed or skipped item back to
+/// pending (D-AQ-5).
+async fn reopen_item(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    let user = reviewer(&principal)?;
+    let project = access.project.id;
+    let (queue_id, item_id) = (path.id, path.item_id);
+    ensure_queue(&state, project, queue_id).await?;
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
+    let now = state.clock.now_ns();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::reopen_tx(conn, queue_id, item_id, visible_from, now).await
+            })
+        })
+        .await?;
+    let answer = review_answer(outcome, now)?;
+    tracing::info!(project_id = %project, queue_id = %queue_id, item_id = %item_id, "annotation queue item reopened");
+    Ok(error::Json(answer))
+}
+
+/// Completes or skips a pending item as the caller. Shared by complete and skip.
+async fn finish(
+    state: &AppState,
+    principal: &Principal,
+    access: &ProjectAccess,
+    path: ItemPath,
+    finish: store::Finish,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    let user = reviewer(principal)?;
+    let project = access.project.id;
+    let (queue_id, item_id) = (path.id, path.item_id);
+    ensure_queue(state, project, queue_id).await?;
+    let visible_from = Visibility::window(state, access.project.org_id).visible_from();
+    let now = state.clock.now_ns();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::finish_tx(conn, queue_id, item_id, user, finish, visible_from, now).await
+            })
+        })
+        .await?;
+    let answer = review_answer(outcome, now)?;
+    let event = match answer.status {
+        QueueItemStatus::Skipped => "skipped",
+        _ => "completed",
+    };
+    tracing::info!(
+        project_id = %project,
+        queue_id = %queue_id,
+        item_id = %item_id,
+        "annotation queue item {}",
+        event
+    );
+    Ok(error::Json(answer))
+}
+
+/// The reviewing user (D-AQ-11). Only sessions and personal tokens reach a review route.
+fn reviewer(principal: &Principal) -> Result<Uuid, ApiError> {
+    Ok(principal::session_user(principal)?.id)
+}
+
+/// The answer of a review: the item, or the refusal the store named (D-AQ-4, D-AQ-5).
+fn review_answer(outcome: store::ReviewOutcome, now: i64) -> Result<AnnotationQueueItem, ApiError> {
+    match outcome {
+        store::ReviewOutcome::Done(row) => Ok(item_json(&row, now)),
+        store::ReviewOutcome::Missing => Err(ApiError::NotFound),
+        store::ReviewOutcome::NotPending => Err(ApiError::Conflict {
+            detail: "the item is not pending",
+        }),
+        store::ReviewOutcome::Pending => Err(ApiError::Conflict {
+            detail: "the item is pending",
+        }),
+        store::ReviewOutcome::HeldBy(holder) => Err(ApiError::ConflictWith {
+            detail: "another reviewer holds this item",
+            errors: vec![field("leased_by_user_id", holder.to_string())],
+        }),
+    }
+}
+
 /// The API form of a stored queue. A missing count is zero.
 fn queue_json(row: &QueueRow, counts: Option<&Counts>) -> AnnotationQueue {
     let counts = counts.cloned().unwrap_or_default();
@@ -1022,6 +1279,7 @@ fn check_definition_ids(ids: &[Uuid], errors: &mut Vec<FieldError>) {
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
+    use std::time::Duration;
 
     use super::*;
     use crate::api::common::ProblemCode;
@@ -2022,5 +2280,325 @@ mod tests {
         let response = send(&app, Method::GET, &path, &seeded.cookie, None).await;
         let fetched: AnnotationQueue = response.json();
         assert_eq!(fetched.counts.pending, 0);
+    }
+
+    /// A trace queue of `n` traces (ids 1 to n), all added by the owner.
+    async fn queue_of(app: &TestApp, seeded: &Seeded, name: &str, n: u128) -> AnnotationQueue {
+        let definition = define(app, seeded.project.id, "relevance", false).await;
+        let queue = create(app, seeded, name, definition).await;
+        let now = app.state.clock.now_ns();
+        let mut targets = Vec::new();
+        for trace in 1..=n {
+            app.commit_trace_at(&seeded.project, trace_id(trace), 0, now).await;
+            targets.push(json!({"trace_id": trace_id(trace).to_hex()}));
+        }
+        let added = add(app, seeded, queue.id, json!({"items": targets})).await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        queue
+    }
+
+    /// `POST .../next` as `cookie`, with `body`.
+    async fn claim(
+        app: &TestApp,
+        seeded: &Seeded,
+        queue: Uuid,
+        cookie: &str,
+        body: Value,
+    ) -> TestResponse {
+        let path = format!("{}/{queue}/next", base(seeded));
+        send(app, Method::POST, &path, cookie, Some(body)).await
+    }
+
+    /// `POST .../items/{item}/{action}` as `cookie`, with an optional body.
+    async fn act(
+        app: &TestApp,
+        seeded: &Seeded,
+        queue: Uuid,
+        item: Uuid,
+        cookie: &str,
+        action: &str,
+        body: Option<Value>,
+    ) -> TestResponse {
+        let path = format!("{}/{queue}/items/{item}/{action}", base(seeded));
+        send(app, Method::POST, &path, cookie, body).await
+    }
+
+    /// A claimed item from a `200` answer.
+    fn claimed(response: TestResponse) -> AnnotationQueueItem {
+        assert_eq!(response.status, StatusCode::OK);
+        response.json()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_reviewers_never_get_the_same_item() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 3).await;
+        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let carol = app.add_member(&seeded, "carol@example.com", OrgRole::Member).await;
+        let dan = app.add_member(&seeded, "dan@example.com", OrgRole::Member).await;
+
+        let first = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
+        let second = claimed(
+            claim(&app, &seeded, queue.id, &seeded.cookie, json!({"after": first.id})).await,
+        );
+        // Ada moved on, and her first lease is gone.
+        assert_ne!(second.id, first.id);
+        let items = items_of(&app, &seeded, queue.id).await;
+        let released = items.iter().find(|item| item.id == first.id).expect("first item");
+        assert_eq!(released.leased_by_user_id, None);
+
+        let bobs = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
+        assert_ne!(bobs.id, second.id, "Ada holds the second item");
+        let carols = claimed(claim(&app, &seeded, queue.id, &carol.cookie, json!({})).await);
+        assert_ne!(carols.id, second.id);
+        assert_ne!(carols.id, bobs.id);
+
+        // Every item is leased by someone else now.
+        let none = claim(&app, &seeded, queue.id, &dan.cookie, json!({})).await;
+        assert_eq!(none.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lease_expires_after_five_minutes() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 1).await;
+        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let item = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
+
+        let held = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "lease", None).await;
+        assert_eq!(held.status, StatusCode::CONFLICT);
+
+        app.state.clock.advance(Duration::from_secs(301));
+        let taken = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "lease", None).await;
+        assert_eq!(taken.status, StatusCode::OK);
+        let taken: AnnotationQueueItem = taken.json();
+        assert_eq!(taken.leased_by_user_id, Some(seeded.user_id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn renew_and_release() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 1).await;
+        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let first = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
+        let first_expiry = first.lease_expires_at.expect("a live lease");
+
+        app.state.clock.advance(Duration::from_secs(60));
+        let renewed = act(&app, &seeded, queue.id, first.id, &seeded.cookie, "lease", None).await;
+        assert_eq!(renewed.status, StatusCode::OK);
+        let renewed: AnnotationQueueItem = renewed.json();
+        assert!(renewed.lease_expires_at.expect("renewed") > first_expiry);
+
+        let refused = act(&app, &seeded, queue.id, first.id, &bob.cookie, "lease", None).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        let body: Value = refused.json();
+        assert_eq!(body["errors"][0]["field"], "leased_by_user_id");
+        assert_eq!(body["errors"][0]["message"], seeded.user_id.to_string());
+
+        let path = format!("{}/{}/items/{}/lease", base(&seeded), queue.id, first.id);
+        let released = send(&app, Method::DELETE, &path, &seeded.cookie, None).await;
+        assert_eq!(released.status, StatusCode::NO_CONTENT);
+
+        let taken = act(&app, &seeded, queue.id, first.id, &bob.cookie, "lease", None).await;
+        assert_eq!(taken.status, StatusCode::OK);
+        let taken: AnnotationQueueItem = taken.json();
+        assert_eq!(taken.leased_by_user_id, Some(bob.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_skip_reopen() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 1).await;
+        let item = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
+
+        let done = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        assert_eq!(done.status, StatusCode::OK);
+        let done: AnnotationQueueItem = done.json();
+        assert_eq!(done.status, QueueItemStatus::Completed);
+        assert_eq!(done.done_by_user_id, Some(seeded.user_id));
+        assert_eq!(done.leased_by_user_id, None);
+
+        let again = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        assert_eq!(again.status, StatusCode::CONFLICT);
+        let body: Value = again.json();
+        assert_eq!(body["detail"], "the item is not pending");
+
+        let reopened = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "reopen", None).await;
+        assert_eq!(reopened.status, StatusCode::OK);
+        let reopened: AnnotationQueueItem = reopened.json();
+        assert_eq!(reopened.status, QueueItemStatus::Pending);
+
+        let pending = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "reopen", None).await;
+        assert_eq!(pending.status, StatusCode::CONFLICT);
+        let body: Value = pending.json();
+        assert_eq!(body["detail"], "the item is pending");
+
+        let skipped = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "skip",
+            Some(json!({"reason": "  off topic "})),
+        )
+        .await;
+        assert_eq!(skipped.status, StatusCode::OK);
+        let skipped: AnnotationQueueItem = skipped.json();
+        assert_eq!(skipped.status, QueueItemStatus::Skipped);
+        assert_eq!(skipped.skip_reason.as_deref(), Some("off topic"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn complete_without_lease_is_allowed_when_free() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 2).await;
+        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let held = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
+
+        let refused = act(&app, &seeded, queue.id, held.id, &seeded.cookie, "complete", None).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        let body: Value = refused.json();
+        assert_eq!(body["code"], "conflict");
+        assert_eq!(body["errors"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["errors"][0]["field"], "leased_by_user_id");
+        assert_eq!(body["errors"][0]["message"], bob.id.to_string());
+
+        let free = items_of(&app, &seeded, queue.id)
+            .await
+            .into_iter()
+            .find(|item| item.id != held.id)
+            .expect("the free item");
+        let done = act(&app, &seeded, queue.id, free.id, &seeded.cookie, "complete", None).await;
+        assert_eq!(done.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bodies() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 2).await;
+        let strange = claim(&app, &seeded, queue.id, &seeded.cookie, json!({"unknown": 1})).await;
+        assert_eq!(strange.status, StatusCode::BAD_REQUEST);
+
+        let claimed_item = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
+        // Complete ignores any body, so none is fine.
+        let done = act(
+            &app,
+            &seeded,
+            queue.id,
+            claimed_item.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
+        assert_eq!(done.status, StatusCode::OK);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn keys_cannot_review() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 1).await;
+        let path = format!("{}/{}/next", base(&seeded), queue.id);
+
+        let write_key = app.write_key(&seeded).await;
+        let by_key = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {write_key}"))
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_eq!(by_key.status, StatusCode::FORBIDDEN);
+
+        let member = app.add_member(&seeded, "member@example.com", OrgRole::Member).await;
+        let read_pat = app.personal_token(member.id, false).await;
+        let by_read_pat = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {read_pat}"))
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_eq!(by_read_pat.status, StatusCode::FORBIDDEN);
+
+        let write_pat = app.personal_token(member.id, true).await;
+        let by_write_pat = app
+            .request(Method::POST, &path)
+            .header("authorization", &format!("Bearer {write_pat}"))
+            .json(&json!({}))
+            .send()
+            .await;
+        assert_eq!(by_write_pat.status, StatusCode::OK);
+        let item: AnnotationQueueItem = by_write_pat.json();
+        assert_eq!(item.leased_by_user_id, Some(member.id));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn viewer_cannot_review() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let queue = queue_of(&app, &seeded, "Review", 1).await;
+        let viewer = app.add_member(&seeded, "viewer@example.com", OrgRole::Viewer).await;
+        let response = claim(&app, &seeded, queue.id, &viewer.cookie, json!({})).await;
+        assert_eq!(response.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hidden_items_are_404() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        // Wide enough to see the item, which is 60 days old, while it is added.
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 3650}),
+        );
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        let old = store::NewItem {
+            trace_id: Some(trace_id(7).to_hex()),
+            span_id: None,
+            session_id: None,
+            target_time: now - 60 * 86_400_000_000_000_i64,
+        };
+        let (queue_id, project, user) = (queue.id, seeded.project.id, seeded.user_id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    store::insert_items_tx(
+                        conn,
+                        queue_id,
+                        project,
+                        &[old],
+                        (store::AddedByKind::User, user),
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let item = items_of(&app, &seeded, queue.id).await.remove(0);
+
+        // Narrow the window: the item is now hidden.
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:01Z",
+            &json!({"data_access_days": 30}),
+        );
+        let done = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        assert_eq!(done.status, StatusCode::NOT_FOUND);
+        let none = claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await;
+        assert_eq!(none.status, StatusCode::NO_CONTENT);
     }
 }

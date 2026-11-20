@@ -355,6 +355,36 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "remove_annotation_queue_item",
     ),
     (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/next",
+        "next_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "lease_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "release_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+        "complete_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+        "skip_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+        "reopen_annotation_queue_item",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/dashboards",
         "list_dashboards",
@@ -1214,6 +1244,17 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "add_annotation_queue_items" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429", "503"]);
+        } else if *id == "next_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
+        } else if *id == "skip_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "lease_annotation_queue_item"
+            || *id == "complete_annotation_queue_item"
+            || *id == "reopen_annotation_queue_item"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "release_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_annotation_queue" || *id == "update_annotation_queue" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_experiment_finish" {
