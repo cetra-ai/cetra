@@ -1,0 +1,79 @@
+{
+  "slug": "opik",
+  "name": "Opik",
+  "url": "https://www.comet.com/site/products/opik/",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source LLM observability, evaluation and optimization platform from Comet, with hosted cloud and self-hosting.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Docker Compose or Kubernetes: Java backend, Python backend, frontend, ClickHouse, MySQL, Redis, MinIO, ZooKeeper",
+      "sources": [
+        "https://www.comet.com/docs/opik/self-host/architecture",
+        "https://github.com/comet-ml/opik/blob/main/deployment/docker-compose/docker-compose.yaml"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Apache-2.0 for the full platform; docs say self-hosted has no user management features",
+      "sources": [
+        "https://github.com/comet-ml/opik/blob/main/LICENSE",
+        "https://www.comet.com/docs/opik/self-host/overview"
+      ]
+    },
+    "cloudFree": {
+      "value": "Free Cloud $0: 10 team members, 25k spans/month, 60-day retention",
+      "sources": ["https://www.comet.com/site/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Pro Cloud $19/month flat incl. 100k spans; extra spans $5 per 100k",
+      "sources": ["https://www.comet.com/site/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP only (gRPC unsupported); GenAI and OpenInference conventions; endpoint /api/v1/private/otel",
+      "sources": ["https://www.comet.com/docs/opik/tracing/opentelemetry/overview"]
+    },
+    "sql": {
+      "value": "Not documented: docs describe OQL, a SQL-like filter syntax used in SDK search methods",
+      "sources": [
+        "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/reference/typescript-sdk/opik-query-language.mdx"
+      ]
+    },
+    "mcp": {
+      "value": "MCP server for coding agents: read traces, find failures, analyze experiments, add tracing",
+      "sources": ["https://www.comet.com/docs/opik/mcp-server"]
+    },
+    "onlineEvals": {
+      "value": "Yes: online evaluation rules with LLM-as-a-Judge score new production traces as they arrive",
+      "sources": ["https://www.comet.com/docs/opik/production/online-evaluation"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets, experiments and side-by-side comparison of versions",
+      "sources": ["https://www.comet.com/docs/opik/evaluation/overview"]
+    },
+    "promptManagement": {
+      "value": "Yes: Prompt Library with immutable sequential versions, via UI or SDK",
+      "sources": [
+        "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/prompt_engineering/version-control.mdx"
+      ]
+    },
+    "gateway": {
+      "value": "Opik LLM Gateway: OpenAI-format proxy, beta, described as for development and testing",
+      "sources": ["https://www.comet.com/docs/opik/integrations/opik-llm-gateway"]
+    },
+    "alerts": {
+      "value": "Alerts to Slack, PagerDuty or any webhook on trace errors, cost, latency, feedback scores, prompt and experiment events",
+      "sources": ["https://www.comet.com/docs/opik/production/alerts"]
+    }
+  },
+  "chooseThem": [
+    "Full platform under Apache-2.0 plus a managed cloud from Comet, so you can use either",
+    "Evaluation tooling: datasets, experiments, online LLM-as-judge and agent optimization",
+    "Kubernetes Helm deployment with ClickHouse, and a Comet enterprise deployment option",
+    "Flat $19/month Pro cloud price and a free cloud tier with 10 team members"
+  ],
+  "notes": "The url field is the docs root (opened); no product homepage was opened. Docs claim 'self-hosted has no user management features' (self-host overview) while the README says full platform with no Enterprise conversation; treat user management as an Enterprise/cloud-only gap but only the quoted docs wording is confirmed. Compose runs many services (MySQL, Redis, ClickHouse, ZooKeeper, MinIO, backend, python-backend, frontend); guardrails are optional profiles. MCP read/write scope not confirmed from the page (tools reference page not fetched; local copy exists). SQL: only OQL filter language found, so 'no SQL' is based on absence in docs read, not an explicit statement. Pricing and 'Enterprise' details from comet.com/site/pricing (comet-wide page, Opik section). Prompt-versioning live URL returned 404; cited the repo's docs file, which is the source of the live docs. Verified 2026-11-20: pricing, otel (HTTP only, GenAI+OpenInference), alerts, online evals, MCP, gateway beta, prompt versions, Apache-2.0, 'no user management' confirmed (live pages/local docs). sql reworded to 'Not documented'; MCP read/write scope not stated on page so 'read' wording kept to listed capabilities. Self-host component list taken from local compose (Jaeger also present, optional). Architecture page not re-fetched.",
+  "chooseUs": [
+    "You want to self-host without ClickHouse, MySQL, Redis and ZooKeeper",
+    "You want members and roles in the self-hosted version",
+    "You want SQL over your traces in the UI, the API and MCP"
+  ]
+}

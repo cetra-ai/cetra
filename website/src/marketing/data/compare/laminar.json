@@ -1,0 +1,80 @@
+{
+  "slug": "laminar",
+  "name": "Laminar",
+  "url": "https://laminar.sh",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source agent observability platform: traces, evaluations, SQL access and LLM-based failure detection (Signals).",
+  "facts": {
+    "selfHostStack": {
+      "value": "Docker Compose: frontend, app server, PostgreSQL, ClickHouse, Quickwit. Helm adds RabbitMQ, Redis, a consumer",
+      "sources": [
+        "https://laminar.sh/docs/hosting-options",
+        "https://github.com/lmnr-ai/lmnr/blob/main/docker-compose.yml"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Apache 2.0. Signals, clusters, email and Slack alerts need an enterprise licence key when self-hosted",
+      "sources": [
+        "https://github.com/lmnr-ai/lmnr/blob/main/LICENSE.md",
+        "https://laminar.sh/docs/hosting-options"
+      ]
+    },
+    "cloudFree": {
+      "value": "Free plan, $0/month: 1 GB data, 7-day retention, 1 project, 1 seat",
+      "sources": ["https://laminar.sh/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Pro: $30/month with 3 GB data included, then $2/GB; 3-month retention; Signals billed per token",
+      "sources": ["https://laminar.sh/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over gRPC and HTTP; gen_ai semantic conventions; self-hosted ports 8001 (gRPC) and 8000 (HTTP)",
+      "sources": ["https://laminar.sh/docs/tracing/otel.md"]
+    },
+    "sql": {
+      "value": "Yes: SQL editor in the UI, POST /v1/sql/query API, CLI and MCP; SELECT only",
+      "sources": ["https://laminar.sh/docs/platform/sql-editor.md"]
+    },
+    "mcp": {
+      "value": "Yes: run read-only SQL, manage Signals and LLM profiles, tag traces; some tools cloud-only",
+      "sources": ["https://laminar.sh/docs/platform/mcp.md"]
+    },
+    "onlineEvals": {
+      "value": "Signals: an LLM agent analyses finished traces against plain-language instructions, with triggers and sampling",
+      "sources": [
+        "https://laminar.sh/docs/signals/introduction.md",
+        "https://laminar.sh/docs/hosting-options"
+      ]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets with versioned datapoints, evaluations SDK with run comparison, agent evaluations via CLI",
+      "sources": [
+        "https://laminar.sh/docs/datasets/introduction.md",
+        "https://laminar.sh/docs/llms.txt"
+      ]
+    },
+    "promptManagement": {
+      "value": "Unknown",
+      "sources": ["https://laminar.sh/docs/llms.txt"]
+    },
+    "gateway": {
+      "value": "Unknown",
+      "sources": ["https://laminar.sh/docs/llms.txt"]
+    },
+    "alerts": {
+      "value": "Per-Signal alerts: in-app, email, Slack; triggered by a new event or a new cluster",
+      "sources": ["https://laminar.sh/docs/signals/alerts.md"]
+    }
+  },
+  "chooseThem": [
+    "Automatic failure detection and clustering on production traces (Signals), written as plain-language instructions",
+    "Agent debugger (record, replay) and agent-evaluation tooling, with docs for browser agents",
+    "SQL over traces from the UI, API, CLI and MCP, plus dashboards",
+    "A managed cloud with usage pricing and a free tier, and Apache 2.0 code you can self-host"
+  ],
+  "notes": "promptManagement and gateway are Unknown: the official docs index (llms.txt) lists no prompt-registry or gateway page; only Playground and LLM Profiles pages exist. I did not confirm absence beyond that index. Signals-based analysis is described by Laminar as a trace analysis agent, not as 'LLM-as-judge' or 'online evaluation'; MCP page lists signals as 'LLM judges that run prompts on matching traces'. Pricing page lists Slack and email alerts on all plans, but the hosting page says they need a licence when self-hosted. The SQL page confirms self-hosted only for the API. Docker Compose file in repo cited for image list; the pricing page notes Scale ($250/month) as the next tier. Verified 2026-11-20: pricing, compose/Helm components, enterprise-key features, OTLP (gRPC+HTTP, ports), MCP, SQL, alerts, Signals confirmed. datasets: only datapoints (not datasets) are stated as versioned; reworded. chooseThem: removed 'without writing evals first' and 'long-running' claims not in docs. promptManagement/gateway left Unknown: docs index (llms.txt) lists no such pages, absence not proven.",
+  "chooseUs": [
+    "You want to self-host without ClickHouse, Quickwit and PostgreSQL",
+    "You want alerts in the self-hosted version without a licence key"
+  ]
+}

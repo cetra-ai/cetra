@@ -1,0 +1,85 @@
+{
+  "slug": "helicone",
+  "name": "Helicone",
+  "url": "https://www.helicone.ai",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source AI gateway and LLM observability platform that logs requests via proxy or async SDK.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Docker Compose: web, Jawn API, Postgres, ClickHouse, MinIO, Redis, Kafka, Cloudflare Worker proxies; all-in-one image",
+      "sources": [
+        "https://github.com/Helicone/helicone/blob/main/docker/docker-compose.yml",
+        "https://github.com/Helicone/helicone/blob/main/README.md",
+        "https://docs.helicone.ai/getting-started/self-host/docker.md"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Apache-2.0; Helm chart for production is offered to Enterprise customers on request",
+      "sources": [
+        "https://github.com/Helicone/helicone/blob/main/LICENSE",
+        "https://github.com/Helicone/helicone/blob/main/README.md"
+      ]
+    },
+    "cloudFree": {
+      "value": "Hobby $0: 10,000 requests, 1 GB storage, 1 seat, 7-day retention",
+      "sources": ["https://www.helicone.ai/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Pro $79/month plus usage-based pricing; 7-day free trial",
+      "sources": ["https://www.helicone.ai/pricing"]
+    },
+    "otel": {
+      "value": "Not documented: no direct OTLP endpoint found; @helicone/async (OpenLLMetry-based) exports OTLP/HTTP traces",
+      "sources": [
+        "https://docs.helicone.ai/getting-started/integration-method/openllmetry.md",
+        "https://github.com/Helicone/helicone/blob/main/sdk/typescript/async/async_logger/HeliconeAsyncLogger.ts"
+      ]
+    },
+    "sql": {
+      "value": "Yes: HQL runs SQL in the dashboard and via REST API; available to selected workspaces",
+      "sources": ["https://docs.helicone.ai/features/hql.md"]
+    },
+    "mcp": {
+      "value": "MCP server with two data-query tools: query_requests and query_sessions; no write tools documented",
+      "sources": ["https://docs.helicone.ai/integrations/tools/mcp.md"]
+    },
+    "onlineEvals": {
+      "value": "No: docs say Helicone does not run evaluations; scores are submitted via API or dashboard",
+      "sources": ["https://docs.helicone.ai/features/advanced-usage/scores.md"]
+    },
+    "datasetsExperiments": {
+      "value": "Datasets: curated logged requests, JSONL/CSV export; Experiments feature deprecated, removal dated Sept 1, 2025",
+      "sources": [
+        "https://docs.helicone.ai/features/datasets.md",
+        "https://docs.helicone.ai/guides/cookbooks/experiments.md"
+      ]
+    },
+    "promptManagement": {
+      "value": "Yes: prompt versions with rollback and per-environment deployment through the AI Gateway",
+      "sources": ["https://docs.helicone.ai/features/advanced-usage/prompts/overview.md"]
+    },
+    "gateway": {
+      "value": "Yes: OpenAI-compatible AI Gateway, 100+ providers, routing, fallbacks; all-in-one self-host image excludes proxying",
+      "sources": [
+        "https://docs.helicone.ai/gateway/overview.md",
+        "https://docs.helicone.ai/getting-started/self-host/docker.md"
+      ]
+    },
+    "alerts": {
+      "value": "Alerts on error rate, cost, latency, tokens, request count to email and Slack; webhooks not mentioned in docs",
+      "sources": ["https://docs.helicone.ai/features/alerts.md"]
+    }
+  },
+  "chooseThem": [
+    "Gateway with a base-URL change, 100+ providers, automatic fallbacks and caching",
+    "Apache-2.0 code with a hosted cloud, so you can start on cloud and keep a self-host option",
+    "Request-level cost and latency tracking and prompt deployment to environments through the gateway",
+    "Entry plan at $79/month plus a free Hobby tier for small projects"
+  ],
+  "notes": "STATUS: Helicone's own site (homepage and pricing page, read 2026-11-20) shows a banner: 'Helicone is now part of Experiential Labs. Details to come soon.' The GitHub repo page shows no archive or maintenance-mode notice; no statement of maintenance mode found on official sources. Keep this in notes, not a fact. Local checkout's last commit is dated 2026-10-28. Docs say the all-in-one self-host image does not include LLM proxying (Jawn proxy routes removed) and has no email service; README still says 'five services' while compose also lists Redis, Kafka, Zookeeper and workers; compose file's own README says it is being updated. OTel: only found the OpenLLMetry-based async SDK; direct OTLP ingestion docs not found, so value is hedged. HQL access limited to selected workspaces. Docs pricing page's check marks for Scores/Datasets per plan not readable. Gateway 'self-hostable' not stated in docs. Verified 2026-11-20: selfHostStack/licence/Helm (local README, compose), pricing, HQL, scores, experiments deprecation, alerts confirmed. otel and alerts absence wording softened to 'not documented/mentioned'; MCP 'read-only' not stated by docs, reworded; gateway: docs say run AI Gateway separately alongside Jawn, so wording adjusted; 'cost and latency dashboards' chooseThem reworded to tracking. Site banner 'now part of Experiential Labs' confirmed on pricing page; consider noting this before publishing.",
+  "chooseUs": [
+    "You want LLM judges on live traffic",
+    "You want to self-host without ClickHouse, Kafka and Redis",
+    "You want to send standard OpenTelemetry instead of routing calls through a proxy"
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "slug": "mlflow",
+  "name": "MLflow",
+  "url": "https://mlflow.org",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source platform for tracing, evaluating and managing LLM applications, agents and ML models; Linux Foundation project.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Tracking server (FastAPI) plus a SQL backend store (PostgreSQL, MySQL, SQLite, MSSQL) and an artifact store such as S3",
+      "sources": [
+        "https://mlflow.org/docs/latest/self-hosting/architecture/overview/",
+        "https://github.com/mlflow/mlflow/blob/master/docker-compose/docker-compose.yml"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Apache 2.0, fully open source; no paid tier of the self-hosted code",
+      "sources": ["https://mlflow.org", "https://github.com/mlflow/mlflow/blob/master/LICENSE.txt"]
+    },
+    "cloudFree": {
+      "value": "No hosted tier on mlflow.org; docs point to a Databricks free trial for managed MLflow (trial credits)",
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
+    },
+    "cloudPaidFrom": {
+      "value": "Unknown",
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
+    },
+    "otel": {
+      "value": "OTLP/HTTP at /v1/traces (needs SQL backend; gRPC not supported); maps GenAI, OpenInference, OpenLLMetry attributes",
+      "sources": [
+        "https://mlflow.org/docs/latest/genai/tracing/opentelemetry/ingest/",
+        "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/tracing/opentelemetry/attribute-mapping.mdx"
+      ]
+    },
+    "sql": {
+      "value": "Not documented: docs describe a SQL-like trace search filter (no OR) in the UI and API",
+      "sources": [
+        "https://mlflow.org/docs/latest/genai/tracing/search-traces/",
+        "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/tracing/search-traces.mdx"
+      ]
+    },
+    "mcp": {
+      "value": "Yes (experimental): search and get traces, set tags, log feedback and expectations, delete traces",
+      "sources": ["https://mlflow.org/docs/latest/genai/mcp/"]
+    },
+    "onlineEvals": {
+      "value": "Yes: automatic evaluation runs LLM judges on traces as they arrive; needs an AI Gateway endpoint; LLM judges only",
+      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/automatic-evaluations/"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: evaluation datasets (SQL backend required) and mlflow.genai.evaluate runs with comparison",
+      "sources": ["https://mlflow.org/docs/latest/genai/datasets/"]
+    },
+    "promptManagement": {
+      "value": "Yes: Prompt Registry with immutable versions, aliases, UI and API",
+      "sources": ["https://mlflow.org/docs/latest/genai/prompt-registry/"]
+    },
+    "gateway": {
+      "value": "Yes: AI Gateway, one endpoint for multiple LLM providers with routing, failover, rate limits, budgets",
+      "sources": [
+        "https://mlflow.org",
+        "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/governance/ai-gateway/index.mdx"
+      ]
+    },
+    "alerts": {
+      "value": "Gateway budget policies send webhook alerts; registry webhooks exist; trace alerts not documented",
+      "sources": [
+        "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/governance/ai-gateway/budget-alerts-limits.mdx",
+        "https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/webhooks/index.mdx"
+      ]
+    }
+  },
+  "chooseThem": [
+    "Covers LLM tracing, evaluation, prompt registry, AI gateway and classic ML experiment tracking in one tool",
+    "Apache 2.0 licence with no paid tier of the self-hosted code",
+    "Runs on a database you already operate (PostgreSQL, MySQL) with object storage for artifacts",
+    "Managed MLflow is available through Databricks"
+  ],
+  "notes": "cloudPaidFrom Unknown: mlflow.org does not list managed MLflow prices; managed MLflow is offered by Databricks, whose pricing I did not fetch. The Databricks trial page gives no duration or credit amount. 'sql' and 'alerts' are absence-style claims ('not documented'/'not found'), based on the docs I read, not an exhaustive search. Automatic-evaluation page does not state whether OSS or Databricks only. Some docs pages (MCP, AI Gateway, mcp-registry) are in the master docs; the mlflow.org/latest web versions may lag the repo (checkout dated 2026-11-09). Stars/downloads figures from the site were not used. GitHub sources (gateway index, budget alerts, webhooks, attribute-mapping, docker-compose) were read in a local checkout, not on the web. Verified 2026-11-20: OTLP (HTTP only, SQL backend), MCP (experimental), automatic evaluation, prompt registry, architecture, gateway and webhooks confirmed (live pages/local docs). sql/alerts reworded to 'not documented'. chooseThem: removed unverified 'large community'; 'Linux Foundation' kept only in oneLine (not re-verified here; check before publishing); removed unverified 'many built-in judge scorers'. LICENSE.txt is Apache-licensed per local checkout header 'Copyright 2018 Databricks'.",
+  "chooseUs": [
+    "You want built-in alerts on error rate, cost, latency and scores",
+    "You want OTLP over gRPC as well as HTTP"
+  ]
+}

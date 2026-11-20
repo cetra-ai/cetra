@@ -1,0 +1,60 @@
+{
+  "slug": "cetra",
+  "name": "cetra",
+  "url": "https://cetra.sh",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source LLM observability and evaluation that runs as one binary on one machine, or in cetra Cloud.",
+  "facts": {
+    "selfHostStack": {
+      "value": "One binary and one data folder; S3-compatible storage optional",
+      "sources": ["/docs/get-started/run-cetra/", "/docs/self-hosting/s3/"]
+    },
+    "selfHostLicence": {
+      "value": "MIT core; single sign-on and project roles need a licence key (Elastic License 2.0)",
+      "sources": ["/docs/platform/plans-and-licence/"]
+    },
+    "cloudFree": {
+      "value": "100,000 spans and scores a month, 30 days of history, 1 seat",
+      "sources": ["/pricing/"]
+    },
+    "cloudPaidFrom": {
+      "value": "$30 a month for 200,000 spans and scores, then $4 per 100,000",
+      "sources": ["/pricing/"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP and gRPC; reads OpenTelemetry GenAI and OpenInference attributes",
+      "sources": ["/docs/get-started/opentelemetry/"]
+    },
+    "sql": {
+      "value": "SQL console in the UI, plus SQL over the API and MCP",
+      "sources": ["/docs/tracing/sql-console/", "/docs/platform/mcp/"]
+    },
+    "mcp": {
+      "value": "MCP server over streamable HTTP: search traces, read traces and spans, run SQL",
+      "sources": ["/docs/platform/mcp/"]
+    },
+    "onlineEvals": {
+      "value": "LLM judges and checks on live traces, with a filter, sampling and a spending cap",
+      "sources": ["/docs/evaluation/online-rules/"]
+    },
+    "datasetsExperiments": {
+      "value": "Versioned datasets; experiments run from the Python and TypeScript SDKs",
+      "sources": ["/docs/evaluation/datasets/", "/docs/evaluation/experiments/"]
+    },
+    "promptManagement": {
+      "value": "No prompt registry",
+      "sources": ["/docs/"]
+    },
+    "gateway": {
+      "value": "No LLM gateway or proxy",
+      "sources": ["/docs/"]
+    },
+    "alerts": {
+      "value": "Error rate, cost, latency and scores, to Slack, email or a signed webhook",
+      "sources": ["/docs/platform/alerts/"]
+    }
+  },
+  "chooseThem": [],
+  "notes": "cetra's own facts, sourced to its docs. Sources starting with / are pages of cetra.sh.",
+  "chooseUs": []
+}
