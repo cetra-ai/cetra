@@ -150,6 +150,7 @@ pub(crate) async fn sweep_batch(
             );
             return Err(());
         }
+        ctx.state.issues_wake();
     }
     Ok(())
 }

@@ -262,6 +262,9 @@ pub(crate) async fn on_scores_written(
                 inserted,
                 "issue candidates queued from scores"
             );
+            if inserted > 0 {
+                state.issues_wake();
+            }
         }
         Err(error) => {
             tracing::warn!(
