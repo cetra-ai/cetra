@@ -204,7 +204,7 @@ The exact attribute names for Codex, and the open points for Gemini (the root sp
   - Each write goes to `meta.db` and to an in-memory map. The table is `agent_contexts`, with `project_id` a foreign key `ON DELETE CASCADE`.
   - The map is loaded from `meta.db` before the listeners open, like D-I-8's pending traces.
   - The ingest path reads only the map, never `meta.db` (spec 02 § Online-eval triggers, D-I-8).
-  - **Skipping writes.** A post that changes nothing updates only the map's `updated_at`. `meta.db` gets the new `updated_at` at most once an hour per entry, so one SQLite write per prompt is avoided.
+  - **Skipping writes.** A post that changes nothing, onto an entry written less than an hour ago, writes nothing; otherwise `meta.db` and the map get the new `updated_at`. Expiry is measured from that write.
   - **Expiry.** An entry expires 30 days after its last write, or after the project's `retention_days` when that is shorter, so an email is not kept longer than the spans.
   - **Sweep.** An hourly sweep deletes expired entries from both stores. A lookup does not check expiry: at most one hour stale.
   - **Cap.** A project keeps at most 10,000 entries. Inserting a new key over the cap evicts the entry with the oldest `updated_at` from both stores.

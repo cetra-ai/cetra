@@ -20,7 +20,7 @@ cetra is one binary, `cetra`, that serves the web UI, the API, OTLP ingestion an
 |---|---|
 | 8080 | the UI, the API, OTLP/HTTP at `/v1/traces`, MCP at `/mcp`, `/healthz` and `/readyz` |
 | 4317 | OTLP/gRPC |
-| 4318 | OTLP/HTTP only (the standard OTLP port) |
+| 4318 | OTLP/HTTP and `/v1/agent-context` (the standard OTLP port) |
 
 cetra accepts `/v1/logs` and `/v1/metrics` and drops them: it stores traces only.
 

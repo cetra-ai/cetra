@@ -517,6 +517,26 @@ Every create, and every update that changes `version`, writes one `evaluator_ver
 
 `eval_jobs` is the durable queue (spec 06 § Online rules › Execution; D-I-11, D-I-12): `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and there is no lease. Every hour, finished jobs older than 7 days are deleted, queued jobs older than 24 h (7 days for backfill) are skipped as `expired`, and jobs of inactive projects or orgs are deleted (D-I-28). `rule_spend` holds one row per rule and UTC day; a month is the sum of its days; rows older than 62 days are deleted.
 
+### Coding-agent session contexts (D-CA-9)
+
+```sql
+-- Coding-agent session contexts (D-CA-9): the repository, branch and person a hook reported.
+CREATE TABLE agent_contexts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot
+  session_id TEXT NOT NULL,
+  repository TEXT,              -- canonical form (D-CA-4)
+  branch TEXT,
+  user_id TEXT,                 -- the hook's `user`, lowercased
+  updated_at INTEGER NOT NULL,  -- ns since the Unix epoch, time of the last write
+  PRIMARY KEY (project_id, agent, session_id)
+);
+CREATE INDEX agent_contexts_user ON agent_contexts(project_id, user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at);
+```
+
+Written by `POST /v1/agent-context` (last write wins; an unchanged post within an hour writes nothing), loaded into memory before the listeners open, read by ingest from memory only. An hourly sweep deletes rows older than 30 days or the project's retention when shorter; a project keeps at most 10,000 rows, the oldest evicted; a deletion by user deletes the user's rows.
+
 ## Alerts
 
 Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10).

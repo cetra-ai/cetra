@@ -1,11 +1,12 @@
 # 09 — API surface
 
-All HTTP on one port (`CETRA_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on `CETRA_GRPC_ADDR` (default `0.0.0.0:4317`); an OTLP/HTTP-only listener on `CETRA_OTLP_HTTP_ADDR` (default `0.0.0.0:4318`, serves only the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`) for exporters configured with the standard OTel port.
+All HTTP on one port (`CETRA_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on `CETRA_GRPC_ADDR` (default `0.0.0.0:4317`); an OTLP/HTTP-only listener on `CETRA_OTLP_HTTP_ADDR` (default `0.0.0.0:4318`, serves only the OTLP routes `/v1/traces`, `/v1/logs`, `/v1/metrics` and `/v1/agent-context`) for exporters configured with the standard OTel port.
 
 | Prefix | Purpose | Auth |
 |---|---|---|
 | `/v1/traces` | OTLP/HTTP ingest; follows OTLP (02), not in the OpenAPI document; errors are problem+json (D-G-6) | `sk` (ingest scope) |
 | `/v1/logs`, `/v1/metrics` | OTLP/HTTP, accepted and dropped (02, D-G-40); same auth, limits and errors as `/v1/traces` | `sk` (ingest scope) |
+| `/v1/agent-context` | coding-agent session context (D-CA-9); in the OpenAPI document; `204` | sk (ingest scope) |
 | `/api/auth/*` | login, OAuth, invites, reset | none / cookie |
 | `/api/v1/*` | REST API (UI + SDK + CLI) | cookie, PAT, or `sk` |
 | `/api/public/*` | browser-safe endpoints | `pk` |

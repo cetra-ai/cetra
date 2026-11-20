@@ -12,7 +12,7 @@ cetra ingests spans over OTLP, the OpenTelemetry protocol, from the cetra SDKs o
 | OTLP/HTTP | `POST /v1/traces` on the main port (default 8080) and on port 4318 | `application/x-protobuf`, `application/json`; `Content-Encoding` of `gzip`, `zstd`, `deflate` or none |
 | OTLP/gRPC | `opentelemetry.proto.collector.trace.v1.TraceService/Export` on port 4317 | protobuf; gzip |
 
-Port 4318 serves only the OTLP routes, for exporters that use the standard OpenTelemetry port.
+Port 4318 serves only the OTLP routes and `/v1/agent-context`, for exporters that use the standard OpenTelemetry port.
 
 OTLP/JSON follows the OpenTelemetry specification strictly: lowerCamelCase field names, hex trace and span IDs, enums as integers and 64-bit integers as decimal strings or numbers. A body with enum names or base64 IDs gets `400`.
 
