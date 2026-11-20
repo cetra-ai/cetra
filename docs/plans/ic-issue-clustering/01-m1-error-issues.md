@@ -138,7 +138,7 @@ The phases run one after another, in one worktree.
 6. Run `just openapi` and `just docs-gen`.
 7. Design doc and decision log:
    - in `00-design.md`, add `### D-IC-18 Occurrence ids, hiding and counts` after D-IC-17, with the four bullets of this plan's "Decided while writing this plan";
-   - in `docs/mvp-decisions.md` § Track IC, add the row: `| D-IC-18 | Occurrence ids and hiding | **An occurrence score id is a UUIDv7 stamped with the trace's start, its other bits from SHA-256(cetra.issue-occurrence.v1 ‖ project ‖ trace ‖ issue)**, so \`created_at\` is the trace's start and rewrites are idempotent. \`latest_scores\`, users' \`scores_of\` and the dashboard scores source leave out source \`issue\`; the trace view reads issue scores with \`source=issue\`. Issues have no stored count: storage counts their scores. \`issue_sources.kind\` has no SQL CHECK. |`.
+   - in `docs/mvp-decisions.md` § Track IC, add the row: `| D-IC-18 | Occurrence ids and hiding | **An occurrence score id is a UUIDv7 stamped with the occurrence time (for errors, the start of the trace's earliest error span of that fingerprint, clamped to now), its other bits from SHA-256(cetra.issue-occurrence.v1 ‖ project ‖ trace ‖ issue)**, so \`created_at\` is when the problem happened and rewrites are idempotent; occurrences carry the trace's user and session; regression compares trace times. \`latest_scores\`, users' \`scores_of\` and the dashboard scores source leave out source \`issue\`; the trace view reads issue scores with \`source=issue\`. Issues have no stored count: storage counts their scores. \`issue_sources.kind\` has no SQL CHECK. |`.
 
 **Tests:** steps 3–5. `enums.rs`'s round-trip test covers the new variant.
 
@@ -838,7 +838,7 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 
 **Done when:** `just check-rust` and `just check-web` pass.
 
-**Commit:** `Add the issues API`
+
 
 ---
 
