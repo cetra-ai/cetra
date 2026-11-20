@@ -90,10 +90,13 @@ const suggested = suggestedPlan(units).id;
   /** One sentence for the status region, read by screen readers after a pause in typing. */
   function announce(units: number) {
     const suggested = suggestedPlan(units);
+    const text = estimateText(suggested, units);
     status.textContent =
       suggested.id === "free"
         ? `Free covers ${formatUnits(units)} a month.`
-        : `About ${estimateText(suggested, units)} a month on ${suggested.name}, the suggested plan.`;
+        : text.startsWith("$")
+          ? `About ${text} a month on ${suggested.name}, the suggested plan.`
+          : "At this volume, talk to us for a price.";
   }
 
   function onInput() {
