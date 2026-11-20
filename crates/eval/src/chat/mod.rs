@@ -6,6 +6,8 @@ mod anthropic;
 mod gemini;
 mod http;
 mod openai;
+mod sse;
+mod stream;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -17,15 +19,23 @@ use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
-pub(crate) use http::provider_error;
+pub(crate) use http::{provider_error, stream_error};
+pub use stream::ChatStream;
+use stream::Decoder;
 
-use crate::egress::{EgressClient, EgressRequest};
+use crate::egress::{EgressClient, EgressRequest, EgressStreamRequest};
 use crate::error::ChatError;
 use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 use crate::secret::Secret;
 
 /// Largest provider response body, in bytes (D159).
 pub(crate) const RESPONSE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// Largest answer a stream may assemble, text plus tool-call arguments, and largest
+/// single SSE event (D-V-30, D159).
+pub(crate) const ANSWER_MAX_BYTES: usize = RESPONSE_MAX_BYTES;
+/// Largest raw stream (D-V-30).
+pub(crate) const STREAM_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 const MODEL_MAX_BYTES: usize = 256;
 
@@ -255,6 +265,41 @@ impl FinishReason {
     }
 }
 
+/// One event of a streamed call.
+#[derive(Clone, PartialEq)]
+pub enum ChatEvent {
+    /// A piece of the answer text. Never empty.
+    Text(String),
+    /// A complete tool call. In tool mode, the forced tool's call arrives here (D-V-25).
+    ToolCall(ToolCall),
+    /// The last event.
+    Done(ChatDone),
+}
+
+impl fmt::Debug for ChatEvent {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => formatter
+                .debug_struct("Text")
+                .field("bytes", &text.len())
+                .finish(),
+            Self::ToolCall(call) => formatter.debug_tuple("ToolCall").field(call).finish(),
+            Self::Done(done) => formatter.debug_tuple("Done").field(done).finish(),
+        }
+    }
+}
+
+/// How a streamed call ended.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatDone {
+    /// Why generation stopped, when the provider said.
+    pub finish_reason: Option<FinishReason>,
+    /// Token counts; `None` when the stream carried none.
+    pub usage: Option<TokenUsage>,
+    /// Model the provider says it ran.
+    pub response_model: Option<String>,
+}
+
 /// Rejects a model name that would be placed in a URL or a JSON body.
 pub(crate) fn validate_model(model: &str) -> Result<(), ChatError> {
     if model.is_empty() || model.len() > MODEL_MAX_BYTES || model.chars().any(forbidden_in_model) {
@@ -472,6 +517,15 @@ pub(crate) fn arguments_text(arguments: Option<&Value>) -> Result<String, ChatEr
     }
 }
 
+/// Arguments assembled from a stream: blank text is `{}`, JSON text is its value, other
+/// text is kept as a JSON string.
+pub(crate) fn stream_arguments(raw: &str) -> Value {
+    if raw.trim().is_empty() {
+        return Value::Object(Map::new());
+    }
+    serde_json::from_str(raw).unwrap_or_else(|_| Value::String(raw.to_owned()))
+}
+
 /// A tool result as text: a JSON string as is, any other value as compact JSON.
 pub(crate) fn response_text(response: &Value) -> Result<String, ChatError> {
     match response {
@@ -610,6 +664,55 @@ pub(crate) async fn complete_chat(
     }
 }
 
+/// Sends `request` as a streamed call (D-V-19, D-V-24, D-V-30).
+///
+/// # Errors
+///
+/// The request errors of [`ChatError`] before anything is sent. A non-200 answer is
+/// [`ChatError::Provider`], its body read up to 4 MiB. Transport failures are
+/// [`ChatError::Transport`].
+pub async fn stream_chat(
+    client: &EgressClient,
+    conn: &JudgeConnection,
+    request: &ChatRequest,
+) -> Result<ChatStream, ChatError> {
+    let (prepared, decoder) = match conn.adapter {
+        Adapter::OpenAi => (
+            openai::prepare(conn, request, true)?,
+            Decoder::OpenAi(openai::StreamState::default()),
+        ),
+        Adapter::Anthropic => (
+            anthropic::prepare(conn, request, true)?,
+            Decoder::Anthropic(anthropic::StreamState::default()),
+        ),
+        Adapter::Gemini => (
+            gemini::prepare(conn, request, true)?,
+            Decoder::Gemini(gemini::StreamState::default()),
+        ),
+    };
+    let body = client
+        .post_stream(EgressStreamRequest {
+            url: &prepared.url,
+            headers: prepared.headers,
+            body: prepared.body,
+            timeout: request.timeout,
+            idle_timeout: request.idle_timeout,
+            max_response_bytes: STREAM_MAX_BYTES,
+        })
+        .await?;
+    let status = body.status().as_u16();
+    if status != 200 {
+        let bytes = body.read_to_end(RESPONSE_MAX_BYTES).await?;
+        return Err(provider_error(
+            conn.adapter,
+            hint_mode(conn, request),
+            status,
+            &bytes,
+        ));
+    }
+    Ok(ChatStream::new(body, decoder))
+}
+
 /// A decoded non-streamed answer. Decoders never fail: every shape maps to a field.
 // Holds the answer text and tool arguments. Nothing logs it, so `Debug` is derived.
 #[derive(Debug, Clone, PartialEq)]
@@ -643,10 +746,10 @@ mod tests {
     use serde_json::{Map, Value, json};
 
     use super::{
-        CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_MAX, ChatParams, ChatRequest, FinishReason,
+        CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_MAX, ChatEvent, ChatParams, ChatRequest, FinishReason,
         PROMPT_INSTRUCTION, ResponseFormat, ToolCall, ToolChoice, ToolDefinition,
         apply_prompt_mode, arguments_object, arguments_text, check_messages, check_request, number,
-        other_finish, request_headers, response_text,
+        other_finish, request_headers, response_text, stream_arguments,
     };
     use crate::error::{ChatError, JudgeError};
     use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
@@ -720,6 +823,26 @@ mod tests {
             Some(Part::Text { content, .. }) => content.as_str(),
             _ => panic!("not a text message"),
         }
+    }
+
+    #[test]
+    fn stream_arguments_keeps_what_it_cannot_parse() {
+        assert_eq!(stream_arguments(""), json!({}));
+        assert_eq!(stream_arguments("  "), json!({}));
+        assert_eq!(stream_arguments("{\"a\":1}"), json!({"a": 1}));
+        assert_eq!(stream_arguments("{\"a\":"), json!("{\"a\":"));
+    }
+
+    #[test]
+    fn chat_event_debug_hides_payload() {
+        let text = ChatEvent::Text("SECRET-PAYLOAD".to_owned());
+        assert_eq!(format!("{text:?}"), "Text { bytes: 14 }");
+        let call = ChatEvent::ToolCall(ToolCall {
+            id: "call_0".to_owned(),
+            name: "lookup".to_owned(),
+            arguments: json!({"q": "SECRET-PAYLOAD"}),
+        });
+        assert!(!format!("{call:?}").contains("SECRET-PAYLOAD"));
     }
 
     #[test]

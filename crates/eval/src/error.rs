@@ -359,6 +359,9 @@ pub enum ChatError {
         /// Fixed reason, such as `media part`.
         reason: &'static str,
     },
+    /// An event of the stream is not UTF-8 or not the JSON its provider sends.
+    #[error("invalid provider stream")]
+    BadStream,
     /// The provider returned a non-success status, or an error event in a stream.
     #[error("provider status {status}")]
     Provider {
@@ -413,6 +416,7 @@ impl fmt::Debug for ChatError {
                 .field("index", index)
                 .field("reason", reason)
                 .finish(),
+            Self::BadStream => formatter.write_str("BadStream"),
         }
     }
 }
@@ -430,7 +434,8 @@ impl ChatError {
             Self::InvalidModel
             | Self::InvalidHeader
             | Self::InvalidRequest
-            | Self::UnsupportedMessage { .. } => ErrorClass::Permanent,
+            | Self::UnsupportedMessage { .. }
+            | Self::BadStream => ErrorClass::Permanent,
         }
     }
 }
@@ -440,9 +445,9 @@ impl From<ChatError> for JudgeError {
         match error {
             ChatError::InvalidModel => Self::InvalidModel,
             ChatError::InvalidHeader => Self::InvalidHeader,
-            ChatError::InvalidRequest | ChatError::UnsupportedMessage { .. } => {
-                Self::InvalidRequest
-            }
+            ChatError::InvalidRequest
+            | ChatError::UnsupportedMessage { .. }
+            | ChatError::BadStream => Self::InvalidRequest,
             ChatError::Provider {
                 status,
                 class,

@@ -38,16 +38,10 @@ pub(crate) struct StreamRequest {
     /// Path without the query.
     pub(crate) path: String,
     /// Query without `?`.
-    // Used by the chat stream tests.
-    #[allow(dead_code)]
     pub(crate) query: Option<String>,
     /// Header names in lowercase, with their values.
-    // Used by the chat stream tests.
-    #[allow(dead_code)]
     pub(crate) headers: Vec<(String, String)>,
     /// Parsed JSON body, or `Null`.
-    // Used by the chat stream tests.
-    #[allow(dead_code)]
     pub(crate) body: Value,
 }
 
@@ -85,15 +79,11 @@ impl StreamServer {
     }
 
     /// `http://127.0.0.1:{port}/v1` (OpenAI-compatible base).
-    // Used by the chat stream tests.
-    #[allow(dead_code)]
     pub(crate) fn base_v1(&self) -> Url {
         self.url("/v1")
     }
 
     /// `http://127.0.0.1:{port}` (Anthropic and Gemini base).
-    // Used by the chat stream tests.
-    #[allow(dead_code)]
     pub(crate) fn origin(&self) -> Url {
         self.url("")
     }
@@ -110,22 +100,16 @@ impl StreamServer {
 }
 
 /// `data: {data}\n\n`.
-// Used by the chat stream tests.
-#[allow(dead_code)]
 pub(crate) fn sse(data: &str) -> Vec<u8> {
     format!("data: {data}\n\n").into_bytes()
 }
 
 /// `event: {event}\ndata: {data}\n\n`.
-// Used by the chat stream tests.
-#[allow(dead_code)]
 pub(crate) fn sse_named(event: &str, data: &str) -> Vec<u8> {
     format!("event: {event}\ndata: {data}\n\n").into_bytes()
 }
 
 /// A 200 reply that sends each item as one chunk, with no pauses.
-// Used by the chat stream tests.
-#[allow(dead_code)]
 pub(crate) fn ok_chunks(chunks: Vec<Vec<u8>>) -> StreamReply {
     StreamReply {
         status: 200,

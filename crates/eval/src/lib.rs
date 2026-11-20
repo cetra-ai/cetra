@@ -32,8 +32,9 @@ mod trace;
 mod webhook;
 
 pub use chat::{
-    CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_DEFAULT, CHAT_MAX_TOKENS_MAX, CHAT_TIMEOUT_MAX, ChatParams,
-    ChatRequest, FinishReason, ResponseFormat, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_DEFAULT, CHAT_MAX_TOKENS_MAX, CHAT_TIMEOUT_MAX, ChatDone,
+    ChatEvent, ChatParams, ChatRequest, ChatStream, FinishReason, ResponseFormat, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition, stream_chat,
 };
 pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
@@ -60,6 +61,9 @@ pub use webhook::{SIGNATURE_HEADER, sign_payload};
 #[cfg(test)]
 #[path = "../tests/anthropic.rs"]
 mod anthropic_tests;
+#[cfg(test)]
+#[path = "../tests/chat_stream.rs"]
+mod chat_stream_tests;
 #[cfg(test)]
 #[path = "../tests/egress_public.rs"]
 mod egress_public_tests;

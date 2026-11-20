@@ -11,14 +11,17 @@ use reqwest::Url;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
+use super::sse::SseEvent;
+use super::stream::{Flow, Sink};
 use super::{
-    ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, arguments_object, check_request, endpoint, messages_to_send, number,
-    other_finish, request_headers, secret_header, send_buffered, texts, validate_model,
+    ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall,
+    ToolChoice, ToolDefinition, arguments_object, check_request, endpoint, messages_to_send,
+    number, other_finish, request_headers, secret_header, send_buffered, stream_error, texts,
+    validate_model,
 };
 use crate::egress::EgressClient;
 use crate::error::ChatError;
-use crate::judge::{JudgeConnection, StructuredOutput};
+use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 
 const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
@@ -36,19 +39,21 @@ pub(crate) async fn complete(
     conn: &JudgeConnection,
     request: &ChatRequest,
 ) -> Result<ChatReply, ChatError> {
-    let prepared = prepare(conn, request)?;
+    let prepared = prepare(conn, request, false)?;
     let body = send_buffered(client, conn, request, prepared).await?;
     Ok(decode_reply(&body))
 }
 
-/// The URL, headers and body of one `generateContent` call.
+/// The URL, headers and body of one `generateContent` call. `stream` selects
+/// `streamGenerateContent?alt=sse` (D-V-19).
 pub(crate) fn prepare(
     conn: &JudgeConnection,
     request: &ChatRequest,
+    stream: bool,
 ) -> Result<Prepared, ChatError> {
     validate_model(&request.model)?;
     check_request(request)?;
-    let url = generate_content_url(conn.base_url.as_ref(), &request.model)?;
+    let url = generate_content_url(conn.base_url.as_ref(), &request.model, stream)?;
     let headers = request_headers(
         conn,
         vec![
@@ -66,10 +71,19 @@ pub(crate) fn prepare(
     Ok(Prepared { url, headers, body })
 }
 
-fn generate_content_url(base: Option<&Url>, model: &str) -> Result<Url, ChatError> {
+fn generate_content_url(base: Option<&Url>, model: &str, stream: bool) -> Result<Url, ChatError> {
     validate_model(model)?;
-    let path = format!("v1beta/models/{model}:generateContent");
-    endpoint(base, DEFAULT_BASE, &path)
+    let method = if stream {
+        "streamGenerateContent"
+    } else {
+        "generateContent"
+    };
+    let path = format!("v1beta/models/{model}:{method}");
+    let mut url = endpoint(base, DEFAULT_BASE, &path)?;
+    if stream {
+        url.query_pairs_mut().append_pair("alt", "sse");
+    }
+    Ok(url)
 }
 
 fn request_body(mode: StructuredOutput, request: &ChatRequest) -> Result<Vec<u8>, ChatError> {
@@ -399,6 +413,110 @@ fn u64_field(object: &Map<String, Value>, key: &str) -> u64 {
     object.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// The state of one streamed `streamGenerateContent` answer (D-V-19, D-V-30). The
+/// stream ends with the body, so the end is the last event that carries a finish reason
+/// or a block.
+#[derive(Default)]
+pub(crate) struct StreamState {
+    finish_reason: Option<FinishReason>,
+    saw_finish: bool,
+    blocked: bool,
+    usage: Option<TokenUsage>,
+    response_model: Option<String>,
+    emitted: usize,
+}
+
+impl StreamState {
+    /// Whether a finish reason or a block arrived: the answer is complete.
+    pub(crate) fn ended(&self) -> bool {
+        self.saw_finish || self.blocked
+    }
+
+    /// Decodes one event. Thoughts are skipped, as in a buffered answer.
+    pub(crate) fn on_event(
+        &mut self,
+        event: &SseEvent,
+        sink: &mut Sink,
+    ) -> Result<Flow, ChatError> {
+        let value: Value = serde_json::from_str(&event.data).map_err(|_| ChatError::BadStream)?;
+        if value.get("error").is_some_and(Value::is_object) {
+            return Err(stream_error(Adapter::Gemini, &value));
+        }
+        if let Some(model) = value.get("modelVersion").and_then(Value::as_str) {
+            self.response_model = Some(model.to_owned());
+        }
+        if let Some(usage) = value.get("usageMetadata").filter(|usage| usage.is_object()) {
+            self.usage = Some(usage_of(Some(usage)));
+        }
+        if blocked(&value) {
+            self.blocked = true;
+        }
+        let Some(candidate) = value.pointer("/candidates/0") else {
+            return Ok(Flow::Continue);
+        };
+        if let Some(parts) = candidate
+            .pointer("/content/parts")
+            .and_then(Value::as_array)
+        {
+            for part in parts {
+                if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                    continue;
+                }
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    sink.text(text)?;
+                }
+                if let Some(call) = part.get("functionCall").filter(|call| call.is_object()) {
+                    self.function_call(call, sink)?;
+                }
+            }
+        }
+        if let Some(raw) = candidate.get("finishReason").and_then(Value::as_str) {
+            self.saw_finish = true;
+            self.finish_reason = finish_reason(raw);
+        }
+        Ok(Flow::Continue)
+    }
+
+    /// Queues one complete `functionCall`. A missing id becomes `call_<n>`; missing
+    /// `args` is an empty object.
+    fn function_call(&mut self, call: &Value, sink: &mut Sink) -> Result<(), ChatError> {
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| format!("call_{}", self.emitted), str::to_owned);
+        self.emitted += 1;
+        let name = call
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let arguments = call
+            .get("args")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        sink.tool_call(ToolCall {
+            id,
+            name,
+            arguments,
+        })
+    }
+
+    /// Queues the final event. A block wins over the finish reason.
+    pub(crate) fn finish(&mut self, sink: &mut Sink) {
+        let finish_reason = if self.blocked {
+            Some(FinishReason::ContentFilter)
+        } else {
+            self.finish_reason.take()
+        };
+        sink.done(ChatDone {
+            finish_reason,
+            usage: self.usage.take(),
+            response_model: self.response_model.take(),
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -476,7 +594,7 @@ mod tests {
 
     #[test]
     fn puts_the_model_in_the_path_and_keeps_the_key_out_of_the_query() {
-        let default = generate_content_url(None, "gemini-2.5-flash").expect("default base");
+        let default = generate_content_url(None, "gemini-2.5-flash", false).expect("default base");
         assert_eq!(
             default.as_str(),
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
@@ -486,24 +604,34 @@ mod tests {
             "https://generativelanguage.googleapis.com",
             "https://generativelanguage.googleapis.com/",
         ] {
-            let url =
-                generate_content_url(Some(&Url::parse(base).expect(base)), "gemini-2.5-flash")
-                    .expect(base);
+            let url = generate_content_url(
+                Some(&Url::parse(base).expect(base)),
+                "gemini-2.5-flash",
+                false,
+            )
+            .expect(base);
             assert_eq!(url.as_str(), default.as_str());
         }
         let custom = Url::parse("https://example.com/gemini?version=1").expect("custom");
-        let url = generate_content_url(Some(&custom), "gemini-2.5-flash").expect("custom");
+        let url = generate_content_url(Some(&custom), "gemini-2.5-flash", false).expect("custom");
         assert_eq!(
             url.path(),
             "/gemini/v1beta/models/gemini-2.5-flash:generateContent"
         );
         assert_eq!(url.query(), Some("version=1"));
         assert!(!url.as_str().contains("key="));
+        let streamed =
+            generate_content_url(Some(&custom), "gemini-2.5-flash", true).expect("streamed");
+        assert_eq!(
+            streamed.path(),
+            "/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+        );
+        assert_eq!(streamed.query(), Some("version=1&alt=sse"));
     }
 
     #[test]
     fn rejects_a_model_name_before_building_a_url() {
-        let err = generate_content_url(None, "gemini/flash").expect_err("slash");
+        let err = generate_content_url(None, "gemini/flash", false).expect_err("slash");
         assert_eq!(err, ChatError::InvalidModel);
     }
 
@@ -511,7 +639,7 @@ mod tests {
     fn rejects_a_model_that_would_leave_the_models_path() {
         let custom = Url::parse("https://example.com/gemini/?version=1").expect("custom");
         for model in [r"a\..\..\..\admin", "a%2f..%2f..%2fadmin"] {
-            let err = generate_content_url(Some(&custom), model).expect_err(model);
+            let err = generate_content_url(Some(&custom), model, true).expect_err(model);
             assert_eq!(err, ChatError::InvalidModel, "{model:?}");
         }
     }

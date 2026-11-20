@@ -3,19 +3,23 @@
 //! The base URL includes the version (`https://api.openai.com/v1`). Compatible
 //! servers use the same path.
 
+use std::collections::BTreeMap;
+
 use cetra_core::message::{Message, Part, Role};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
+use super::sse::SseEvent;
+use super::stream::{Flow, Sink};
 use super::{
-    ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, arguments_text, check_request, endpoint, messages_to_send, number,
-    other_finish, request_headers, response_text, send_buffered, text_content, texts,
-    validate_model,
+    ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall,
+    ToolChoice, ToolDefinition, arguments_text, check_request, endpoint, messages_to_send, number,
+    other_finish, request_headers, response_text, send_buffered, stream_arguments, stream_error,
+    text_content, texts, validate_model,
 };
 use crate::egress::EgressClient;
 use crate::error::ChatError;
-use crate::judge::{JudgeConnection, StructuredOutput};
+use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 use crate::secret::Secret;
 
 const DEFAULT_BASE: &str = "https://api.openai.com/v1";
@@ -26,15 +30,17 @@ pub(crate) async fn complete(
     conn: &JudgeConnection,
     request: &ChatRequest,
 ) -> Result<ChatReply, ChatError> {
-    let prepared = prepare(conn, request)?;
+    let prepared = prepare(conn, request, false)?;
     let body = send_buffered(client, conn, request, prepared).await?;
     Ok(decode_reply(&body))
 }
 
-/// The URL, headers and body of one Chat Completions call.
+/// The URL, headers and body of one Chat Completions call. `stream` adds the streaming
+/// fields (D-V-19).
 pub(crate) fn prepare(
     conn: &JudgeConnection,
     request: &ChatRequest,
+    stream: bool,
 ) -> Result<Prepared, ChatError> {
     validate_model(&request.model)?;
     check_request(request)?;
@@ -52,7 +58,7 @@ pub(crate) fn prepare(
             ),
         ],
     )?;
-    let body = request_body(conn.structured_output, request)?;
+    let body = request_body(conn.structured_output, request, stream)?;
     Ok(Prepared { url, headers, body })
 }
 
@@ -66,7 +72,11 @@ fn header_bytes(bytes: &[u8]) -> Result<HeaderValue, ChatError> {
     HeaderValue::from_bytes(bytes).map_err(|_| ChatError::InvalidHeader)
 }
 
-fn request_body(mode: StructuredOutput, request: &ChatRequest) -> Result<Vec<u8>, ChatError> {
+fn request_body(
+    mode: StructuredOutput,
+    request: &ChatRequest,
+    stream: bool,
+) -> Result<Vec<u8>, ChatError> {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(request.model.clone()));
     let messages = messages_to_send(mode, request)?;
@@ -140,6 +150,10 @@ fn request_body(mode: StructuredOutput, request: &ChatRequest) -> Result<Vec<u8>
     };
     if let Some(choice) = choice {
         body.insert("tool_choice".to_owned(), choice);
+    }
+    if stream {
+        body.insert("stream".to_owned(), Value::Bool(true));
+        body.insert("stream_options".to_owned(), json!({"include_usage": true}));
     }
     serde_json::to_vec(&Value::Object(body)).map_err(|_| ChatError::InvalidRequest)
 }
@@ -352,6 +366,143 @@ fn u64_field(object: &Map<String, Value>, key: &str) -> u64 {
     object.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// The state of one streamed Chat Completions answer (D-V-19, D-V-30).
+#[derive(Default)]
+pub(crate) struct StreamState {
+    calls: BTreeMap<u64, PartialCall>,
+    finish_reason: Option<FinishReason>,
+    saw_finish: bool,
+    refused: bool,
+    usage: Option<TokenUsage>,
+    response_model: Option<String>,
+    emitted: usize,
+}
+
+/// A tool call whose arguments are still arriving.
+#[derive(Default)]
+struct PartialCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamState {
+    /// Whether a `finish_reason` arrived: the answer is complete even without `[DONE]`.
+    pub(crate) fn ended(&self) -> bool {
+        self.saw_finish
+    }
+
+    /// Decodes one event. `[DONE]` is the end.
+    pub(crate) fn on_event(
+        &mut self,
+        event: &SseEvent,
+        sink: &mut Sink,
+    ) -> Result<Flow, ChatError> {
+        if event.data == "[DONE]" {
+            return Ok(Flow::End);
+        }
+        let value: Value = serde_json::from_str(&event.data).map_err(|_| ChatError::BadStream)?;
+        if value.get("error").is_some_and(Value::is_object) {
+            return Err(stream_error(Adapter::OpenAi, &value));
+        }
+        if let Some(model) = value.get("model").and_then(Value::as_str) {
+            self.response_model = Some(model.to_owned());
+        }
+        if let Some(usage) = value.get("usage").filter(|usage| usage.is_object()) {
+            self.usage = Some(usage_of(Some(usage)));
+        }
+        let Some(choice) = value.pointer("/choices/0") else {
+            return Ok(Flow::Continue);
+        };
+        if let Some(delta) = choice.get("delta") {
+            self.on_delta(delta, sink)?;
+        }
+        if let Some(raw) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.saw_finish = true;
+            self.finish_reason = finish_reason(raw);
+            self.flush(sink)?;
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn on_delta(&mut self, delta: &Value, sink: &mut Sink) -> Result<(), ChatError> {
+        if let Some(text) = delta.get("content").and_then(Value::as_str) {
+            sink.text(text)?;
+        }
+        if let Some(refusal) = delta
+            .get("refusal")
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+        {
+            self.refused = true;
+            sink.text(refusal)?;
+        }
+        let Some(entries) = delta.get("tool_calls").and_then(Value::as_array) else {
+            return Ok(());
+        };
+        for (position, entry) in entries.iter().enumerate() {
+            let fallback = u64::try_from(position).unwrap_or(u64::MAX);
+            let index = entry
+                .get("index")
+                .and_then(Value::as_u64)
+                .unwrap_or(fallback);
+            let call = self.calls.entry(index).or_default();
+            if let Some(id) = entry
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            {
+                call.id = id.to_owned();
+            }
+            if let Some(name) = entry
+                .pointer("/function/name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+            {
+                call.name = name.to_owned();
+            }
+            if let Some(arguments) = entry.pointer("/function/arguments").and_then(Value::as_str) {
+                call.arguments.push_str(arguments);
+            }
+        }
+        Ok(())
+    }
+
+    /// Queues the tool calls collected so far, in index order.
+    fn flush(&mut self, sink: &mut Sink) -> Result<(), ChatError> {
+        for call in std::mem::take(&mut self.calls).into_values() {
+            let id = if call.id.is_empty() {
+                format!("call_{}", self.emitted)
+            } else {
+                call.id
+            };
+            self.emitted += 1;
+            sink.tool_call(ToolCall {
+                id,
+                name: call.name,
+                arguments: stream_arguments(&call.arguments),
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Queues the remaining calls and the final event.
+    pub(crate) fn finish(&mut self, sink: &mut Sink) -> Result<(), ChatError> {
+        self.flush(sink)?;
+        let finish_reason = if self.refused {
+            Some(FinishReason::Refusal)
+        } else {
+            self.finish_reason.take()
+        };
+        sink.done(ChatDone {
+            finish_reason,
+            usage: self.usage.take(),
+            response_model: self.response_model.take(),
+        });
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -410,7 +561,7 @@ mod tests {
     }
 
     fn body_of(mode: StructuredOutput, request: &ChatRequest) -> Value {
-        serde_json::from_slice(&request_body(mode, request).expect("body")).expect("json")
+        serde_json::from_slice(&request_body(mode, request, false).expect("body")).expect("json")
     }
 
     fn decode(body: &Value) -> ChatReply {

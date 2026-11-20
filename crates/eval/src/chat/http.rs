@@ -54,6 +54,41 @@ pub(crate) fn provider_error(
     }
 }
 
+/// An error event inside a stream, as a [`ChatError::Provider`] with no hint (D-V-19).
+/// The status is Gemini's `error.code` when it is 400 to 599, else the one the error's
+/// type stands for.
+pub(crate) fn stream_error(adapter: Adapter, value: &Value) -> ChatError {
+    let gemini_code = value
+        .pointer("/error/code")
+        .and_then(Value::as_u64)
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| (400..=599).contains(code));
+    let status = match adapter {
+        Adapter::Gemini => gemini_code,
+        Adapter::OpenAi | Adapter::Anthropic => None,
+    }
+    .unwrap_or_else(|| type_status(value.pointer("/error/type").and_then(Value::as_str)));
+    let body = serde_json::to_vec(value).unwrap_or_default();
+    provider_error(adapter, StructuredOutput::Prompt, status, &body)
+}
+
+/// The status an error type stands for: `invalid_request_error` 400, `authentication_error`
+/// 401, `billing_error` 402, `permission_error` 403, `not_found_error` 404,
+/// `request_too_large` 413, `rate_limit_error` 429, `overloaded_error` 529, anything else 500.
+fn type_status(kind: Option<&str>) -> u16 {
+    match kind {
+        Some("invalid_request_error") => 400,
+        Some("authentication_error") => 401,
+        Some("billing_error") => 402,
+        Some("permission_error") => 403,
+        Some("not_found_error") => 404,
+        Some("request_too_large") => 413,
+        Some("rate_limit_error") => 429,
+        Some("overloaded_error") => 529,
+        _ => 500,
+    }
+}
+
 /// A 400, or Gemini `INVALID_ARGUMENT` at any status, in native or tool mode.
 fn structured_output_hint(
     adapter: Adapter,

@@ -5,19 +5,23 @@
 //! not use an `anthropic-beta` header. The version header is the one in the
 //! current Messages reference.
 
+use std::collections::BTreeMap;
+
 use cetra_core::message::{Message, Part, Role};
 use reqwest::header::{HeaderName, HeaderValue};
 use serde_json::{Map, Value, json};
 
+use super::sse::SseEvent;
+use super::stream::{Flow, Sink};
 use super::{
-    ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, arguments_object, check_request, endpoint, messages_to_send, number,
-    other_finish, request_headers, response_text, secret_header, send_buffered, texts,
-    validate_model,
+    ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall,
+    ToolChoice, ToolDefinition, arguments_object, check_request, endpoint, messages_to_send,
+    number, other_finish, request_headers, response_text, secret_header, send_buffered,
+    stream_arguments, stream_error, texts, validate_model,
 };
 use crate::egress::EgressClient;
 use crate::error::ChatError;
-use crate::judge::{JudgeConnection, StructuredOutput};
+use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 
 const DEFAULT_BASE: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
@@ -28,15 +32,16 @@ pub(crate) async fn complete(
     conn: &JudgeConnection,
     request: &ChatRequest,
 ) -> Result<ChatReply, ChatError> {
-    let prepared = prepare(conn, request)?;
+    let prepared = prepare(conn, request, false)?;
     let body = send_buffered(client, conn, request, prepared).await?;
     Ok(decode_reply(&body))
 }
 
-/// The URL, headers and body of one Messages call.
+/// The URL, headers and body of one Messages call. `stream` adds `"stream": true` (D-V-19).
 pub(crate) fn prepare(
     conn: &JudgeConnection,
     request: &ChatRequest,
+    stream: bool,
 ) -> Result<Prepared, ChatError> {
     validate_model(&request.model)?;
     check_request(request)?;
@@ -58,11 +63,15 @@ pub(crate) fn prepare(
             ),
         ],
     )?;
-    let body = request_body(conn.structured_output, request)?;
+    let body = request_body(conn.structured_output, request, stream)?;
     Ok(Prepared { url, headers, body })
 }
 
-fn request_body(mode: StructuredOutput, request: &ChatRequest) -> Result<Vec<u8>, ChatError> {
+fn request_body(
+    mode: StructuredOutput,
+    request: &ChatRequest,
+    stream: bool,
+) -> Result<Vec<u8>, ChatError> {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(request.model.clone()));
     body.insert("max_tokens".to_owned(), Value::from(request.max_tokens));
@@ -123,6 +132,9 @@ fn request_body(mode: StructuredOutput, request: &ChatRequest) -> Result<Vec<u8>
     };
     if let Some(choice) = choice {
         body.insert("tool_choice".to_owned(), choice);
+    }
+    if stream {
+        body.insert("stream".to_owned(), Value::Bool(true));
     }
     serde_json::to_vec(&Value::Object(body)).map_err(|_| ChatError::InvalidRequest)
 }
@@ -373,6 +385,190 @@ fn u64_field(object: &Map<String, Value>, key: &str) -> u64 {
     object.get(key).and_then(Value::as_u64).unwrap_or(0)
 }
 
+/// The state of one streamed Messages answer (D-V-19, D-V-30). Blocks are keyed by
+/// their `index`.
+#[derive(Default)]
+pub(crate) struct StreamState {
+    blocks: BTreeMap<u64, Block>,
+    usage: Map<String, Value>,
+    stop_reason: Option<String>,
+    refusal_details: bool,
+    response_model: Option<String>,
+    emitted: usize,
+}
+
+/// One content block of the answer while it streams.
+enum Block {
+    Text,
+    ToolUse {
+        id: String,
+        name: String,
+        json: String,
+    },
+    Other,
+}
+
+impl StreamState {
+    /// Decodes one event. `message_stop` is the end; the event type is read from the
+    /// data's `type`, else from the `event:` line.
+    pub(crate) fn on_event(
+        &mut self,
+        event: &SseEvent,
+        sink: &mut Sink,
+    ) -> Result<Flow, ChatError> {
+        let value: Value = serde_json::from_str(&event.data).map_err(|_| ChatError::BadStream)?;
+        let kind = value
+            .get("type")
+            .and_then(Value::as_str)
+            .or(event.event.as_deref())
+            .unwrap_or_default();
+        let index = value.get("index").and_then(Value::as_u64).unwrap_or(0);
+        match kind {
+            "message_start" => {
+                if let Some(message) = value.get("message") {
+                    if let Some(model) = message.get("model").and_then(Value::as_str) {
+                        self.response_model = Some(model.to_owned());
+                    }
+                    self.merge_usage(message.get("usage"));
+                }
+            }
+            "content_block_start" => self.block_start(index, &value, sink)?,
+            "content_block_delta" => self.block_delta(index, &value, sink)?,
+            "content_block_stop" => {
+                if let Some(Block::ToolUse { id, name, json }) = self.blocks.remove(&index) {
+                    self.emit_call(id, name, &json, sink)?;
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.stop_reason = Some(reason.to_owned());
+                }
+                if value
+                    .pointer("/delta/stop_details/type")
+                    .and_then(Value::as_str)
+                    == Some("refusal")
+                {
+                    self.refusal_details = true;
+                }
+                self.merge_usage(value.get("usage"));
+            }
+            "message_stop" => return Ok(Flow::End),
+            "error" => return Err(stream_error(Adapter::Anthropic, &value)),
+            _ => {}
+        }
+        Ok(Flow::Continue)
+    }
+
+    fn block_start(&mut self, index: u64, value: &Value, sink: &mut Sink) -> Result<(), ChatError> {
+        let block = value.get("content_block");
+        let block_type = block
+            .and_then(|block| block.get("type"))
+            .and_then(Value::as_str);
+        let state = match block_type {
+            Some("text") => {
+                let text = block
+                    .and_then(|block| block.get("text"))
+                    .and_then(Value::as_str);
+                sink.text(text.unwrap_or_default())?;
+                Block::Text
+            }
+            Some("tool_use") => Block::ToolUse {
+                id: string_of(block, "id"),
+                name: string_of(block, "name"),
+                json: String::new(),
+            },
+            _ => Block::Other,
+        };
+        self.blocks.insert(index, state);
+        Ok(())
+    }
+
+    fn block_delta(&mut self, index: u64, value: &Value, sink: &mut Sink) -> Result<(), ChatError> {
+        let delta = value.get("delta");
+        match delta
+            .and_then(|delta| delta.get("type"))
+            .and_then(Value::as_str)
+        {
+            Some("text_delta") => {
+                let text = delta
+                    .and_then(|delta| delta.get("text"))
+                    .and_then(Value::as_str);
+                sink.text(text.unwrap_or_default())?;
+            }
+            Some("input_json_delta") => {
+                let part = delta
+                    .and_then(|delta| delta.get("partial_json"))
+                    .and_then(Value::as_str);
+                if let (Some(Block::ToolUse { json, .. }), Some(part)) =
+                    (self.blocks.get_mut(&index), part)
+                {
+                    json.push_str(part);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Merges a usage object: a later value replaces an earlier one, a null is skipped.
+    fn merge_usage(&mut self, usage: Option<&Value>) {
+        let Some(object) = usage.and_then(Value::as_object) else {
+            return;
+        };
+        for (key, value) in object {
+            if !value.is_null() {
+                self.usage.insert(key.clone(), value.clone());
+            }
+        }
+    }
+
+    fn emit_call(
+        &mut self,
+        id: String,
+        name: String,
+        json: &str,
+        sink: &mut Sink,
+    ) -> Result<(), ChatError> {
+        let id = if id.is_empty() {
+            format!("call_{}", self.emitted)
+        } else {
+            id
+        };
+        self.emitted += 1;
+        sink.tool_call(ToolCall {
+            id,
+            name,
+            arguments: stream_arguments(json),
+        })
+    }
+
+    /// Queues the tool calls still open, in index order, and the final event.
+    pub(crate) fn finish(&mut self, sink: &mut Sink) -> Result<(), ChatError> {
+        for (_, block) in std::mem::take(&mut self.blocks) {
+            if let Block::ToolUse { id, name, json } = block {
+                self.emit_call(id, name, &json, sink)?;
+            }
+        }
+        let usage = (!self.usage.is_empty())
+            .then(|| usage_of(Some(&Value::Object(std::mem::take(&mut self.usage)))));
+        sink.done(ChatDone {
+            finish_reason: finish_reason(self.stop_reason.as_deref(), self.refusal_details),
+            usage,
+            response_model: self.response_model.take(),
+        });
+        Ok(())
+    }
+}
+
+/// A string field of an optional object, or `""`.
+fn string_of(object: Option<&Value>, key: &str) -> String {
+    object
+        .and_then(|object| object.get(key))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -445,7 +641,7 @@ mod tests {
     }
 
     fn body_of(mode: StructuredOutput, request: &ChatRequest) -> Value {
-        serde_json::from_slice(&request_body(mode, request).expect("body")).expect("json")
+        serde_json::from_slice(&request_body(mode, request, false).expect("body")).expect("json")
     }
 
     fn decode(body: &Value) -> crate::chat::ChatReply {
@@ -646,7 +842,7 @@ mod tests {
                 }],
             ),
         ];
-        let err = request_body(StructuredOutput::Native, &request(messages))
+        let err = request_body(StructuredOutput::Native, &request(messages), false)
             .expect_err("arguments are not an object");
         assert_eq!(
             err,
