@@ -860,7 +860,7 @@ mod tests {
             add_rule(&app, project, false).await;
             assert!(refresh_tracked(&app.state).await.unwrap().0.is_empty());
             add_rule(&app, project, true).await;
-            let tracked = refresh_tracked(&app.state).await.unwrap().0;
+            let tracked = refresh_tracked(&app.state).await.unwrap();
             assert_eq!(tracked.len(), 1);
             assert_eq!(tracked[&project].rules.len(), 1);
             assert_eq!(tracked[&project].timeout_ns, 60 * SECOND);
@@ -883,7 +883,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let tracked = refresh_tracked(&app.state).await.unwrap().0;
+                let tracked = refresh_tracked(&app.state).await.unwrap();
                 assert_eq!(tracked[&project].timeout_ns, seconds * SECOND);
             }
         }
@@ -967,7 +967,7 @@ mod tests {
             );
 
             // The first refresh that works tracks no project (no rules exist), and drops the row.
-            refresh_tracked(&app.state).await.unwrap().0;
+            refresh_tracked(&app.state).await.unwrap();
             assert_eq!(app.state.pending.len(), 0);
             assert_eq!(
                 flush_once(&app.state).await.unwrap(),
@@ -1206,7 +1206,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            refresh_tracked(&app.state).await.unwrap().0;
+            refresh_tracked(&app.state).await.unwrap();
             rule
         }
 
@@ -1998,7 +1998,7 @@ mod tests {
             let connection = http_connection(&app, &seeded, &mock).await;
             let evaluator = http_judge(&app, &seeded, connection).await;
             let rule_id = http_rule(&app, &seeded, evaluator).await;
-            refresh_tracked(&app.state).await.unwrap().0;
+            refresh_tracked(&app.state).await.unwrap();
             let tasks = crate::eval::spawn(&app.state, EvalTiming::TEST);
 
             let now = app.state.clock.now_ns();
