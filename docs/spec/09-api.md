@@ -141,7 +141,7 @@ Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md) § AP
 | `GET/POST /prompts` | list `?q=&label=&tag=` (keyset-paged by name); create makes the prompt with version 1 (D-V-2, D-V-7) |
 | `GET/PATCH/DELETE /prompts/{prompt}` | `{prompt}` = name; PATCH changes the description and tags only; delete removes the versions, labels and history; a protected label on the prompt refuses it (D-V-2, D-V-10) |
 | `GET /prompts/{prompt}/resolve?label=&version=` | the version a label (default `production`), `latest` or `version` points at; a strong `ETag`, and `304` when `If-None-Match` matches (D-V-9, D-V-12) |
-| `GET/POST /prompts/{prompt}/versions` | list newest first (`cursor` = last version of a page); create appends version *n + 1*, optionally with labels (D-V-7) |
+| `GET/POST /prompts/{prompt}/versions` | list newest first (`cursor` = last version of a page; at most 50 per page, a larger `limit` is clamped to 50); create appends version *n + 1*, optionally with labels (D-V-7) |
 | `GET /prompts/{prompt}/versions/{version}` | one version with its labels, variables and placeholders |
 | `PUT /prompts/{prompt}/labels/{label}` | `{version}`; points the label at the version, creating the label when new; `200` with the prompt; `latest` is 400 (D-V-8, D-V-10) |
 | `DELETE /prompts/{prompt}/labels/{label}` | removes the label and keeps the versions; `204`; a label that is not set is 404 (D-V-8, D-V-10) |

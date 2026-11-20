@@ -3540,6 +3540,8 @@ fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
 }
 
 const PROMPT_READ: &str = "Any project member, or an API key with `read`.";
+const PROMPT_READ_VERSIONS: &str =
+    "Any project member, or an API key with `read`. At most 50 versions per page.";
 const PROMPT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).";
 
 /// The prompt routes (D-V-2, D-V-7, D-V-9, D-V-12, D-V-13). Reads need project view; writes
@@ -3608,7 +3610,7 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
         "Resolve a prompt to a version",
     )
     .description(Some(
-        "Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12).",
+        "Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12). The tag covers the whole body, including the computed `latest` label, so it changes when a newer version is saved.",
     ))
     .parameters(Some(with_query::<ResolveParams>(vec![
         project_param(),
@@ -3641,7 +3643,7 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
         "prompts",
         "List the versions of a prompt",
     )
-    .description(Some(PROMPT_READ))
+    .description(Some(PROMPT_READ_VERSIONS))
     .parameters(Some(with_query::<PageParams>(vec![
         project_param(),
         prompt.clone(),

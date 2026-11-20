@@ -2540,7 +2540,7 @@ export interface paths {
         };
         /**
          * Resolve a prompt to a version
-         * @description Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12).
+         * @description Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12). The tag covers the whole body, including the computed `latest` label, so it changes when a newer version is saved.
          */
         get: operations["get_prompt_resolve"];
         put?: never;
@@ -2560,7 +2560,7 @@ export interface paths {
         };
         /**
          * List the versions of a prompt
-         * @description Any project member, or an API key with `read`.
+         * @description Any project member, or an API key with `read`. At most 50 versions per page.
          */
         get: operations["list_prompt_versions"];
         put?: never;
@@ -6837,7 +6837,7 @@ export interface components {
              * @description When the prompt was created.
              */
             created_at: string;
-            /** @description Who created the prompt. Absent for an API key or a removed user. */
+            /** @description A user id, or `key:<key id>` for an API key. Absent when the user was removed. */
             created_by?: string;
             /** @description Free text, up to 2 000 characters. */
             description?: string;
@@ -6887,7 +6887,7 @@ export interface components {
         };
         /** @description One entry of a label's history (D-V-8). */
         PromptLabelEvent: {
-            /** @description Who moved the label. Absent for an API key or a removed user. */
+            /** @description A user id, or `key:<key id>` for an API key. Absent when the user was removed. */
             actor?: string;
             /**
              * Format: date-time
@@ -6938,7 +6938,7 @@ export interface components {
              * @description When the version was created.
              */
             created_at: string;
-            /** @description Who created the version. Absent for an API key or a removed user. */
+            /** @description A user id, or `key:<key id>` for an API key. Absent when the user was removed. */
             created_by?: string;
             /**
              * @description Labels that point at this version, ordered. Includes `latest` when this is the latest
@@ -8713,7 +8713,7 @@ export interface components {
         UpdatePromptRequest: {
             /** @description New description, when present. `null` clears it. */
             description?: string | null;
-            /** @description New tags, when present. Replaces the whole list. */
+            /** @description New tags, when present. Replaces the whole list. `null` is refused. */
             tags?: string[];
         };
         /**

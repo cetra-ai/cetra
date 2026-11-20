@@ -908,6 +908,43 @@ mod tests {
         assert_eq!(error.position, Some(TextPosition { line: 1, column: 1 }));
     }
 
+    /// The `chat` cases of the shared `render.json` agree with `parse_body`: a case that is not
+    /// an `invalid` error parses, with the variables and placeholders it lists; an `invalid`
+    /// case does not parse.
+    #[test]
+    fn render_fixture_chat_cases_match_parse_body() {
+        let cases: Value =
+            serde_json::from_str(include_str!("../../../../fixtures/prompts/render.json"))
+                .expect("the fixture is JSON");
+        let chat = cases["chat"].as_array().expect("a chat array");
+        assert!(!chat.is_empty());
+        let names = |value: &Value| -> Vec<String> {
+            value
+                .as_array()
+                .expect("an array of names")
+                .iter()
+                .map(|name| name.as_str().expect("a name").to_owned())
+                .collect()
+        };
+        for case in chat {
+            let name = case["name"].as_str().expect("a case name");
+            let parsed = parse_body(PromptType::Chat, &case["template"]);
+            match case["error"]["kind"].as_str() {
+                None | Some("missing_variable" | "missing_placeholder") => {
+                    let body = parsed.unwrap_or_else(|errors| panic!("{name}: {errors:?}"));
+                    assert_eq!(body.variables(), names(&case["variables"]), "{name}");
+                    assert_eq!(
+                        body.placeholders(),
+                        names(&case["placeholder_names"]),
+                        "{name}"
+                    );
+                }
+                Some("invalid") => assert!(parsed.is_err(), "{name} must not parse"),
+                Some(other) => panic!("{name}: unknown error kind {other}"),
+            }
+        }
+    }
+
     #[test]
     fn body_limits() {
         let big = Value::String("a".repeat(MAX_TEMPLATE_BYTES));

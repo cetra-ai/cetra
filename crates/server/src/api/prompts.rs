@@ -49,7 +49,7 @@ pub struct Prompt {
     pub latest_version: i64,
     /// Stored labels, ordered by label. `latest` is not listed.
     pub labels: Vec<PromptLabel>,
-    /// Who created the prompt. Absent for an API key or a removed user.
+    /// A user id, or `key:<key id>` for an API key. Absent when the user was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     /// When the prompt was created.
@@ -89,7 +89,7 @@ pub struct PromptVersion {
     /// The commit message, up to 500 characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_message: Option<String>,
-    /// Who created the version. Absent for an API key or a removed user.
+    /// A user id, or `key:<key id>` for an API key. Absent when the user was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<String>,
     /// When the version was created.
@@ -158,9 +158,10 @@ pub struct UpdatePromptRequest {
     #[serde(default, deserialize_with = "present")]
     #[schema(value_type = Option<String>)]
     pub description: Option<Option<String>>,
-    /// New tags, when present. Replaces the whole list.
-    #[serde(default)]
-    pub tags: Option<Vec<String>>,
+    /// New tags, when present. Replaces the whole list. `null` is refused.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Vec<String>)]
+    pub tags: Option<Option<Vec<String>>>,
 }
 
 /// `PUT /api/v1/projects/{project}/prompts/{prompt}/labels/{label}` body (D-V-8).
@@ -182,7 +183,7 @@ pub struct PromptLabelEvent {
     /// The version it points at now. Absent when the label was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_version: Option<i64>,
-    /// Who moved the label. Absent for an API key or a removed user.
+    /// A user id, or `key:<key id>` for an API key. Absent when the user was removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<String>,
     /// When the label moved.
@@ -271,6 +272,18 @@ mod tests {
         let set: UpdatePromptRequest =
             serde_json::from_value(json!({"description": "x"})).expect("parses");
         assert_eq!(set.description, Some(Some("x".to_owned())));
+    }
+
+    #[test]
+    fn tags_tri_state() {
+        let absent: UpdatePromptRequest = serde_json::from_value(json!({})).expect("parses");
+        assert_eq!(absent.tags, None);
+        let null: UpdatePromptRequest =
+            serde_json::from_value(json!({"tags": null})).expect("parses");
+        assert_eq!(null.tags, Some(None));
+        let set: UpdatePromptRequest =
+            serde_json::from_value(json!({"tags": ["a"]})).expect("parses");
+        assert_eq!(set.tags, Some(Some(vec!["a".to_owned()])));
     }
 
     #[test]

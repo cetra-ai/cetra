@@ -23,6 +23,9 @@ pub(crate) const DUPLICATE_NAME: &str = "a prompt with this name already exists"
 pub(crate) const TOO_MANY_PROMPTS: &str = "a project has at most 5000 prompts";
 pub(crate) const TOO_MANY_VERSIONS: &str = "a prompt has at most 10000 versions";
 pub(crate) const TOO_MANY_LABELS: &str = "a prompt has at most 50 labels";
+/// The prompt was deleted and created again with another type between the request's read and
+/// its write.
+pub(crate) const PROMPT_CHANGED: &str = "the prompt changed; retry";
 
 /// `prompts.type`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

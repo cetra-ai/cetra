@@ -39,6 +39,9 @@ use super::orgs::page_named;
 /// a config of at most 64 KiB, and the JSON around them.
 const PROMPT_BODY_LIMIT: usize = 512 * 1024;
 
+/// A versions page holds at most this many versions: each carries its template and config.
+const MAX_VERSION_PAGE: u32 = 50;
+
 /// Prompt routes. Reads need project view; writes need [`ProjectPerm::ManagePrompts`]. Not
 /// session-only.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -263,7 +266,8 @@ fn kind_of(prompt_type: PromptType) -> PromptKind {
     }
 }
 
-/// D-V-10: a project admin, or an API key (a key that reaches a `ManagePrompts` route has `write`).
+/// D-V-10: a project admin, or an API key.
+/// A key reaching a `ManagePrompts` route has the `write` scope (`ProjectPerm::ManagePrompts.key_scope()`); public keys hold only `feedback`.
 fn may_touch_protected(principal: &Principal, access: &ProjectAccess) -> bool {
     matches!(principal, Principal::ApiKey { .. }) || access.role == Some(Role::Admin)
 }
@@ -574,9 +578,13 @@ async fn update_prompt(
             }
         },
     };
-    let tags = match body.tags.as_deref() {
+    let tags = match body.tags {
         None => None,
-        Some(tags) => match check_tags(tags) {
+        Some(None) => {
+            errors.push(field_error("tags", "must be an array"));
+            None
+        }
+        Some(Some(tags)) => match check_tags(&tags) {
             Ok(tags) => Some(tags),
             Err(found) => {
                 errors.extend(found);
@@ -743,7 +751,7 @@ async fn list_versions(
 ) -> Result<error::Json<Page<PromptVersion>>, ApiError> {
     let row = find(&state, access.project.id, &prompt).await?;
     let before = positive_cursor(params.cursor.as_deref())?;
-    let limit = params.limit.get();
+    let limit = params.limit.get().min(MAX_VERSION_PAGE);
     let keep = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut rows = store::list_versions(state.meta.reader(), row.id, before, limit).await?;
     let more = rows.len() > keep;
@@ -760,11 +768,13 @@ async fn list_versions(
     Ok(error::Json(Page { data, next_cursor }))
 }
 
-/// The version create's write: the protected check, then the new version and its labels.
+/// The version create's write: the prompt re-read, the type check against `validated_for` (the
+/// type the template was checked for), the protected check, then the new version and its labels.
 async fn add_version_tx(
     conn: &mut SqliteConnection,
     project: ProjectId,
     name: &str,
+    validated_for: PromptType,
     version: NewVersion,
     may: bool,
     now: i64,
@@ -772,6 +782,9 @@ async fn add_version_tx(
     let Some(prompt) = store::get_prompt_tx(conn, project, name).await? else {
         return Ok(Written::Missing);
     };
+    if prompt.prompt_type != validated_for {
+        return Err(MetaError::Conflict(store::PROMPT_CHANGED));
+    }
     if refused_by_protection(conn, project, &version.labels, may).await? {
         return Ok(Written::Protected);
     }
@@ -794,8 +807,9 @@ async fn create_version(
     error::Json(body): error::Json<CreateVersionRequest>,
 ) -> Result<(StatusCode, error::Json<PromptVersion>), ApiError> {
     let existing = find(&state, access.project.id, &prompt).await?;
+    let validated_for = existing.prompt_type;
     let version = new_version(
-        existing.prompt_type,
+        validated_for,
         &body.template,
         body.config.as_ref(),
         &body.labels,
@@ -809,7 +823,9 @@ async fn create_version(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { add_version_tx(conn, project, &prompt, version, may, now).await })
+            Box::pin(async move {
+                add_version_tx(conn, project, &prompt, validated_for, version, may, now).await
+            })
         })
         .await?;
     let (prompt, version) = settle(outcome)?;
@@ -1641,6 +1657,141 @@ mod tests {
         )
         .await;
         assert_eq!(admin_version.status, StatusCode::CREATED);
+
+        let key_delete = call(
+            &app,
+            Method::DELETE,
+            &pl,
+            ("authorization", write_key.as_str()),
+            None,
+        )
+        .await;
+        assert_eq!(key_delete.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn patch_refuses_null_tags() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            auth,
+            Some(text_body("tagged", &[])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let path = format!("{list}/tagged");
+
+        let refused = call(
+            &app,
+            Method::PATCH,
+            &path,
+            auth,
+            Some(json!({"tags": null})),
+        )
+        .await;
+        assert_eq!(field_names(&refused), vec!["tags"]);
+        let body: Value = refused.json();
+        assert_eq!(body["errors"][0]["message"], "must be an array");
+        let prompt: Prompt = call(&app, Method::GET, &path, auth, None).await.json();
+        assert!(prompt.tags.is_empty());
+    }
+
+    /// A version write checks the type that the template was validated for against the prompt
+    /// re-read in the transaction. A prompt deleted and created again under the same name can
+    /// have another type; that write is a 409 (`PROMPT_CHANGED`) and writes nothing.
+    #[tokio::test]
+    async fn version_write_refuses_a_changed_type() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let project = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org = crate::meta::orgs::insert_org(
+                        conn,
+                        cetra_core::ids::OrgId::new_v7(),
+                        "Acme",
+                        "acme",
+                        1,
+                    )
+                    .await?;
+                    let project = crate::meta::projects::insert_project(
+                        conn, org.id, "Support", "support", None, 1,
+                    )
+                    .await?;
+                    Ok::<_, MetaError>(project.id)
+                })
+            })
+            .await
+            .unwrap();
+        let new_text_version = || NewVersion {
+            template: "\"hello\"".to_owned(),
+            config: "{}".to_owned(),
+            commit_message: None,
+            labels: Vec::new(),
+            actor: None,
+        };
+        let id = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let prompt = NewPrompt {
+                        id: Uuid::now_v7(),
+                        name: "p".to_owned(),
+                        prompt_type: PromptType::Text,
+                        description: None,
+                        tags: Vec::new(),
+                    };
+                    let (row, _) =
+                        store::create_prompt(conn, project, prompt, new_text_version(), 1).await?;
+                    Ok::<_, MetaError>(row.id)
+                })
+            })
+            .await
+            .unwrap();
+
+        let changed = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    add_version_tx(
+                        conn,
+                        project,
+                        "p",
+                        PromptType::Chat,
+                        new_text_version(),
+                        true,
+                        2,
+                    )
+                    .await
+                })
+            })
+            .await;
+        assert!(matches!(
+            changed,
+            Err(MetaError::Conflict(detail)) if detail == store::PROMPT_CHANGED
+        ));
+        let stored = store::get_version(db.reader(), id, 2).await.unwrap();
+        assert!(stored.is_none(), "a refused write adds no version");
+
+        let same_type = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    add_version_tx(
+                        conn,
+                        project,
+                        "p",
+                        PromptType::Text,
+                        new_text_version(),
+                        true,
+                        3,
+                    )
+                    .await
+                })
+            })
+            .await;
+        assert!(matches!(same_type, Ok(Written::Done(_))));
     }
 
     #[tokio::test(flavor = "multi_thread")]
