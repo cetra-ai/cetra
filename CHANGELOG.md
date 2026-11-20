@@ -29,12 +29,23 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   `/healthz`; the Helm chart already does.
 - `/healthz` now fails on a storage failure that a restart clears (a WAL, object fsync or catalog
   failure), so a liveness probe on it restarts the server.
+- Migration `0030` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`.
 
 ### Added
 
 - `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their
   test sends to the org's verified members whatever `auth.signup` is (D-K-21). Unset, it keeps the
   old rule: members only under open signup.
+- Alert rules on issues: the `issue_occurrences` metric counts the occurrences of one issue or of a source's issues in a window of 15 minutes or more (D-IC-20).
+- Issue notifications: an issue source can send its new and regressed issues to project channels, in one message per 10 minutes at most (D-IC-21).
+- Issues: "Add examples to dataset" copies an issue's newest occurrence traces into a dataset, and "Create alert" opens an alert rule for the issue (D-IC-22, D-IC-23).
+- MCP: the read-only `list_issues` tool lists a project's issues with their state and counts over the last 7 days (D-IC-24).
+- Issue sources for bad scores, user feedback and topics: LLM summaries and embeddings group them into issues, refreshed every 6 hours (D-IC-4, D-IC-8).
+- MCP tools `list_prompts` and `get_prompt` (D-V-39): coding agents read the project's prompts, their labels and a version's template, config and variables, with the same access and limits as the other MCP tools.
+- Prompts pages (D-V-32): the prompt list with search, label and tag filters, protected labels and a create dialog; the prompt page with the template editor (saving a version), versions with labels and line diffs, label history and per-version metrics; prompt links, facets and columns on traces and spans.
+- In-app assistant (D193, D-AS-1 to D-AS-31): a chat panel in each project (`Ctrl/Cmd+I`) that answers questions over traces, metrics, evaluations and settings with the organization's LLM connection, and drafts filters, SQL, dashboards, evaluators and online rules that you apply.
+- Organization setting Assistant (D-AS-3, D-AS-24): off until an admin picks a connection and a model; turning it on runs a tool-calling test.
+- Assistant API (D-AS-9, D-AS-10): conversations, turns streamed over SSE, feedback, and the org setting under `/api/v1/…/assistant`.
 - Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
 - Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.
 - Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).
@@ -108,6 +119,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - Evaluator version history: every change to an evaluator's config or output is kept, `GET /api/v1/projects/{project}/evaluators/{id}/versions` lists the versions, and the evaluator page has a History tab that diffs a version against the previous one.
 - Evaluators: `GET /evaluators/stats`; the evaluator list shows 7-day runs, errors, average cost, p50 and result columns (the score column is now "Output"), and the evaluator page a 7-day stats row and the experiments with its score (D-I-48).
+- Issues: error spans of production traces are grouped into issues you can resolve, ignore and merge, with occurrence counts and a filter on the trace list (D-IC-2).
+- Playground (D-V-20 to D-V-28, D-V-38): run prompt versions and recorded LLM spans against up to four models side by side, streamed, with cost and latency; save the result as a prompt version; recent runs.
 - A "Coding agents" dashboard template, and `session_id` as a breakdown of trace widgets.
 
 ### Changed

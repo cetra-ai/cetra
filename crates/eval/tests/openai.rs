@@ -7,7 +7,10 @@ use std::time::Duration;
 use crate::config::JudgeOutput;
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{EgressError, ErrorClass, JudgeError};
-use crate::judge::{Adapter, JudgeCall, JudgeConnection, RawAnswer, StructuredOutput, call};
+use crate::judge::{
+    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, RawAnswer,
+    StructuredOutput, answer_schema, call,
+};
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
 use serde_json::{Value, json};
@@ -38,15 +41,17 @@ fn connection(base: reqwest::Url, extra: Vec<(&str, &str)>) -> JudgeConnection {
 
 fn judge<'a>(
     model: &'a str,
-    output: &'a JudgeOutput,
+    schema: &'a Value,
     temperature: Option<f64>,
     timeout: Duration,
-) -> JudgeCall<'a> {
-    JudgeCall {
+) -> CompletionCall<'a> {
+    CompletionCall {
         model,
         prompt: PROMPT,
-        output,
-        include_reason: true,
+        schema,
+        schema_name: "judge_answer",
+        tool_name: JUDGEMENT_TOOL,
+        tool_description: JUDGEMENT_DESCRIPTION,
         temperature,
         max_output_tokens: 1024,
         timeout,
@@ -86,14 +91,24 @@ async fn request_body_with_and_without_temperature() {
     call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("no temperature");
     call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, Some(0.2), Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            Some(0.2),
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("temperature");
@@ -133,7 +148,12 @@ async fn returns_text_for_each_output_type() {
         let reply = call(
             &http,
             &conn,
-            &judge("gpt-4o-mini", output, None, Duration::from_secs(2)),
+            &judge(
+                "gpt-4o-mini",
+                &answer_schema(output, true),
+                None,
+                Duration::from_secs(2),
+            ),
         )
         .await
         .expect(kind);
@@ -166,7 +186,8 @@ async fn refusal_length_filter_and_a_missing_choice() {
     let conn = connection(mock.url(), Vec::new());
     let http = client();
     let output = numeric();
-    let request = judge("gpt-4o-mini", &output, None, Duration::from_secs(2));
+    let schema = answer_schema(&output, true);
+    let request = judge("gpt-4o-mini", &schema, None, Duration::from_secs(2));
 
     mock.enqueue(MockReply {
         status: 200,
@@ -238,7 +259,12 @@ async fn maps_usage_including_details() {
     let reply = call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("usage");
@@ -259,7 +285,12 @@ async fn maps_usage_including_details() {
     let reply = call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("bare usage");
@@ -306,7 +337,8 @@ async fn classifies_provider_statuses() {
     let conn = connection(mock.url(), Vec::new());
     let http = client();
     let output = numeric();
-    let request = judge("gpt-4o-mini", &output, None, Duration::from_secs(2));
+    let schema = answer_schema(&output, true);
+    let request = judge("gpt-4o-mini", &schema, None, Duration::from_secs(2));
     for (status, kind, code, class) in cases {
         mock.enqueue(MockReply {
             status,
@@ -347,7 +379,12 @@ async fn timeout_is_retryable() {
     let err = call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_millis(200)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_millis(200),
+        ),
     )
     .await
     .expect_err("timeout");
@@ -371,7 +408,12 @@ async fn sends_the_key_and_extra_headers_without_leaking_them() {
     let err = call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect_err("status");
@@ -399,7 +441,12 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
     let err = call(
         &http,
         &conn,
-        &judge("gpt/4", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt/4",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect_err("model");
@@ -411,7 +458,12 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
     let err = call(
         &http,
         &bad,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect_err("header");
@@ -424,7 +476,7 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
         &conn,
         &judge(
             "gpt-4o-mini",
-            &output,
+            &answer_schema(&output, true),
             Some(f64::NAN),
             Duration::from_secs(2),
         ),
@@ -449,7 +501,12 @@ async fn response_over_4_mib_is_permanent() {
     let err = call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(5)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(5),
+        ),
     )
     .await
     .expect_err("too large");
@@ -463,7 +520,11 @@ async fn response_over_4_mib_is_permanent() {
     assert_eq!(err.to_string(), "response exceeds 4194304 bytes");
 }
 
-async fn call_err(http: &EgressClient, conn: &JudgeConnection, call: &JudgeCall<'_>) -> JudgeError {
+async fn call_err(
+    http: &EgressClient,
+    conn: &JudgeConnection,
+    call: &CompletionCall<'_>,
+) -> JudgeError {
     crate::judge::call(http, conn, call)
         .await
         .expect_err("provider error")
@@ -499,7 +560,12 @@ async fn extra_headers_cannot_override_the_content_type_or_the_auth_header() {
     call(
         &http,
         &conn,
-        &judge("gpt-4o-mini", &output, None, Duration::from_secs(2)),
+        &judge(
+            "gpt-4o-mini",
+            &answer_schema(&output, true),
+            None,
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect_err("status");

@@ -1,0 +1,6 @@
+{
+  "usable": true,
+  "connection_name": "OpenAI",
+  "adapter": "openai",
+  "model": "gpt-4o"
+}

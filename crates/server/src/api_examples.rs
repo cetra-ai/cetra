@@ -11,6 +11,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::api::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantSettings, AssistantStatus,
+};
 use crate::api::common::Page;
 use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
@@ -21,7 +24,7 @@ use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
 use crate::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
 use crate::api::users::{EndUserDetail, EndUserSummary};
-use crate::test_support::{EXAMPLE_PROJECT, EXAMPLE_PROMPT, TestApp};
+use crate::test_support::{EXAMPLE_CONVERSATION, EXAMPLE_PROJECT, EXAMPLE_PROMPT, TestApp};
 
 const MEDIA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
 const EXAMPLE_DATASET: &str = "01900000-0000-7000-8000-000000000c01";
@@ -174,6 +177,22 @@ async fn fetch<T: Serialize + DeserializeOwned>(
     response.json()
 }
 
+/// `GET` of `path`, an absolute path. Asserts `200` and parses the body as `T`.
+async fn get_at<T: DeserializeOwned>(app: &TestApp, cookie: &str, path: &str) -> T {
+    let response = app
+        .request(Method::GET, path)
+        .header("cookie", cookie)
+        .send()
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    response.json()
+}
+
 /// `POST` of `body` to the example project's `path`. Asserts `200` and parses the body as `T`.
 async fn post_json<T: Serialize + DeserializeOwned>(
     app: &TestApp,
@@ -205,6 +224,8 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         .unwrap_or_else(|error| panic!("{error}"));
     app.load_example_dataset(project).await;
     app.seed_example_faq_dataset().await;
+    app.seed_example_conversation().await;
+    app.seed_example_assistant_settings().await;
     app.seed_example_prompts().await;
     let cookie = cookie.as_str();
     let mut out = Output::default();
@@ -320,6 +341,45 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 
     let scores: Page<Score> = fetch(&app, cookie, "/scores").await;
     out.add("list_scores", &[], &[], "responses/scores.json", &scores);
+
+    let conversations: Page<AssistantConversation> =
+        fetch(&app, cookie, "/assistant/conversations").await;
+    out.add(
+        "list_assistant_conversations",
+        &[],
+        &[],
+        "responses/assistant-conversations.json",
+        &conversations,
+    );
+    let conversation: AssistantConversationDetail = fetch(
+        &app,
+        cookie,
+        &format!("/assistant/conversations/{EXAMPLE_CONVERSATION}"),
+    )
+    .await;
+    out.add(
+        "get_assistant_conversation",
+        &[("id", EXAMPLE_CONVERSATION)],
+        &[],
+        &format!("responses/assistant-conversations/{EXAMPLE_CONVERSATION}.json"),
+        &conversation,
+    );
+    let org_setting: AssistantSettings = get_at(&app, cookie, "/api/v1/orgs/acme/assistant").await;
+    out.add(
+        "get_org_assistant",
+        &[("org", "acme")],
+        &[],
+        "responses/org-assistant.json",
+        &org_setting,
+    );
+    let assistant_status: AssistantStatus = fetch(&app, cookie, "/assistant").await;
+    out.add(
+        "get_project_assistant",
+        &[],
+        &[],
+        "responses/project-assistant.json",
+        &assistant_status,
+    );
 
     let datasets: Page<Dataset> = fetch(&app, cookie, "/datasets").await;
     out.add(
@@ -1266,6 +1326,55 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             BTreeMap::new(),
             BTreeMap::new(),
             "static/online-rule-preview.json",
+            "application/json",
+        ),
+        example(
+            "list_issue_sources",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/issue-sources.json",
+            "application/json",
+        ),
+        example(
+            "get_issue_source",
+            params(&[("id", "01900000-0000-7000-8000-000000001c00")]),
+            BTreeMap::new(),
+            "static/issue-source.json",
+            "application/json",
+        ),
+        example(
+            "list_issues",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/issues.json",
+            "application/json",
+        ),
+        example(
+            "list_issue_source_refits",
+            params(&[("id", "01900000-0000-7000-8000-000000001c20")]),
+            BTreeMap::new(),
+            "static/issue-refits.json",
+            "application/json",
+        ),
+        example(
+            "get_issue",
+            params(&[("id", "01900000-0000-7000-8000-000000001c01")]),
+            BTreeMap::new(),
+            "static/issue.json",
+            "application/json",
+        ),
+        example(
+            "get_issue_occurrences",
+            params(&[("id", "01900000-0000-7000-8000-000000001c01")]),
+            BTreeMap::new(),
+            "static/issue-occurrences.json",
+            "application/json",
+        ),
+        example(
+            "get_issue_events",
+            params(&[("id", "01900000-0000-7000-8000-000000001c01")]),
+            BTreeMap::new(),
+            "static/issue-events.json",
             "application/json",
         ),
         example(

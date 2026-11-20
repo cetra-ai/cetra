@@ -848,8 +848,8 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     writeln!(out, "retention window: {window}")
 }
 
-/// The ten limits in D-P-13 order.
-fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 10] {
+/// The D-P-13 limits in order, then D-IC-13.
+fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 11] {
     [
         ("units_included", limits.units_included),
         ("units_cap", limits.units_cap),
@@ -861,6 +861,7 @@ fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 10] {
         ("max_alert_rules", limits.max_alert_rules),
         ("max_active_online_rules", limits.max_active_online_rules),
         ("max_annotation_queues", limits.max_annotation_queues),
+        ("max_active_issue_sources", limits.max_active_issue_sources),
     ]
 }
 

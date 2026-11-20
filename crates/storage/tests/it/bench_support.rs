@@ -12,19 +12,16 @@
     clippy::print_stdout
 )]
 
-#[allow(dead_code)] // each test target uses part of the shared helpers
-mod common;
-
 use std::collections::HashMap;
 
-use cetra_core::ids::{ProjectId, TraceId};
-use common::corpus::Corpus;
-use common::machine::{physical_disk, strip_subvolume};
-use common::payload::{
+use crate::common::corpus::Corpus;
+use crate::common::machine::{physical_disk, strip_subvolume};
+use crate::common::payload::{
     AppKind, Content, LLM_MAX_BYTES, LLM_MIN_BYTES, Payloads, SMALL_MAX_BYTES, trace,
 };
-use common::rng::Rng;
-use common::s3::S3Env;
+use crate::common::rng::Rng;
+use crate::common::s3::S3Env;
+use cetra_core::ids::{ProjectId, TraceId};
 use serde_json::Value;
 
 #[test]
@@ -404,9 +401,9 @@ fn column_sizes_reads_parquet_metadata() {
     use std::fs::File;
     use std::sync::Arc;
 
+    use crate::common::parquet_stats::column_sizes;
     use arrow::array::{ArrayRef, RecordBatch, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
-    use common::parquet_stats::column_sizes;
     use parquet::arrow::ArrowWriter;
     use parquet::basic::{Compression, ZstdLevel};
     use parquet::file::properties::WriterProperties;

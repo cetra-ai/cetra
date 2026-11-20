@@ -384,6 +384,95 @@ pub(crate) struct PlaygroundGuard {
     _user: InFlightGuard<Uuid>,
 }
 
+/// Assistant turns one user may start per minute (D-AS-15).
+pub(crate) const ASSISTANT_PER_MINUTE: u32 = 20;
+/// Assistant turns one user may have in progress at once (D-AS-15).
+pub(crate) const ASSISTANT_USER_IN_FLIGHT: u32 = 2;
+/// Assistant turns an org may have in progress at once (D-AS-15).
+pub(crate) const ASSISTANT_ORG_IN_FLIGHT: u32 = 8;
+
+/// Rate and concurrency of the assistant's turns (D-AS-15): one turn at a time per conversation,
+/// then per org and per user, then one rate token per user.
+pub(crate) struct AssistantLimits {
+    /// Turns a minute per user.
+    rate: KeyedLimiter<Uuid>,
+    /// Turns in progress per user.
+    users: InFlight<Uuid>,
+    /// Turns in progress per org.
+    orgs: InFlight<cetra_core::ids::OrgId>,
+    /// Turns in progress per conversation: one.
+    conversations: InFlight<Uuid>,
+}
+
+/// Why a turn was not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssistantRefusal {
+    /// The conversation already has a turn in progress (`409`).
+    Busy,
+    /// The org, the user or the rate is full (`429`).
+    Limited(RetryAfter),
+}
+
+/// One admitted assistant turn. Dropping it frees its three slots.
+pub(crate) struct AssistantGuard {
+    _conversation: InFlightGuard<Uuid>,
+    _user: InFlightGuard<Uuid>,
+    _org: InFlightGuard<cetra_core::ids::OrgId>,
+}
+
+impl AssistantLimits {
+    pub(crate) fn new() -> Self {
+        Self {
+            rate: KeyedLimiter::new(
+                Bucket {
+                    capacity: ASSISTANT_PER_MINUTE,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            users: InFlight::new(ASSISTANT_USER_IN_FLIGHT),
+            orgs: InFlight::new(ASSISTANT_ORG_IN_FLIGHT),
+            conversations: InFlight::new(1),
+        }
+    }
+
+    /// Admits one turn of `user` in `conversation` of `org`. The conversation's slot, then the
+    /// org's, then the user's, then the rate token. The turn counts as in progress until the
+    /// guard drops.
+    ///
+    /// # Errors
+    ///
+    /// [`AssistantRefusal::Busy`] when the conversation has a turn in progress, or
+    /// [`AssistantRefusal::Limited`] when the org or the user has no free slot or the rate is
+    /// spent. A refusal spends no rate token and holds no slot.
+    pub(crate) fn admit(
+        &self,
+        conversation: Uuid,
+        user: Uuid,
+        org: cetra_core::ids::OrgId,
+        now: i64,
+    ) -> Result<AssistantGuard, AssistantRefusal> {
+        let conversation_slot = self
+            .conversations
+            .admit(conversation)
+            .map_err(|_| AssistantRefusal::Busy)?;
+        let org_slot = self.orgs.admit(org).map_err(AssistantRefusal::Limited)?;
+        let user_slot = self.users.admit(user).map_err(AssistantRefusal::Limited)?;
+        self.rate
+            .check(&user, now)
+            .map_err(AssistantRefusal::Limited)?;
+        Ok(AssistantGuard {
+            _conversation: conversation_slot,
+            _user: user_slot,
+            _org: org_slot,
+        })
+    }
+
+    fn prune(&self, now: i64) {
+        self.rate.prune(now);
+    }
+}
+
 /// The login, form, and mail limiters, plus the password lockout.
 pub(crate) struct Limits {
     /// 10 checks per minute per `(client IP, email)`.
@@ -414,6 +503,8 @@ pub(crate) struct Limits {
     pub(crate) demo: DemoLimits,
     /// Playground runs per user and per org (D-V-24).
     pub(crate) playground: PlaygroundLimits,
+    /// Assistant turns per user, per org and per conversation (D-AS-15).
+    pub(crate) assistant: AssistantLimits,
 }
 
 impl Limits {
@@ -487,6 +578,7 @@ impl Limits {
             lockout: Lockout::new(20, Duration::from_secs(15 * 60), MAX_KEYS),
             demo: DemoLimits::new(demo),
             playground: PlaygroundLimits::new(MAX_KEYS),
+            assistant: AssistantLimits::new(),
         }
     }
 
@@ -504,6 +596,7 @@ impl Limits {
         self.mcp.prune(now);
         self.demo.prune(now);
         self.playground.prune(now);
+        self.assistant.prune(now);
         self.lockout.prune(now);
     }
 }
@@ -875,6 +968,123 @@ mod tests {
         assert!(
             limits.admit(ada, org, 0).is_err(),
             "exactly 60 tokens were spent, so the 61st is refused"
+        );
+    }
+
+    #[test]
+    fn assistant_allows_one_turn_per_conversation() {
+        let limits = AssistantLimits::new();
+        let (ada, bob) = (Uuid::now_v7(), Uuid::now_v7());
+        let org = cetra_core::ids::OrgId::new_v7();
+        let conversation = Uuid::now_v7();
+        let held = limits
+            .admit(conversation, ada, org, 0)
+            .expect("the first turn is admitted");
+        assert!(matches!(
+            limits.admit(conversation, bob, org, 0),
+            Err(AssistantRefusal::Busy)
+        ));
+        drop(held);
+        assert!(
+            limits.admit(conversation, ada, org, 0).is_ok(),
+            "the conversation is free again"
+        );
+    }
+
+    #[test]
+    fn a_busy_refusal_spends_no_rate_token() {
+        let limits = AssistantLimits::new();
+        let (ada, org) = (Uuid::now_v7(), cetra_core::ids::OrgId::new_v7());
+        let busy_conversation = Uuid::now_v7();
+        // One turn is held in `busy_conversation`: it spends one of the user's 20 tokens.
+        let held = limits
+            .admit(busy_conversation, ada, org, 0)
+            .expect("the first turn is admitted");
+        assert!(matches!(
+            limits.admit(busy_conversation, ada, org, 0),
+            Err(AssistantRefusal::Busy)
+        ));
+        // The busy refusal spent nothing: 19 more turns in other conversations pass, and the
+        // 21st turn overall is refused by the rate.
+        for _ in 0..(ASSISTANT_PER_MINUTE - 1) {
+            let other = Uuid::now_v7();
+            assert!(limits.admit(other, ada, org, 0).is_ok());
+        }
+        assert!(matches!(
+            limits.admit(Uuid::now_v7(), ada, org, 0),
+            Err(AssistantRefusal::Limited(_))
+        ));
+        drop(held);
+    }
+
+    #[test]
+    fn assistant_allows_two_turns_per_user_at_once() {
+        let limits = AssistantLimits::new();
+        let (ada, bob) = (Uuid::now_v7(), Uuid::now_v7());
+        let org = cetra_core::ids::OrgId::new_v7();
+        let held: Vec<AssistantGuard> = (0..ASSISTANT_USER_IN_FLIGHT)
+            .map(|_| {
+                limits
+                    .admit(Uuid::now_v7(), ada, org, 0)
+                    .expect("under the per-user cap")
+            })
+            .collect();
+        assert!(matches!(
+            limits.admit(Uuid::now_v7(), ada, org, 0),
+            Err(AssistantRefusal::Limited(RetryAfter(wait))) if wait == Duration::from_secs(1)
+        ));
+        assert!(
+            limits.admit(Uuid::now_v7(), bob, org, 0).is_ok(),
+            "another user is not held back"
+        );
+        drop(held);
+        assert!(limits.admit(Uuid::now_v7(), ada, org, 0).is_ok());
+    }
+
+    #[test]
+    fn assistant_allows_eight_turns_per_org_across_users() {
+        let limits = AssistantLimits::new();
+        let org = cetra_core::ids::OrgId::new_v7();
+        let mut held = Vec::new();
+        for _ in 0..ASSISTANT_ORG_IN_FLIGHT {
+            held.push(
+                limits
+                    .admit(Uuid::now_v7(), Uuid::now_v7(), org, 0)
+                    .expect("under the org cap"),
+            );
+        }
+        let outsider = Uuid::now_v7();
+        assert!(matches!(
+            limits.admit(Uuid::now_v7(), outsider, org, 0),
+            Err(AssistantRefusal::Limited(_))
+        ));
+        let other_org = cetra_core::ids::OrgId::new_v7();
+        assert!(
+            limits.admit(Uuid::now_v7(), outsider, other_org, 0).is_ok(),
+            "another org has its own cap"
+        );
+    }
+
+    #[test]
+    fn assistant_allows_twenty_turns_a_minute_per_user() {
+        let limits = AssistantLimits::new();
+        let (ada, org) = (Uuid::now_v7(), cetra_core::ids::OrgId::new_v7());
+        for _ in 0..ASSISTANT_PER_MINUTE {
+            assert!(limits.admit(Uuid::now_v7(), ada, org, 0).is_ok());
+        }
+        assert!(
+            matches!(
+                limits.admit(Uuid::now_v7(), ada, org, 0),
+                Err(AssistantRefusal::Limited(RetryAfter(wait))) if wait > Duration::ZERO
+            ),
+            "the 21st turn within a minute is refused"
+        );
+        let a_minute_later = 60_000_000_000;
+        assert!(
+            limits
+                .admit(Uuid::now_v7(), ada, org, a_minute_later)
+                .is_ok(),
+            "a minute later one token is back"
         );
     }
 }

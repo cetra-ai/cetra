@@ -47,6 +47,12 @@ use super::annotation_queues::{
     QueueMatchingPreview, QueueMatchingRequest, QueueTarget, SkipQueueItem, SkippedQueueItem,
     UpdateAnnotationQueue,
 };
+use super::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
+    AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
+    AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
+};
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
@@ -67,8 +73,8 @@ use super::datasets::{
     ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
     ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportColumn,
     ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
-    ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams,
-    RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
+    IssueDatasetItemsRequest, ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem,
+    PreviewParams, RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -101,6 +107,12 @@ use super::internal::{
     MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
+use super::issues::{
+    CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
+    IssueExample, IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueRefit,
+    IssueRefitPage, IssueSource, IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest,
+    UpdateIssueRequest, UpdateIssueSourceRequest,
+};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
     CreatedPersonalToken, PersonalToken,
@@ -367,6 +379,23 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
     set.insert_page::<DashboardSummary>("DashboardPage");
+    set.insert::<AssistantConversation>();
+    set.insert::<AssistantConversationDetail>();
+    set.insert::<AssistantMessage>();
+    set.insert::<AssistantPart>();
+    set.insert::<AssistantRole>();
+    set.insert::<AssistantMessageStatus>();
+    set.insert::<AssistantFeedback>();
+    set.insert::<AssistantDraftKind>();
+    set.insert::<UpdateAssistantConversationRequest>();
+    set.insert::<AssistantFeedbackRequest>();
+    set.insert::<AssistantTurnRequest>();
+    set.insert_page::<AssistantConversation>("AssistantConversationPage");
+    set.insert::<AssistantSettings>();
+    set.insert::<PutAssistantSettings>();
+    set.insert::<AssistantTestRequest>();
+    set.insert::<AssistantUnavailable>();
+    set.insert::<AssistantStatus>();
     set.insert_page::<AnnotationQueue>("AnnotationQueuePage");
     set.insert_page::<AnnotationQueueItem>("AnnotationQueueItemPage");
     set.insert::<EvaluatorKind>();
@@ -424,6 +453,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<RestoreRequest>();
     set.insert::<TraceRef>();
     set.insert::<FromTracesRequest>();
+    set.insert::<IssueDatasetItemsRequest>();
     set.insert::<SkippedTrace>();
     set.insert::<FromTracesResult>();
     set.insert::<ExperimentScoreMean>();
@@ -506,6 +536,23 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OnlineRulePreviewRequest>();
     set.insert::<OnlineRulePreview>();
     set.insert::<OnlineRuleStatsResponse>();
+    set.insert::<IssueSourceKind>();
+    set.insert::<IssueSource>();
+    set.insert::<IssueSourcePage>();
+    set.insert::<IssueCandidateCounts>();
+    set.insert::<IssueRefit>();
+    set.insert::<IssueRefitPage>();
+    set.insert::<CreateIssueSourceRequest>();
+    set.insert::<UpdateIssueSourceRequest>();
+    set.insert::<IssueState>();
+    set.insert::<UpdateIssueRequest>();
+    set.insert::<MergeIssueRequest>();
+    set.insert_page::<Issue>("IssuePage");
+    set.insert::<IssueDay>();
+    set.insert::<IssueExample>();
+    set.insert::<IssueOccurrences>();
+    set.insert::<IssueEvent>();
+    set.insert::<IssueEventPage>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -637,6 +684,11 @@ pub fn openapi() -> OpenApi {
                 "alerts",
                 "Alert rules, alert events and notification channels.",
             ),
+            tag("issues", "Issue sources and the issues they find."),
+            tag(
+                "assistant",
+                "The in-app assistant's conversations, private to their author (D-AS-10).",
+            ),
             tag(
                 "internal",
                 "Endpoints the cloud control plane calls on a cell.",
@@ -691,12 +743,15 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
 /// on a request means "keep data forever", while an absent field leaves the default
 /// (spec 09). The server takes both (`api/account.rs`).
 const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("AssistantFeedbackRequest", "feedback"),
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
     ("UpdateDatasetRequest", "description"),
     ("UpdatePromptRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
+    ("UpdateIssueSourceRequest", "filter"),
+    ("UpdateIssueRequest", "description"),
     ("AgentContextBody", "repository"),
     ("AgentContextBody", "branch"),
     ("AgentContextBody", "user"),
@@ -952,6 +1007,8 @@ fn paths() -> Paths {
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
+    let paths = issue_source_paths(paths);
+    let paths = issue_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = playground_paths(paths);
@@ -968,6 +1025,8 @@ fn paths() -> Paths {
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
+    let paths = assistant_paths(paths);
+    let paths = assistant_settings_paths(paths);
     media_paths(paths).build()
 }
 
@@ -2910,6 +2969,252 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue source id.");
+    let list = operation("list_issue_sources", "issues", "List issue sources")
+        .description(Some(
+            "Any project member can read. `org_active_sources` counts the enabled sources of the whole org for the plan's active-source limit (D-IC-13).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssueSourcePage", "One page of issue sources."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_issue_source", "issues", "Create an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-source limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateIssueSourceRequest")))
+        .responses(responses(
+            "201",
+            json_of::<IssueSource>("The created source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_issue_source", "issues", "Get an issue source")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The source."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_issue_source", "issues", "Update an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `kind` cannot change. Enabling a source checks the active-source limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueSourceRequest")))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The updated source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let refit = operation(
+        "post_issue_source_refit",
+        "issues",
+        "Refit an issue source now",
+    )
+        .description(Some(
+            "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source, or a disabled or paused one. The refit is recorded as `manual`. 409 when a refit started less than 10 minutes ago or one is already due.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "202",
+            json_of::<IssueSource>("The source, with `next_refit_at` set to now."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let refits = operation(
+        "list_issue_source_refits",
+        "issues",
+        "List the refits of an issue source",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 refits of the source, newest first.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<IssueRefitPage>("The refits, newest first."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete = operation("delete_issue_source", "issues", "Delete an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refit"),
+            PathItem::new(HttpMethod::Post, refit),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refits"),
+            PathItem::new(HttpMethod::Get, refits),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue id.");
+    let list = operation("list_issues", "issues", "List issues")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the period `[from, to)` (default the last 24 hours). Merged issues are listed only when `state` names `merged`. Blank `ids` means no filter.",
+        ))
+        .parameters(Some(with_query::<IssueListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssuePage", "One page of issues."),
+            READ_ERRORS,
+        ))
+        .build();
+    let get = operation("get_issue", "issues", "Get an issue")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the last 24 hours. `merged_from` lists the issues merged into this one.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses("200", json_of::<Issue>("The issue."), READ_ERRORS))
+        .build();
+    let patch = operation("patch_issue", "issues", "Update an issue")
+        .description(Some(
+            "Project members and above. API keys and personal access tokens cannot call it. `title` renames the issue and records a `renamed` event. `description` records no event; `null` clears it. `state` resolves, ignores or reopens the issue and records a `state_changed` event; a resolved issue that recurs is reopened as regressed. `merged` is refused: merge with the merge operation. Setting a value it already has changes nothing. A merged issue cannot change (409).",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The updated issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .build();
+    let merge = operation("post_issue_merge", "issues", "Merge an issue into another")
+        .description(Some(
+            "Project members and above. API keys and personal access tokens cannot call it. Folds the issue into `into`, an issue of the same source that is not merged. The issues merged into it move to `into` too, so chains stay one level deep. Its occurrences count on `into`. Answers the target issue. 409 when both are the same issue, the issues are in different sources, this issue is already merged, or the target is merged.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("MergeIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The target issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .build();
+    let dataset_items = operation(
+        "post_issue_dataset_items",
+        "issues",
+        "Add an issue's occurrences to a dataset",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("IssueDatasetItemsRequest")))
+    .responses(responses(
+        "201",
+        json_of::<FromTracesResult>("The new version, the items added and the traces skipped."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
+    let occurrences = operation(
+        "get_issue_occurrences",
+        "issues",
+        "Get the occurrences of an issue",
+    )
+    .description(Some(
+        "Any project member can read. `days` has one entry per UTC day of `[from, to)` (default the last 14 days, at most 90) with an occurrence. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period.",
+    ))
+    .parameters(Some(with_query::<IssueOccurrenceParams>(vec![
+        project_param(),
+        id.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<IssueOccurrences>("The occurrences."),
+        READ_ERRORS,
+    ))
+    .build();
+    let events = operation("get_issue_events", "issues", "List the events of an issue")
+        .description(Some(
+            "Any project member can read. The newest 100 events of the issue, newest first.",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "200",
+            json_of::<IssueEventPage>("The events."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issues"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/merge"),
+            PathItem::new(HttpMethod::Post, merge),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/dataset-items"),
+            PathItem::new(HttpMethod::Post, dataset_items),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/occurrences"),
+            PathItem::new(HttpMethod::Get, occurrences),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/events"),
+            PathItem::new(HttpMethod::Get, events),
+        )
+}
+
 fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
     let job_id = path_uuid("id", "Eval job id.");
     let list = operation("list_eval_jobs", "evaluation", "List eval jobs")
@@ -4685,7 +4990,7 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let query = operation("query_widget", "dashboards", "Get one widget's data")
         .description(Some(
-            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("WidgetQueryRequest")))
@@ -5080,12 +5385,291 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 const EXCLUSIONS: &str = concat!(
-    "Evaluation and playground traces (`environment = ",
+    "Evaluation, playground and assistant traces (`environment = ",
     cetra_core::cetra_name!("-eval"),
-    "` or `environment = ",
+    "`, `environment = ",
     cetra_core::cetra_name!("-playground"),
+    "` or `environment = ",
+    cetra_core::cetra_name!("-assistant"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
+
+/// The access of the assistant routes (D-AS-4, D-AS-10).
+const ASSISTANT_ACCESS: &str =
+    "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10).";
+
+fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation(
+        "list_assistant_conversations",
+        "assistant",
+        "List the caller's assistant conversations",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "AssistantConversationPage",
+            "The caller's conversations.",
+        ),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_assistant_conversation",
+        "assistant",
+        "Create an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Takes no body. The conversation starts with an empty title."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "201",
+        json_of::<AssistantConversation>("The created conversation."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let get = operation(
+        "get_assistant_conversation",
+        "assistant",
+        "Get an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversation with its messages, oldest first. Any other id is 404."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversationDetail>("The conversation with its messages."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let update = operation(
+        "patch_assistant_conversation",
+        "assistant",
+        "Rename an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("UpdateAssistantConversationRequest")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversation>("The renamed conversation."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_assistant_conversation",
+        "assistant",
+        "Delete an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Deletes the conversation and its messages."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let seq = ParameterBuilder::new()
+        .name("seq")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Message position, from 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let turn = operation(
+        "post_assistant_turn",
+        "assistant",
+        "Stream an assistant turn",
+    )
+    .description(Some(
+        "Members and above, with a session (D-AS-4). Streams one turn (D-AS-9); aborting the request cancels it. Not units (D-AS-11).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("AssistantTurnRequest")))
+    .responses(responses(
+        "200",
+        sse("The turn's events, as `text/event-stream`: `start`, `text`, `tool_call`, `tool_result` and `draft` events, then one `done` or `error`. A `ping` comes every 15 seconds."),
+        &[400, 401, 403, 404, 409, 413, 429, 503],
+    ))
+    .build();
+    let feedback = operation(
+        "put_assistant_feedback",
+        "assistant",
+        "Rate an assistant message",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the rating of an assistant message to `up` or `down`; `null` clears it. A user or tool message is `400`. Any other message is `404`."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+        seq,
+    ]))
+    .request_body(Some(json_body("AssistantFeedbackRequest")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Saved.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/messages/{{seq}}/feedback"),
+            PathItem::new(HttpMethod::Put, feedback),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/turns"),
+            PathItem::new(HttpMethod::Post, turn),
+        )
+}
+
+/// The org's assistant setting and its test, and the panel's status (D-AS-3, D-AS-4, D-AS-24).
+fn assistant_settings_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let session = || Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]);
+    let get = operation(
+        "get_org_assistant",
+        "assistant",
+        "Get the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization members and above, and viewers. Answers `enabled: false` while the org never saved one (D-AS-3).",
+    ))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The setting."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let put = operation(
+        "put_org_assistant",
+        "assistant",
+        "Save the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Enabling needs a connection and a model, and runs the tool-calling test first; a failed test saves nothing (D-AS-3, D-AS-24). Disabling needs no test.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("PutAssistantSettings")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The saved setting."),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let test = operation(
+        "post_org_assistant_test",
+        "assistant",
+        "Test a connection for the assistant",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org]))
+    .request_body(Some(json_body("AssistantTestRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let status = operation(
+        "get_project_assistant",
+        "assistant",
+        "Get whether the caller can use the assistant",
+    )
+    .description(Some(
+        "Project members and above, with a session. Answers `usable` and, when it is false, the reason: `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16).",
+    ))
+    .securities(session())
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantStatus>("The caller's status."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let mut setting = PathItem::new(HttpMethod::Get, get);
+    setting.put = Some(put);
+    paths
+        .path("/api/v1/orgs/{org}/assistant", setting)
+        .path(
+            "/api/v1/orgs/{org}/assistant/test",
+            PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            format!("{PROJECT}/assistant"),
+            PathItem::new(HttpMethod::Get, status),
+        )
+}
 
 fn operation(id: &str, tag_name: &str, summary: &str) -> OperationBuilder {
     OperationBuilder::new()

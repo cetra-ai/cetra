@@ -74,6 +74,7 @@ impl Mock {
         };
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
+            .route("/v1/embeddings", post(handle))
             .route("/v1/messages", post(handle))
             .route("/v1beta/models/{*rest}", post(handle))
             .route("/webhook", post(handle))

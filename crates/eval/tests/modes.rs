@@ -7,13 +7,13 @@ use crate::config::JudgeOutput;
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::JudgeError;
 use crate::judge::{
-    Adapter, Answer, JudgeCall, JudgeConnection, JudgeReply, RawAnswer, StructuredOutput, call,
-    parse_answer,
+    Adapter, Answer, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection,
+    JudgeReply, RawAnswer, StructuredOutput, answer_schema, call, parse_answer,
 };
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
 use cetra_core::score::ScoreValue;
-use serde_json::json;
+use serde_json::{Value, json};
 
 const KEY: &str = "mode-SECRET-PAYLOAD";
 const PROMPT: &str = "Grade the answer.";
@@ -65,12 +65,14 @@ fn connection(provider: &Provider, base: reqwest::Url, mode: StructuredOutput) -
     }
 }
 
-fn judge<'a>(provider: &'a Provider, output: &'a JudgeOutput) -> JudgeCall<'a> {
-    JudgeCall {
+fn judge<'a>(provider: &'a Provider, schema: &'a Value) -> CompletionCall<'a> {
+    CompletionCall {
         model: provider.model,
         prompt: PROMPT,
-        output,
-        include_reason: true,
+        schema,
+        schema_name: "judge_answer",
+        tool_name: JUDGEMENT_TOOL,
+        tool_description: JUDGEMENT_DESCRIPTION,
         temperature: None,
         max_output_tokens: 1024,
         timeout: Duration::from_secs(2),
@@ -161,7 +163,7 @@ async fn request_bodies_for_tool_and_prompt() {
             call(
                 &http,
                 &connection(provider, (provider.base)(&mock), mode),
-                &judge(provider, &output),
+                &judge(provider, &answer_schema(&output, true)),
             )
             .await
             .expect("request");
@@ -199,7 +201,7 @@ async fn tool_replies_parse_and_text_only_still_parses() {
         let reply = call(
             &http,
             &connection(provider, (provider.base)(&mock), StructuredOutput::Tool),
-            &judge(provider, &output),
+            &judge(provider, &answer_schema(&output, true)),
         )
         .await
         .expect("tool");
@@ -216,7 +218,7 @@ async fn tool_replies_parse_and_text_only_still_parses() {
         let reply = call(
             &http,
             &connection(provider, (provider.base)(&mock), StructuredOutput::Tool),
-            &judge(provider, &output),
+            &judge(provider, &answer_schema(&output, true)),
         )
         .await
         .expect("text");
@@ -237,7 +239,7 @@ async fn prompt_mode_parses_fenced_json() {
         let reply = call(
             &http,
             &connection(provider, (provider.base)(&mock), StructuredOutput::Prompt),
-            &judge(provider, &output),
+            &judge(provider, &answer_schema(&output, true)),
         )
         .await
         .expect("fence");
@@ -271,7 +273,7 @@ async fn unparsable_tool_arguments_are_not_json() {
     let err = call(
         &http,
         &connection(provider, mock.url(), StructuredOutput::Tool),
-        &judge(provider, &output),
+        &judge(provider, &answer_schema(&output, true)),
     )
     .await
     .expect_err("arguments");
@@ -311,7 +313,7 @@ async fn hint_on_a_400_in_native_and_tool_mode_only() {
             let err = call(
                 &http,
                 &connection(provider, (provider.base)(&mock), mode),
-                &judge(provider, &output),
+                &judge(provider, &answer_schema(&output, true)),
             )
             .await
             .expect_err("status");

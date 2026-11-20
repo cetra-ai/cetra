@@ -8,9 +8,10 @@ use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) use answer::Answer;
-pub(crate) use answer::{RawAnswer, parse_answer};
+pub(crate) use answer::{RawAnswer, answer_schema, find_object, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
 use reqwest::Url;
+use serde_json::Value;
 
 use cetra_core::message::{Message, Part, Role};
 use serde_json::Map;
@@ -18,7 +19,6 @@ use serde_json::Map;
 use crate::chat::{
     CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, ResponseFormat, TokenUsage,
 };
-use crate::config::JudgeOutput;
 use crate::egress::EgressClient;
 use crate::error::JudgeError;
 use crate::secret::Secret;
@@ -158,16 +158,20 @@ impl std::fmt::Debug for JudgeConnection {
     }
 }
 
-/// One judge invocation. The caller owns the model, prompt, and output definition.
-pub(crate) struct JudgeCall<'a> {
+/// One completion call. The caller owns the model, prompt, and answer schema.
+pub(crate) struct CompletionCall<'a> {
     /// Provider model id.
     pub(crate) model: &'a str,
     /// Rendered prompt. Sent as one user message.
     pub(crate) prompt: &'a str,
-    /// Score the model must produce.
-    pub(crate) output: &'a JudgeOutput,
-    /// Include `explanation` in the schema.
-    pub(crate) include_reason: bool,
+    /// JSON Schema of the answer object.
+    pub(crate) schema: &'a Value,
+    /// OpenAI `json_schema.name` in native mode. `^[a-zA-Z0-9_-]{1,64}$`.
+    pub(crate) schema_name: &'a str,
+    /// Function name forced in [`StructuredOutput::Tool`].
+    pub(crate) tool_name: &'a str,
+    /// Function description sent in [`StructuredOutput::Tool`].
+    pub(crate) tool_description: &'a str,
     /// Sampling temperature. Omitted from the request when unset.
     pub(crate) temperature: Option<f64>,
     /// Completion cap, including reasoning tokens.
@@ -176,14 +180,13 @@ pub(crate) struct JudgeCall<'a> {
     pub(crate) timeout: Duration,
 }
 
-impl std::fmt::Debug for JudgeCall<'_> {
+impl std::fmt::Debug for CompletionCall<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("JudgeCall")
+            .debug_struct("CompletionCall")
             .field("model", &self.model)
             .field("prompt_bytes", &self.prompt.len())
-            .field("output", &self.output)
-            .field("include_reason", &self.include_reason)
+            .field("tool_name", &self.tool_name)
             .field("temperature", &self.temperature)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("timeout", &self.timeout)
@@ -204,10 +207,9 @@ pub(crate) struct JudgeReply {
     pub(crate) response_model: Option<String>,
 }
 
-/// The chat request of one judge call: the prompt as one user message, the answer
-/// schema as the response format (`judge_answer`, strict), and [`JUDGEMENT_TOOL`] as the
-/// forced tool in tool mode.
-fn chat_request(call: &JudgeCall<'_>) -> ChatRequest {
+/// The chat request of one completion call: the prompt as one user message, the answer
+/// schema as the strict response format, and the call's tool as the forced tool in tool mode.
+fn chat_request(call: &CompletionCall<'_>) -> ChatRequest {
     ChatRequest {
         model: call.model.to_owned(),
         messages: vec![Message {
@@ -223,11 +225,11 @@ fn chat_request(call: &JudgeCall<'_>) -> ChatRequest {
         tools: Vec::new(),
         tool_choice: None,
         response_format: Some(ResponseFormat {
-            name: "judge_answer".to_owned(),
-            schema: answer::answer_schema(call.output, call.include_reason),
+            name: call.schema_name.to_owned(),
+            schema: call.schema.clone(),
             strict: true,
-            tool_name: JUDGEMENT_TOOL.to_owned(),
-            tool_description: JUDGEMENT_DESCRIPTION.to_owned(),
+            tool_name: call.tool_name.to_owned(),
+            tool_description: call.tool_description.to_owned(),
         }),
         params: ChatParams {
             temperature: call.temperature,
@@ -286,7 +288,7 @@ pub(crate) fn judge_reply(reply: ChatReply) -> Result<JudgeReply, JudgeError> {
 pub(crate) async fn call(
     client: &EgressClient,
     conn: &JudgeConnection,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     judge_reply(crate::chat::complete_chat(client, conn, &chat_request(call)).await?)
 }

@@ -48,6 +48,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import type { EvaluatorDraft } from "@/lib/assistant/types";
 import { canManageEvaluation } from "@/lib/roles";
 
 type Kind = Schema<"EvaluatorKind">;
@@ -105,9 +106,17 @@ function numberText(value: unknown): string {
   return typeof value === "number" ? String(value) : "";
 }
 
-function initialValues(evaluator: Schema<"Evaluator"> | undefined): FormValues {
-  const config: Record<string, unknown> = evaluator?.config ?? {};
-  const kind = evaluator?.kind ?? "llm_judge";
+/** What a form starts from: a stored evaluator, or an assistant's draft (the same config shape). */
+type EvaluatorSource = {
+  name: string;
+  kind: "llm_judge" | "check" | "webhook";
+  config: Record<string, unknown>;
+  output_score?: Schema<"OutputScoreBody">;
+};
+
+function valuesOf(source: EvaluatorSource | undefined): FormValues {
+  const config: Record<string, unknown> = source?.config ?? {};
+  const kind = source?.kind ?? "llm_judge";
   const check = checkStateOf(config);
   const headerNames = Array.isArray(config.header_names)
     ? config.header_names.filter((item): item is string => typeof item === "string")
@@ -115,12 +124,12 @@ function initialValues(evaluator: Schema<"Evaluator"> | undefined): FormValues {
   let output = defaultOutputState();
   if (kind === "llm_judge") {
     output = outputStateOfJudge(config.output);
-  } else if (evaluator) {
-    output = outputStateOfScore(evaluator.output_score);
+  } else if (source?.output_score !== undefined) {
+    output = outputStateOfScore(source.output_score);
   }
   return {
     kind,
-    name: evaluator?.name ?? "",
+    name: source?.name ?? "",
     connectionId: stringOf(config.connection_id),
     model: stringOf(config.model),
     prompt: stringOf(config.prompt),
@@ -135,7 +144,7 @@ function initialValues(evaluator: Schema<"Evaluator"> | undefined): FormValues {
     headers: headerNames.map((headerName) => newHeaderRow(headerName)),
     replaceWebhook: false,
     secret: "",
-    scoreName: evaluator?.output_score.name ?? "",
+    scoreName: source?.output_score?.name ?? "",
     defaultMapping: [],
   };
 }
@@ -390,6 +399,7 @@ export function EvaluatorForm({
   project,
   evaluator,
   initialTemplateId,
+  initialDraft,
   onSaved,
   onCancel,
 }: {
@@ -398,6 +408,8 @@ export function EvaluatorForm({
   evaluator?: Schema<"Evaluator">;
   /** A template to start from, as picked on the list page. An id that is not a template is ignored. */
   initialTemplateId?: string;
+  /** An assistant's draft to prefill a new evaluator with. The form still saves with POST. */
+  initialDraft?: EvaluatorDraft;
   onSaved: (saved: Schema<"Evaluator">) => void;
   /** Shows a Cancel button beside the submit button. */
   onCancel?: () => void;
@@ -407,7 +419,7 @@ export function EvaluatorForm({
   const canEdit = canManageEvaluation(projectData.role);
   const ref = projectRef(org, project);
   const saved = evaluator !== undefined;
-  const [initial] = useState(() => initialValues(evaluator));
+  const [initial] = useState(() => valuesOf(evaluator ?? initialDraft));
   // The baseline is what the saved evaluator sends, so an edit sends only what changed.
   const [baseline] = useState(() => buildParts(initial, true));
   const [values, setValues] = useState<FormValues>(initial);
@@ -430,7 +442,12 @@ export function EvaluatorForm({
   // Applies `initialTemplateId` once, through the same path as picking it in the select.
   const appliedInitialTemplate = useRef(false);
   useEffect(() => {
-    if (appliedInitialTemplate.current || saved || initialTemplateId === undefined) {
+    if (
+      appliedInitialTemplate.current ||
+      saved ||
+      initialDraft !== undefined ||
+      initialTemplateId === undefined
+    ) {
       return;
     }
     const template = templates.data?.data.find((item) => item.id === initialTemplateId);

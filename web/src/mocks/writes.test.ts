@@ -15,6 +15,7 @@ import { WRITE_OPERATIONS, writeHandlers } from "./writes";
 
 const PROJECT = "/api/v1/projects/acme%2Fsupport-bot";
 const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
+const CONNECTION_ID = "01900000-0000-7000-8000-000000000400";
 const ITEM_ID = "01900000-0000-7000-8000-000000000d01";
 
 /** Writes that later sub-phases add under the covered prefixes. */
@@ -77,9 +78,13 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/channels") ||
         path.startsWith("/api/v1/projects/{project}/alert-rules") ||
         path.startsWith("/api/v1/projects/{project}/online-rules") ||
+        path.startsWith("/api/v1/projects/{project}/issue-sources") ||
+        path.startsWith("/api/v1/projects/{project}/issues") ||
         path.startsWith("/api/v1/projects/{project}/datasets") ||
         path.startsWith("/api/v1/projects/{project}/scores") ||
         path.startsWith("/api/v1/projects/{project}/experiments") ||
+        path.startsWith("/api/v1/projects/{project}/prompts") ||
+        path.startsWith("/api/v1/projects/{project}/prompt-settings") ||
         path.startsWith("/api/v1/projects/{project}/annotation-queues");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });
@@ -120,6 +125,43 @@ it("refuses to change the signed-in admin", async () => {
   );
   expect(response.status).toBe(400);
   expect(response.json?.detail).toBe("cannot change your own account");
+});
+
+it("saves the org assistant setting and stamps it", async () => {
+  const response = await send(
+    "PUT",
+    "/api/v1/orgs/acme/assistant",
+    JSON.stringify({ enabled: true, connection_id: CONNECTION_ID, model: "gpt-4o" }),
+  );
+  expect(response.status).toBe(200);
+  expect(response.json).toMatchObject({
+    enabled: true,
+    connection_id: CONNECTION_ID,
+    model: "gpt-4o",
+  });
+  expect(typeof response.json?.updated_at).toBe("string");
+});
+
+it("refuses to turn the org assistant on without a connection", async () => {
+  const response = await send(
+    "PUT",
+    "/api/v1/orgs/acme/assistant",
+    JSON.stringify({ enabled: true, model: "gpt-4o" }),
+  );
+  expect(response.status).toBe(400);
+  expect(response.json?.errors).toEqual([
+    { field: "connection_id", message: "required when enabled" },
+  ]);
+});
+
+it("answers the org assistant test with the test result", async () => {
+  const response = await send(
+    "POST",
+    "/api/v1/orgs/acme/assistant/test",
+    JSON.stringify({ connection_id: CONNECTION_ID, model: "gpt-5-mini" }),
+  );
+  expect(response.status).toBe(200);
+  expect(response.json?.ok).toBe(true);
 });
 
 it("creates a public key", async () => {

@@ -139,6 +139,16 @@
     "file": "static/annotation-queue-item.json"
   },
   {
+    "operation_id": "get_assistant_conversation",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json"
+  },
+  {
     "operation_id": "get_auth_config",
     "path_params": {},
     "query": {},
@@ -454,6 +464,46 @@
     "file": "static/invite-preview.json"
   },
   {
+    "operation_id": "get_issue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue.json"
+  },
+  {
+    "operation_id": "get_issue_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-events.json"
+  },
+  {
+    "operation_id": "get_issue_occurrences",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-occurrences.json"
+  },
+  {
+    "operation_id": "get_issue_source",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c00"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-source.json"
+  },
+  {
     "operation_id": "get_llm_connection",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000400",
@@ -521,6 +571,16 @@
     "file": "static/org.json"
   },
   {
+    "operation_id": "get_org_assistant",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/org-assistant.json"
+  },
+  {
     "operation_id": "get_org_entitlements",
     "path_params": {
       "org": "acme"
@@ -565,6 +625,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/project.json"
+  },
+  {
+    "operation_id": "get_project_assistant",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/project-assistant.json"
   },
   {
     "operation_id": "get_prompt",
@@ -1010,6 +1078,14 @@
     "file": "static/api-keys.json"
   },
   {
+    "operation_id": "list_assistant_conversations",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations.json"
+  },
+  {
     "operation_id": "list_backfills",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000700"
@@ -1155,6 +1231,32 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiments.json"
+  },
+  {
+    "operation_id": "list_issue_source_refits",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c20"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-refits.json"
+  },
+  {
+    "operation_id": "list_issue_sources",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-sources.json"
+  },
+  {
+    "operation_id": "list_issues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issues.json"
   },
   {
     "operation_id": "list_llm_connections",

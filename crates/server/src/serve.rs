@@ -461,6 +461,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     }
     let storage = Arc::new(storage);
     let eval = crate::eval::EvalQueue::new(config.eval.workers);
+    let issue_workers = Arc::new(tokio::sync::Semaphore::new(
+        usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
+    ));
     let limits = Limits::new(&config.demo);
     let state = AppState::new(AppInner {
         config,
@@ -497,6 +500,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         eval,
         pending: crate::eval::pending::PendingTraces::default(),
         telemetry,
+        issue_score_rules: crate::issues::triggers::ScoreRules::default(),
+        issue_workers,
+        issue_wake: tokio::sync::Notify::new(),
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -570,6 +576,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         spawn_prune(state.clone()),
         spawn_purge(state.clone()),
         spawn_last_used(state.clone()),
+        crate::assistant::spawn_expiry(state.clone()),
     ];
     tasks.extend(crate::alerts::spawn_loops(
         &state,
@@ -1550,11 +1557,11 @@ mod tests {
             })
             .await
             .unwrap();
-        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        crate::eval::trigger::refresh_tracked(&state).await.unwrap();
         // A sweep that read the rules before the insert may still hold a stale tracked set. Every
         // tick that starts after this sleep tracks the project, so refreshing again is enough.
         tokio::time::sleep(crate::eval::EvalTiming::DEFAULT.sweep_every * 2).await;
-        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        crate::eval::trigger::refresh_tracked(&state).await.unwrap();
         // An unrooted span: the trace stays pending for the 60 s timeout, so nothing completes it.
         let mut span = crate::test_support::dataset_span(0);
         span.parent_span_id = Some(SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1]).unwrap());

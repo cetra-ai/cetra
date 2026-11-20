@@ -8,9 +8,13 @@ export const GO_TARGETS = {
   q: { id: "go-sql", to: "/$org/$project/sql" },
   e: { id: "go-evaluators", to: "/$org/$project/evaluators" },
   o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
+  y: { id: "go-issues", to: "/$org/$project/issues" },
+  n: { id: "go-issue-sources", to: "/$org/$project/issue-sources" },
   r: { id: "go-annotation-queues", to: "/$org/$project/annotation-queues" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
+  m: { id: "go-prompts", to: "/$org/$project/prompts" },
+  l: { id: "go-playground", to: "/$org/$project/playground" },
 } as const;
 
 type GoTarget = (typeof GO_TARGETS)[keyof typeof GO_TARGETS];
@@ -26,7 +30,8 @@ export type ShortcutId =
   | "fit"
   | "palette"
   | "help"
-  | GoTarget["id"];
+  | GoTarget["id"]
+  | "assistant";
 
 type Binding = { id: ShortcutId; key: string; mod?: boolean };
 
@@ -117,6 +122,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
     bindings: [{ id: "palette", key: "k", mod: true }],
   },
   {
+    keys: "⌘I",
+    description: "Open or close the assistant",
+    scope: "project",
+    bindings: [{ id: "assistant", key: "i", mod: true }],
+  },
+  {
     keys: "?",
     description: "Shortcuts help",
     scope: "anywhere",
@@ -133,6 +144,7 @@ export type KeyInfo = {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  shiftKey?: boolean;
 };
 
 export function isElementShortcut(id: ShortcutId): boolean {
@@ -185,6 +197,12 @@ export function reduceShortcut(
   const palette = key.key.toLowerCase() === "k" && (key.metaKey || key.ctrlKey) && !key.altKey;
   if (palette) {
     return { chord: null, action: "palette" };
+  }
+  // Before the typing check: the assistant's composer is a textarea, and Ctrl/Cmd+I must still work there.
+  const assistant =
+    key.key.toLowerCase() === "i" && (key.metaKey || key.ctrlKey) && !key.altKey && !key.shiftKey;
+  if (assistant) {
+    return { chord: null, action: "assistant" };
   }
   if (typing || key.metaKey || key.ctrlKey || key.altKey) {
     return { chord: null, action: null };

@@ -67,6 +67,12 @@ pub(crate) fn success(body: &Value) -> CallToolResult {
 /// the position), else the problem's detail, else its title, cut to [`MAX_MESSAGE`]
 /// characters. Logged like an HTTP error.
 pub(crate) fn failure(error: &ApiError) -> CallToolResult {
+    CallToolResult::error(vec![ContentBlock::text(render(&failure_body(error)))])
+}
+
+/// The body of a failed tool result, `{"error": {"code", "message", "position"?}}`, shared by
+/// `failure` and the assistant's tools (AS M2). Logged like an HTTP error.
+pub(crate) fn failure_body(error: &ApiError) -> Value {
     error.log();
     let problem = error.problem();
     // `errors` is borrowed by `first()`; `detail` and `title` are other fields, so moving them is allowed.
@@ -84,7 +90,7 @@ pub(crate) fn failure(error: &ApiError) -> CallToolResult {
             json!({"line": position.line, "column": position.column}),
         );
     }
-    CallToolResult::error(vec![ContentBlock::text(render(&json!({"error": inner})))])
+    json!({"error": inner})
 }
 
 /// Fits `body` in `max_chars` by keeping the longest prefix of the array `body[list]`.

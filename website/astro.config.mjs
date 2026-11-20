@@ -94,8 +94,10 @@ export default defineConfig({
                     { label: "Evaluators and LLM judges", link: "/docs/evaluation/evaluators/" },
                     { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },
+                    { label: "Issues", link: "/docs/evaluation/issues/" },
                     { label: "Datasets", link: "/docs/evaluation/datasets/" },
                     { label: "Prompts", link: "/docs/evaluation/prompts/" },
+                    { label: "Playground", link: "/docs/evaluation/playground/" },
                     { label: "Experiments", link: "/docs/evaluation/experiments/" },
                   ],
                 },
@@ -104,6 +106,7 @@ export default defineConfig({
                   items: [
                     { label: "Alerts", link: "/docs/platform/alerts/" },
                     { label: "MCP server", link: "/docs/platform/mcp/" },
+                    { label: "Assistant", link: "/docs/platform/assistant/" },
                     { label: "API keys and tokens", link: "/docs/platform/api-keys/" },
                     { label: "Organizations and roles", link: "/docs/platform/organizations/" },
                     { label: "Single sign-on", link: "/docs/platform/sso/" },

@@ -11,6 +11,7 @@
     "typecheck": "pnpm gen:routes && tsc -b",
     "test": "pnpm gen:routes && vitest run",
     "build": "vite build",
+    "build:demo": "vite build --mode demo",
     "check": "pnpm check:api && biome check . && pnpm typecheck && pnpm test && pnpm build && node scripts/check-dist.mjs"
   },
   "dependencies": {
@@ -62,7 +63,8 @@
     "openapi-typescript": "7.13.0",
     "typescript": "5.9.3",
     "vite": "8.3.6",
-    "vitest": "5.1.0"
+    "vitest": "5.1.0",
+    "wrangler": "4.159.0"
   },
   "msw": {
     "workerDirectory": [

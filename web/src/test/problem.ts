@@ -15,7 +15,11 @@ const TITLES: Record<number, string> = {
 export function problemResponse(
   status: number,
   code: string,
-  options: { detail?: string; errors?: { field: string; message: string }[]; title?: string } = {},
+  options: {
+    detail?: string;
+    errors?: { field: string; message: string; position?: { line: number; column: number } }[];
+    title?: string;
+  } = {},
 ): Response {
   return HttpResponse.json(
     {

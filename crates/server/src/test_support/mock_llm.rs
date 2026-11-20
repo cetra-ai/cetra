@@ -23,9 +23,9 @@ pub(crate) struct Reply {
     pub(crate) body: Value,
 }
 
-/// Serves `POST /v1/chat/completions` on `127.0.0.1:0`. Replies in order; the
-/// last one repeats. Records each request's headers and JSON body. Aborts its
-/// task on drop.
+/// Serves `POST /v1/chat/completions` and `POST /v1/embeddings` on `127.0.0.1:0`. Each route
+/// replies from its own script, in order; the last reply repeats. Records each request's
+/// headers and JSON body per route. Aborts its task on drop.
 pub(crate) struct MockLlm {
     addr: SocketAddr,
     state: Arc<MockState>,
@@ -33,10 +33,14 @@ pub(crate) struct MockLlm {
 }
 
 struct MockState {
-    /// Replies still to serve. The last one repeats.
+    /// Chat replies still to serve. The last one repeats.
     replies: Arc<Mutex<Vec<Reply>>>,
-    /// Each request's headers and parsed JSON body, in arrival order.
+    /// Each chat request's headers and parsed JSON body, in arrival order.
     requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
+    /// Embedding replies still to serve. The last one repeats.
+    embeddings: Arc<Mutex<Vec<Reply>>>,
+    /// Each embedding request's headers and parsed JSON body, in arrival order.
+    embedding_requests: Arc<Mutex<Vec<(HeaderMap, Value)>>>,
     /// Runs on each request before its reply (a test moves the clock while a call is in flight).
     hook: Box<dyn Fn() + Send + Sync>,
     /// How long each reply waits before it is sent.
@@ -46,12 +50,12 @@ struct MockState {
 impl MockLlm {
     /// Binds the listener and serves it in the background.
     pub(crate) async fn start(replies: Vec<Reply>) -> Self {
-        Self::start_with_delay(replies, Duration::ZERO).await
+        Self::start_with_embeddings(replies, Vec::new()).await
     }
 
     /// [`Self::start`], and each reply is sent `delay` after its request arrives.
     pub(crate) async fn start_with_delay(replies: Vec<Reply>, delay: Duration) -> Self {
-        Self::spawn(replies, Box::new(|| {}), delay).await
+        Self::spawn(replies, Vec::new(), Box::new(|| {}), delay).await
     }
 
     /// [`Self::start`], and `hook` runs on each request before its reply.
@@ -59,22 +63,31 @@ impl MockLlm {
         replies: Vec<Reply>,
         hook: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        Self::spawn(replies, Box::new(hook), Duration::ZERO).await
+        Self::spawn(replies, Vec::new(), Box::new(hook), Duration::ZERO).await
+    }
+
+    /// [`Self::start`], with `embeddings` as the replies of `POST /v1/embeddings`.
+    pub(crate) async fn start_with_embeddings(replies: Vec<Reply>, embeddings: Vec<Reply>) -> Self {
+        Self::spawn(replies, embeddings, Box::new(|| {}), Duration::ZERO).await
     }
 
     async fn spawn(
         replies: Vec<Reply>,
+        embeddings: Vec<Reply>,
         hook: Box<dyn Fn() + Send + Sync>,
         delay: Duration,
     ) -> Self {
         let state = Arc::new(MockState {
             replies: Arc::new(Mutex::new(replies)),
             requests: Arc::new(Mutex::new(Vec::new())),
+            embeddings: Arc::new(Mutex::new(embeddings)),
+            embedding_requests: Arc::new(Mutex::new(Vec::new())),
             hook,
             delay,
         });
         let router = Router::new()
             .route("/v1/chat/completions", post(handle))
+            .route("/v1/embeddings", post(handle_embedding))
             .with_state(Arc::clone(&state));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -92,10 +105,20 @@ impl MockLlm {
         format!("http://{}/v1", self.addr)
     }
 
-    /// Requests received so far, in arrival order.
+    /// Chat requests received so far, in arrival order.
     pub(crate) fn requests(&self) -> Vec<(HeaderMap, Value)> {
         self.state
             .requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Embedding requests received so far, in arrival order. Each body has `model`, `input`,
+    /// `encoding_format` and, when the caller asked for one, `dimensions`.
+    pub(crate) fn embedding_requests(&self) -> Vec<(HeaderMap, Value)> {
+        self.state
+            .embedding_requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -109,15 +132,39 @@ impl Drop for MockLlm {
 }
 
 async fn handle(State(state): State<Arc<MockState>>, headers: HeaderMap, body: Bytes) -> Response {
-    let parsed = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    state
-        .requests
-        .lock()
+    serve(&state, &state.replies, &state.requests, headers, &body).await
+}
+
+async fn handle_embedding(
+    State(state): State<Arc<MockState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    serve(
+        &state,
+        &state.embeddings,
+        &state.embedding_requests,
+        headers,
+        &body,
+    )
+    .await
+}
+
+/// Records one request, then sends the next reply of `queue`.
+async fn serve(
+    state: &MockState,
+    queue: &Mutex<Vec<Reply>>,
+    log: &Mutex<Vec<(HeaderMap, Value)>>,
+    headers: HeaderMap,
+    body: &[u8],
+) -> Response {
+    let parsed = serde_json::from_slice(body).unwrap_or(Value::Null);
+    log.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .push((headers, parsed));
     (state.hook)();
     let reply = {
-        let mut replies = state.replies.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut replies = queue.lock().unwrap_or_else(PoisonError::into_inner);
         // Replies are served in order; the last one repeats.
         match replies.len() {
             0 => {
@@ -162,5 +209,27 @@ pub(crate) fn completion(content: &str) -> Reply {
             }],
             "usage": {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
         }),
+    }
+}
+
+/// A 200 embedding of `vector`; its dimension is the vector's length. The model is
+/// `text-embedding-test`, with usage 5 in.
+pub(crate) fn embedding(vector: &[f32]) -> Reply {
+    Reply {
+        status: 200,
+        body: serde_json::json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": vector}],
+            "model": "text-embedding-test",
+            "usage": {"prompt_tokens": 5, "total_tokens": 5}
+        }),
+    }
+}
+
+/// An error reply with `status` and an OpenAI-style error body carrying `message`.
+pub(crate) fn error(status: u16, message: &str) -> Reply {
+    Reply {
+        status,
+        body: serde_json::json!({"error": {"message": message}}),
     }
 }

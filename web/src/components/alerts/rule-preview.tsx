@@ -37,7 +37,9 @@ export function RulePreview(props: { org: string; project: string; values: RuleF
   if (preview === undefined) {
     return (
       <div className="rounded-md border border-dashed p-4 text-body text-muted-foreground">
-        No preview for LLM span latency. The dashboard shows it per model.
+        {values.metric === "issue_occurrences"
+          ? "No preview for issue occurrences."
+          : "No preview for LLM span latency. The dashboard shows it per model."}
       </div>
     );
   }

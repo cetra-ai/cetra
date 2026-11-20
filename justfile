@@ -16,7 +16,8 @@ fmt-check:
 
 # Lint (warnings are errors)
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # `--all-targets` skips the storage `test = false` targets (benchmarks, S3 probes); name them.
+    cargo clippy --workspace --all-targets --all-features --test ingest_bench --test trace_bench --test s3_chaos --test s3_probe -- -D warnings
 
 # Run all Rust tests
 test:
@@ -120,9 +121,9 @@ fetch-corpus:
     echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
     mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
 
-# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/soak.rs
+# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/it/soak.rs
 soak:
-    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
+    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test it -- --ignored --nocapture --exact soak::soak
 
 # Plots of a soak run's samples into <out>/plots
 soak-plot out:
@@ -403,6 +404,32 @@ docs-deploy branch: js-install
       url="$(grep -oE 'https://cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
     else
       url="$(grep -oE 'https://{{branch}}-cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    fi
+    test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
+    echo "url=$url/"
+
+# Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (or a `wrangler login`); the
+# last line printed is `url=<deployed URL>`.
+# Build the web UI on its mocks and deploy it to the `cetra-web-demo` Worker: `main` is production, `pr-<number>` a Preview (D-C-22)
+web-demo-deploy branch: js-install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{branch}}" in
+      main | pr-[0-9]*) ;;
+      *) echo "branch must be main or pr-<number>, not {{branch}}" >&2; exit 1 ;;
+    esac
+    pnpm --dir web run build:demo
+    test -f web/dist-demo/mockServiceWorker.js || { echo "the demo build has no mockServiceWorker.js" >&2; exit 1; }
+    if [ "{{branch}}" = main ]; then
+      out="$(pnpm --dir web exec wrangler deploy)"
+    else
+      out="$(pnpm --dir web exec wrangler preview --name "{{branch}}")"
+    fi
+    echo "$out"
+    if [ "{{branch}}" = main ]; then
+      url="$(grep -oE 'https://cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    else
+      url="$(grep -oE 'https://{{branch}}-cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
     fi
     test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
     echo "url=$url/"

@@ -36,6 +36,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import type { RuleDraft } from "@/lib/assistant/types";
 import { canManageEvaluation } from "@/lib/roles";
 
 type Problem = Schema<"Problem">;
@@ -84,8 +85,21 @@ function percentText(rate: number): string {
   return String(Number((rate * 100).toFixed(4)));
 }
 
-function initialValues(rule: Rule | undefined): FormValues {
-  if (rule === undefined) {
+/** What the form starts from: a stored rule, or an assistant's draft (the same field names). */
+type RuleSource = {
+  name: string;
+  evaluator_id: string;
+  target: Target;
+  filter?: string;
+  variable_mapping: Record<string, string>;
+  sample_rate: number;
+  budget_usd?: number;
+  budget_period?: Period;
+  enabled: boolean;
+};
+
+function initialValues(source: RuleSource | undefined): FormValues {
+  if (source === undefined) {
     return {
       name: "",
       evaluatorId: "",
@@ -100,18 +114,18 @@ function initialValues(rule: Rule | undefined): FormValues {
     };
   }
   return {
-    name: rule.name,
-    evaluatorId: rule.evaluator_id,
-    target: rule.target,
-    filter: rule.filter ?? "",
-    mapping: Object.entries(rule.variable_mapping).map(([variable, expression]) =>
+    name: source.name,
+    evaluatorId: source.evaluator_id,
+    target: source.target,
+    filter: source.filter ?? "",
+    mapping: Object.entries(source.variable_mapping).map(([variable, expression]) =>
       newMappingRow(variable, expression),
     ),
-    samplePercent: percentText(rule.sample_rate),
-    limitSpend: rule.budget_usd !== undefined,
-    budget: rule.budget_usd !== undefined ? String(rule.budget_usd) : "",
-    period: rule.budget_period ?? "day",
-    enabled: rule.enabled,
+    samplePercent: percentText(source.sample_rate),
+    limitSpend: source.budget_usd !== undefined,
+    budget: source.budget_usd !== undefined ? String(source.budget_usd) : "",
+    period: source.budget_period ?? "day",
+    enabled: source.enabled,
   };
 }
 
@@ -285,27 +299,38 @@ function SectionError({ message }: { message: string | undefined }) {
   );
 }
 
-export function RuleForm({ org, project, rule }: { org: string; project: string; rule?: Rule }) {
+export function RuleForm({
+  org,
+  project,
+  rule,
+  initialDraft,
+}: {
+  org: string;
+  project: string;
+  rule?: Rule;
+  /** An assistant's draft to prefill a new rule with. The form still saves with POST. */
+  initialDraft?: RuleDraft;
+}) {
   const { data: projectData } = useProject();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const ref = projectRef(org, project);
   const canEdit = canManageEvaluation(projectData.role);
   const saved = rule !== undefined;
-  const [values, setValues] = useState<FormValues>(() => initialValues(rule));
+  const [values, setValues] = useState<FormValues>(() => initialValues(rule ?? initialDraft));
   const [errors, setErrors] = useState<Errors>({});
   const [formError, setFormError] = useState<FormProblem | undefined>();
   const upgradeUrl = useOrgEntitlements(org).upgradeUrl;
   const evaluators = useEvaluatorPages(org, project);
   const evaluatorItems = evaluators.data?.pages.flatMap((page) => page.data);
-  // A saved rule's evaluator may be past the first page of the list: fetch it by id then.
-  const savedEvaluatorId = rule?.evaluator_id ?? "";
+  // A saved rule's or a draft's evaluator may be past the first page of the list: fetch it by id.
+  const savedEvaluatorId = rule?.evaluator_id ?? initialDraft?.evaluator_id;
   const fetchMissing =
-    saved &&
+    savedEvaluatorId !== undefined &&
     evaluatorItems !== undefined &&
     !evaluatorItems.some((item) => item.id === savedEvaluatorId);
   const missing = useQuery({
-    ...evaluatorQuery(org, project, savedEvaluatorId),
+    ...evaluatorQuery(org, project, savedEvaluatorId ?? ""),
     enabled: fetchMissing,
   });
   const create = $api.useMutation("post", "/api/v1/projects/{project}/online-rules", {

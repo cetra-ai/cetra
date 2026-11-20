@@ -26,13 +26,17 @@ pub(crate) struct InteractivePermit {
     _slot: OwnedSemaphorePermit,
 }
 
-/// Waits up to `wait` for a slot of `connection` (FIFO, ahead of the dispatcher's
-/// `try_acquire`), then for a rate token (polled every 100 ms with the state's clock), and
-/// returns the permit. At the deadline: `Busy`, holding nothing.
+/// Waits up to `wait` for a rate token of `connection` (polled every 100 ms with the state's
+/// clock), without holding a slot, then for a slot (FIFO, ahead of the dispatcher's
+/// `try_acquire`) with the time that is left, and returns the permit.
+///
+/// A token is spent when it is taken, so a call that gets its token and then no slot before the
+/// deadline answers `Busy` and the token is lost (it is not given back). At the deadline without a
+/// token or a slot: `Busy`, holding nothing.
 ///
 /// # Errors
 ///
-/// Returns [`Busy`] when no slot or no token is free before `wait` is over.
+/// Returns [`Busy`] when no token or no slot is free before `wait` is over.
 pub(crate) async fn acquire(
     state: &AppState,
     connection: &ConnectionRow,
@@ -45,19 +49,20 @@ pub(crate) async fn acquire(
         (connection.max_concurrency, connection.requests_per_minute),
         state.clock.now_ns(),
     );
-    let slot = match timeout_at(deadline, Arc::clone(limit.slots()).acquire_owned()).await {
-        Ok(Ok(permit)) => permit,
-        Ok(Err(_)) | Err(_) => return Err(Busy),
-    };
     loop {
         if limit.take_token(state.clock.now_ns()) {
-            return Ok(InteractivePermit { _slot: slot });
+            break;
         }
         if Instant::now() + TOKEN_POLL > deadline {
             return Err(Busy);
         }
         sleep(TOKEN_POLL).await;
     }
+    let slot = match timeout_at(deadline, Arc::clone(limit.slots()).acquire_owned()).await {
+        Ok(Ok(permit)) => permit,
+        Ok(Err(_)) | Err(_) => return Err(Busy),
+    };
+    Ok(InteractivePermit { _slot: slot })
 }
 
 #[cfg(test)]
@@ -149,6 +154,27 @@ mod tests {
         // The refused call holds no slot.
         let limit = connection_limit(&app.state.eval, row.id, (2, 1), 0);
         assert_eq!(limit.slots().available_permits(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_waiter_for_a_token_holds_no_slot() {
+        let app = TestApp::new().await;
+        // One request a minute, two slots: the first call takes the token and a slot.
+        let row = row(2, 1);
+        let first = acquire(&app.state, &row, Duration::from_secs(1))
+            .await
+            .expect("the first token");
+        let limit = connection_limit(&app.state.eval, row.id, (2, 1), 0);
+        let (refused, free) = tokio::join!(
+            acquire(&app.state, &row, Duration::from_millis(300)),
+            async {
+                sleep(Duration::from_millis(100)).await;
+                limit.slots().available_permits()
+            }
+        );
+        assert_eq!(refused.err(), Some(Busy));
+        assert_eq!(free, 1, "the call waiting for a token holds no slot");
+        drop(first);
     }
 
     #[tokio::test]

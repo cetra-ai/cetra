@@ -1,0 +1,62 @@
+name: Web demo deploy
+
+# The web UI on its MSW mocks (D-C-22): production on every push to main, a Preview per PR
+# that touches the UI or its mocks. Outside ci-ok: a Cloudflare outage must not block merges.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "web/**"
+      - "fixtures/api/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/web-demo-deploy.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-demo-deploy-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # The job runs the PR's code with a deploy token: only main and owner-authored,
+    # owner-triggered same-repository PRs (the CI_CACHE_ALLOWED gate of ci.yml, D-W-3).
+    if: >-
+      ${{
+        (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'pull_request' &&
+         github.event.pull_request.user.login == 'sebastiencs' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.actor == 'sebastiencs' && github.triggering_actor == 'sebastiencs')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      # One environment for production and Previews: both would hold the same token (D-C-22).
+      name: web-demo
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - name: Deploy
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BRANCH: ${{ github.event_name == 'push' && 'main' || format('pr-{0}', github.event.pull_request.number) }}
+        # The recipe's last line is `url=<deployed URL>`.
+        # pipefail: the default `bash -e` would let `tee` hide a failed deploy.
+        run: |
+          set -o pipefail
+          just web-demo-deploy "$BRANCH" | tee deploy.log
+          url="$(tail -n1 deploy.log | sed -n 's/^url=//p')"
+          test -n "$url"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+      - name: Summary
+        env:
+          URL: ${{ steps.deploy.outputs.url }}
+        run: echo "Deployed to $URL" >> "$GITHUB_STEP_SUMMARY"

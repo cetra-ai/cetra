@@ -9,7 +9,7 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
-use crate::alerts::deliver::send_one;
+use crate::alerts::deliver::{Outgoing, send_to_channel};
 use crate::alerts::message::{self, MessageKind, Notice};
 use crate::api::alerts::{
     AlertMetric, AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
@@ -312,11 +312,11 @@ async fn test_channel(
             None,
         ),
     };
-    let sent = send_one(
+    let sent = send_to_channel(
         &state,
         project.org_id,
         &config,
-        &notice,
+        Outgoing::Alert(&notice),
         Uuid::now_v7(),
         now,
     );
@@ -1014,6 +1014,8 @@ mod tests {
             target: None,
             score_name: None,
             aggregation: None,
+            issue_id: None,
+            source_id: None,
         };
         let rule = alerts::NewRule {
             project_id: seeded.project.id,

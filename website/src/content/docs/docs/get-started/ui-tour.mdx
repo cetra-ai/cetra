@@ -15,7 +15,7 @@ The sidebar lists the pages of the current project in four groups:
 |---|---|
 | Observe | [Dashboard](/docs/tracing/dashboard/), [Traces](/docs/tracing/traces/), Spans, [Sessions](/docs/tracing/sessions/), [Users](/docs/tracing/users/) |
 | Monitor | [Alerts](/docs/platform/alerts/) |
-| Evaluate | [Evaluators](/docs/evaluation/evaluators/), [Online rules](/docs/evaluation/online-rules/), [Datasets](/docs/evaluation/datasets/), [Experiments](/docs/evaluation/experiments/) |
+| Evaluate | [Prompts](/docs/evaluation/prompts/), [Playground](/docs/evaluation/playground/), [Evaluators](/docs/evaluation/evaluators/), [Online rules](/docs/evaluation/online-rules/), [Datasets](/docs/evaluation/datasets/), [Experiments](/docs/evaluation/experiments/) |
 | Explore | [SQL](/docs/tracing/sql-console/) |
 
 Spans is a list of single spans, with the same toolbar as Traces. You can also make your own views of the Dashboard page, see [Custom dashboards](/docs/tracing/custom-dashboards/).
@@ -36,6 +36,7 @@ The top bar shows, from left to right:
 - A dot that shows whether the project is receiving spans. It is green when the last batch is under five minutes old, and grey otherwise. Hover it for the time of the last batch. Before the server has received any, it says "No spans received since the server started". Click it to open Traces.
 - The alert bell, with the number of firing alert rules. It appears only while a rule is firing. Click it to list the rules.
 - The search box, which opens the command palette (`⌘K`).
+- The Assistant button, which opens the assistant panel. Press `⌘I` or `Ctrl+I` to open or close it. See [Assistant](/docs/platform/assistant/).
 
 ## Lists and panels
 
@@ -80,6 +81,9 @@ Shortcuts are ignored while you type in a field. Press `?` to see the list in th
 | `g` then `o` | Go to Online rules |
 | `g` then `i` | Go to Datasets |
 | `g` then `x` | Go to Experiments |
+| `g` then `r` | Go to Annotation queues |
+| `g` then `m` | Go to Prompts |
+| `g` then `l` | Go to Playground |
 
 ## Account and appearance
 

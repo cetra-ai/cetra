@@ -55,7 +55,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `service_name` | Utf8 (dict), nullable | P | Resource `service.name`. |
 | `session_id` | Utf8, nullable | P | Bloom filter. |
 | `user_id` | Utf8, nullable | P | Bloom filter. GDPR key. |
-| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `cetra-playground` (playground runs, D-V-22), `experiment` default for experiment runs. The reserved set is `cetra_core::names::environment::RESERVED` (D-V-33); each reserved value is hidden by default, not an online-rule target, not a trace an evaluator can load, rewritten when received over OTLP, and not billed (D-V-34). |
+| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `cetra-playground` (playground runs, D-V-22), `cetra-assistant` (assistant turns, D-AS-11), `experiment` default for experiment runs. The reserved set is `cetra_core::names::environment::RESERVED` (D-V-33); each reserved value is hidden by default, not an online-rule target, not a trace an evaluator can load, rewritten when received over OTLP, and not billed (D-V-34). |
 | `release` | Utf8 (dict), nullable | P | Git SHA / version string. |
 | `tags` | List(Utf8) | P | |
 | `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. Coding-agent spans carry `coding_agent`, `repository` and `branch` (02 § Coding agents). |
@@ -199,7 +199,7 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `value_num` | Float64, nullable | numeric value; boolean as 0/1 |
 | `value_str` | Utf8, nullable | categorical label or text |
 | `reason` | Utf8, nullable | explanation |
-| `source` | Utf8 dict | `api` \| `sdk` \| `human` \| `end_user` \| `llm_judge` \| `check` \| `webhook` |
+| `source` | Utf8 dict | `api` \| `sdk` \| `human` \| `end_user` \| `llm_judge` \| `check` \| `webhook` \| `issue` |
 | `evaluator_id` | Utf8, nullable | |
 | `rule_id` | Utf8, nullable | online rule that produced it |
 | `experiment_id` | Utf8, nullable | |

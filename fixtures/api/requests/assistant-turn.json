@@ -1,0 +1,8 @@
+{
+  "message": "Why did checkout errors spike yesterday?",
+  "context": {
+    "page": "traces",
+    "filter": "status = 'error'",
+    "range": "24h"
+  }
+}

@@ -23,7 +23,7 @@ use crate::egress::EgressClient;
 use crate::error::ChatError;
 use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 
-const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
+pub(super) const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
 const FILTERED_FINISH: &[&str] = &[
     "SAFETY",
@@ -54,7 +54,16 @@ pub(crate) fn prepare(
     validate_model(&request.model)?;
     check_request(request)?;
     let url = generate_content_url(conn.base_url.as_ref(), &request.model, stream)?;
-    let headers = request_headers(
+    let headers = gemini_headers(conn)?;
+    let body = request_body(conn.structured_output, request)?;
+    Ok(Prepared { url, headers, body })
+}
+
+/// The request headers of a Gemini call, shared with embeddings.
+pub(super) fn gemini_headers(
+    conn: &JudgeConnection,
+) -> Result<Vec<(HeaderName, HeaderValue)>, ChatError> {
+    request_headers(
         conn,
         vec![
             (
@@ -66,9 +75,7 @@ pub(crate) fn prepare(
                 HeaderValue::from_static("application/json"),
             ),
         ],
-    )?;
-    let body = request_body(conn.structured_output, request)?;
-    Ok(Prepared { url, headers, body })
+    )
 }
 
 fn generate_content_url(base: Option<&Url>, model: &str, stream: bool) -> Result<Url, ChatError> {

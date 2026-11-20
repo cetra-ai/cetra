@@ -16,11 +16,13 @@
 //!
 //! [`EgressClient`] and [`sign_payload`] are public so the server's alert deliveries share the guard and the signature (D-K-11).
 
+pub mod assistant_trace;
 mod chat;
 mod check;
 mod config;
 mod egress;
 mod error;
+pub mod issue;
 mod judge;
 mod mapping;
 pub mod plain_template;
@@ -54,7 +56,10 @@ pub use error::{
 pub use judge::{Adapter, JudgeConnection, StructuredOutput, UnknownName};
 pub use mapping::resolve::{ItemData, TraceData, Variables, resolve};
 pub use mapping::{Expr, VariableMapping};
-pub use runner::{EvalOutcome, EvalRun, EvalRunner, RunInput};
+pub use runner::{
+    CallTrace, CompletionInput, CompletionRun, EmbeddingInput, EmbeddingRun, EvalOutcome, EvalRun,
+    EvalRunner, MAX_EMBEDDING_DIMENSIONS, RunInput,
+};
 pub use secret::Secret;
 pub use template::PromptTemplate;
 pub use templates::{JudgeTemplate, builtin_templates};
@@ -71,8 +76,14 @@ mod chat_capture_tests;
 #[path = "../tests/chat_stream.rs"]
 mod chat_stream_tests;
 #[cfg(test)]
+#[path = "../tests/complete.rs"]
+mod complete_tests;
+#[cfg(test)]
 #[path = "../tests/egress_public.rs"]
 mod egress_public_tests;
+#[cfg(test)]
+#[path = "../tests/embed.rs"]
+mod embed_tests;
 #[cfg(test)]
 #[path = "../tests/gemini.rs"]
 mod gemini_tests;

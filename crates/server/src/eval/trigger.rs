@@ -1,7 +1,7 @@
 //! The online-rule trigger (D-I-7 to D-I-11): the tracked projects, the flusher, startup and the
 //! sweeper, which completes traces, matches each rule through storage, samples, caps and enqueues.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use cetra_core::ids::{OrgId, ProjectId, TraceId};
@@ -17,8 +17,10 @@ use crate::eval::hourly::HourlyCaps;
 use crate::eval::pending::{Changes, Completed, Entry};
 use crate::eval::sampling;
 use crate::http::AppState;
+use crate::issues::sources::ProjectSources;
 use crate::meta::MetaError;
 use crate::meta::eval_jobs::{KIND_RULE, NewJob, insert_rule_job};
+use crate::meta::issues::{SourceRow, SweepSource};
 use crate::meta::online_rules::{self, TriggerRule};
 use crate::meta::pending_traces::{PendingRow, load_pending, write_pending};
 use crate::meta::projects::{
@@ -45,16 +47,14 @@ pub(crate) struct FlushReport {
     pub(crate) deletes: usize,
 }
 
-/// Reads the enabled, unpaused rules, groups them by project, and sets the tracked set to their
-/// projects (D-I-8). A project's timeout is its stored `trace_completion_timeout_s` when that is
-/// in range, else the default.
+/// Reads the enabled, unpaused rules and groups them by project. A project's timeout is its stored
+/// `trace_completion_timeout_s` when that is in range, else the default. The tracked set is not
+/// touched.
 ///
 /// # Errors
 ///
-/// [`MetaError`] when the read fails; the tracked set is then left as it was.
-pub(crate) async fn refresh_rules(
-    state: &AppState,
-) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
+/// [`MetaError`] when the read fails.
+async fn read_rules(state: &AppState) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
     #[cfg(test)]
     if faults::take_refresh() {
         return Err(MetaError::Db(sqlx::Error::PoolTimedOut));
@@ -73,13 +73,33 @@ pub(crate) async fn refresh_rules(
             .rules
             .push(rule);
     }
-    state
-        .pending
-        .set_tracked(projects.keys().copied().collect());
     Ok(projects)
 }
 
-/// Startup: the table's rows into the map, after [`refresh_rules`] (D-I-8). When the rules cannot
+/// Reads the rules and the error sources, and sets the tracked set to the union of their
+/// projects (D-I-8, D-IC-2). Either read failing returns its error before the tracked set is
+/// set, so the set stays as it was.
+///
+/// # Errors
+///
+/// [`MetaError`] when a read fails.
+pub(crate) async fn refresh_tracked(
+    state: &AppState,
+) -> Result<
+    (
+        HashMap<ProjectId, ProjectRules>,
+        HashMap<ProjectId, ProjectSources>,
+    ),
+    MetaError,
+> {
+    let rules = read_rules(state).await?;
+    let sources = crate::issues::sources::refresh(state).await?;
+    let tracked: HashSet<ProjectId> = rules.keys().chain(sources.keys()).copied().collect();
+    state.pending.set_tracked(tracked);
+    Ok((rules, sources))
+}
+
+/// Startup: the table's rows into the map, after [`refresh_tracked`] (D-I-8). When the rules cannot
 /// be read, the rows are still loaded: their projects are tracked for now, and the first sweep's
 /// refresh sets the real tracked set and drops the rest.
 ///
@@ -88,7 +108,7 @@ pub(crate) async fn refresh_rules(
 /// [`MetaError`] when the rows cannot be read.
 pub(crate) async fn load(state: &AppState) -> Result<(), MetaError> {
     let rows = load_pending(state.meta.reader()).await?;
-    if let Err(error) = refresh_rules(state).await {
+    if let Err(error) = refresh_tracked(state).await {
         tracing::warn!(
             error = %error,
             "online rules could not be read at startup; stored pending traces are held until the first sweep"
@@ -214,7 +234,7 @@ const BATCH_SPREAD_NS: i64 = 12 * 3_600 * NANOS_PER_SECOND;
 /// Span rules keep this many sampled spans per trace (D-I-10).
 const MAX_SAMPLED_SPANS: usize = 50;
 /// Time allowed for one rule's read.
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Most jobs inserted per write (D-I-11).
 const ENQUEUE_CHUNK: usize = 1_000;
 
@@ -253,22 +273,46 @@ struct Candidates<'a> {
 ///
 /// [`MetaError`] only when the rules cannot be read; a failed batch is counted, not returned.
 pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport, MetaError> {
-    let projects = refresh_rules(state).await?;
+    let (rules, sources) = refresh_tracked(state).await?;
+    let mut projects: Vec<ProjectId> = rules.keys().chain(sources.keys()).copied().collect();
+    projects.sort();
+    projects.dedup();
     let mut report = SweepReport::default();
-    for (project, project_rules) in &projects {
+    for project in projects {
         if state.eval.is_stopped() {
             break;
         }
-        let completed =
-            state
-                .pending
-                .completed(*project, now, project_rules.timeout_ns, PER_PROJECT_TICK);
+        let project_rules = rules.get(&project);
+        let project_sources = sources.get(&project);
+        let Some((org, timeout_ns)) = project_rules
+            .map(|found| (found.org, found.timeout_ns))
+            .or_else(|| project_sources.map(|found| (found.org, found.timeout_ns)))
+        else {
+            continue;
+        };
+        let project_rule_list: &[TriggerRule] = match project_rules {
+            Some(found) => &found.rules,
+            None => &[],
+        };
+        let project_source_list: &[SweepSource] = match project_sources {
+            Some(found) => &found.sources,
+            None => &[],
+        };
+        let project_topic_list: &[SourceRow] = match project_sources {
+            Some(found) => &found.topics,
+            None => &[],
+        };
+        let completed = state
+            .pending
+            .completed(project, now, timeout_ns, PER_PROJECT_TICK);
         report.completed += completed.len();
         let ctx = SweepCtx {
             state,
-            org: project_rules.org,
-            project: *project,
-            rules: &project_rules.rules,
+            org,
+            project,
+            rules: project_rule_list,
+            sources: project_source_list,
+            topic_sources: project_topic_list,
             now,
         };
         for (around, batch) in batches(&completed) {
@@ -278,7 +322,7 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
             let outcome = sweep_batch(&ctx, around, batch, &mut report).await;
             #[cfg(test)]
             faults::run_before_settle();
-            settle(state, *project, batch, outcome, &mut report);
+            settle(state, project, batch, outcome, &mut report);
         }
     }
     if report.enqueued > 0 {
@@ -287,13 +331,16 @@ pub(crate) async fn sweep_once(state: &AppState, now: i64) -> Result<SweepReport
     Ok(report)
 }
 
-/// What one sweep works with for one project: its state, the rules, and the sweep's clock.
-struct SweepCtx<'a> {
-    state: &'a AppState,
-    org: OrgId,
-    project: ProjectId,
-    rules: &'a [TriggerRule],
-    now: i64,
+/// What one sweep works with for one project: its state, the rules, the error and topic sources,
+/// and the sweep's clock.
+pub(crate) struct SweepCtx<'a> {
+    pub(crate) state: &'a AppState,
+    pub(crate) org: OrgId,
+    pub(crate) project: ProjectId,
+    pub(crate) rules: &'a [TriggerRule],
+    pub(crate) sources: &'a [SweepSource],
+    pub(crate) topic_sources: &'a [SourceRow],
+    pub(crate) now: i64,
 }
 
 /// Ends one batch: `Ok` removes its traces that did not grow; `Err` counts a failed read for each
@@ -322,11 +369,57 @@ fn settle(
     }
 }
 
-/// Reads, admits and enqueues one batch: read first, then, chunk by chunk, admit and enqueue. Only
-/// the reads can fail before the hourly cap is touched, so a failed read spends no unit and counts
-/// nothing. A chunk is admitted just before its write, so a failed write spends the cap of its own
-/// chunk only.
+/// Ends one batch's sweep: the error issues first (D-IC-2), then the topic candidates (D-IC-4),
+/// then the rules. A failed step with no rules after it retries the batch: nothing else ran, and
+/// the error sweep is idempotent, as is a topic write's retry up to its daily caps. A failed step
+/// with rules after it is logged and the rules go on: the rule enqueue is not idempotent (it spends
+/// the hourly cap), so the batch is retried only when [`rule_batch`] fails, and a retry re-runs
+/// the idempotent steps. The rules' reads, admission and enqueue come after: see [`read_candidates`].
 async fn sweep_batch(
+    ctx: &SweepCtx<'_>,
+    around: i64,
+    batch: &[Completed],
+    report: &mut SweepReport,
+) -> Result<(), ()> {
+    if !ctx.sources.is_empty() {
+        let swept = crate::issues::errors::sweep_batch(ctx, around, batch).await;
+        if swept.is_err() {
+            // Nothing after it: the batch is retried. Topics are not run, so a retry does not
+            // admit their traces twice.
+            if ctx.rules.is_empty() {
+                return swept;
+            }
+            tracing::warn!(
+                project_id = %ctx.project,
+                batch = batch.len(),
+                "error issues of a batch were not swept; its online rules go on"
+            );
+        }
+    }
+    if !ctx.topic_sources.is_empty() {
+        let topics = crate::issues::topics::sweep_batch(ctx, around, batch).await;
+        if topics.is_err() {
+            if ctx.rules.is_empty() {
+                return topics;
+            }
+            tracing::warn!(
+                project_id = %ctx.project,
+                batch = batch.len(),
+                "topic candidates of a batch were not queued; its online rules go on"
+            );
+        }
+    }
+    if ctx.rules.is_empty() {
+        return Ok(());
+    }
+    rule_batch(ctx, around, batch, report).await
+}
+
+/// Reads, admits and enqueues one batch's rules: read first, then, chunk by chunk, admit and
+/// enqueue. Only the reads can fail before the hourly cap is touched, so a failed read spends no
+/// unit and counts nothing. A chunk is admitted just before its write, so a failed write spends the
+/// cap of its own chunk only.
+async fn rule_batch(
     ctx: &SweepCtx<'_>,
     around: i64,
     batch: &[Completed],
@@ -360,6 +453,7 @@ async fn read_candidates<'a>(
         project,
         rules,
         now,
+        ..
     } = *ctx;
     let opened = state
         .storage
@@ -566,7 +660,7 @@ fn batches(completed: &[Completed]) -> Vec<(i64, &[Completed])> {
 }
 
 /// A stored timeout in seconds as nanoseconds; out of range means the default.
-fn timeout_ns(stored: Option<i64>) -> i64 {
+pub(crate) fn timeout_ns(stored: Option<i64>) -> i64 {
     let seconds = stored
         .and_then(|value| u32::try_from(value).ok())
         .filter(|value| (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(value))
@@ -577,7 +671,7 @@ fn timeout_ns(stored: Option<i64>) -> i64 {
 /// Test-only fault injection for the trigger's reads, writes and sweep order. Each fault is armed
 /// by a test on its own thread and fires once.
 #[cfg(test)]
-mod faults {
+pub(crate) mod faults {
     use std::cell::{Cell, RefCell};
 
     use cetra_storage::RunError;
@@ -609,7 +703,7 @@ mod faults {
         BEFORE_SETTLE.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
 
-    pub(super) fn take_read() -> Option<RunError> {
+    pub(crate) fn take_read() -> Option<RunError> {
         READ.with(|slot| slot.borrow_mut().take())
     }
 
@@ -674,6 +768,7 @@ mod tests {
 
         use super::super::*;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::issues::{SourceKind, SourceRow, insert_source, update_source};
         use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
         use crate::meta::pending_traces::{load_pending, write_pending};
         use crate::meta::projects::insert_project;
@@ -796,9 +891,9 @@ mod tests {
             let seeded = app.seed().await;
             let project = seeded.project.id;
             add_rule(&app, project, false).await;
-            assert!(refresh_rules(&app.state).await.unwrap().is_empty());
+            assert!(refresh_tracked(&app.state).await.unwrap().0.is_empty());
             add_rule(&app, project, true).await;
-            let tracked = refresh_rules(&app.state).await.unwrap();
+            let tracked = refresh_tracked(&app.state).await.unwrap().0;
             assert_eq!(tracked.len(), 1);
             assert_eq!(tracked[&project].rules.len(), 1);
             assert_eq!(tracked[&project].timeout_ns, 60 * SECOND);
@@ -821,7 +916,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let tracked = refresh_rules(&app.state).await.unwrap();
+                let tracked = refresh_tracked(&app.state).await.unwrap().0;
                 assert_eq!(tracked[&project].timeout_ns, seconds * SECOND);
             }
         }
@@ -905,7 +1000,7 @@ mod tests {
             );
 
             // The first refresh that works tracks no project (no rules exist), and drops the row.
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap();
             assert_eq!(app.state.pending.len(), 0);
             assert_eq!(
                 flush_once(&app.state).await.unwrap(),
@@ -944,6 +1039,87 @@ mod tests {
                 total
             );
         }
+
+        /// An error source of `project`, stored enabled or not.
+        async fn error_source(app: &TestApp, project: ProjectId, enabled: bool) -> SourceRow {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Errors {}", Uuid::now_v7()),
+                kind: SourceKind::Error,
+                filter: None,
+                enabled,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+                sample_rate: None,
+                daily_cap: None,
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
+            };
+            let stored = row.clone();
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            stored
+        }
+
+        #[tokio::test]
+        async fn project_with_only_an_error_source_is_tracked() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, true).await;
+            refresh_tracked(&app.state).await.unwrap();
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_disabled_source_untracks_its_project() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let mut source = error_source(&app, project, true).await;
+            refresh_tracked(&app.state).await.unwrap();
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 1);
+
+            source.enabled = false;
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        update_source(conn, &source).await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+            let (rules, sources) = refresh_tracked(&app.state).await.unwrap();
+            assert!(rules.is_empty());
+            assert!(sources.is_empty());
+            // The project's held traces are dropped with it.
+            assert_eq!(app.state.pending.len(), 0);
+            app.state.pending.observe(project, &[rooted_span()], 0);
+            assert_eq!(app.state.pending.len(), 0);
+        }
     }
 
     mod sweep {
@@ -952,7 +1128,7 @@ mod tests {
         use axum::http::{Method, header};
         use cetra_core::enums::{PayloadFormat, SpanKind, SpanStatus};
         use cetra_core::ids::{ProjectId, SpanId, TraceId};
-        use cetra_core::span::Span;
+        use cetra_core::span::{Span, SpanEvent};
         use serde_json::{Value, json};
         use uuid::Uuid;
 
@@ -964,6 +1140,7 @@ mod tests {
         use crate::eval::sampling;
         use crate::meta::eval_jobs::KIND_RULE;
         use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+        use crate::meta::issues::{SourceKind, SourceRow, insert_source};
         use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
         use crate::test_support::mock_llm::{MockLlm, completion};
         use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span};
@@ -1017,7 +1194,7 @@ mod tests {
         }
 
         /// A rule of `target` on `project` (no evaluation runs: the sweeper only enqueues), created
-        /// in one write, then `refresh_rules`, so the project is tracked before any commit.
+        /// in one write, then `refresh_tracked`, so the project is tracked before any commit.
         async fn rule(
             app: &TestApp,
             project: ProjectId,
@@ -1077,7 +1254,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap();
             rule
         }
 
@@ -1869,7 +2046,7 @@ mod tests {
             let connection = http_connection(&app, &seeded, &mock).await;
             let evaluator = http_judge(&app, &seeded, connection).await;
             let rule_id = http_rule(&app, &seeded, evaluator).await;
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap();
             let tasks = crate::eval::spawn(&app.state, EvalTiming::TEST);
 
             let now = app.state.clock.now_ns();
@@ -1913,6 +2090,1203 @@ mod tests {
             let page: Value = scores.json();
             assert_eq!(page["data"].as_array().expect("data").len(), 1, "{page}");
             tasks.shutdown(&app.state).await;
+        }
+
+        /// An enabled error source of `project` with `filter`. Returns its id.
+        async fn error_source(app: &TestApp, project: ProjectId, filter: Option<&str>) -> Uuid {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Errors {}", Uuid::now_v7()),
+                kind: SourceKind::Error,
+                filter: filter.map(str::to_owned),
+                enabled: true,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+                sample_rate: None,
+                daily_cap: None,
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
+            };
+            let id = row.id;
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            refresh_tracked(&app.state).await.unwrap();
+            id
+        }
+
+        /// A root error span of `trace`, starting at `start`, from `service`, with an `exception`
+        /// event of `kind` and `message`.
+        fn error_span(
+            trace: TraceId,
+            start: i64,
+            service: &str,
+            kind: &str,
+            message: &str,
+        ) -> Span {
+            let mut row = span(trace, 1, true, start);
+            row.status = SpanStatus::Error;
+            row.service_name = Some(service.to_owned());
+            row.events = vec![SpanEvent {
+                time: start,
+                name: "exception".to_owned(),
+                attributes: Some(
+                    json!({"exception.type": kind, "exception.message": message}).to_string(),
+                ),
+            }];
+            row
+        }
+
+        /// The issues of the project: title, state, regressed flag, first and last seen.
+        async fn issues_of(app: &TestApp) -> Vec<(String, String, i64, i64, i64)> {
+            sqlx::query_as(
+                "SELECT title, state, regressed, first_seen, last_seen FROM issues ORDER BY title",
+            )
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        /// The events of the issue titled `title`, oldest first: kind, from and to values.
+        async fn events_of(
+            app: &TestApp,
+            title: &str,
+        ) -> Vec<(String, Option<String>, Option<String>)> {
+            sqlx::query_as(
+                "SELECT e.kind, e.from_value, e.to_value FROM issue_events e \
+                 JOIN issues i ON i.id = e.issue_id WHERE i.title = ? ORDER BY e.at, e.id",
+            )
+            .bind(title)
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        /// Runs `statement` with the binds in one write.
+        async fn exec(app: &TestApp, statement: &'static str, binds: Vec<String>) {
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        let mut query = sqlx::query(statement);
+                        for bind in binds {
+                            query = query.bind(bind);
+                        }
+                        query.execute(&mut *conn).await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+        }
+
+        #[tokio::test]
+        async fn error_span_becomes_an_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    start,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let title = "ValueError: bad id <n>";
+            assert_eq!(
+                issues_of(&app).await,
+                vec![(title.to_owned(), "open".to_owned(), 0, start, start)]
+            );
+            assert_eq!(
+                events_of(&app, title).await,
+                vec![("created".to_owned(), None, Some("open".to_owned()))]
+            );
+        }
+
+        #[tokio::test]
+        async fn same_error_in_two_traces_is_one_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(
+                        trace_id(2),
+                        start + SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 43",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                issues_of(&app).await,
+                vec![(
+                    "ValueError: bad id <n>".to_owned(),
+                    "open".to_owned(),
+                    0,
+                    start,
+                    start + SECOND
+                )]
+            );
+        }
+
+        #[tokio::test]
+        async fn different_exception_types_are_two_issues() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "api", "KeyError", "bad id 42"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let titles: Vec<String> = issues_of(&app).await.into_iter().map(|row| row.0).collect();
+            assert_eq!(
+                titles,
+                vec![
+                    "KeyError: bad id <n>".to_owned(),
+                    "ValueError: bad id <n>".to_owned()
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn resolved_issue_regresses_on_a_newer_trace() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let title = "ValueError: bad id <n>";
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 60 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 1",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // Resolved 30 seconds before the clock's start time.
+            exec(
+                &app,
+                "UPDATE issues SET state = 'resolved', resolved_at = ? WHERE title = ?",
+                vec![(at - 30 * SECOND).to_string(), title.to_owned()],
+            )
+            .await;
+
+            // A trace that started before the resolution, but completes after it: no reopen.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(2),
+                    at - 50 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 2",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "resolved");
+            assert_eq!(issues_of(&app).await[0].2, 0);
+
+            // A trace that started after the resolution reopens the issue.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(3),
+                    at - 10 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 3",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "open");
+            assert_eq!(issues_of(&app).await[0].2, 1);
+            assert_eq!(
+                events_of(&app, title).await,
+                vec![
+                    ("created".to_owned(), None, Some("open".to_owned())),
+                    (
+                        "regressed".to_owned(),
+                        Some("resolved".to_owned()),
+                        Some("open".to_owned())
+                    ),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn merged_issue_routes_to_its_target() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "api", "KeyError", "missing key"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            exec(
+                &app,
+                "UPDATE issues SET state = 'merged', \
+                 merged_into = (SELECT id FROM issues WHERE title = ?) WHERE title = ?",
+                vec![
+                    "ValueError: bad id <n>".to_owned(),
+                    "KeyError: missing key".to_owned(),
+                ],
+            )
+            .await;
+
+            let later = start + 2 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(3),
+                    later,
+                    "api",
+                    "KeyError",
+                    "missing key",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                issues_of(&app).await,
+                vec![
+                    (
+                        "KeyError: missing key".to_owned(),
+                        "merged".to_owned(),
+                        0,
+                        start,
+                        start
+                    ),
+                    (
+                        "ValueError: bad id <n>".to_owned(),
+                        "open".to_owned(),
+                        0,
+                        start,
+                        later
+                    ),
+                ]
+            );
+        }
+
+        #[tokio::test]
+        async fn filter_limits_the_spans() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, Some("service_name = 'api'")).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 42"),
+                    error_span(trace_id(2), start, "worker", "KeyError", "missing key"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let titles: Vec<String> = issues_of(&app).await.into_iter().map(|row| row.0).collect();
+            assert_eq!(titles, vec!["ValueError: bad id <n>".to_owned()]);
+        }
+
+        #[tokio::test]
+        async fn a_bad_stored_filter_skips_the_source_only() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let broken = error_source(&app, project, None).await;
+            error_source(&app, project, None).await;
+            exec(
+                &app,
+                "UPDATE issue_sources SET filter = ? WHERE id = ?",
+                vec!["((".to_owned(), broken.to_string()],
+            )
+            .await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // Only the source with a working filter created the issue.
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn rules_and_sources_share_a_batch() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            rule(&app, project, "trace", None, 1.0).await;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let report = sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(report.enqueued, 1);
+            assert_eq!(jobs(&app).await.len(), 1);
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn eval_traces_are_never_issues() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut eval_span = error_span(trace_id(9), start, "api", "ValueError", "bad id 42");
+            eval_span.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+            app.commit_spans(&seeded.project, vec![eval_span]).await;
+            // Evaluation spans are not recorded as pending, so the trace is forced into the map.
+            app.state.pending.load(vec![(
+                project,
+                trace_id(9),
+                Entry {
+                    first_seen: at,
+                    last_seen: at,
+                    min_start: start,
+                    root_ended: true,
+                    failed_reads: 0,
+                    spans: 1,
+                },
+            )]);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(issues_of(&app).await.is_empty());
+        }
+
+        #[tokio::test]
+        async fn a_failed_error_read_retries_the_batch_without_rules() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            faults::fail_next_read(RunError::Timeout);
+            let report = sweep_once(&app.state, now).await.unwrap();
+            // No rules ran, so the batch is retried.
+            assert_eq!(report.failed_batches, 1);
+            assert!(issues_of(&app).await.is_empty());
+            assert_eq!(app.state.pending.len(), 1, "the trace stays pending");
+
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 0);
+            assert_eq!(issues_of(&app).await.len(), 1);
+            assert_eq!(app.state.pending.len(), 0);
+        }
+
+        #[tokio::test]
+        async fn a_failed_error_read_still_runs_the_rules() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            rule(&app, project, "trace", None, 1.0).await;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            // The fault hits the error read, which runs first: the rules still enqueue.
+            faults::fail_next_read(RunError::Timeout);
+            let report = sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(report.failed_batches, 0);
+            assert_eq!(report.enqueued, 1);
+            assert_eq!(jobs(&app).await.len(), 1);
+            assert!(issues_of(&app).await.is_empty());
+            assert_eq!(app.state.pending.len(), 0);
+        }
+
+        /// The live occurrence scores of `trace` in `project`, as the API lists them.
+        async fn occurrences_on(
+            app: &TestApp,
+            seeded: &Seeded,
+            project: ProjectId,
+            trace: TraceId,
+        ) -> Vec<cetra_core::score::Score> {
+            let response = app
+                .request(
+                    Method::GET,
+                    &format!("/api/v1/projects/{project}/scores?trace_id={trace}&source=issue"),
+                )
+                .header(header::COOKIE.as_str(), &seeded.cookie)
+                .send()
+                .await;
+            let page: Value = response.json();
+            page["data"]
+                .as_array()
+                .expect("data")
+                .iter()
+                .map(|item| serde_json::from_value(item.clone()).expect("a score"))
+                .collect()
+        }
+
+        /// The id of the issue titled `title`.
+        async fn issue_id_of(app: &TestApp, title: &str) -> Uuid {
+            let (id,): (String,) = sqlx::query_as("SELECT id FROM issues WHERE title = ?")
+                .bind(title)
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+            Uuid::parse_str(&id).unwrap()
+        }
+
+        #[tokio::test]
+        async fn error_span_becomes_an_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut span = error_span(trace_id(1), start, "api", "ValueError", "bad id 42");
+            span.user_id = Some("user-1".to_owned());
+            span.session_id = Some("session-1".to_owned());
+            app.commit_spans(&seeded.project, vec![span]).await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let issue = issue_id_of(&app, "ValueError: bad id <n>").await;
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            let score = &scores[0];
+            assert_eq!(score.name, format!("issue:{issue}"));
+            assert_eq!(score.source, cetra_core::enums::ScoreSource::Issue);
+            assert_eq!(score.created_at, (start / 1_000_000) * 1_000_000);
+            assert_eq!(score.user_id.as_deref(), Some("user-1"));
+            assert_eq!(score.session_id.as_deref(), Some("session-1"));
+            assert_eq!(score.metadata.len(), 2, "{:?}", score.metadata);
+            assert!(score.metadata.contains_key("cetra.issue.span_id"));
+        }
+
+        #[tokio::test]
+        async fn two_error_spans_of_one_issue_in_one_trace_give_one_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        start + SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 42",
+                    ),
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 43"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            // The occurrence is the trace's earliest error span.
+            assert_eq!(scores[0].created_at, (start / 1_000_000) * 1_000_000);
+        }
+
+        #[tokio::test]
+        async fn a_resweep_writes_no_second_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // A later span of the same error joins the trace; its earliest span is unchanged.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 20 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 43",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            assert_eq!(
+                scores[0].created_at,
+                ((at - 30 * SECOND) / 1_000_000) * 1_000_000
+            );
+        }
+
+        #[tokio::test]
+        async fn a_future_span_start_is_clamped_to_now() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at + 10 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            sweep_once(&app.state, now).await.unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            assert_eq!(scores[0].created_at, (now / 1_000_000) * 1_000_000);
+        }
+
+        #[tokio::test]
+        async fn an_occurrence_older_than_retention_is_skipped() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            app.commit_spans(
+                &short,
+                vec![
+                    error_span(trace_id(1), at - 2 * day, "api", "ValueError", "bad id 1"),
+                    error_span(
+                        trace_id(2),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 2",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            // The rest of the batch is still written.
+            assert_eq!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn ignored_issue_still_gets_occurrences() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            exec(
+                &app,
+                "UPDATE issues SET state = 'ignored' WHERE title = ?",
+                vec!["ValueError: bad id <n>".to_owned()],
+            )
+            .await;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(2),
+                    at - 20 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 43",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "ignored");
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn occurrences_bill_no_units() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            let before = app
+                .state
+                .usage
+                .month_units(&app.state.meta, seeded.org_id, now)
+                .await
+                .unwrap();
+            sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .len(),
+                1
+            );
+            let after = app
+                .state
+                .usage
+                .month_units(&app.state.meta, seeded.org_id, now)
+                .await
+                .unwrap();
+            assert_eq!(after, before);
+        }
+
+        #[tokio::test]
+        async fn deletion_guard_blocks_occurrences() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 42",
+                    ),
+                    error_span(
+                        trace_id(2),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 43",
+                    ),
+                ],
+            )
+            .await;
+            let now = app.state.clock.now_ns();
+            app.state
+                .deletions
+                .guard
+                .add_traces(project, &[trace_id(1)], Uuid::now_v7(), now);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+            // Trace 2 still makes the issue: the blocked trace only drops its own occurrence.
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_trace_blocked_by_a_deletion_creates_no_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            let now = app.state.clock.now_ns();
+            app.state
+                .deletions
+                .guard
+                .add_traces(project, &[trace_id(1)], Uuid::now_v7(), now);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(issues_of(&app).await.is_empty());
+            assert!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn a_too_old_occurrence_does_not_regress_a_resolved_issue() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(3)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            app.commit_spans(
+                &short,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await.len(), 1);
+            // Resolved five days ago. A trace that started four days ago came after that, but it is
+            // past the three-day retention, so it must not reopen the issue.
+            let resolved_at = at - 5 * day;
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move {
+                        sqlx::query("UPDATE issues SET state = 'resolved', resolved_at = ?")
+                            .bind(resolved_at)
+                            .execute(&mut *conn)
+                            .await?;
+                        Ok::<(), MetaError>(())
+                    })
+                })
+                .await
+                .unwrap();
+            app.commit_spans(
+                &short,
+                vec![error_span(
+                    trace_id(2),
+                    at - 4 * day,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let issues = issues_of(&app).await;
+            assert_eq!(issues.len(), 1);
+            assert_eq!(issues[0].1, "resolved");
+            assert_eq!(issues[0].2, 0, "the issue is not regressed");
+            assert!(
+                events_of(&app, &issues[0].0)
+                    .await
+                    .iter()
+                    .all(|event| event.0 != "regressed")
+            );
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn an_occurrence_within_the_retention_margin_is_dropped() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            // Thirty minutes inside the cutoff is within the one-hour margin; two hours is not.
+            app.commit_spans(
+                &short,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        at - day + 30 * 60 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 1",
+                    ),
+                    error_span(
+                        trace_id(2),
+                        at - day + 2 * HOUR,
+                        "api",
+                        "ValueError",
+                        "bad id 2",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        /// A topic source of `project`, enabled, with `filter` and a sample rate of 1, stored
+        /// directly (its candidates come from the sweep only).
+        async fn topic_source(
+            app: &TestApp,
+            project: ProjectId,
+            filter: Option<&str>,
+        ) -> SourceRow {
+            let now = app.state.clock.now_ns();
+            let row = SourceRow {
+                id: Uuid::now_v7(),
+                project_id: project,
+                name: format!("Topics {}", Uuid::now_v7()),
+                kind: SourceKind::Topic,
+                filter: filter.map(str::to_owned),
+                enabled: true,
+                paused_reason: None,
+                paused_at: None,
+                created_by: None,
+                created_at: now,
+                updated_at: now,
+                sample_rate: Some(1.0),
+                daily_cap: Some(100),
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
+            };
+            let stored = row.clone();
+            app.state
+                .meta
+                .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+                .await
+                .unwrap();
+            stored
+        }
+
+        /// The dedup keys of the candidates of `source`, sorted.
+        async fn topic_candidates(app: &TestApp, source: Uuid) -> Vec<String> {
+            sqlx::query_scalar(
+                "SELECT dedup_key FROM issue_candidates WHERE source_id = ? ORDER BY dedup_key",
+            )
+            .bind(source.to_string())
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+        }
+
+        #[tokio::test]
+        async fn a_completed_trace_queues_a_topic_candidate() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let source = topic_source(&app, project, None).await;
+            // Tracked before the commit, as a rule's project is (see `rule`).
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(&seeded.project, vec![span(trace_id(1), 1, true, start)])
+                .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(
+                topic_candidates(&app, source.id).await,
+                vec![format!("{}:{}", source.id, trace_id(1))]
+            );
+            let starts: Vec<Option<i64>> =
+                sqlx::query_scalar("SELECT trace_start FROM issue_candidates WHERE source_id = ?")
+                    .bind(source.id.to_string())
+                    .fetch_all(app.state.meta.reader())
+                    .await
+                    .unwrap();
+            assert_eq!(starts, vec![Some(start)]);
+        }
+
+        #[tokio::test]
+        async fn a_topic_filter_excludes_its_traces() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let excluded = topic_source(&app, project, Some("environment = 'cetra-eval'")).await;
+            let kept = topic_source(&app, project, None).await;
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![span(trace_id(1), 1, true, at - 30 * SECOND)],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(topic_candidates(&app, excluded.id).await.is_empty());
+            assert_eq!(topic_candidates(&app, kept.id).await.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn a_project_with_only_a_topic_source_is_tracked() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            topic_source(&app, project, None).await;
+            let (rules, sources) = refresh_tracked(&app.state).await.unwrap();
+            assert!(rules.is_empty());
+            assert!(sources[&project].sources.is_empty());
+            assert_eq!(sources[&project].topics.len(), 1);
+            app.state
+                .pending
+                .observe(project, &[span(trace_id(1), 1, true, 0)], 0);
+            assert_eq!(app.state.pending.len(), 1);
+        }
+
+        #[tokio::test]
+        async fn an_evaluation_trace_is_never_a_topic_candidate() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            let source = topic_source(&app, project, None).await;
+            refresh_tracked(&app.state).await.unwrap();
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut eval_span = span(trace_id(1), 1, true, start);
+            eval_span.environment = Some(cetra_core::names::environment::EVAL.to_owned());
+            app.commit_spans(&seeded.project, vec![eval_span]).await;
+            // Forced into the map, the strict read still skips the evaluation trace.
+            app.state.pending.load(vec![(
+                project,
+                trace_id(1),
+                Entry {
+                    first_seen: at,
+                    last_seen: at,
+                    min_start: start,
+                    root_ended: true,
+                    failed_reads: 0,
+                    spans: 1,
+                },
+            )]);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(topic_candidates(&app, source.id).await.is_empty());
         }
     }
 }

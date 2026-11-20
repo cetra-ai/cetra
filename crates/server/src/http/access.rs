@@ -155,6 +155,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::api_keys::routes());
     routes.extend(crate::routes::channels::routes());
     routes.extend(crate::routes::alert_rules::routes());
+    routes.extend(crate::routes::assistant::routes());
     routes.extend(crate::routes::tokens::routes());
     routes.extend(crate::routes::traces::routes());
     routes.extend(crate::routes::streams::routes());
@@ -172,6 +173,8 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::playground::routes());
     routes.extend(crate::routes::evaluators::routes());
     routes.extend(crate::routes::online_rules::routes());
+    routes.extend(crate::routes::issues::routes());
+    routes.extend(crate::routes::issue_dataset_items::routes());
     routes.extend(crate::routes::backfills::routes());
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());

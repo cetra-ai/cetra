@@ -8,6 +8,9 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import ruleFixture from "../../../../../../fixtures/api/static/alert-rule.json";
 import channelsFixture from "../../../../../../fixtures/api/static/channels.json";
+import issueFixture from "../../../../../../fixtures/api/static/issue.json";
+import issueSourcesFixture from "../../../../../../fixtures/api/static/issue-sources.json";
+import issuesFixture from "../../../../../../fixtures/api/static/issues.json";
 import entitlementsFixture from "../../../../../../fixtures/api/static/org-entitlements.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
@@ -15,6 +18,13 @@ const PAGE = "/acme/support-bot/alerts/new";
 const RULES = "/api/v1/projects/:project/alert-rules";
 const WIDGET = "/api/v1/projects/:project/dashboards/query";
 const LIST = "/acme/support-bot/alerts";
+const ISSUES = "/api/v1/projects/:project/issues";
+const ISSUE = "/api/v1/projects/:project/issues/:id";
+const SOURCES = "/api/v1/projects/:project/issue-sources";
+const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
+const OTHER_ISSUE_ID = "01900000-0000-7000-8000-000000001c02";
+const SOURCE_ID = "01900000-0000-7000-8000-000000001c00";
+const ISSUE_LABEL = "ValueError: could not parse the reply (Errors)";
 
 /** Chooses an option of a select by its label, through the trigger and the listbox. */
 async function choose(user: UserEvent, label: string, option: string) {
@@ -393,4 +403,163 @@ it("does not let viewers create rules", async () => {
     await screen.findByText("Only project members and above can create alert rules."),
   ).toBeInTheDocument();
   expect(screen.queryByRole("textbox", { name: "Name" })).toBeNull();
+});
+
+/** The issue list and the source list of the project, for the scope pickers. */
+function serveScopeLists() {
+  server.use(
+    http.get(ISSUES, () => HttpResponse.json(issuesFixture)),
+    http.get(SOURCES, () => HttpResponse.json(issueSourcesFixture)),
+  );
+}
+
+it("creates an issue occurrences rule", async () => {
+  let body: Record<string, unknown> | undefined;
+  serveScopeLists();
+  server.use(
+    http.post(RULES, async ({ request }) => {
+      body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(ruleFixture, { status: 201 });
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await user.type(await screen.findByRole("textbox", { name: "Name" }), "Issue errors");
+  await choose(user, "Metric", "Issue occurrences");
+  expect(screen.getByRole("combobox", { name: "Window" })).toHaveTextContent("1 hour");
+  await choose(user, "Issue", ISSUE_LABEL);
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  await waitFor(() =>
+    expect(body?.condition).toEqual({
+      metric: "issue_occurrences",
+      window: "1h",
+      comparator: "gt",
+      threshold: 0,
+      issue_id: ISSUE_ID,
+    }),
+  );
+});
+
+it("creates a source occurrences rule", async () => {
+  let body: Record<string, unknown> | undefined;
+  serveScopeLists();
+  server.use(
+    http.post(RULES, async ({ request }) => {
+      body = (await request.json()) as Record<string, unknown>;
+      return HttpResponse.json(ruleFixture, { status: 201 });
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await user.type(await screen.findByRole("textbox", { name: "Name" }), "Source errors");
+  await choose(user, "Metric", "Issue occurrences");
+  await choose(user, "Scope", "All issues of a source");
+  await choose(user, "Source", "Errors");
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  await waitFor(() =>
+    expect(body?.condition).toEqual({
+      metric: "issue_occurrences",
+      window: "1h",
+      comparator: "gt",
+      threshold: 0,
+      source_id: SOURCE_ID,
+    }),
+  );
+});
+
+it("offers no window under 15 minutes for issue occurrences", async () => {
+  serveScopeLists();
+
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+  await user.click(screen.getByRole("combobox", { name: "Window" }));
+
+  expect(await screen.findByRole("option", { name: "15 minutes" })).toBeInTheDocument();
+  expect(screen.queryByRole("option", { name: "5 minutes" })).toBeNull();
+  expect(screen.queryByRole("option", { name: "1 minute" })).toBeNull();
+});
+
+it("says there is no preview for issue occurrences", async () => {
+  serveScopeLists();
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+
+  expect(await screen.findByText("No preview for issue occurrences.")).toBeInTheDocument();
+});
+
+it("hides the filter and the minimum samples for issue occurrences", async () => {
+  serveScopeLists();
+  const { user } = await renderApp(PAGE);
+  await choose(user, "Metric", "Issue occurrences");
+
+  expect(await screen.findByRole("combobox", { name: "Scope" })).toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Filter" })).toBeNull();
+  expect(screen.queryByRole("textbox", { name: "Minimum samples" })).toBeNull();
+});
+
+it("shows the scope error when no issue is chosen", async () => {
+  let posts = 0;
+  serveScopeLists();
+  server.use(
+    http.post(RULES, () => {
+      posts += 1;
+      return HttpResponse.json(ruleFixture, { status: 201 });
+    }),
+  );
+
+  const { user } = await renderApp(PAGE);
+  await user.type(await screen.findByRole("textbox", { name: "Name" }), "Issue errors");
+  await choose(user, "Metric", "Issue occurrences");
+  await user.click(screen.getByRole("button", { name: "Create rule" }));
+
+  expect(await screen.findByText("Choose an issue.")).toBeInTheDocument();
+  expect(posts).toBe(0);
+});
+
+it("prefills an issue occurrences rule from the search params and saves nothing", async () => {
+  let posts = 0;
+  serveScopeLists();
+  server.use(
+    http.get(ISSUE, () =>
+      HttpResponse.json({ ...issueFixture, id: OTHER_ISSUE_ID, title: "Timeout on retry" }),
+    ),
+    http.post(RULES, () => {
+      posts += 1;
+      return HttpResponse.json(ruleFixture, { status: 201 });
+    }),
+  );
+
+  await renderApp(`${PAGE}?metric=issue_occurrences&issue_id=${OTHER_ISSUE_ID}`);
+
+  expect(await screen.findByRole("combobox", { name: "Metric" })).toHaveTextContent(
+    "Issue occurrences",
+  );
+  expect(screen.getByRole("combobox", { name: "Window" })).toHaveTextContent("1 hour");
+  expect(screen.getByRole("textbox", { name: "Threshold" })).toHaveValue("0");
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "Issue" })).toHaveTextContent("Timeout on retry"),
+  );
+  expect(posts).toBe(0);
+});
+
+it("prefills a source occurrences rule from the search params", async () => {
+  serveScopeLists();
+
+  await renderApp(`${PAGE}?metric=issue_occurrences&source_id=${SOURCE_ID}`);
+
+  await waitFor(() =>
+    expect(screen.getByRole("combobox", { name: "Source" })).toHaveTextContent("Errors"),
+  );
+  expect(screen.getByRole("combobox", { name: "Scope" })).toHaveTextContent(
+    "All issues of a source",
+  );
+});
+
+it("ignores an unknown metric in the search params", async () => {
+  await renderApp(`${PAGE}?metric=bogus&issue_id=${ISSUE_ID}`);
+
+  expect(await screen.findByRole("combobox", { name: "Metric" })).toHaveTextContent("Error rate");
+  expect(screen.queryByRole("combobox", { name: "Scope" })).toBeNull();
 });

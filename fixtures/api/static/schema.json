@@ -272,7 +272,7 @@
           "name": "environment",
           "column_type": "string",
           "nullable": true,
-          "description": "Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs."
+          "description": "Deployment environment. cetra-eval is reserved for evaluator runs, cetra-playground for playground runs and cetra-assistant for assistant turns."
         },
         {
           "name": "release",
@@ -668,7 +668,7 @@
           "name": "source",
           "column_type": "string",
           "nullable": false,
-          "description": "api, sdk, human, end_user, llm_judge, check, or webhook."
+          "description": "api, sdk, human, end_user, llm_judge, check, webhook or issue."
         },
         {
           "name": "evaluator_id",

@@ -87,6 +87,16 @@ async fn list_score_definitions(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<ScoreDefinitionListParams>,
 ) -> Result<error::Json<Page<ScoreDefinition>>, ApiError> {
+    Ok(error::Json(definition_page(&state, &access, params).await?))
+}
+
+/// One page of score definitions: the body of `GET /score-definitions`. The assistant's
+/// `list_score_definitions` tool shares it (AS M2).
+pub(crate) async fn definition_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: ScoreDefinitionListParams,
+) -> Result<Page<ScoreDefinition>, ApiError> {
     let rows = list_definitions(
         state.meta.reader(),
         access.project.id,
@@ -97,11 +107,7 @@ async fn list_score_definitions(
         .iter()
         .map(|row| (row.name.clone(), row.id.to_string(), definition_json(row)))
         .collect();
-    Ok(error::Json(page_named(
-        items,
-        params.cursor.as_deref(),
-        params.limit.get(),
-    )?))
+    page_named(items, params.cursor.as_deref(), params.limit.get())
 }
 
 async fn create_score_definition(

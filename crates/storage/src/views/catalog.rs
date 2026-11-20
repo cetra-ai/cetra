@@ -334,7 +334,7 @@ const SPANS: &[ColumnInfo] = &[
         "environment",
         ColumnKind::String,
         true,
-        "Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs.",
+        "Deployment environment. cetra-eval is reserved for evaluator runs, cetra-playground for playground runs and cetra-assistant for assistant turns.",
     ),
     col(
         "release",
@@ -674,7 +674,7 @@ const SCORES: &[ColumnInfo] = &[
         "source",
         ColumnKind::String,
         false,
-        "api, sdk, human, end_user, llm_judge, check, or webhook.",
+        "api, sdk, human, end_user, llm_judge, check, webhook or issue.",
     ),
     col(
         "evaluator_id",

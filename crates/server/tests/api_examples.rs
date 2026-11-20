@@ -20,6 +20,11 @@ use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
     NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
 };
+use cetra_server::api::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantFeedbackRequest,
+    AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
+    UpdateAssistantConversationRequest,
+};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -44,6 +49,10 @@ use cetra_server::api::experiments::{
 };
 use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
+use cetra_server::api::issues::{
+    CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueRefitPage,
+    IssueSource, IssueSourcePage, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
+};
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
 use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
@@ -462,6 +471,13 @@ fn static_files_match_their_types() {
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
     roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
+    roundtrip::<IssueSourcePage>("static/issue-sources.json");
+    roundtrip::<IssueSource>("static/issue-source.json");
+    roundtrip::<IssuePage>("static/issues.json");
+    roundtrip::<Issue>("static/issue.json");
+    roundtrip::<IssueOccurrences>("static/issue-occurrences.json");
+    roundtrip::<IssueEventPage>("static/issue-events.json");
+    roundtrip::<IssueRefitPage>("static/issue-refits.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
@@ -480,6 +496,10 @@ fn static_files_match_their_types() {
 #[test]
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
+    roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
+    roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
+    roundtrip::<AssistantTurnRequest>("requests/assistant-turn.json");
+    roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
@@ -506,6 +526,19 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create.json");
+    roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create-topic.json");
+    roundtrip::<MergeIssueRequest>("requests/issue-merge.json");
+    // `UpdateIssueSourceRequest` has no `Serialize`, so it is only deserialized.
+    let issue_update_text = fs::read_to_string(api_dir().join("requests/issue-source-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateIssueSourceRequest>(&issue_update_text)
+        .unwrap_or_else(|error| panic!("requests/issue-source-update.json: {error}"));
+    // `UpdateIssueRequest` has no `Serialize`, so it is only deserialized.
+    let issue_patch_text = fs::read_to_string(api_dir().join("requests/issue-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateIssueRequest>(&issue_patch_text)
+        .unwrap_or_else(|error| panic!("requests/issue-update.json: {error}"));
     roundtrip::<PlaygroundRunRequest>("requests/playground-run.json");
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
@@ -557,7 +590,21 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator_run", "requests/evaluator-run.json"),
         ("post_playground_run", "requests/playground-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
+        ("post_issue_source", "requests/issue-source-create.json"),
+        (
+            "post_issue_source",
+            "requests/issue-source-create-topic.json",
+        ),
+        ("patch_issue_source", "requests/issue-source-update.json"),
+        ("patch_issue", "requests/issue-update.json"),
+        ("post_issue_merge", "requests/issue-merge.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "patch_assistant_conversation",
+            "requests/assistant-conversation-rename.json",
+        ),
+        ("put_org_assistant", "requests/assistant-settings.json"),
+        ("put_assistant_feedback", "requests/assistant-feedback.json"),
         (
             "post_online_rule_preview",
             "requests/online-rule-preview.json",
@@ -692,6 +739,12 @@ fn generated_files_roundtrip() {
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "list_assistant_conversations" => {
+                roundtrip::<Page<AssistantConversation>>(&example.file);
+            }
+            "get_assistant_conversation" => roundtrip::<AssistantConversationDetail>(&example.file),
+            "get_org_assistant" => roundtrip::<AssistantSettings>(&example.file),
+            "get_project_assistant" => roundtrip::<AssistantStatus>(&example.file),
             "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
             | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
@@ -756,6 +809,13 @@ fn generated_files_roundtrip() {
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
             "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "list_issue_sources" => roundtrip::<IssueSourcePage>(&example.file),
+            "get_issue_source" => roundtrip::<IssueSource>(&example.file),
+            "list_issues" => roundtrip::<IssuePage>(&example.file),
+            "get_issue" => roundtrip::<Issue>(&example.file),
+            "get_issue_occurrences" => roundtrip::<IssueOccurrences>(&example.file),
+            "get_issue_events" => roundtrip::<IssueEventPage>(&example.file),
+            "list_issue_source_refits" => roundtrip::<IssueRefitPage>(&example.file),
             "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);

@@ -106,7 +106,8 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | Create prompt versions, move unprotected prompt labels (D-V-13) | | ✓ | ✓ | ✓ |
 | Move protected prompt labels, edit the protected list (D-V-10) | | | ✓ | ✓ |
 | Create and edit annotation queues, add and remove items (D-AQ-11) | | ✓ | ✓ | ✓ |
-| Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
+| Use the in-app assistant: chat and manage one's own conversations, with a session only (D-AS-4) | | ✓ | ✓ | ✓ |
+| Manage API keys, LLM connections, the assistant setting (D-AS-3), project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
 | Instance settings (instance admins only) | — | — | — | — |

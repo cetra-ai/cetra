@@ -501,6 +501,53 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "list_assistant_conversations",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "post_assistant_conversation",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "get_assistant_conversation",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "patch_assistant_conversation",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "delete_assistant_conversation",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
+        "put_assistant_feedback",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/turns",
+        "post_assistant_turn",
+    ),
+    ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
+    ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/assistant/test",
+        "post_org_assistant_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant",
+        "get_project_assistant",
+    ),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -584,6 +631,68 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get",
         "/api/v1/projects/{project}/online-rules/stats",
         "get_online_rule_stats",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources",
+        "list_issue_sources",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issue-sources",
+        "post_issue_source",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "get_issue_source",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "patch_issue_source",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issue-sources/{id}/refit",
+        "post_issue_source_refit",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}/refits",
+        "list_issue_source_refits",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "delete_issue_source",
+    ),
+    ("get", "/api/v1/projects/{project}/issues", "list_issues"),
+    ("get", "/api/v1/projects/{project}/issues/{id}", "get_issue"),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/occurrences",
+        "get_issue_occurrences",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/events",
+        "get_issue_events",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/issues/{id}",
+        "patch_issue",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/merge",
+        "post_issue_merge",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/dataset-items",
+        "post_issue_dataset_items",
     ),
     (
         "post",
@@ -965,6 +1074,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "resolve_model_price",
     "list_org_model_prices",
     "list_online_rules",
+    "list_issue_sources",
     "post_online_rule_preview",
     "post_backfill_estimate",
     "list_eval_jobs",
@@ -988,6 +1098,9 @@ const READ_OPERATIONS: &[&str] = &[
     "get_evaluator_stats",
     "get_online_rule_stats",
     "get_experiment_summaries",
+    "list_issues",
+    "get_issue",
+    "get_issue_occurrences",
     "get_prompt_metrics",
 ];
 
@@ -1018,6 +1131,8 @@ const TAGS: &[&str] = &[
     "internal",
     "deletions",
     "alerts",
+    "issues",
+    "assistant",
     "ingest",
 ];
 
@@ -1149,6 +1264,18 @@ fn document_lint() {
                 | "delete_org_sso_domain"
                 | "delete_org"
                 | "delete_project"
+                | "patch_issue"
+                | "post_issue_merge"
+                | "list_assistant_conversations"
+                | "post_assistant_conversation"
+                | "get_assistant_conversation"
+                | "patch_assistant_conversation"
+                | "delete_assistant_conversation"
+                | "put_assistant_feedback"
+                | "post_assistant_turn"
+                | "put_org_assistant"
+                | "post_org_assistant_test"
+                | "get_project_assistant"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1220,6 +1347,10 @@ fn document_lint() {
             || *id == "test_channel"
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
+            || *id == "patch_assistant_conversation"
+            || *id == "put_assistant_feedback"
+            || *id == "put_org_assistant"
+            || *id == "post_org_assistant_test"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
@@ -1304,13 +1435,28 @@ fn document_lint() {
         } else if *id == "post_playground_run" {
             // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_assistant_turn" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_online_rule" || *id == "patch_online_rule" || *id == "post_backfill"
+        } else if *id == "post_online_rule"
+            || *id == "patch_online_rule"
+            || *id == "post_backfill"
+            || *id == "post_issue_source"
+            || *id == "patch_issue_source"
+            || *id == "patch_issue"
+            || *id == "post_issue_merge"
+            || *id == "post_issue_dataset_items"
+            || *id == "post_issue_source_refit"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
+            || *id == "get_issue_source"
+            || *id == "delete_issue_source"
+            || *id == "get_issue_events"
+            || *id == "list_issue_source_refits"
             || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"
@@ -1464,6 +1610,7 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("DashboardPage", "DashboardSummary"),
+        ("AssistantConversationPage", "AssistantConversation"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1481,6 +1628,8 @@ fn document_lint() {
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
         ("OnlineRulePage", "OnlineRule"),
+        ("IssueSourcePage", "IssueSource"),
+        ("IssuePage", "Issue"),
         ("EvalJobPage", "EvalJob"),
         ("BackfillPage", "Backfill"),
     ];
@@ -1645,7 +1794,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
@@ -1703,12 +1852,15 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     // `null` is a value here, not an absent field: a PATCH clears retention with it
     // (`api/openapi.rs` NULL_IS_A_VALUE).
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("AssistantFeedbackRequest", &["feedback"]),
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
         (
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("UpdateIssueSourceRequest", &["filter"]),
+        ("UpdateIssueRequest", &["description"]),
         ("AgentContextBody", &["repository", "branch", "user"]),
         ("UpdatePromptRequest", &["description"]),
     ];
@@ -1753,6 +1905,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "DashboardPage",
+        "AssistantConversationPage",
         "AnnotationQueuePage",
         "AnnotationQueueItemPage",
         "LlmConnectionPage",
@@ -1773,6 +1926,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertRulePage",
         "AlertEventPage",
         "OnlineRulePage",
+        "IssueSourcePage",
+        "IssuePage",
         "EvalJobPage",
         "BackfillPage",
         "InternalUsagePage",

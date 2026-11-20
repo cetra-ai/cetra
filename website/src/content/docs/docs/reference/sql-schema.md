@@ -63,7 +63,7 @@ One row per span, including payload columns.
 | `service_name` | `string` | yes | Resource service.name. |
 | `session_id` | `string` | yes | Session id. |
 | `user_id` | `string` | yes | End-user id. |
-| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs. |
+| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs, cetra-playground for playground runs and cetra-assistant for assistant turns. |
 | `release` | `string` | yes | Git SHA or version string. |
 | `tags` | `string_list` | no | Tags. |
 | `metadata` | `string_map` | no | User metadata. Values are JSON-encoded scalars or strings. |
@@ -141,7 +141,7 @@ One row per live score.
 | `value_num` | `float` | yes | Numeric value. Booleans are 0 or 1. |
 | `value_str` | `string` | yes | Categorical label or text. |
 | `reason` | `string` | yes | Explanation. |
-| `source` | `string` | no | api, sdk, human, end_user, llm_judge, check, or webhook. |
+| `source` | `string` | no | api, sdk, human, end_user, llm_judge, check, webhook or issue. |
 | `evaluator_id` | `string` | yes | Evaluator that produced the score. |
 | `rule_id` | `string` | yes | Online rule that produced the score. |
 | `experiment_id` | `string` | yes | Experiment the score belongs to. |

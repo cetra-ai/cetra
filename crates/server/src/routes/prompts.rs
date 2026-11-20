@@ -340,7 +340,10 @@ fn prompt_json(row: &PromptRow) -> Prompt {
 /// API form of a version. The labels are the version's stored labels, plus `latest` when this
 /// is the prompt's latest version, sorted. The stored texts are parsed back and the variables
 /// and placeholders re-read from the template.
-fn version_json(prompt: &PromptRow, version: &VersionRow) -> Result<PromptVersion, ApiError> {
+pub(crate) fn version_json(
+    prompt: &PromptRow,
+    version: &VersionRow,
+) -> Result<PromptVersion, ApiError> {
     let template: Value =
         serde_json::from_str(&version.template).map_err(|_| corrupt("template"))?;
     let config: Value = serde_json::from_str(&version.config).map_err(|_| corrupt("config"))?;

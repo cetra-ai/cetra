@@ -354,6 +354,59 @@ CREATE INDEX annotation_queue_items_time ON annotation_queue_items(project_id, t
 
 One kind per queue (D-AQ-2). Items are unique per target within a queue. `target_time` drives retention and the data window (D-AQ-9). The lease is `leased_by_user_id` plus `lease_expires_at`: 5 minutes, claimed atomically on the writer (D-AQ-4). At most 100 queues per project, 100 000 items per queue, 50 definitions per queue.
 
+## Assistant
+
+Conversations of the in-app assistant (track AS, D-AS-10): private to their author in one project.
+
+```sql
+-- In-app assistant conversations (track AS, D-AS-10).
+CREATE TABLE assistant_conversations (
+  id TEXT PRIMARY KEY,                 -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',      -- '' until the first user message (M3) or a rename
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+);
+CREATE INDEX assistant_conversations_owner ON assistant_conversations(project_id, user_id, last_active_at);
+CREATE INDEX assistant_conversations_idle ON assistant_conversations(last_active_at);
+CREATE TABLE assistant_messages (
+  conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,                -- 1, 2, … within the conversation
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+  parts TEXT NOT NULL,                 -- JSON array of message parts (spec 04 § Assistant)
+  context TEXT,                        -- JSON page context of a user message (D-AS-14)
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'cancelled', 'failed')),
+  feedback TEXT CHECK (feedback IN ('up', 'down')),
+  turn_trace_id TEXT,                  -- 32 lowercase hex characters
+  stub_after INTEGER,                  -- tool messages: when their results become stubs; NULL once stubbed
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+);
+CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL;
+```
+
+The org's assistant setting (D-AS-3) is one row per org; an org with no row has the assistant off.
+
+```sql
+-- The org's in-app assistant setting (track AS, D-AS-3).
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+> Enabling needs a connection and a model; turning it on runs the tool-calling test (D-AS-24) and stores nothing when the test fails. The assistant never changes a connection's status. Deleting the connection leaves the setting with no connection, which reads as `no_connection`. A setting with `enabled` false, or with no row, reads as `disabled`.
+
+> `parts` is a JSON array of parts. The message parts of spec 01 are used where they fit: `{type: "text", content}` and `{type: "tool_call", id, name, arguments}`. Two parts are the assistant's own: `{type: "tool_result", id, name, ok, result, size_bytes, rows?, stubbed}` (the tool's JSON answer, `null` once stubbed) and `{type: "draft", id, kind, draft}` (`kind` is `filter`, `sql`, `dashboard`, `evaluator` or `online_rule`; D-AS-6). A user message holds text parts and its page context in `context`; an assistant message holds text and tool calls; a tool message holds tool results, each followed by the draft it produced (D-AS-21, draft id `draft_<tool call id>`).
+>
+> Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3); a turn starts only when 34 more messages fit (D-AS-25). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). The expiry and the stubbing run at startup, then hourly, so a result can stay whole for up to about 25 hours. Conversations are deleted with their project, org or author.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).
@@ -659,9 +712,167 @@ CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at);
 
 Written by `POST /v1/agent-context` (last write wins; an unchanged post within an hour writes nothing), loaded into memory before the listeners open, read by ingest from memory only. An hourly sweep deletes rows older than 30 days or the project's retention when shorter; a project keeps at most 10,000 rows, the oldest evicted; a deletion by user deletes the user's rows. Only active projects are loaded and swept; rows of a paused project stay until it is active again or dropped.
 
+## Issues
+
+Track IC (D-IC-1, D-IC-3, D-IC-10; design in `docs/plans/ic-issue-clustering/00-design.md`). `issue_sources` holds the sources of a project. `kind` is `error`, `score`, `feedback` or `topic` (D-IC-1) and has no SQL CHECK, so kinds are added without a table rebuild (the Rust enum is the only gate). `enabled` is the switch and `paused_reason` the pause of the sweeper or of the connection; the sweeper and the LLM workers read only enabled, unpaused sources. Deleting a source deletes its issues and their events (D-IC-3), and its candidates and refits.
+
+The LLM kinds carry a chat connection and model (candidate summaries, naming), an embedding connection, model and dimension (D-IC-5; fixed at create, changed only through the embedding dimension setter), a `sample_rate` and `daily_cap` (D-IC-1), an optional `budget_usd` per `budget_period` (`day` or `month`, D-IC-12), a `floor` (the join threshold, D-IC-7) and a `min_issue_size` (D-IC-8). `score_names` and `feedback_sources` are JSON arrays of strings, NULL when empty. `paused_detail` holds the provider's error text for a connection pause. `next_refit_at` is when the next refit is due, nanoseconds (D-IC-8). `refit_trigger` is the trigger that the due refit records, `schedule` or `manual` (CHECK): "Refit now" sets it to `manual` with `next_refit_at`, the refit records it in `issue_refits.trigger`, and the refit's finish schedules the next one and sets it back to `schedule`.
+
+`issues` holds one error group per row. `fingerprint` is the hex fingerprint of the group (D-IC-17); it is unique per source where set. `state` is `open`, `resolved`, `ignored` or `merged`; `regressed` is set when a resolved issue recurs. `merged_into` names the issue this one was merged into; a merge chain is one level deep (D-IC-9). `first_seen` and `last_seen` are trace start times, not ingest times. `resolved_at` and `resolved_by` record the last resolution. For an LLM source's issue, `centroid` is the mean of the member vectors and `member_count` the members in it (at most 500, D-IC-7); both are NULL or zero for error issues.
+
+`issue_events` is the audit trail of an issue (D-IC-10): `kind` is `created`, `state_changed`, `renamed`, `merged` or `regressed`; `from_value` and `to_value` hold the old and new value as text. `actor_user_id` NULL means the system. Events go with their issue.
+
+`issue_candidates` is the queue of an LLM source's work (D-IC-4, D-IC-12): one row per accepted target, deduplicated by `dedup_key`. `dedup_key` is `<source id>:<trace hex>` for a trace target, `<source id>:<trace hex>:<span hex>` for a span and `<source id>:session:<session id>` for a session. `status` is `queued`, `running`, `pending` (waiting for a refit), `assigned`, `outlier`, `dropped`, `failed` or `skipped`. `attempts`, `claims`, `interruptions` and `load_retries` count the queue's tries; `not_before` is when the row may be claimed (ns). `summary` and `summary_prompt_version` hold the one summary; `vector` and `embed_model`/`dimension` hold the embedding, a f32 little-endian BLOB. `call_trace_id` names the call trace of the last LLM call, and `cost_usd` sums the spend of its calls. Candidates keep their vector 7 days unassigned and 30 days assigned (D-IC-6). A finished candidate's (`assigned`, `outlier`, `dropped`, `failed` or `skipped`) `summary` is cleared when it is older than its project's `retention_days` (the row stays, since it anchors the issue membership); a `queued`, `running` or `pending` candidate keeps its summary, since a refit's naming prompt needs it; the candidates whose trace starts before the org's data window are deleted. A candidate that duplicates a `dedup_key` takes no slot of the source's daily cap.
+
+`issue_source_days` counts, per source and UTC day (`day` is the day start, ns), the candidates admitted and the USD spent: the daily cap and the budget read it, as `rule_spend` does for online rules (D-IC-1).
+
+`issue_refits` is the history of a source's refits (D-IC-8, D-IC-12): `trigger` is `schedule` or `manual`; the counts are the pending candidates read, the clusters found, the issues created, the candidates joined and the outliers; `error_class` is set when the refit stopped early. The last 50 refits of a source are kept.
+
+`issue_sources.last_notified_at` is the cut-off of the source's notifications, in nanoseconds: enabling a source, or giving it its first channel, sets it to now, so no backlog is sent (D-IC-21). `issue_source_channels` holds the source's notification channels, for new and regressed issues: at most 10 per source, both foreign keys cascade. `issue_notifications` holds one digest per message: `digest` is the JSON `{"items":[{"issue_id","kind":"created"|"regressed","title"}],"more":n}`, at most 20 items, newest first, `more` the count of the rest. A source sends at most one digest per 10 minutes, to each of its channels, through the delivery loop of § Alerts. Digests are pruned like alert events, after 90 days, with their deliveries (D-IC-21).
+
+```sql
+CREATE TABLE issue_sources (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- 'error', 'score', 'feedback' or 'topic'; no CHECK (D-IC-1)
+  filter TEXT,                        -- span filter DSL (error) or trace filter DSL (LLM kinds), when set
+  enabled INTEGER NOT NULL DEFAULT 1,
+  paused_reason TEXT,                 -- set by the sweeper or a connection pause; NULL when not paused
+  paused_at INTEGER,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  sample_rate REAL,                   -- LLM kinds, (0, 1]
+  daily_cap INTEGER,                  -- LLM kinds, candidates per UTC day
+  score_names TEXT,                   -- JSON array of strings; NULL when empty
+  feedback_sources TEXT,              -- JSON array of strings; NULL when empty
+  chat_connection_id TEXT REFERENCES llm_connections(id),
+  chat_model TEXT,
+  embed_connection_id TEXT REFERENCES llm_connections(id),
+  embed_model TEXT,
+  embed_dimension INTEGER,            -- set once, at create or on the first embedding
+  floor REAL,                         -- join threshold, cosine
+  min_issue_size INTEGER,
+  budget_usd REAL,
+  budget_period TEXT,                 -- 'day' or 'month'
+  paused_detail TEXT,                 -- the provider's error text for a connection pause
+  next_refit_at INTEGER,              -- ns
+  refit_trigger TEXT NOT NULL DEFAULT 'schedule' CHECK (refit_trigger IN ('schedule', 'manual')),
+  last_notified_at INTEGER,           -- ns; the last issue notification cut-off (D-IC-21)
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE issues (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  fingerprint TEXT,                   -- NULL for issues without one
+  title TEXT NOT NULL,
+  description TEXT,
+  state TEXT NOT NULL CHECK (state IN ('open', 'resolved', 'ignored', 'merged')),
+  regressed INTEGER NOT NULL DEFAULT 0,
+  merged_into TEXT REFERENCES issues(id) ON DELETE SET NULL,
+  first_seen INTEGER NOT NULL,        -- trace start, ns
+  last_seen INTEGER NOT NULL,         -- trace start, ns
+  resolved_at INTEGER,
+  resolved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  centroid BLOB,                      -- f32 little-endian; NULL for error issues
+  member_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
+    WHERE fingerprint IS NOT NULL;
+CREATE INDEX issues_project_last_seen ON issues (project_id, last_seen DESC, id);
+CREATE INDEX issues_merged_into ON issues (merged_into) WHERE merged_into IS NOT NULL;
+CREATE INDEX issues_source ON issues (source_id);
+
+CREATE TABLE issue_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('created', 'state_changed', 'renamed', 'merged', 'regressed')),
+  actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  from_value TEXT,
+  to_value TEXT,
+  at INTEGER NOT NULL                 -- ns
+);
+CREATE INDEX issue_events_issue ON issue_events (issue_id, at, id);
+
+CREATE TABLE issue_candidates (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  target TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+  trace_id BLOB,
+  span_id BLOB,
+  session_id TEXT,
+  user_id TEXT,
+  trace_start INTEGER,                -- ns
+  score_id TEXT,                      -- the score that made the candidate, when a score source
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'pending', 'assigned', 'outlier', 'dropped', 'failed', 'skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claims INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,        -- ns
+  error_class TEXT,
+  issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
+  summary TEXT,
+  summary_prompt_version INTEGER,
+  vector BLOB,                        -- f32 little-endian
+  embed_model TEXT,
+  dimension INTEGER,
+  call_trace_id BLOB,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX issue_candidates_ready ON issue_candidates (not_before) WHERE status = 'queued';
+CREATE INDEX issue_candidates_source ON issue_candidates (source_id, status, created_at);
+CREATE INDEX issue_candidates_trace ON issue_candidates (project_id, trace_id);
+
+CREATE TABLE issue_source_days (
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  day INTEGER NOT NULL,               -- UTC day start, ns
+  candidates INTEGER NOT NULL DEFAULT 0,
+  spent_usd REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, day)
+);
+
+CREATE TABLE issue_refits (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  trigger TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+  started_at INTEGER NOT NULL,        -- ns
+  finished_at INTEGER,                -- ns; NULL while running
+  pending INTEGER NOT NULL DEFAULT 0,
+  clusters INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL DEFAULT 0,
+  joined INTEGER NOT NULL DEFAULT 0,
+  outliers INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  error_class TEXT
+);
+CREATE INDEX issue_refits_source ON issue_refits (source_id, started_at DESC);
+
+CREATE TABLE issue_source_channels (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, channel_id)
+);
+CREATE INDEX issue_source_channels_channel ON issue_source_channels (channel_id);
+
+CREATE TABLE issue_notifications (
+    id         TEXT PRIMARY KEY,
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    digest     TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX issue_notifications_created ON issue_notifications (created_at);
+```
+
 ## Alerts
 
-Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10).
+Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10). A delivery belongs to an alert event or to an issue notification, never both (D-IC-21).
 
 ```sql
 CREATE TABLE notification_channels (
@@ -723,19 +934,22 @@ CREATE INDEX alert_events_rule ON alert_events(rule_id, created_at);
 CREATE INDEX alert_events_created ON alert_events(created_at);
 
 CREATE TABLE notification_deliveries (
-  id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
-  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
-  status TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER,
-  last_error TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
+    issue_notification_id TEXT REFERENCES issue_notifications(id) ON DELETE CASCADE,
+    channel_id            TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    status                TEXT NOT NULL,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       INTEGER,
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))
 );
 CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next_attempt_at);
 CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id);
 CREATE INDEX notification_deliveries_channel ON notification_deliveries(channel_id, updated_at);
+CREATE INDEX notification_deliveries_issue ON notification_deliveries(issue_notification_id);
 ```
 
 ## Entitlements (track P)

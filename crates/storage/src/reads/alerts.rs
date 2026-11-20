@@ -18,6 +18,7 @@ use datafusion::logical_expr::expr_fn::when;
 use datafusion::logical_expr::{Expr, LogicalPlan, col, in_subquery, lit};
 
 use super::columns::{f64_at, i64_at, internal, percentile, require};
+use super::scores::MAX_COUNT_NAMES;
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
@@ -54,6 +55,12 @@ pub enum AlertMeasure {
     ScorePassRate {
         /// Score name.
         name: String,
+    },
+    /// The number of live scores whose name is in `names` and whose `created_at` is in the
+    /// window, whatever their target (D-IC-20). `AlertValueRequest::filter` must be absent.
+    ScoreCount {
+        /// Score names, at most [`MAX_COUNT_NAMES`]; empty counts 0.
+        names: Vec<String>,
     },
 }
 
@@ -102,6 +109,13 @@ async fn compute(
     ctx: &QueryContext,
     request: AlertValueRequest<'_>,
 ) -> Result<AlertValue, RunError> {
+    if matches!(request.measure, AlertMeasure::ScoreCount { .. })
+        && present(request.filter).is_some()
+    {
+        return Err(RunError::InvalidRequest(
+            "a score count takes no filter".to_owned(),
+        ));
+    }
     let filter = match present(request.filter) {
         Some(text) => Some(ctx.parse_filter(FilterView::Traces, text)?),
         None => None,
@@ -209,7 +223,51 @@ async fn compute(
         AlertMeasure::ScorePassRate { name } => {
             score_value(ctx, window, filter, references_environment, name, true).await
         }
+        AlertMeasure::ScoreCount { names } => score_count(ctx, window, names).await,
     }
+}
+
+/// The number of live scores named in `names` whose `created_at` is in the window, of any
+/// target. No trace join, no default exclusions (D-IC-20).
+async fn score_count(
+    ctx: &QueryContext,
+    window: TimeWindow,
+    names: &[String],
+) -> Result<AlertValue, RunError> {
+    if names.len() > MAX_COUNT_NAMES {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_COUNT_NAMES} names"
+        )));
+    }
+    if names.is_empty() {
+        return Ok(AlertValue {
+            count: 0,
+            value: Some(0.0),
+        });
+    }
+    let list: Vec<Expr> = names.iter().map(|name| lit(name.as_str())).collect();
+    let batches = ctx
+        .session()
+        .table("scores")
+        .await
+        .map_err(classify)?
+        .filter(
+            col(scores::NAME)
+                .in_list(list, false)
+                .and(window.predicate(scores::CREATED_AT)),
+        )
+        .map_err(classify)?
+        .aggregate(vec![], vec![count(lit(1_i64)).alias(COUNT)])
+        .map_err(classify)?
+        .collect()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let batch = single_row(&batches)?;
+    let count = i64_at(require(batch, COUNT)?, 0)?;
+    Ok(AlertValue {
+        count,
+        value: Some(count as f64),
+    })
 }
 
 /// `1` for a trace with errors, `0` otherwise.
@@ -871,5 +929,142 @@ mod tests {
         let ctx = context(&[in_window(0)], &[]);
         let result = measure(&ctx, AlertMeasure::ErrorRate, Some("nonsense_column = 1")).await;
         assert!(matches!(result, Err(RunError::Invalid(_))), "{result:?}");
+    }
+
+    fn count_names(names: &[&str]) -> AlertMeasure {
+        AlertMeasure::ScoreCount {
+            names: names.iter().map(|name| (*name).to_owned()).collect(),
+        }
+    }
+
+    #[tokio::test]
+    async fn score_count_counts_names_in_the_window() {
+        let scores = vec![
+            score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
+            score_row(2, 0, T0 + 2 * MIN, T0 + 2 * MIN, T0 + 2 * MIN, false, "b"),
+            score_row(3, 0, T0 + 3 * MIN, T0 + 3 * MIN, T0 + 3 * MIN, false, "c"),
+            // Before the window start, and at the window end (exclusive).
+            score_row(4, 0, T0 - 1, T0 - 1, T0 - 1, false, "a"),
+            score_row(
+                5,
+                0,
+                T0 + 10 * MIN,
+                T0 + 10 * MIN,
+                T0 + 10 * MIN,
+                false,
+                "b",
+            ),
+        ];
+        let ctx = context(&[], &scores);
+        let value = measure(&ctx, count_names(&["a", "b"]), None)
+            .await
+            .expect("value");
+        assert_eq!(
+            value,
+            AlertValue {
+                count: 2,
+                value: Some(2.0)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn score_count_counts_every_target_and_ignores_traces() {
+        let span = in_window(0);
+        let mut span_score = score(1, 0, "issue:x", ScoreValue::Numeric(1.0));
+        span_score.target = ScoreTarget::Span {
+            trace_id: span.trace_id,
+            span_id: span.span_id,
+        };
+        let mut session_score = score(2, 1, "issue:x", ScoreValue::Numeric(1.0));
+        session_score.target = ScoreTarget::Session {
+            session_id: "s1".to_owned(),
+        };
+        let trace_score = score(3, 2, "issue:x", ScoreValue::Numeric(1.0));
+        // No span or trace of these scores is in the context.
+        let ctx = context(&[], &[span_score, session_score, trace_score]);
+        let value = measure(&ctx, count_names(&["issue:x"]), None)
+            .await
+            .expect("value");
+        assert_eq!(value.count, 3);
+        assert_eq!(value.value, Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn score_count_zero_is_a_value() {
+        let scores = vec![score_row(
+            1,
+            0,
+            T0 + MIN,
+            T0 + MIN,
+            T0 + MIN,
+            false,
+            "other",
+        )];
+        let ctx = context(&[], &scores);
+        let value = measure(&ctx, count_names(&["a"]), None)
+            .await
+            .expect("value");
+        assert_eq!(
+            value,
+            AlertValue {
+                count: 0,
+                value: Some(0.0)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn score_count_with_no_names_is_zero_without_a_query() {
+        let scores = vec![score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a")];
+        let ctx = context(&[], &scores);
+        let value = measure(&ctx, count_names(&[]), None).await.expect("value");
+        assert_eq!(
+            value,
+            AlertValue {
+                count: 0,
+                value: Some(0.0)
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn score_count_refuses_more_than_the_name_cap() {
+        let ctx = context(&[], &[]);
+        let many = vec!["a"; MAX_COUNT_NAMES + 1];
+        let result = measure(&ctx, count_names(&many), None).await;
+        assert!(
+            matches!(result, Err(RunError::InvalidRequest(_))),
+            "{result:?}"
+        );
+
+        let at_cap = vec!["a"; MAX_COUNT_NAMES];
+        let result = measure(&ctx, count_names(&at_cap), None).await;
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn score_count_refuses_a_filter() {
+        let ctx = context(&[in_window(0)], &[]);
+        let result = measure(&ctx, count_names(&["a"]), Some("status = 'error'")).await;
+        assert!(
+            matches!(result, Err(RunError::InvalidRequest(_))),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn score_count_skips_deleted_scores() {
+        // A later tombstone version of score 1 hides it from the live view.
+        let scores = vec![
+            score_row(1, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
+            score_row(1, 0, T0 + MIN, T0 + 2 * MIN, T0 + 2 * MIN, true, "a"),
+            score_row(2, 0, T0 + MIN, T0 + MIN, T0 + MIN, false, "a"),
+        ];
+        let ctx = context(&[], &scores);
+        let value = measure(&ctx, count_names(&["a"]), None)
+            .await
+            .expect("value");
+        assert_eq!(value.count, 1);
     }
 }
