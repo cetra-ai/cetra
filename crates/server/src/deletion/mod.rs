@@ -752,6 +752,9 @@ mod tests {
     use cetra_storage::error::{AppendError, DeletionError};
 
     use super::*;
+    use crate::meta::annotation_queues::{
+        AddedByKind, NewItem, NewQueue, QueueCreate, Target, insert_items_tx, insert_queue_tx,
+    };
     use crate::meta::datasets::{
         DatasetFields, NewRevision, VersionChange, insert_dataset, write_version,
     };
@@ -1794,6 +1797,197 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(gone, 0, "the queued job of the deleted trace is deleted");
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Pending);
+    }
+
+    /// A queue of `project` of `target`, created now, holding `items`. Returns its id.
+    async fn queue_of(
+        app: &TestApp,
+        project: &ProjectRow,
+        target: Target,
+        items: Vec<NewItem>,
+    ) -> Uuid {
+        let (org, project_id) = (project.org_id, project.id);
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let created = insert_queue_tx(
+                        conn,
+                        project_id,
+                        org,
+                        NewQueue {
+                            name: format!("q-{}", Uuid::now_v7()),
+                            description: None,
+                            instructions: None,
+                            target,
+                            definition_ids: Vec::new(),
+                            created_by: None,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    let QueueCreate::Created(row) = created else {
+                        panic!("the queue is created");
+                    };
+                    insert_items_tx(
+                        conn,
+                        row.id,
+                        project_id,
+                        &items,
+                        (AddedByKind::User, Uuid::now_v7()),
+                        now,
+                    )
+                    .await?;
+                    Ok(row.id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    /// A trace item of `trace`, or a span item of `span` in it.
+    fn item_on(trace: &str, span: Option<&str>) -> NewItem {
+        NewItem {
+            trace_id: Some(trace.to_owned()),
+            span_id: span.map(str::to_owned),
+            session_id: None,
+            target_time: 0,
+        }
+    }
+
+    /// A session item of `session`.
+    fn session_item(session: &str) -> NewItem {
+        NewItem {
+            trace_id: None,
+            span_id: None,
+            session_id: Some(session.to_owned()),
+            target_time: 0,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trace_deletion_removes_queue_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        // Trace 1 is in session `s1`; trace 2 is not deleted.
+        commit(&app, project, &trace_id(1), &span_id(1), |row| {
+            row.session_id = Some("s1".to_owned());
+        })
+        .await;
+        commit(&app, project, &trace_id(2), &span_id(2), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        queue_of(
+            &app,
+            project,
+            Target::Trace,
+            vec![item_on(&trace_id(1), None), item_on(&trace_id(2), None)],
+        )
+        .await;
+        queue_of(
+            &app,
+            project,
+            Target::Span,
+            vec![item_on(&trace_id(1), Some(&span_id(1)))],
+        )
+        .await;
+        queue_of(&app, project, Target::Session, vec![session_item("s1")]).await;
+
+        insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        let left = "SELECT COUNT(*) FROM annotation_queue_items WHERE project_id = ?";
+        assert_eq!(
+            count_rows(&app, left, project.id.to_string()).await,
+            1,
+            "only the item of the unrelated trace stays"
+        );
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM annotation_queue_items WHERE trace_id = ?",
+                trace_id(2)
+            )
+            .await,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_removes_session_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |row| {
+            row.user_id = Some("u1".to_owned());
+            row.session_id = Some("s1".to_owned());
+        })
+        .await;
+        commit(&app, project, &trace_id(2), &span_id(2), |row| {
+            row.user_id = Some("u2".to_owned());
+            row.session_id = Some("s2".to_owned());
+        })
+        .await;
+        app.state.clock.advance(Duration::from_secs(1));
+        queue_of(
+            &app,
+            project,
+            Target::Session,
+            vec![session_item("s1"), session_item("s2")],
+        )
+        .await;
+
+        let mut new = new_row(&app, project, DeletionKind::User);
+        new.user_id = Some("u1".to_owned());
+        insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        let by_session = "SELECT COUNT(*) FROM annotation_queue_items WHERE session_id = ?";
+        assert_eq!(count_rows(&app, by_session, "s1".to_owned()).await, 0);
+        assert_eq!(count_rows(&app, by_session, "s2".to_owned()).await, 1);
+    }
+
+    /// With no session item in any queue, the scan is skipped and the deletion still applies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cascade_skips_the_scan_without_session_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = &seeded.project;
+        commit(&app, project, &trace_id(1), &span_id(1), |_| {}).await;
+        app.state.clock.advance(Duration::from_secs(1));
+        queue_of(
+            &app,
+            project,
+            Target::Trace,
+            vec![item_on(&trace_id(1), None)],
+        )
+        .await;
+
+        let id = insert(
+            &app,
+            new_row(&app, project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+
+        assert_eq!(
+            count_rows(
+                &app,
+                "SELECT COUNT(*) FROM annotation_queue_items WHERE trace_id = ?",
+                trace_id(1)
+            )
+            .await,
+            0
+        );
         assert_eq!(deletion_row(&app, id).await.state, DeletionState::Pending);
     }
 

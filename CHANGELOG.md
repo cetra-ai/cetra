@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).
 - Scores carry an optional `queue_id`, the annotation queue they were written from, and `GET /scores` filters by it.
 - Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
 - A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).

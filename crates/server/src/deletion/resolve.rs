@@ -77,6 +77,24 @@ pub(super) async fn resolve(
     let jobs = crate::meta::eval_jobs::jobs_for_traces(state.meta.reader(), project, &scope)
         .await
         .map_err(|error| super::from_meta(&error))?;
+    // Annotation queue items of a session in the scope go too (D-AQ-9). The scan is skipped when
+    // no queue holds a session item. The visibility is exempt, so old sessions are found.
+    let queue_sessions: Vec<String> =
+        if crate::meta::annotation_queues::has_session_items(state.meta.reader(), project)
+            .await
+            .map_err(|error| super::from_meta(&error))?
+        {
+            let traces: HashSet<TraceId> = scope.iter().copied().collect();
+            let mut found = cetra_storage::session_ids_of_traces(&ctx, &traces, RESOLVE_TIMEOUT)
+                .await
+                .map_err(|error| super::from_run(&error, row.kind))?;
+            found.extend(sessions.iter().cloned());
+            found.sort();
+            found.dedup();
+            found
+        } else {
+            Vec::new()
+        };
 
     let id = row.id;
     let session_count = (row.kind == DeletionKind::User).then(|| count(sessions.len()));
@@ -84,7 +102,7 @@ pub(super) async fn resolve(
     // J's cascade (D-J-9) reads the scope from `deletion_traces` in this transaction, so an item
     // added from a trace before it is never missed; add-from-trace checks the guard in its own
     // write, so one added after the guard is filled is refused.
-    let (stored, cascade) = state
+    let (stored, cascade, queue_items) = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
@@ -96,20 +114,28 @@ pub(super) async fn resolve(
                     crate::meta::eval_jobs::delete_jobs(conn, &jobs).await?;
                     let cascade =
                         crate::meta::experiments::delete_copies_of_tx(conn, id, project).await?;
-                    return Ok((true, cascade));
+                    let queue_items = crate::meta::annotation_queues::delete_items_of_deletion_tx(
+                        conn,
+                        id,
+                        project,
+                        &queue_sessions,
+                    )
+                    .await?;
+                    return Ok((true, cascade, queue_items));
                 }
-                Ok((false, Cascade::default()))
+                Ok((false, Cascade::default(), 0))
             })
         })
         .await
         .map_err(|error| super::from_meta(&error))?;
-    if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 {
+    if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 || queue_items > 0 {
         tracing::info!(
             target: "audit",
             deletion_id = %row.id,
             project_id = %project,
             dataset_item_revisions = cascade.dataset_item_revisions,
             experiment_items = cascade.experiment_items,
+            queue_items = queue_items,
             "deletion removed dataset and experiment copies"
         );
     }
