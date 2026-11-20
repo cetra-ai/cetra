@@ -1,0 +1,119 @@
+---
+import Button from "../marketing/components/Button.astro";
+import Card from "../marketing/components/Card.astro";
+import Section from "../marketing/components/Section.astro";
+import SectionHeading from "../marketing/components/SectionHeading.astro";
+import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+import { CONTACT_EMAIL } from "../marketing/site";
+
+const protections = [
+  "Passwords hashed with Argon2id",
+  "Sign-in with GitHub, Google or your OpenID Connect provider",
+  "API keys stored as SHA-256 hashes, with optional expiry",
+  "Write-only public keys for browser feedback",
+  "Roles: owner, admin, member, viewer",
+  "Stored LLM keys and webhook secrets encrypted with a key you hold",
+  "LLM judges and webhooks cannot reach private network addresses by default",
+  "Logs carry IDs and sizes, never prompts, outputs or secrets",
+];
+---
+
+<MarketingLayout
+  title="Security"
+  description="Where cetra keeps your data, how it is protected, and how deletion and retention work, for self-hosted cetra and cetra Cloud."
+  route="/security/"
+>
+  <Section tone="ink" labelledby="sec-hero-title">
+    <SectionHeading
+      level={1}
+      eyebrow="Security"
+      title="Your data, where you decide."
+      id="sec-hero-title"
+      lede="This page states what cetra does today. It makes no claim about certifications cetra does not have."
+    />
+  </Section>
+
+  <Section tone="raised" divider labelledby="sec-where-title">
+    <SectionHeading title="Where your data lives" id="sec-where-title" />
+    <div class="cards">
+      <Card title="Self-hosted">
+        <p>Traces go from your app to your server. cetra sends no usage data anywhere, and a licence key is verified offline.</p>
+      </Card>
+      <Card title="cetra Cloud">
+        <p>Your org lives on a cell in the EU (eu1), on Hetzner servers and object storage in the EU.</p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section tone="ink" divider labelledby="sec-protect-title">
+    <SectionHeading title="How it is protected" id="sec-protect-title" />
+    <ul class="protections">
+      {protections.map((item) => <li>{item}</li>)}
+    </ul>
+  </Section>
+
+  <Section tone="teal" divider labelledby="sec-delete-title">
+    <SectionHeading title="Deletion and retention" id="sec-delete-title" />
+    <div class="prose">
+      <p>Delete by user, by trace, by filter, by project or by org. Deleted data disappears from every view within seconds and, by default, leaves live storage within 24 hours. The bytes are then removed from old files when cetra cleans them up.</p>
+      <p>Set retention per project. Days past it are removed.</p>
+      <p><a href="/docs/platform/deletion-and-retention/">How deletion works</a></p>
+    </div>
+  </Section>
+
+  <Section tone="ink" divider labelledby="sec-compliance-title">
+    <SectionHeading title="Compliance" id="sec-compliance-title" />
+    <div class="prose">
+      <p>cetra is not SOC 2 or ISO 27001 certified yet. If you need a security review, <a href={`mailto:${CONTACT_EMAIL}`}>write to us</a> and we will answer your questionnaire.</p>
+    </div>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+  .protections {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-7) 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3) var(--space-6);
+  }
+  .protections li {
+    display: flex;
+    gap: var(--space-3);
+    align-items: baseline;
+  }
+  .protections li::before {
+    content: "";
+    flex: none;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    transform: translateY(-0.2em);
+  }
+  .prose {
+    margin-top: var(--space-6);
+    max-width: 46rem;
+    font-size: var(--text-lg);
+    color: var(--fg-muted);
+  }
+  .prose p + p {
+    margin-top: var(--space-4);
+  }
+  .prose a {
+    color: var(--accent);
+  }
+  @media (max-width: 720px) {
+    .cards,
+    .protections {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
