@@ -79,7 +79,7 @@ No new dependency. The panel uses `react-markdown` 10.1.0, `remark-gfm` 4.0.1, `
 ### Event types (`web/src/lib/assistant/types.ts`, AS4.1)
 
 ```ts
-import type { Schema } from "@/api/schema";
+import type { Schema } from "@/api/types";
 
 export type AssistantMessage = Schema<"AssistantMessage">;
 export type AssistantPart = Schema<"AssistantPart">;
@@ -329,7 +329,7 @@ AS4.2 and AS4.3 may run in parallel after AS4.1 (their Edit lists do not overlap
    ```
    and one test in `roles.test.ts` in the style of its neighbours.
 5. `web/src/test/turn-stream.ts`: `turnStream(events: {event: string; data: unknown}[], options?: {delayMs?: number; hold?: Promise<void>}): Response`. It builds an `HttpResponse` with `Content-Type: text/event-stream` whose `ReadableStream` enqueues `": open\n\n"` first, then `event: <name>\ndata: <JSON>\n\n` per event (after `delayMs` each when set), waits for `hold` before closing when given, then closes. It never errors the stream (facts § 8: cancelling a live body can make undici assert).
-6. `web/src/mocks/assistant.ts`: `assistantHandlers()` for the dev worker; its turn handler is: `http.post("*/api/v1/projects/:project/assistant/conversations/:id/turns", ...)` answering a scripted turn over the example data: `start`, three `text` deltas, a `tool_call` `search_traces` with `{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z","filter":"status = 'error'"}`, its `tool_result` (`ok`, `size_bytes` 812, `rows` 3), a `tool_call` `draft_filter`, its `tool_result`, a `draft` `filter` `{"view":"traces","filter":"status = 'error'","range":"24h","include_eval":false,"include_experiments":false}`, text naming the three traces, and `done`. Use 120 ms between events so the screenshot shows streaming.    The same module also exports the handlers the dev worker needs for a new chat, kept in one module-level state (reset by a `resetAssistantMock()` export):
+6. `web/src/mocks/assistant.ts`: `assistantHandlers()` for the dev worker; its turn handler is: `http.post("/api/v1/projects/:project/assistant/conversations/:id/turns", ...)` answering a scripted turn over the example data: `start`, three `text` deltas, a `tool_call` `search_traces` with `{"from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z","filter":"status = 'error'"}`, its `tool_result` (`ok`, `size_bytes` 812, `rows` 3), a `tool_call` `draft_filter`, its `tool_result`, a `draft` `filter` `{"view":"traces","filter":"status = 'error'","range":"24h","include_eval":false,"include_experiments":false}`, text naming the three traces, and `done`. Use 120 ms between events so the screenshot shows streaming.    The same module also exports the handlers the dev worker needs for a new chat, kept in one module-level state (reset by a `resetAssistantMock()` export):
    - `POST …/assistant/conversations` → 201 with a conversation of fixed id `01900000-0000-7000-8000-000000001a02`, title "", `message_count` 0;
    - `GET …/assistant/conversations/01900000-0000-7000-8000-000000001a02` → that conversation with the messages of the scripted turn once a turn has run (user message with its context; assistant message with the `search_traces` call; tool message with its result; assistant message with the `draft_filter` call; tool message with its result and the filter draft part; assistant text), else no messages;
    - `GET …/assistant/conversations` → the fixture list with the new conversation first once it exists;
