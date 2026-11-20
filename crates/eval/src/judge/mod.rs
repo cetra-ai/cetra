@@ -3,7 +3,6 @@
 //! E11 is the OpenAI-compatible adapter, E12 is Anthropic, and E13 is Gemini.
 
 mod answer;
-mod anthropic;
 mod gemini;
 
 use std::time::Duration;
@@ -319,7 +318,9 @@ pub(crate) async fn call(
         Adapter::OpenAi => {
             judge_reply(crate::chat::openai::complete(client, conn, &chat_request(call)).await?)
         }
-        Adapter::Anthropic => anthropic::complete(client, conn, call).await,
+        Adapter::Anthropic => {
+            judge_reply(crate::chat::anthropic::complete(client, conn, &chat_request(call)).await?)
+        }
         Adapter::Gemini => gemini::complete(client, conn, call).await,
     }
 }

@@ -2,6 +2,7 @@
 //! Gemini APIs (D21, D-V-19). Judges send it without streaming (D-V-29); the
 //! playground streams it.
 
+pub(crate) mod anthropic;
 mod http;
 pub(crate) mod openai;
 
@@ -430,6 +431,27 @@ pub(crate) fn text_content(texts: &[&str]) -> Value {
     }
 }
 
+/// Tool-call arguments as a JSON object: an object as is; `None` and `null` as `{}`; a
+/// JSON string that parses to an object as that object. Anything else is
+/// `UnsupportedMessage { index, reason: "tool call arguments are not a JSON object" }`.
+pub(crate) fn arguments_object(
+    index: usize,
+    arguments: Option<&Value>,
+) -> Result<Map<String, Value>, ChatError> {
+    let parsed = match arguments {
+        None | Some(Value::Null) => return Ok(Map::new()),
+        Some(Value::String(text)) => serde_json::from_str::<Value>(text).ok(),
+        Some(value) => Some(value.clone()),
+    };
+    match parsed {
+        Some(Value::Object(object)) => Ok(object),
+        _ => Err(ChatError::UnsupportedMessage {
+            index,
+            reason: "tool call arguments are not a JSON object",
+        }),
+    }
+}
+
 /// Tool-call arguments as JSON text: a JSON string as is, `None` as `{}`, any other
 /// value as compact JSON.
 pub(crate) fn arguments_text(arguments: Option<&Value>) -> Result<String, ChatError> {
@@ -600,8 +622,8 @@ mod tests {
     use super::{
         CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_MAX, ChatParams, ChatRequest, FinishReason,
         PROMPT_INSTRUCTION, ResponseFormat, ToolCall, ToolChoice, ToolDefinition,
-        apply_prompt_mode, arguments_text, check_messages, check_request, number, other_finish,
-        request_headers, response_text,
+        apply_prompt_mode, arguments_object, arguments_text, check_messages, check_request, number,
+        other_finish, request_headers, response_text,
     };
     use crate::error::{ChatError, JudgeError};
     use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
@@ -964,6 +986,27 @@ mod tests {
                 vec![text(&format!("{PROMPT_INSTRUCTION}\n{pretty}"))]
             )
         );
+    }
+
+    #[test]
+    fn arguments_object_wants_an_object() {
+        let object = json!({"a": 1});
+        let expected = object.as_object().cloned().expect("an object");
+        assert_eq!(arguments_object(2, Some(&object)), Ok(expected.clone()));
+        assert_eq!(arguments_object(2, None), Ok(Map::new()));
+        assert_eq!(arguments_object(2, Some(&Value::Null)), Ok(Map::new()));
+        assert_eq!(arguments_object(2, Some(&json!("{\"a\":1}"))), Ok(expected));
+        let refused = ChatError::UnsupportedMessage {
+            index: 2,
+            reason: "tool call arguments are not a JSON object",
+        };
+        for bad in [json!("[1]"), json!(3), json!("x")] {
+            assert_eq!(
+                arguments_object(2, Some(&bad)),
+                Err(refused.clone()),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
