@@ -1629,20 +1629,6 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     expected.insert("CreateExperimentResponse.next_cursor".to_owned());
     expected.insert("ExperimentResults.next_cursor".to_owned());
     expected.insert("ExperimentComparison.next_cursor".to_owned());
-    // A source always shows its filter, pause and author, `null` when it has none.
-    expected.insert("IssueSource.filter".to_owned());
-    expected.insert("IssueSource.paused_reason".to_owned());
-    expected.insert("IssueSource.created_by".to_owned());
-    // An issue shows its description, merge target and resolver, `null` when it has none; its
-    // examples and events show their optional texts and users the same way.
-    expected.insert("Issue.description".to_owned());
-    expected.insert("Issue.merged_into".to_owned());
-    expected.insert("Issue.resolved_by".to_owned());
-    expected.insert("IssueExample.span_id".to_owned());
-    expected.insert("IssueExample.reason".to_owned());
-    expected.insert("IssueEvent.actor_user_id".to_owned());
-    expected.insert("IssueEvent.from_value".to_owned());
-    expected.insert("IssueEvent.to_value".to_owned());
     assert_eq!(required_nullable, expected);
 }
 
