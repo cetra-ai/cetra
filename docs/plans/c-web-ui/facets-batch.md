@@ -10,7 +10,7 @@ Opening the Spans page sends six `GET /facets` requests: `span_kind`, `status` a
 - `AGENTS.md` (rules, privacy, tests, "No compatibility layers").
 - `docs/spec/05-query.md` § Facets; `docs/spec/09-api.md` line with `GET /facets`; `docs/spec/11-ui.md` § Facet sidebar and § Presets; `docs/mvp-decisions.md` D-C-13.
 - `crates/storage/src/reads/facets.rs` (all of it), `crates/storage/src/reads/mod.rs` and `crates/storage/src/lib.rs` (the `facets` re-exports).
-- `crates/server/src/api/facets.rs`, `crates/server/src/routes/facets.rs`, `crates/server/src/routes/read.rs` (`Deadline`, `check_search`, `list_scope`, `open_query`), `crates/server/src/http/error.rs` (`ApiError::QueryAt`, `ApiError::log`, `ApiError::problem`, `query_problem`), `crates/server/src/routes/dashboards.rs` lines 40–50 and 130–145 (a POST read route with a body limit), `crates/server/src/api/openapi.rs` (`get_facets` around line 2553 and `query_widget` around line 4991), `crates/server/src/api_examples.rs` (the `FACETS` loop and `post_json`).
+- `crates/server/src/api/facets.rs`, `crates/server/src/routes/facets.rs`, `crates/server/src/routes/read.rs` (`Deadline`, `check_search`, `list_scope`, `open_query`), `crates/server/src/http/error.rs` (`ApiError::QueryAt`, `ApiError::log`, `ApiError::problem`, `query_problem`), `crates/server/src/routes/dashboards.rs` lines 40–50 and 130–145 (a POST read route with a body limit), `crates/server/src/api/openapi.rs` (`get_facets` around line 2643 and `query_widget` around line 4991), `crates/server/src/api_examples.rs` (the `FACETS` loop and `post_json`).
 - `web/src/api/queries.ts` (`FacetAsk`, `facetQuery`, `useFacetQuery`, `latestFacetAnswer`), `web/src/api/client.ts`, `web/src/api/problem.ts`.
 - The callers: `web/src/components/facets/{values-facet,range-facet,keys-facet,preset-chips}.tsx`, `web/src/components/filter-bar/{editor,value-input}.tsx`.
 - The mocks: `web/src/mocks/handlers.ts` (`widgetQueryFixture`), `web/src/mocks/generated/handlers.ts` (`facets`, `facetAnswer`, `readQuery`, `problem`).
@@ -27,7 +27,7 @@ Out of scope:
 - The list row queries and their caching (another session owns them).
 - A server-side cache of facet answers (D-C-13 keeps none).
 - One scan for all fields (see D-C-23: rejected for now).
-- A per-field `filter`. A section asks its counts with the filter minus its own chips (spec 11), so when the filter is not empty, sections whose own chips differ ask with different filters, and the batcher sends one request per distinct filter. With an empty filter (opening a page with no filter) all fields share one request.
+- A per-field `filter`. A section asks its counts with the filter minus its own chips (spec 11), so when the filter is not empty, sections whose own chips differ ask with different filters, and the batcher sends one request per distinct filter. The preset chips ask without filter and search, so with a search active they also go out apart from the sections. With an empty filter and no search (opening a page plainly) all fields share one request.
 
 ## Decisions this plan relies on
 
@@ -171,7 +171,21 @@ The private enum named `FacetField` today (the parsed field) is renamed `ParsedF
    6. `let deadline = tokio::time::Instant::now() + request.timeout;`
    7. Build the rows once under the deadline: `tokio::time::timeout_at(deadline, rows(ctx, &request, filter))`; an elapsed timeout is `Err(RunError::Timeout)` (outer), an inner error is returned as the outer error. `rows` is today's `match` at the top of `run`: `window_rows` for traces and spans, `session_rows(ctx, request.scope, filter)` for sessions.
    8. Change `window_rows` to take `(ctx, table, view: FilterView, scope: ListScope, search: Option<&str>, filter: Option<Filter>)` instead of `&FacetRequest`; its body is unchanged otherwise.
-   9. For each `checked` entry, in order, make a future: an `Err` is returned as is; an `Ok((field, query, limit))` runs `tokio::time::timeout_at(deadline, one(ctx, frame.clone(), &field, query, limit))`, mapping an elapsed timeout to `Err(RunError::Timeout)`. `one` is today's `match field` at the end of `run` (`histogram` for `Number`, else `values`). Await them together with `futures::future::join_all` and return `Ok` of the results (same order).
+   9. Consume `checked` with `into_iter()` and map each entry to one `async move` block (so every future has the same type), capturing `ctx` (a `&QueryContext`), a `frame.clone()` and `deadline`:
+      ```rust
+      let futures = checked.into_iter().map(|entry| {
+          let frame = frame.clone();
+          async move {
+              let (field, query, limit) = entry?;
+              match tokio::time::timeout_at(deadline, one(ctx, frame, &field, query, limit)).await {
+                  Err(_) => Err(RunError::Timeout),
+                  Ok(result) => result,
+              }
+          }
+      });
+      Ok(futures::future::join_all(futures).await)
+      ```
+      `one(ctx, frame, field: &ParsedField, query: Option<&str>, limit: usize) -> Result<FacetData, RunError>` is today's `match field` at the end of `run` (`histogram` for `Number`, else `values`). If clippy's `large_futures` fires on this, wrap the `async move` block in `Box::pin(...)`; nothing else.
    10. Delete `run` (its two halves became `rows` and `one`).
 5. Re-export in `reads/mod.rs` and `lib.rs`: replace `FacetRequest` by `FacetField`, `FacetsRequest`, `MAX_FACET_FIELDS`, and `facet` by `facets`. Keep the alphabetical order of each `pub use` list.
 6. Tests (in `facets.rs`'s `mod tests`). Keep every existing test body unchanged by adding, in the test module, a test-only single-field shape and adapter:
@@ -213,8 +227,7 @@ The private enum named `FacetField` today (the parsed field) is renamed `ParsedF
    - `duplicate_fields_are_answered_twice`: fields `status`, `status`: two equal `Ok`s.
    - `no_field_or_too_many_fail_the_batch`: 0 fields and `MAX_FACET_FIELDS + 1` fields (all `status`) are outer `Err(RunError::InvalidRequest(_))`.
    - `bad_filter_fails_the_batch_before_the_fields`: filter `error_count >` with field `input` is outer `Err(RunError::Invalid(_))`.
-   - `only_bad_fields_run_no_query`: fields `input` and `output` with timeout `Duration::ZERO`: `Ok` of two `InvalidRequest` errors (with a zero timeout, building the rows would have been a `Timeout`, so this shows no query ran).
-   - `zero_timeout_fails_the_batch`: field `status` with timeout `Duration::ZERO` is outer `Err(RunError::Timeout)`.
+   - `only_bad_fields_answer_their_errors`: fields `input` and `output`: `Ok` of two `Err(RunError::InvalidRequest(_))`.
 
 **Done when:** the files are written. Do not compile or test (machine load); the coordinator runs the checks at the end.
 
@@ -226,7 +239,7 @@ The private enum named `FacetField` today (the parsed field) is renamed `ParsedF
 
 **Goal:** replace the `GET` route with a `POST` that takes a `FacetsRequest` body and answers one result per field.
 
-**Edit:** `crates/server/src/api/facets.rs`, `crates/server/src/routes/facets.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, new `fixtures/api/requests/facets-traces.json`, `fixtures/api/requests/facets-spans.json`, `fixtures/api/requests/facets-sessions.json`. Nothing else (not `manifest.json`, not `responses/`, not `openapi.json`: the coordinator regenerates them).
+**Edit:** `crates/server/src/api/facets.rs`, `crates/server/src/routes/facets.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, new `fixtures/api/requests/facets-traces.json`, `fixtures/api/requests/facets-spans.json`, `fixtures/api/requests/facets-sessions.json`. Nothing else (not `manifest.json`, not `responses/`, not `openapi.json`: the coordinator regenerates them).
 
 **Types** (`api/facets.rs`; delete `FacetsParams` and the old `FacetsResponse`; keep `FacetView`, `FacetKind`, `FacetValue`, `FacetBucket`, `FacetHistogram` unchanged; update the module comment to `POST /api/v1/projects/{project}/facets`):
 
@@ -354,6 +367,15 @@ pub struct Facet {
    - `facets-traces.json`: `status`, `name`, `environment`, `tags`, `models`, `metadata`, `duration_ms`, `cost_total`.
    - `facets-spans.json`: `span_kind`, `status`, `name`, `model`, `duration_ms`, `cost_total`.
    - `facets-sessions.json`: `user_id`, `tags`, `duration_ms`, `cost_total`.
+8. `crates/server/tests/openapi.rs`:
+   - the route table row `("get", ".../facets", "get_facets")` (around line 551) becomes `("post", <same path>, "post_facets")`;
+   - remove `get_facets` from `QUERY_OR_BODY` (around line 1053) and `READ_OPERATIONS` (around line 1095) if those lists hold GET operations only; if a list is meant to hold body reads too (look at what else it holds, e.g. `query_widget`, `run_sql`), put `post_facets` where `query_widget` is instead, and say which you did in the report;
+   - the error-code branch `else if *id == "run_sql" || *id == "query_widget"` (around line 1410) gets `|| *id == "post_facets"`;
+   - `assert_exclusions`' `EXPECTED` (around line 1788) loses `get_facets` (the POST has no `include_eval` query parameter).
+9. `crates/server/tests/api_examples.rs`:
+   - the round-trip match arm `"get_facets" => roundtrip::<FacetsResponse>` (around line 736) becomes `"post_facets"`;
+   - add `("post_facets", "requests/facets-traces.json")`, `("post_facets", "requests/facets-spans.json")` and `("post_facets", "requests/facets-sessions.json")` to the `requests` array (around lines 587–670), as `post_issue_source` has two rows;
+   - add a deserialize check that each of the three request files parses as `FacetsRequest`, the way `RunEvaluatorRequest` is checked (around line 573).
 
 **Done when:** the files are written. Do not compile or test; the coordinator runs the checks.
 
@@ -384,6 +406,9 @@ import type { Schema } from "./types";
  * enough for the sections and preset chips a page mounts together.
  */
 export const FACET_BATCH_MS = 10;
+
+/** Most fields in one request, the server's limit. */
+const MAX_FACET_FIELDS = 20;
 
 /** What every field of one batch shares: the list, its window, flags, filter and search. */
 export type FacetShared = Omit<Schema<"FacetsRequest">, "fields">;
@@ -421,6 +446,10 @@ export function askFacet(
       batch = created;
     }
     batch.waiting.push({ field, resolve, reject });
+    // The server takes at most 20 fields; the next ask starts a new batch.
+    if (batch.waiting.length >= MAX_FACET_FIELDS) {
+      open.delete(key);
+    }
   });
 }
 
@@ -436,7 +465,7 @@ async function send(batch: Batch): Promise<void> {
     fields.push(field);
     return fields.length - 1;
   });
-  let answer: Schema<"FacetsResponse"> | undefined;
+  let results: Schema<"FacetResult">[];
   try {
     const { data, error } = await api.POST("/api/v1/projects/{project}/facets", {
       params: { path: { project: batch.project } },
@@ -445,21 +474,21 @@ async function send(batch: Batch): Promise<void> {
     if (error !== undefined || data === undefined) {
       throw error ?? new Error("facets: empty answer");
     }
-    answer = data;
+    results = data.results;
   } catch (error) {
     for (const waiting of batch.waiting) {
       waiting.reject(error);
     }
     return;
   }
-  batch.waiting.forEach((waiting, index) => {
-    const result = answer.results[slots[index] ?? -1];
+  for (const [index, waiting] of batch.waiting.entries()) {
+    const result = results[slots[index] ?? -1];
     if (result?.facet !== undefined) {
       waiting.resolve(result.facet);
     } else {
       waiting.reject(result?.error ?? new Error("facets: missing result"));
     }
-  });
+  }
 }
 ```
 
@@ -520,6 +549,7 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
   - `different shared parts go out separately`: two calls with different `filter` → two requests, one field each.
   - `the same field asked twice is sent once`: two calls with equal shared part and field → one request with one field; both promises resolve to the same facet.
   - `a later ask starts a new batch`: one call, await it, then another → two requests.
+  - `more than 20 fields go out in several requests`: 21 calls with distinct fields (`f0`…`f20`) without awaiting → two requests, of 20 and 1 fields; all 21 resolve.
 - `web/src/api/queries.test.tsx`: update the cached-key helpers to the new key (they use `facetQuery(...).queryKey`, so mostly unchanged) and the `useFacetQuery` test's handler from `http.get` to `http.post` answering `{ view, results: body.fields.map((field) => ({ field: field.field, facet })) }`. Keep every existing case: same-length window found, different length not found, other project not found, placeholder shown while the new window loads.
 - Add in `queries.test.tsx`: `facetQuery keys leave out empty parts`: `facetQuery("acme", "support-bot", { view: "traces", field: "status", from, to, filter: "", search: "", includeEval: false, q: "", limit: 10 }).queryKey` equals `["facets", <ref>, { view: "traces", from, to }, { field: "status", limit: 10 }]`, where `<ref>` is `projectRef("acme", "support-bot")`.
 
@@ -585,8 +615,9 @@ Not an agent phase; the coordinator writes it.
 - `docs/spec/05-query.md` § Facets: the request line becomes `POST /api/v1/projects/{p}/facets` with the body (`view`, `from`, `to`, `filter`, `search`, `include_eval`, `include_experiments`, `fields: [{ field, limit?, q? }]`, 1–20 fields) and the answer (`results` in request order, each `facet` or `error`); which errors fail the whole request and which only a field; the storage builds the rows once and computes the fields concurrently under one deadline; the cost paragraph: "the UI fetches only expanded facets, keeps each answer 30 s, and sends the fields it asks together as one request".
 - `docs/spec/09-api.md`: the `GET /facets` row becomes `POST /facets`, a read by POST (D-H-4).
 - `docs/spec/11-ui.md`: `GET /facets` → `POST /facets` (filter bar, presets); the facet sidebar paragraph adds: "Each section keeps its own cached answer; the fields asked together (a page opening, the presets) go out as one request per distinct filter (D-C-23)."
-- `docs/mvp-decisions.md`: D-C-13 says "one field per request" → "one request per batch of fields (D-C-23)"; D129 `GET /facets` → `POST /facets`; add D-C-23 (the text of the table row above).
+- `docs/mvp-decisions.md`: D-C-13 says "one field per request" → "one request per batch of fields (D-C-23)", and "(plus one `limit=1` histogram per Slow/Expensive preset for its p95)" → "(plus the duration and cost histograms for the Slow/Expensive presets' p95)"; D129 `GET /facets` → `POST /facets`; add D-C-23 (the text of the table row above).
 - `CHANGELOG.md` § `[Unreleased]` › `Changed`: "`GET /facets` is replaced by `POST /facets`, which answers up to 20 fields in one request; the facet sidebar and presets send one request when a list opens (D-C-23)." and update the `Added` line that says "Backed by the new `GET /facets` endpoint" to `POST /facets`.
+- `docs/roadmap.md`: the track C row gets this plan and its PR.
 - `website/`: no page names the endpoint (checked: `grep -rn "/facets" website/src` is empty).
 
 Commit: `Document the facet batch (D-C-23)`.
