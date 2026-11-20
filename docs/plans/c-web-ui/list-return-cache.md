@@ -274,13 +274,14 @@ Run them one at a time in the same worktree (each commits). Files per phase:
 
    ```ts
    import { type QueryKey, useQuery } from "@tanstack/react-query";
+   import type { ReactElement } from "react";
    import { Button } from "@/components/ui/button";
 
    /** "1 new span", "3 new spans", "50+ new spans": `more` adds "+" and forces the plural. */
    export function countLabel(count: number, more: boolean, one: string, many: string): string;
 
    /** The pill at the top of a list's table. */
-   export function NewRowsPill({ label, onClick }: { label: string; onClick: () => void }): JSX.Element;
+   export function NewRowsPill({ label, onClick }: { label: string; onClick: () => void }): ReactElement;
 
    type CheckPage = { data: readonly unknown[]; next_cursor?: string | null };
 
