@@ -95,6 +95,7 @@ export default defineConfig({
                     { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },
                     { label: "Datasets", link: "/docs/evaluation/datasets/" },
+                    { label: "Prompts", link: "/docs/evaluation/prompts/" },
                     { label: "Experiments", link: "/docs/evaluation/experiments/" },
                   ],
                 },

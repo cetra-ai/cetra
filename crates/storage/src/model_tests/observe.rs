@@ -646,6 +646,7 @@ fn trace_from_batch(batch: &RecordBatch, row: usize) -> Result<ExpectedTrace, Re
         environment: opt_string(utf8(batch, traces::ENVIRONMENT), row),
         tags: string_list(batch, traces::TAGS, row),
         models: string_list(batch, traces::MODELS, row),
+        prompts: string_list(batch, traces::PROMPTS, row),
         span_count: count(traces::SPAN_COUNT),
         error_count: count(traces::ERROR_COUNT),
         llm_count: count(traces::LLM_COUNT),

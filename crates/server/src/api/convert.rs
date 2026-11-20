@@ -317,6 +317,7 @@ fn trace_batch(batch: &RecordBatch) -> Result<Vec<TraceSummary>, ConvertError> {
     let total_tokens = ints(batch, traces::TOTAL_TOKENS)?;
     let cost_total = floats(batch, traces::COST_TOTAL)?;
     let models = lists(batch, traces::MODELS)?;
+    let prompts = lists(batch, traces::PROMPTS)?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -348,6 +349,7 @@ fn trace_batch(batch: &RecordBatch) -> Result<Vec<TraceSummary>, ConvertError> {
             total_tokens: opt_i64(&total_tokens, row),
             cost_total: opt_f64(&cost_total, row),
             models: list_strings(&models, row, traces::MODELS)?,
+            prompts: list_strings(&prompts, row, traces::PROMPTS)?,
             scores: Vec::new(),
         });
     }
@@ -395,6 +397,8 @@ fn span_batch(batch: &RecordBatch) -> Result<Vec<SpanSummary>, ConvertError> {
     let ttft_ns = ints(batch, spans::TTFT_NS)?;
     let input_preview = strings(batch, spans::INPUT_PREVIEW)?;
     let output_preview = strings(batch, spans::OUTPUT_PREVIEW)?;
+    let prompt_name = strings(batch, spans::PROMPT_NAME)?;
+    let prompt_version = ints(batch, spans::PROMPT_VERSION)?;
 
     let mut out = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
@@ -423,6 +427,8 @@ fn span_batch(batch: &RecordBatch) -> Result<Vec<SpanSummary>, ConvertError> {
             metadata: map_strings(&metadata, row, spans::METADATA)?,
             provider: opt_string(&provider, row),
             model: opt_string(&response_model, row).or_else(|| opt_string(&request_model, row)),
+            prompt_name: opt_string(&prompt_name, row),
+            prompt_version: opt_i64(&prompt_version, row),
             input_tokens: opt_i64(&input_tokens, row),
             output_tokens: opt_i64(&output_tokens, row),
             cache_read_tokens: opt_i64(&cache_read_tokens, row),
@@ -460,6 +466,8 @@ struct SpanColumns {
     provider: StringArray,
     request_model: StringArray,
     response_model: StringArray,
+    prompt_name: StringArray,
+    prompt_version: Int64Array,
     operation: StringArray,
     input_tokens: Int64Array,
     output_tokens: Int64Array,
@@ -516,6 +524,8 @@ fn span_columns(batch: &RecordBatch) -> Result<SpanColumns, ConvertError> {
         provider: strings(batch, spans::PROVIDER)?,
         request_model: strings(batch, spans::REQUEST_MODEL)?,
         response_model: strings(batch, spans::RESPONSE_MODEL)?,
+        prompt_name: strings(batch, spans::PROMPT_NAME)?,
+        prompt_version: ints(batch, spans::PROMPT_VERSION)?,
         operation: strings(batch, spans::OPERATION)?,
         input_tokens: ints(batch, spans::INPUT_TOKENS)?,
         output_tokens: ints(batch, spans::OUTPUT_TOKENS)?,
@@ -583,6 +593,8 @@ impl SpanColumns {
             provider: opt_string(&self.provider, row),
             request_model: opt_string(&self.request_model, row),
             response_model: opt_string(&self.response_model, row),
+            prompt_name: opt_string(&self.prompt_name, row),
+            prompt_version: opt_i64(&self.prompt_version, row),
             operation: opt_string(&self.operation, row),
             input_tokens: opt_i64(&self.input_tokens, row),
             output_tokens: opt_i64(&self.output_tokens, row),

@@ -54,6 +54,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Dataset revisions | `01900000-0000-7000-8000-000000000d11` (item `…0d01`, version 1), `…0d12` (`…0d02`, version 1, closed at version 2), `…0d13` (`…0d03`, version 1), `…0d14` (`…0d02`, version 2), `…0d15` (`…0d04`, version 4, from trace `a100…0001`) |
 | Experiments | `01900000-0000-7000-8000-000000000e01` (`baseline`, completed, pinned to `faq` version 2), `…0e02` (`candidate`, completed in `experiments.json`, running in `experiment-created.json`). `experiment.json`, `experiments.json`, `experiment-created.json`, `experiment-results.json`, `experiment-comparison.json` and `requests/experiment-results.json` use them. They are not live experiments | `static/evaluator-stats.json` uses `…0e01` and `…0e02` as experiments with the relevance score.
 | Model prices | `01900000-0000-7000-8000-000000000c00`, an org row `Llama 3.1 8B (local)` for `llama3\.1:8b`, any provider, 0 USD; `…0c01`, a project row `gpt-4o (negotiated)` for `gpt\-4o`, provider `openai`, from `2026-01-01T00:00:00.000000000Z`, input 2.0, output 8.0, cache read 1.0. `model-prices.json`, `model-price.json` and `model-price-resolution.json` use them, and `requests/model-price-create.json` is the body of the create |
+| Prompts | `01900000-0000-7000-8000-000000001001`, `support-reply` (chat, versions 1 and 2; `production` on 1, `staging` on 2), and `01900000-0000-7000-8000-000000001002`, `summarize` (text, version 1, `production`). `prompts.json`, `prompts/…` and the `post_prompt` and `post_prompt_version` answers use them. `requests/prompt-create.json` and `requests/prompt-version-create.json` are the bodies of those two creates. They are not live prompts |
 | Judge trace (test result example) | `e1000000000000000000000000000001`; it is not in the dataset |
 | Created account | `01900000-0000-7000-8000-000000000102`, `new@example.com`. `admin-user-created.json` reuses that synthetic token in the reset link. It is not a live reset |
 | Trace ids | `a1000000000000000000000000000001` through `…0006` |
@@ -61,7 +62,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Missing parent of trace 6 | `b1000000000000ff` |
 | PNG | `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581` |
 
-Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists.
+Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists, as is any trace in `cetra-playground`.
 
 ## Manifest
 

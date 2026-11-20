@@ -17,6 +17,7 @@ from cetra._retry import retry_delay
 if TYPE_CHECKING:
     from cetra._annotation_queues import AnnotationQueues
     from cetra._datasets import Datasets
+    from cetra._prompts import Prompts
 
 _PROJECT_PATH: Final = "/api/v1/projects/current"
 _TIMEOUT_S: Final = 30
@@ -84,6 +85,10 @@ class Client:
 
         self._datasets: Datasets = Datasets(self)
         self._annotation_queues: AnnotationQueues = AnnotationQueues(self)
+        # Deferred for the same reason: _prompts imports this module for ApiError.
+        from cetra._prompts import Prompts
+
+        self._prompts: Prompts = Prompts(self)
 
     def __repr__(self) -> str:
         return f"Client(base_url={self._base_url!r})"
@@ -97,6 +102,11 @@ class Client:
     def annotation_queues(self) -> "AnnotationQueues":
         """Annotation queues of the key's project (D-AQ-8)."""
         return self._annotation_queues
+
+    @property
+    def prompts(self) -> "Prompts":
+        """Prompt calls: ``get``, ``list``, ``create``, ``create_version`` and ``set_label``."""
+        return self._prompts
 
     def _request(
         self,

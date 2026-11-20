@@ -57,10 +57,12 @@ use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::prompts::{self as prompt_store, NewPrompt, NewVersion, PromptType};
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
+use crate::prompts::{check_config, parse_body};
 
 /// `2026-01-01T00:00:00Z`.
 const MANUAL_NOW_NS: i64 = 1_767_225_600_000_000_000;
@@ -798,6 +800,103 @@ impl TestApp {
             .await
             .unwrap();
         plaintext
+    }
+}
+
+/// The example prompt `support-reply` of `fixtures/api/README.md` § Fixed identifiers.
+pub(crate) const EXAMPLE_PROMPT: &str = "support-reply";
+
+/// A version as the API stores it: the template and config go through the same checks.
+fn example_version(
+    prompt_type: PromptType,
+    template: &serde_json::Value,
+    config: &serde_json::Value,
+    labels: &[&str],
+    commit_message: &str,
+) -> NewVersion {
+    let body = parse_body(prompt_type, template).unwrap_or_else(|errors| panic!("{errors:?}"));
+    let config = check_config(config).unwrap_or_else(|errors| panic!("{errors:?}"));
+    NewVersion {
+        template: serde_json::to_string(&body.to_json()).unwrap_or_else(|error| panic!("{error}")),
+        config,
+        commit_message: Some(commit_message.to_owned()),
+        labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+        actor: None,
+    }
+}
+
+impl TestApp {
+    /// The example prompts of `fixtures/api/README.md` § Fixed identifiers, written through the
+    /// store into the example project: `summarize`, then `support-reply` with two versions. The
+    /// writes are one second apart, from 2026-01-01T00:00:00Z. Call after `seed_examples`.
+    pub(crate) async fn seed_example_prompts(&self) {
+        const SUMMARIZE: &str = "01900000-0000-7000-8000-000000001002";
+        const SUPPORT_REPLY: &str = "01900000-0000-7000-8000-000000001001";
+        const FIRST: i64 = 1_767_225_600_000_000_000;
+        const SECOND: i64 = 1_000_000_000;
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let summarize_id: Uuid = SUMMARIZE.parse().unwrap();
+        let support_id: Uuid = SUPPORT_REPLY.parse().unwrap();
+        let summarize_v1 = example_version(
+            PromptType::Text,
+            &serde_json::json!(
+                "Summarize this conversation in {{ max_words }} words:\n\n{{ transcript }}"
+            ),
+            &serde_json::json!({"model": "gpt-4o-mini", "params": {"temperature": 0.2}}),
+            &["production"],
+            "First version",
+        );
+        let support_v1 = example_version(
+            PromptType::Chat,
+            &serde_json::json!([
+                {"role": "system", "content": "You are a support agent for {{ product }}."},
+                {"type": "placeholder", "name": "history"},
+                {"role": "user", "content": "{{ question }}"}
+            ]),
+            &serde_json::json!({"model": "gpt-4o", "params": {"temperature": 0.3, "max_tokens": 512}}),
+            &["production"],
+            "First version",
+        );
+        let support_v2 = example_version(
+            PromptType::Chat,
+            &serde_json::json!([
+                {"role": "system", "content": "You are a friendly support agent for {{ product }}. Answer in {{ language }}."},
+                {"type": "placeholder", "name": "history"},
+                {"role": "user", "content": "{{ question }}"}
+            ]),
+            &serde_json::json!({"model": "gpt-4o", "params": {"temperature": 0.3, "max_tokens": 512}}),
+            &["staging"],
+            "Friendlier tone",
+        );
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let summarize = NewPrompt {
+                        id: summarize_id,
+                        name: "summarize".to_owned(),
+                        prompt_type: PromptType::Text,
+                        description: Some("Summarize a support conversation".to_owned()),
+                        tags: vec!["support".to_owned()],
+                    };
+                    prompt_store::create_prompt(conn, project, summarize, summarize_v1, FIRST)
+                        .await?;
+                    let support = NewPrompt {
+                        id: support_id,
+                        name: EXAMPLE_PROMPT.to_owned(),
+                        prompt_type: PromptType::Chat,
+                        description: None,
+                        tags: Vec::new(),
+                    };
+                    prompt_store::create_prompt(conn, project, support, support_v1, FIRST + SECOND)
+                        .await?;
+                    prompt_store::add_version(conn, support_id, support_v2, FIRST + 2 * SECOND)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
     }
 }
 

@@ -6,6 +6,7 @@ import logging
 import sys
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -24,6 +25,7 @@ from cetra._context import (
     current_values,
     experiment_scope,
 )
+from cetra._prompts import Prompt
 from cetra._runtime import Runtime
 
 Memory = tuple[InMemorySpanExporter, Callable[..., Runtime]]
@@ -282,3 +284,72 @@ def test_experiment_scope_drops_the_callers_values(memory: Memory) -> None:
 def test_context_inside_a_scope_keeps_the_link() -> None:
     with experiment_scope("e", "i"), cetra.context(user_id="u"):
         assert current_values() == ContextValues(user_id="u", experiment=ExperimentLink("e", "i"))
+
+
+def _prompt(name: str, version: int | None) -> Prompt:
+    return Prompt(
+        name=name,
+        type="text",
+        template="x",
+        version=version,
+        config=MappingProxyType({}),
+        labels=(),
+        variables=(),
+        placeholders=(),
+        is_fallback=version is None,
+    )
+
+
+def test_context_prompt_is_stamped(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    runtime = start()
+    with (
+        cetra.context(prompt=_prompt("support-reply", 3)),
+        runtime.tracer.start_as_current_span("inside"),
+    ):
+        pass
+    attributes = attrs(spans(exporter)[0])
+    assert attributes["cetra.prompt.name"] == "support-reply"
+    assert attributes["cetra.prompt.version"] == 3
+
+
+def test_nested_context_keeps_the_prompt_and_the_inner_one_wins(
+    memory: Memory, spans: Spans
+) -> None:
+    exporter, start = memory
+    runtime = start()
+    with (
+        cetra.context(prompt=_prompt("outer", 1)),
+        cetra.context(user_id="u"),
+        runtime.tracer.start_as_current_span("kept"),
+    ):
+        pass
+    with (
+        cetra.context(prompt=_prompt("outer", 1)),
+        cetra.context(prompt=_prompt("inner", 2)),
+        runtime.tracer.start_as_current_span("inner"),
+    ):
+        pass
+    with (
+        cetra.context(prompt=_prompt("fallback", None)),
+        runtime.tracer.start_as_current_span("fallback"),
+    ):
+        pass
+    by_name = {span.name: attrs(span) for span in spans(exporter)}
+    assert by_name["kept"]["cetra.prompt.name"] == "outer"
+    assert by_name["kept"]["cetra.prompt.version"] == 1
+    assert by_name["inner"]["cetra.prompt.name"] == "inner"
+    assert by_name["inner"]["cetra.prompt.version"] == 2
+    assert by_name["fallback"]["cetra.prompt.name"] == "fallback"
+    assert "cetra.prompt.version" not in by_name["fallback"]
+
+
+def test_context_prompt_rejects_other_types(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    runtime = start()
+    bad: dict[str, Any] = {"prompt": "support-reply"}
+    with cetra.context(**bad):
+        assert current_values().prompt is None
+        with runtime.tracer.start_as_current_span("plain"):
+            pass
+    assert "cetra.prompt.name" not in attrs(spans(exporter)[0])

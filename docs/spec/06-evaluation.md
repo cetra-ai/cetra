@@ -55,6 +55,7 @@ Stored in SQLite `evaluators` (04). Three kinds.
 - Structured output is a per-connection setting, `structured_output`: `native` (default), `tool` or `prompt` (D157). `native` is OpenAI-compatible `response_format: {type: "json_schema", strict: true}`, Anthropic `output_config.format` with a JSON schema, and Gemini `responseMimeType: "application/json"` with `responseJsonSchema`. `tool` is a forced tool or function call carrying the same schema; it is not the default, because newer Claude models refuse a forced `tool_choice`. `prompt` appends an instruction and the schema to the prompt and parses the text. There is no automatic downgrade and no cached capability state. A provider that rejects the mode returns a permanent error that names the setting to change.
 - The schema the model sees is an object with `explanation` (string, present only when `include_reason`) first, then `value` (number or boolean) or `label` (an enum of the labels) (D158). `additionalProperties` is false, every property is required, and there is no `minimum` or `maximum`; ranges are checked after parsing. The same parser reads every mode. It accepts a tool call's arguments, text that is one JSON object, text in a markdown fence, or the first complete JSON object in the text. It coerces `"0.8"` to 0.8 and `"true"` / `"false"` to booleans, joins an array explanation with newlines, and matches labels after trimming and case-folding. Unknown labels, out-of-range numbers, missing fields, an empty answer and a refusal are typed errors. The explanation becomes the score's `reason`. The field the model sees is never named `reasoning`.
 - Requests (D159): the OpenAI-compatible adapter uses Chat Completions (`POST {base_url}/chat/completions`, default base `https://api.openai.com/v1`) with `max_completion_tokens`. Anthropic uses Messages with `max_tokens`, which is required. Gemini uses `models/{model}:generateContent` with `maxOutputTokens`. The prompt is one user message. `temperature` is optional and unset by default; the built-in templates do not set it. `max_output_tokens` defaults to 1024. Timeouts are 10 s to connect and 60 s for the whole call (`timeout_ms` on the evaluator, at most 300 s). A response over 4 MiB is an error.
+Judges send these requests through the provider chat layer below, without streaming (D-V-29).
 - Result → score: numeric `value_num`; boolean 0/1; categorical `value_str` = label and `value_num` = `label_values[label]` when provided; `reason`.
 - **Judge traces** (same pattern as Langfuse, Opik, Phoenix): every evaluator execution (judge, check or webhook, success or failure) is traced into the **user's project** through the internal ingestion path (spans built in-process and handed to the WAL, no HTTP), with:
   - reserved `environment = "cetra-eval"`;
@@ -189,6 +190,37 @@ Client-side execution with the SDK (10, D18); the server stores results. There a
 - Compare 2–4 experiments on the same dataset, the first being the baseline: aggregate deltas, per-item side by side with regressions highlighted (a score mean lower than the baseline's by more than `threshold`, default 0.1, or a new error); a warning when they pinned different versions (D-J-13).
 - The API returns the same data for CI gating; the SDK exposes `result.summary()` and `result.assert_min("correctness", 0.8)` (10).
 - Experiments created before the org's data-access window are hidden (D-J-14).
+
+## Provider chat layer
+
+`cetra-eval` sends chat calls to the three provider APIs through one request shape (D21, D-V-19). The judges make buffered calls; the playground makes streamed calls (D-V-29, D-V-20).
+
+- **Request.** A request has a model, canonical messages (01), tools, a tool choice, an optional response format, sampling parameters, `max_tokens`, a whole-call timeout and an idle timeout. The model name is at most 256 bytes and has no whitespace, control character, `/`, `\`, `%`, `?` or `#`. `max_tokens` is 1 to 65,536; the playground defaults it to 4,096 (D-V-24). The whole-call timeout is above zero and at most 300 s. The idle timeout is above zero. A tool name is 1 to 64 characters of `A-Z`, `a-z`, `0-9`, `_` and `-`. A tool choice that names a tool the request does not have is refused. Any of these failures is refused before anything is sent.
+- **Response format.** The response format goes through the connection's structured-output mode (D157, D-V-25). In `tool` mode the layer forces a tool that carries the schema, and the forced tool's arguments are the answer.
+- **Message mapping (D-V-31).** System messages become the provider's system field: Anthropic `system`, Gemini `systemInstruction`. OpenAI keeps them in place. A `tool` message becomes an OpenAI `tool` message, an Anthropic `tool_result` block in a user turn, or a Gemini `functionResponse` part whose name comes from the earlier call with the same id. Consecutive messages that map to the same Anthropic or Gemini role are merged. Reasoning parts are not sent. Media parts, unknown parts, unknown roles and tool parts in the wrong role are refused, with the index of the message.
+- **Parameters (D-V-31).** A parameter the provider has no field for is not sent. Anthropic gets `temperature`, `top_p` and `stop`. Gemini gets every parameter except `reasoning_effort`. OpenAI gets every parameter.
+- **Tool call ids.** A tool call without an id gets `call_<n>` in every provider.
+- **Buffered call.** `complete_chat` sends the request without streaming and reads one JSON body into the same reply shape. The body is at most 4 MiB (D159).
+- **Streamed call.** `stream_chat` sends the request with streaming on: OpenAI `stream: true` with `stream_options.include_usage`, Anthropic Messages SSE, and Gemini `streamGenerateContent?alt=sse`. It yields these events:
+  - `text`: a piece of the answer text. Pieces are never empty.
+  - `tool_call`: a complete tool call, with its arguments assembled from the stream.
+  - `done`: the last event. It has the finish reason (`stop`, `length`, `tool_call`, `content_filter`, `refusal`, or a short provider token), the usage in OTel semantics (or none when the stream carried no usage) and the response model.
+
+  Dropping the stream closes the provider connection.
+
+  Each provider marks the end of its answer with an end signal. OpenAI sends a `finish_reason` or `[DONE]`. Anthropic sends `message_stop`. Gemini sends a `finishReason`, or a blocked prompt. A body that ends before its end signal is an invalid stream. Empty `data:` events are ignored.
+
+  A streamed Gemini call without `args` is a call with no arguments. The buffered decoding that judges use skips such a call.
+- **Limits (D-V-24, D-V-30).** A whole call takes at most its timeout. The idle timeout is a request field: a stream fails after a silence longer than it. The playground sets it to 60 s (D-V-24). The answer a stream assembles (text plus tool-call arguments, including partial arguments) and any one SSE event are at most 4 MiB. The raw stream is at most 32 MiB. A non-200 body is read up to 4 MiB.
+- **Errors (D160).** A provider status or an error event maps to D160's classes: retryable, pause or permanent. An error event in a stream is a provider error with the status its type stands for. An event that is not JSON, or a stream whose body ends before the provider's end signal, is an invalid stream. A stream over a cap is a transport error. Events read before an error are delivered first. No error text or log line carries a prompt, an answer, a tool argument, a header value, a key or a URL path or query.
+- **Egress (D166).** Every call goes through the SSRF guard. Redirects are not followed, and proxies are ignored.
+- **Edge cases the layer does not handle.** These are sent as they are:
+  - The request bounds above also apply to judges. Their configuration already enforces the same bounds.
+  - An empty text part is sent as it is.
+  - A request whose messages are all system messages is sent, and the provider answers with status 400.
+  - In `tool` mode the forced tool replaces the request's tool choice.
+
+**Connection limits (D-V-35, D-V-36).** A playground run and a judge job share their connection's concurrency slot and rate token. `interactive::acquire` waits at most 10 s for both, ahead of queued rule jobs, and the run answers `429 rate_limited` when it cannot get them. A run uses the connection whatever its status and never marks it failing; a pause-class error reaches the user only in the run's `error` event.
 
 ## Library
 

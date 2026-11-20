@@ -9,6 +9,7 @@
 import { AnnotationQueues } from "./annotation-queues.js";
 import { ConfigError, resolveConfig } from "./config.js";
 import { Datasets } from "./datasets.js";
+import { Prompts } from "./prompts.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
 import { getFetch, timeoutSignal } from "./web.js";
 
@@ -74,6 +75,7 @@ export class ApiError extends Error {
 
 export class Client {
   readonly datasets: Datasets;
+  readonly prompts: Prompts;
   readonly annotationQueues: AnnotationQueues;
   readonly #apiKey: string;
   readonly #baseUrl: string;
@@ -99,6 +101,7 @@ export class Client {
     this.#fetch = fetcher;
     this.#sleep = options.sleep ?? defaultSleep;
     this.datasets = new Datasets(this);
+    this.prompts = new Prompts(this);
     this.annotationQueues = new AnnotationQueues(this);
   }
 

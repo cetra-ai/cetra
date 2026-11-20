@@ -73,6 +73,8 @@ struct SpanColumns {
     request_model: StringBuilder,
     response_model: StringBuilder,
     model: StringBuilder,
+    prompt_name: StringBuilder,
+    prompt_version: Int64Builder,
     operation: StringBuilder,
     input_tokens: Int64Builder,
     output_tokens: Int64Builder,
@@ -147,6 +149,8 @@ impl SpanColumns {
                 sum_len(spans, |span| span.response_model.as_deref()),
             ),
             model: string_builder(rows, 0),
+            prompt_name: string_builder(rows, sum_len(spans, |span| span.prompt_name.as_deref())),
+            prompt_version: Int64Builder::with_capacity(rows),
             operation: string_builder(rows, sum_len(spans, |span| span.operation.as_deref())),
             input_tokens: Int64Builder::with_capacity(rows),
             output_tokens: Int64Builder::with_capacity(rows),
@@ -232,6 +236,8 @@ impl SpanColumns {
                 .as_deref()
                 .or(span.request_model.as_deref()),
         );
+        append_opt(&mut self.prompt_name, span.prompt_name.as_deref());
+        self.prompt_version.append_option(span.prompt_version);
         append_opt(&mut self.operation, span.operation.as_deref());
         self.input_tokens.append_option(span.input_tokens);
         self.output_tokens.append_option(span.output_tokens);
@@ -311,6 +317,8 @@ impl SpanColumns {
             finish_string(self.request_model),
             finish_string(self.response_model),
             finish_string(self.model),
+            finish_string(self.prompt_name),
+            Arc::new(self.prompt_version.finish()),
             finish_string(self.operation),
             Arc::new(self.input_tokens.finish()),
             Arc::new(self.output_tokens.finish()),
@@ -694,6 +702,8 @@ mod tests {
         fallback.request_model = Some("requested-only".to_owned());
         let batch = spans_to_record_batch(&[minimal_span(), full_span(), fallback]).unwrap();
         assert_eq!(batch.schema(), spans_schema());
+        assert!(is_null(&batch, schema::spans::PROMPT_NAME, 0));
+        assert!(is_null(&batch, schema::spans::PROMPT_VERSION, 0));
 
         assert_eq!(utf8(&batch, schema::spans::NAME, 0), Some("root"));
         assert_eq!(utf8(&batch, schema::spans::SPAN_KIND, 0), Some("span"));
@@ -736,6 +746,11 @@ mod tests {
             Some("computed")
         );
         assert_eq!(i64_at(&batch, schema::spans::TTFT_NS, 1), 42_000_000);
+        assert_eq!(
+            utf8(&batch, schema::spans::PROMPT_NAME, 1),
+            Some("support-reply")
+        );
+        assert_eq!(i64_at(&batch, schema::spans::PROMPT_VERSION, 1), 2);
         assert_eq!(list_at(&batch, schema::spans::TAGS, 1), vec!["beta"]);
         assert_eq!(
             list_at(&batch, schema::spans::CONVENTIONS, 1),

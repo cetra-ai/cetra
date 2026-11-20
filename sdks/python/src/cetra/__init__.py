@@ -23,9 +23,11 @@ from cetra._context import context
 from cetra._datasets import Dataset, DatasetInfo, DatasetItem
 from cetra._experiments import ExperimentResult, Run, Score, aevaluate, evaluate
 from cetra._llm import LlmSpan, llm_span
+from cetra._prompts import Prompt, PromptNotAvailable, get_prompt
 from cetra._runtime import flush, init, shutdown, span_processor, tracer_provider
 from cetra._scores import score, uuid7
 from cetra._spans import Span, current_span_id, current_trace_id, observe, span
+from cetra._template import PromptCompileError
 
 __all__ = [
     "AddedQueueItems",
@@ -39,6 +41,9 @@ __all__ = [
     "DatasetItem",
     "ExperimentResult",
     "LlmSpan",
+    "Prompt",
+    "PromptCompileError",
+    "PromptNotAvailable",
     "QueueCounts",
     "QueueItemStatus",
     "QueueTarget",
@@ -53,6 +58,7 @@ __all__ = [
     "current_trace_id",
     "evaluate",
     "flush",
+    "get_prompt",
     "init",
     "llm_span",
     "observe",

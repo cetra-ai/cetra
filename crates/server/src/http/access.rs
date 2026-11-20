@@ -165,9 +165,11 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::score_definitions::routes());
     routes.extend(crate::routes::datasets::routes());
     routes.extend(crate::routes::experiments::routes());
+    routes.extend(crate::routes::prompts::routes());
     routes.extend(crate::routes::model_prices::project_routes());
     routes.extend(crate::routes::model_prices::org_routes());
     routes.extend(crate::routes::eval_jobs::routes());
+    routes.extend(crate::routes::playground::routes());
     routes.extend(crate::routes::evaluators::routes());
     routes.extend(crate::routes::online_rules::routes());
     routes.extend(crate::routes::backfills::routes());

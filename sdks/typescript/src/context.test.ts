@@ -2,6 +2,7 @@ import { context, diag, propagation, ROOT_CONTEXT, trace } from "@opentelemetry/
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CONTEXT_KEY, currentValues, experimentContext, withContext } from "./context.js";
+import { Prompt } from "./prompt.js";
 import { resetForTests } from "./runtime.js";
 import { finished, startMemory } from "./testing.test-helpers.js";
 
@@ -286,5 +287,72 @@ describe("the context key", () => {
     expect(g2["cetra.session.id"]).toBeUndefined();
     expect(g2["cetra.tags"]).toBeUndefined();
     expect(g2["cetra.metadata.length"]).toBeUndefined();
+  });
+});
+
+describe("withContext prompt", () => {
+  const prompt = (name: string, version: number | undefined): Prompt =>
+    new Prompt({
+      name,
+      version,
+      config: {},
+      labels: [],
+      isFallback: version === undefined,
+      template: "Hi {{ name }}",
+    });
+
+  it("stamps the prompt name and version on spans inside the block, children included", async () => {
+    const { exporter, runtime } = startMemory();
+    withContext({ prompt: prompt("support-reply", 3) }, () => {
+      runtime.tracer.startActiveSpan("parent", (parent) => {
+        runtime.tracer.startSpan("child").end();
+        parent.end();
+      });
+    });
+    const spans = await finished(exporter);
+    expect(spans).toHaveLength(2);
+    for (const span of spans) {
+      expect(span.attributes["cetra.prompt.name"]).toBe("support-reply");
+      expect(span.attributes["cetra.prompt.version"]).toBe(3);
+    }
+  });
+
+  it("keeps the outer prompt in a nested block without one, and the inner prompt wins", async () => {
+    const { exporter, runtime } = startMemory();
+    withContext({ prompt: prompt("outer", 1) }, () => {
+      withContext({ userId: "u-1" }, () => {
+        runtime.tracer.startSpan("kept").end();
+      });
+      withContext({ prompt: prompt("inner", 2) }, () => {
+        runtime.tracer.startSpan("inner").end();
+      });
+    });
+    runtime.tracer.startSpan("outside").end();
+    const spans = await finished(exporter);
+    const named = (name: string) => spans.find((span) => span.name === name);
+    expect(named("kept")?.attributes["cetra.prompt.name"]).toBe("outer");
+    expect(named("inner")?.attributes["cetra.prompt.name"]).toBe("inner");
+    expect(named("inner")?.attributes["cetra.prompt.version"]).toBe(2);
+    expect(named("outside")?.attributes["cetra.prompt.name"]).toBeUndefined();
+  });
+
+  it("stamps the name only for a fallback", async () => {
+    const { exporter, runtime } = startMemory();
+    withContext({ prompt: prompt("fallback-only", undefined) }, () => {
+      runtime.tracer.startSpan("span").end();
+    });
+    const [span] = await finished(exporter);
+    expect(span?.attributes["cetra.prompt.name"]).toBe("fallback-only");
+    expect(span?.attributes["cetra.prompt.version"]).toBeUndefined();
+  });
+
+  it("drops a value that is not a Prompt", async () => {
+    const { exporter, runtime } = startMemory();
+    withContext({ prompt: "support-reply" as unknown as Prompt }, () => {
+      runtime.tracer.startSpan("span").end();
+    });
+    const [span] = await finished(exporter);
+    expect(span?.attributes["cetra.prompt.name"]).toBeUndefined();
+    expect(currentValues().prompt).toBeUndefined();
   });
 });

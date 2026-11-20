@@ -18,7 +18,6 @@ use cetra_core::batch::spans_to_record_batch;
 use cetra_core::error::CoreError;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::media::MediaBlob as CoreBlob;
-use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
 use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, IngestContext, IngestLimits, Normalized, PriceTable,
     count_genai_log_records, decode_json, decode_logs_json, decode_logs_protobuf, decode_protobuf,
@@ -388,10 +387,10 @@ impl Ingest {
     }
 
     /// Stores the media, then appends the spans (D-G-8, D-G-9), then counts the billable spans
-    /// (every span outside the reserved evaluation environment, D-I-31) and the request bytes
-    /// (D-G-30). Nothing is appended when a blob fails, and nothing is counted then. The
-    /// caller's reservation covers the spans until this returns. Then records the trace in the
-    /// trigger's pending map when its project has an online rule (D-I-8; memory only).
+    /// ([`billable_spans`]: every span outside a reserved environment, D-I-31, D-V-34) and the
+    /// request bytes (D-G-30). Nothing is appended when a blob fails, and nothing is counted
+    /// then. The caller's reservation covers the spans until this returns. Then records the trace
+    /// in the trigger's pending map when its project has an online rule (D-I-8; memory only).
     pub(crate) async fn commit(
         &self,
         storage: &Storage,
@@ -419,10 +418,7 @@ impl Ingest {
             stored += 1;
         }
         let accepted = spans.len();
-        let billable = spans
-            .iter()
-            .filter(|span| span.environment.as_deref() != Some(EVAL_ENVIRONMENT))
-            .count();
+        let billable = billable_spans(&spans);
         if !spans.is_empty() {
             let (batch, spans) = tokio::task::spawn_blocking(move || {
                 spans_to_record_batch(&spans).map(|batch| (batch, spans))
@@ -501,6 +497,20 @@ pub(crate) fn newest_span_starts(spans: &[cetra_core::span::Span]) -> HashMap<St
         }
     }
     newest
+}
+
+/// Spans that count as units (D173, D-V-23, D-V-34): every span outside a reserved environment.
+/// The one units rule; `Ingest::commit` counts with it.
+pub(crate) fn billable_spans(spans: &[cetra_core::span::Span]) -> usize {
+    spans
+        .iter()
+        .filter(|span| {
+            !span
+                .environment
+                .as_deref()
+                .is_some_and(cetra_core::names::environment::is_reserved)
+        })
+        .count()
 }
 
 /// Converts a normalized blob to the storage type, checking that its hash is 32 bytes.
@@ -615,6 +625,7 @@ mod tests {
     use cetra_core::enums::{CostSource, SpanKind};
     use cetra_core::ids::ProjectId;
     use cetra_core::media::MediaBlob as CoreBlob;
+    use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
     use cetra_otel::{
         ExportTraceServiceRequest, PriceRow, PriceScope, Rejections, builtin_price_rows,
         decode_json,
@@ -1306,6 +1317,25 @@ mod tests {
                 .await
                 .expect("one usage row for the day");
         assert_eq!(counted, (0, 7));
+    }
+
+    #[test]
+    fn billable_spans_skips_reserved_environments() {
+        let base = dataset_span(0);
+        let spans: Vec<cetra_core::span::Span> = [
+            None,
+            Some("production".to_owned()),
+            Some(EVAL_ENVIRONMENT.to_owned()),
+            Some(cetra_core::names::environment::PLAYGROUND.to_owned()),
+        ]
+        .into_iter()
+        .map(|environment| cetra_core::span::Span {
+            environment,
+            ..base.clone()
+        })
+        .collect();
+        assert_eq!(billable_spans(&spans), 2);
+        assert_eq!(billable_spans(&[]), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]

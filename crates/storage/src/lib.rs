@@ -101,8 +101,9 @@ pub use reads::{
     LATEST_SCORE_COLUMNS, ListScope, MAX_BREAKDOWN_LIMIT, MAX_EXPERIMENT_SCORES,
     MAX_EXPERIMENT_TRACES, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY,
     MAX_FILTER_DELETION_TRACES, MAX_MAP_KEY, MAX_MATCH_COUNT, MAX_MEAN_EXPERIMENTS, MAX_MEASURES,
-    MAX_PAGE, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS, MAX_TARGET_IDS,
-    MAX_TRACE_SPANS, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, MatchCountRequest, Measure, Page,
+    MAX_PAGE, MAX_PROMPT_VERSIONS, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_SESSION_TURNS,
+    MAX_TARGET_IDS, MAX_TRACE_SPANS, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, MatchCountRequest,
+    Measure, Page, PromptMetricsRequest, PromptScoreMean, PromptVersionMetrics,
     SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW, SESSION_LAST_OUTPUT_PREVIEW,
     SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, ScoreListRequest, ScoreTargets, SessionDetailData,
     SessionExtrasRequest, SessionListRequest, SessionSort, SessionTarget, SessionTargetFilter,
@@ -113,10 +114,11 @@ pub use reads::{
     WidgetError, WidgetPoint, WidgetQuery, WidgetRequest, WidgetSeries, WidgetSource, alert_value,
     eval_trace_ids, experiment_score_means, experiment_scores, experiment_traces, facet,
     filter_session_targets, filter_span_targets, filter_trace_ids, latest_scores, match_count,
-    score_list, scores_by_id, session_detail, session_extras, session_ids_of_traces, session_list,
-    session_targets, span_detail, span_list, span_refresh, span_targets, trace_detail, trace_list,
-    trace_list_plan, trace_refresh, trace_spans, trace_targets, user_deletion_scope, user_detail,
-    user_extras, user_list, validate_expressions, validate_filter, validate_shape, widget_query,
+    prompt_metrics, score_list, scores_by_id, session_detail, session_extras,
+    session_ids_of_traces, session_list, session_targets, span_detail, span_list, span_refresh,
+    span_targets, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
+    trace_targets, user_deletion_scope, user_detail, user_extras, user_list, validate_expressions,
+    validate_filter, validate_shape, widget_query,
 };
 pub use snapshot::CopyReport;
 pub use snapshot::{CatalogSnapshot, LiveObject};
@@ -2806,6 +2808,127 @@ mod tests {
             Err(RunError::TooLarge) => {}
             Err(other) => panic!("expected too large, got {other:?}"),
             Ok(_) => panic!("the join fit in one megabyte"),
+        }
+        drop(ctx);
+        storage.shutdown().await.unwrap();
+    }
+
+    /// The prompt columns survive a flush: spans keep them and the trace merges
+    /// them into the distinct list `prompts` (D-V-15).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prompt_columns_round_trip() {
+        use arrow::array::{Array, Int64Array, ListArray};
+
+        use crate::reads::{
+            ListScope, SortOrder, TraceListRequest, TraceSort, trace_detail, trace_list,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let spans: Vec<_> = [1_u8, 2]
+            .into_iter()
+            .map(|version| {
+                let mut span = span_row(1, version, 1_000 + i64::from(version), 1_000);
+                span.prompt_name = Some("p".to_owned());
+                span.prompt_version = Some(i64::from(version));
+                span
+            })
+            .collect();
+        let trace_id = spans[0].trace_id.to_string();
+        storage
+            .append_spans(project(), span_rows(&spans))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+
+        let ctx = QueryContext::new(
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let timeout = Duration::from_secs(30);
+        let detail = trace_detail(&ctx, &trace_id, timeout)
+            .await
+            .unwrap()
+            .expect("the trace exists");
+        let mut span_values = Vec::new();
+        for batch in &detail.spans {
+            let names = batch
+                .column_by_name(spans::PROMPT_NAME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let versions = batch
+                .column_by_name(spans::PROMPT_VERSION)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                span_values.push((names.value(row).to_owned(), versions.value(row)));
+            }
+        }
+        assert_eq!(span_values, [("p".to_owned(), 1), ("p".to_owned(), 2)]);
+
+        let list = trace_list(
+            &ctx,
+            TraceListRequest {
+                filter: None,
+                search: None,
+                strict_exclusions: false,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                sort: TraceSort::StartTime,
+                order: SortOrder::Desc,
+                limit: 10,
+                cursor: None,
+                timeout,
+            },
+        )
+        .await
+        .unwrap();
+        let trace_batch = &list.batches[0];
+        let prompts = trace_batch
+            .column_by_name(cetra_core::schema::traces::PROMPTS)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let prompts = prompts.as_any().downcast_ref::<StringArray>().unwrap();
+        let prompts: Vec<_> = (0..prompts.len()).map(|i| prompts.value(i)).collect();
+        assert_eq!(prompts, ["p@1", "p@2"]);
+
+        for (filter, matches) in [("prompts @> ['p@2']", 1), ("prompts @> ['p@3']", 0)] {
+            let page = trace_list(
+                &ctx,
+                TraceListRequest {
+                    filter: Some(filter),
+                    search: None,
+                    strict_exclusions: false,
+                    scope: ListScope {
+                        window: None,
+                        include_eval: false,
+                        include_experiments: false,
+                    },
+                    sort: TraceSort::StartTime,
+                    order: SortOrder::Desc,
+                    limit: 10,
+                    cursor: None,
+                    timeout,
+                },
+            )
+            .await
+            .unwrap();
+            let rows: usize = page.batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, matches, "{filter}");
         }
         drop(ctx);
         storage.shutdown().await.unwrap();

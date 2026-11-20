@@ -1,0 +1,8 @@
+{
+  "description": "A Langfuse prompt name with a version given as a string fills the prompt columns, and both keys are consumed.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Context fields",
+    "02 § Normalization rules / 18"
+  ]
+}

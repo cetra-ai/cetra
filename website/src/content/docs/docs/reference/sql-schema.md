@@ -41,6 +41,7 @@ One row per trace. Merge bookkeeping columns are not exposed.
 | `total_tokens` | `integer` | yes | Sum of total tokens. Null when every span omitted the field. |
 | `cost_total` | `float` | yes | Sum of span costs, USD. Null when every span omitted the field. |
 | `models` | `string_list` | no | Distinct model names. |
+| `prompts` | `string_list` | no | Registry prompts the trace used, as name@version (D-V-15). |
 
 ## `spans`
 
@@ -62,7 +63,7 @@ One row per span, including payload columns.
 | `service_name` | `string` | yes | Resource service.name. |
 | `session_id` | `string` | yes | Session id. |
 | `user_id` | `string` | yes | End-user id. |
-| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs. |
+| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs. |
 | `release` | `string` | yes | Git SHA or version string. |
 | `tags` | `string_list` | no | Tags. |
 | `metadata` | `string_map` | no | User metadata. Values are JSON-encoded scalars or strings. |
@@ -70,6 +71,8 @@ One row per span, including payload columns.
 | `request_model` | `string` | yes | Model named in the request. |
 | `response_model` | `string` | yes | Model named in the response. |
 | `model` | `string` | yes | coalesce(response_model, request_model). |
+| `prompt_name` | `string` | yes | Registry prompt the span used (D-V-15). |
+| `prompt_version` | `integer` | yes | Version of that prompt. |
 | `operation` | `string` | yes | GenAI operation name. |
 | `input_tokens` | `integer` | yes | Input tokens, including cached tokens. |
 | `output_tokens` | `integer` | yes | Output tokens, including reasoning tokens. |

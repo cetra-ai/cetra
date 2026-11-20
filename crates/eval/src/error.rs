@@ -335,6 +335,139 @@ impl fmt::Debug for JudgeError {
     }
 }
 
+/// A chat call could not be sent, or the provider refused or broke it.
+///
+/// No variant stores prompt text, answer text, tool arguments or header values.
+/// [`Self::Provider`] keeps the provider message for the UI and leaves it out of
+/// [`Display`](std::fmt::Display) and [`Debug`](std::fmt::Debug).
+#[derive(Clone, PartialEq, thiserror::Error)]
+pub enum ChatError {
+    /// The model name cannot be placed in a URL or a request body.
+    #[error("invalid model name")]
+    InvalidModel,
+    /// An extra header name or value, or the API key, is not a valid HTTP header.
+    #[error("invalid header")]
+    InvalidHeader,
+    /// The request breaks a bound, or its body could not be encoded.
+    #[error("invalid request")]
+    InvalidRequest,
+    /// A message cannot be sent (D-V-25, D-V-31). `index` is its position in the request.
+    #[error("message {index}: {reason}")]
+    UnsupportedMessage {
+        /// Zero-based index into the request's messages.
+        index: usize,
+        /// Fixed reason, such as `media part`.
+        reason: &'static str,
+    },
+    /// An event of the stream is not UTF-8 or not the JSON its provider sends.
+    #[error("invalid provider stream")]
+    BadStream,
+    /// The provider returned a non-success status, or an error event in a stream.
+    #[error("provider status {status}")]
+    Provider {
+        /// HTTP status code; for an error event in a stream, the status its type stands for.
+        status: u16,
+        /// Class derived from the status and the provider's type or code.
+        class: ErrorClass,
+        /// Provider error type, when it is a short token.
+        provider_type: Option<String>,
+        /// Provider error code, when it is a short token.
+        provider_code: Option<String>,
+        /// Provider error message, cut to 500 characters. Never logged; `Debug` prints its length.
+        provider_message: Option<String>,
+        /// Optional hint for the UI.
+        hint: Option<&'static str>,
+    },
+    /// The HTTP client failed before a provider status was available, or a cap was passed.
+    #[error(transparent)]
+    Transport(#[from] EgressError),
+}
+
+impl fmt::Debug for ChatError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider {
+                status,
+                class,
+                provider_type,
+                provider_code,
+                provider_message,
+                hint,
+            } => formatter
+                .debug_struct("Provider")
+                .field("status", status)
+                .field("class", class)
+                .field("provider_type", provider_type)
+                .field("provider_code", provider_code)
+                .field(
+                    "provider_message_chars",
+                    &provider_message
+                        .as_ref()
+                        .map(|message| message.chars().count()),
+                )
+                .field("hint", hint)
+                .finish(),
+            Self::Transport(error) => formatter.debug_tuple("Transport").field(error).finish(),
+            Self::InvalidModel => formatter.write_str("InvalidModel"),
+            Self::InvalidHeader => formatter.write_str("InvalidHeader"),
+            Self::InvalidRequest => formatter.write_str("InvalidRequest"),
+            Self::UnsupportedMessage { index, reason } => formatter
+                .debug_struct("UnsupportedMessage")
+                .field("index", index)
+                .field("reason", reason)
+                .finish(),
+            Self::BadStream => formatter.write_str("BadStream"),
+        }
+    }
+}
+
+impl ChatError {
+    /// Class for the eval queue (D160).
+    ///
+    /// [`Self::Provider`] returns the class stored when the status was read. The
+    /// request errors are permanent.
+    #[must_use]
+    pub fn class(&self) -> ErrorClass {
+        match self {
+            Self::Provider { class, .. } => *class,
+            Self::Transport(error) => error.class(),
+            Self::InvalidModel
+            | Self::InvalidHeader
+            | Self::InvalidRequest
+            | Self::UnsupportedMessage { .. }
+            | Self::BadStream => ErrorClass::Permanent,
+        }
+    }
+}
+
+impl From<ChatError> for JudgeError {
+    fn from(error: ChatError) -> Self {
+        match error {
+            ChatError::InvalidModel => Self::InvalidModel,
+            ChatError::InvalidHeader => Self::InvalidHeader,
+            ChatError::InvalidRequest
+            | ChatError::UnsupportedMessage { .. }
+            | ChatError::BadStream => Self::InvalidRequest,
+            ChatError::Provider {
+                status,
+                class,
+                provider_type,
+                provider_code,
+                provider_message,
+                hint,
+            } => Self::Provider {
+                status,
+                class,
+                provider_type,
+                provider_code,
+                provider_message,
+                hint,
+            },
+            ChatError::Transport(error) => Self::Transport(error),
+        }
+    }
+}
+
 impl EgressError {
     /// Class for the eval queue. Timeouts and connection failures are retryable.
     #[must_use]
@@ -521,7 +654,56 @@ pub(crate) fn assert_no_payload(message: &str, payload: &str) {
 
 #[cfg(test)]
 mod class_tests {
-    use super::{EgressError, ErrorClass, EvalError, JudgeError, assert_no_payload};
+    use super::{ChatError, EgressError, ErrorClass, EvalError, JudgeError, assert_no_payload};
+
+    #[test]
+    fn chat_error_classes_and_debug() {
+        let err = ChatError::Provider {
+            status: 400,
+            class: ErrorClass::Permanent,
+            provider_type: Some("invalid_request_error".to_owned()),
+            provider_code: None,
+            provider_message: Some("echoed SECRET-PAYLOAD".to_owned()),
+            hint: None,
+        };
+        let debug = format!("{err:?}");
+        assert_no_payload(&debug, "SECRET-PAYLOAD");
+        assert!(
+            debug.contains("provider_message_chars: Some(21)"),
+            "{debug}"
+        );
+        assert_eq!(err.class(), ErrorClass::Permanent);
+        assert_eq!(
+            JudgeError::from(err),
+            JudgeError::Provider {
+                status: 400,
+                class: ErrorClass::Permanent,
+                provider_type: Some("invalid_request_error".to_owned()),
+                provider_code: None,
+                provider_message: Some("echoed SECRET-PAYLOAD".to_owned()),
+                hint: None,
+            }
+        );
+        assert_eq!(
+            ChatError::Transport(EgressError::Timeout).class(),
+            ErrorClass::Retryable
+        );
+        for err in [
+            ChatError::InvalidModel,
+            ChatError::InvalidHeader,
+            ChatError::InvalidRequest,
+        ] {
+            assert_eq!(err.class(), ErrorClass::Permanent);
+        }
+        assert_eq!(
+            JudgeError::from(ChatError::InvalidHeader),
+            JudgeError::InvalidHeader
+        );
+        assert_eq!(
+            format!("{:?}", ChatError::Transport(EgressError::Timeout)),
+            "Transport(Timeout)"
+        );
+    }
 
     #[test]
     fn debug_omits_the_provider_message() {

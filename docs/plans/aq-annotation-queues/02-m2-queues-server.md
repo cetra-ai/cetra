@@ -168,7 +168,7 @@ Rules for every phase:
 **Goal.** The three tables and the store functions of queues and items (create, read, update, delete, add, list), tested at the store level.
 
 **Edit:**
-- `crates/server/migrations/meta/0023_annotation_queues.sql` (new)
+- `crates/server/migrations/meta/0024_annotation_queues.sql` (new)
 - `crates/server/src/meta/annotation_queues.rs` (new)
 - `crates/server/src/meta/mod.rs` (module line only)
 - `crates/server/tests/snapshots/meta_schema.snap`
