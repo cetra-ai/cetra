@@ -250,6 +250,8 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `get_schema` | `project` | views, columns, types, descriptions (`GET /schema`) |
 | `query_sql` | `project, query, params?, from, to, limit?` (1–1,000, default 100), `max_chars?` | columns, rows (JSON), row count, truncated flag, notes. `from`/`to` are required, `from < to`, at most 30 days apart (D-H-9); 30 s timeout |
 | `list_saved_views` | `project, kind?` | saved views and SQL queries visible to the user |
+| `list_prompts` | `project, q?, label?, limit?` (1–200, default 50), `max_chars?` | the project's prompts by name: type, description, tags, latest version, labels (`label` keeps the prompts carrying it; `latest` keeps all). `truncated` when more exist (D-V-39) |
+| `get_prompt` | `project, name, label?` (default `production`; `latest` is the latest version), `version?` | one prompt version as `GET /prompts/{name}/resolve` answers it; `label` and `version` together are `bad_request`. Not capped by `max_chars` (D-V-39) |
 | `search_traces` | `project, from, to, view?, filter?, search?, limit?` (1–100, default 20), `include_eval?`, `include_experiments?`, `max_chars?` | compact trace summaries (`view` = saved view id or name; explicit args override it). Window required as for `query_sql` |
 | `get_trace` | `project, trace_id, around?, include_payloads=false, max_chars?` | span tree with optional truncated I/O |
 | `get_span` | `project, trace_id, span_id, around?, max_chars?` | full span |

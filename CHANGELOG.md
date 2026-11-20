@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- MCP tools `list_prompts` and `get_prompt` (D-V-39): coding agents read the project's prompts, their labels and a version's template, config and variables, with the same access and limits as the other MCP tools.
 - Prompts pages (D-V-32): the prompt list with search, label and tag filters, protected labels and a create dialog; the prompt page with the template editor (saving a version), versions with labels and line diffs, label history and per-version metrics; prompt links, facets and columns on traces and spans.
 - Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
 - Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.

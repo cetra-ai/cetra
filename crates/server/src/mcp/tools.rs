@@ -79,6 +79,39 @@ pub(crate) fn tool_list() -> Vec<Tool> {
             }),
         ),
         tool(
+            super::prompts::LIST_PROMPTS,
+            "List prompts",
+            "Prompts of the project's registry, with their latest version and labels (production, staging, …).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "q": {"type": "string", "description": "A case-insensitive part of the prompt's name."},
+                    "label": {"type": "string", "description": "Only prompts that carry this label. `latest` keeps every prompt."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "Most prompts to return."},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later prompts are left out beyond it."}
+                },
+                "required": ["project"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            super::prompts::GET_PROMPT,
+            "Get a prompt",
+            "One prompt version: its template ({{ name }} variables, chat messages and placeholders), config (model, params, tools) and labels. Defaults to the version labelled production; pass `label` or `version` for another.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "name": {"type": "string", "description": "The prompt's name, as list_prompts returns it."},
+                    "label": {"type": "string", "description": "A label such as production or staging; `latest` is the latest version. Defaults to production."},
+                    "version": {"type": "integer", "minimum": 1, "description": "A version number. Give label or version, not both."}
+                },
+                "required": ["project", "name"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             super::traces::SEARCH_TRACES,
             "Search traces",
             "Traces whose start_time is in [from, to), newest first. `from` and `to` are required and at most 30 days apart. Narrow with `filter` (a SQL boolean expression over the traces view, e.g. status = 'error' AND cost_total > 0.1; get_schema lists the columns), `search` (text in span input, output, name or system instructions), or a saved traces `view` (name or id from list_saved_views): explicit filter, search, include_eval and include_experiments override the view's, and the view's range and sort are ignored. Evaluation and experiment traces are hidden unless include_eval / include_experiments. Long metadata and preview values are cut to 200 characters.",
