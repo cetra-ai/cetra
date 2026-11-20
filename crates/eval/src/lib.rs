@@ -24,6 +24,7 @@ mod error;
 mod judge;
 mod mapping;
 pub mod plain_template;
+pub mod playground;
 mod runner;
 mod secret;
 mod template;
@@ -37,6 +38,7 @@ pub use chat::{
     ChatEvent, ChatParams, ChatRequest, ChatStream, FinishReason, ResponseFormat, TokenUsage,
     ToolCall, ToolChoice, ToolDefinition, stream_chat,
 };
+pub use chat::check_request as check_chat_request;
 pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,

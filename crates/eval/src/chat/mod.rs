@@ -372,7 +372,7 @@ pub(crate) fn secret_header(value: &Secret) -> Result<HeaderValue, ChatError> {
 }
 
 /// The bounds of D-V-24, tool names, and the parts D-V-25 allows.
-pub(crate) fn check_request(request: &ChatRequest) -> Result<(), ChatError> {
+pub fn check_request(request: &ChatRequest) -> Result<(), ChatError> {
     if !(1..=CHAT_MAX_TOKENS_MAX).contains(&request.max_tokens) {
         return Err(ChatError::InvalidRequest);
     }

@@ -81,6 +81,10 @@ pub mod metadata_key {
     /// `cetra.normalize_warning`, stored in `attributes`: a JSON array of warning codes,
     /// sorted and without duplicates. Spec 02 § Normalization rules.
     pub const NORMALIZE_WARNING: &str = crate::cetra_name!(".normalize_warning");
+    /// `cetra.playground.run_by`: the user who ran a playground run (D-V-22).
+    pub const PLAYGROUND_RUN_BY: &str = crate::cetra_name!(".playground.run_by");
+    /// `cetra.playground.source`: the prompt or span a playground run came from (D-V-22).
+    pub const PLAYGROUND_SOURCE: &str = crate::cetra_name!(".playground.source");
 }
 
 /// Keys written into score metadata by evaluators.
@@ -223,6 +227,16 @@ mod tests {
                 metadata_key::NORMALIZE_WARNING,
             ),
             (
+                "metadata_key",
+                "PLAYGROUND_RUN_BY",
+                metadata_key::PLAYGROUND_RUN_BY,
+            ),
+            (
+                "metadata_key",
+                "PLAYGROUND_SOURCE",
+                metadata_key::PLAYGROUND_SOURCE,
+            ),
+            (
                 "score_metadata_key",
                 "JUDGE_TRACE_ID",
                 score_metadata_key::JUDGE_TRACE_ID,
@@ -354,6 +368,8 @@ mod tests {
             metadata_key::EVAL_EVALUATOR_ID,
             metadata_key::NORMALIZE_ERROR,
             metadata_key::NORMALIZE_WARNING,
+            metadata_key::PLAYGROUND_RUN_BY,
+            metadata_key::PLAYGROUND_SOURCE,
             environment::EVAL,
             environment::EVAL_EXTERNAL,
             environment::PLAYGROUND,
@@ -399,6 +415,8 @@ mod tests {
         metadata_key::EVAL_EVALUATOR_ID,
         metadata_key::NORMALIZE_ERROR,
         metadata_key::NORMALIZE_WARNING,
+        metadata_key::PLAYGROUND_RUN_BY,
+        metadata_key::PLAYGROUND_SOURCE,
     ];
 
     #[test]
