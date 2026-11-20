@@ -2,7 +2,7 @@
 
 M4 connects issues to the rest of the product (D-IC-14, amended by D-IC-20 to D-IC-25):
 - K gets a fifth alert condition, `issue_occurrences`, over one issue or one source;
-- each issue source can notify K's channels of new and regressed issues, in one digest message per 10 minutes;
+- each issue source can notify K's channels of new and regressed issues, in one digest message per 10 minutes (precisely: at least about 9 to 10 minutes apart, the cut-off being the newest event's `at`, D-IC-21);
 - an issue page can copy its newest occurrence traces into a dataset, and can open a prefilled alert rule;
 - MCP gets a read-only `list_issues` tool;
 - the real binary and the in-process tests cover the whole chain.
@@ -11,7 +11,7 @@ M4 connects issues to the rest of the product (D-IC-14, amended by D-IC-20 to D-
 
 **Read first:**
 - `AGENTS.md`;
-- `00-design.md` (D-IC-9 to D-IC-11, D-IC-14, D-IC-16, D-IC-18) and the decisions this plan adds (`ic-m4-decisions` summary in M4.1);
+- `00-design.md` (D-IC-9 to D-IC-11, D-IC-14, D-IC-16, D-IC-18) and the decisions this plan adds (Appendix A, copied into the design doc by M4.1);
 - the code M1 and M3 added: `crates/server/src/meta/issues.rs`, `issues/`, `routes/issues.rs`, `api/issues.rs`;
 - track K: `crates/server/src/alerts/{mod,condition,evaluate,deliver,message,channel}.rs`, `meta/alerts.rs`, `routes/alert_rules.rs`, `routes/channels.rs`, `api/alerts.rs`, `email/mod.rs`, `email/templates/alert.*`;
 - track J: `routes/datasets.rs` (`add_from_traces`, `item_from`), `api/datasets.rs`;
@@ -36,6 +36,7 @@ The decisions file (D-IC-20 to D-IC-25) leaves these open. Each phase is written
 | Q9 | Singular wording (`1 new or regressed issues`) | singular for one (`1 new or regressed issue`), plural otherwise, in Slack, email subject and body | M4.7 |
 | Q10 | A `created` or `regressed` event of an issue that is ignored or merged by the time of the tick | still notified (no filter on the issue's state); accepted | M4.3 |
 | Q11 | Window of an `issue_occurrences` rule | `15m` or more; `1m` and `5m` are refused (decided by the coordinator) | M4.4 |
+| Q12 | Adding the first channel to an already enabled source | `last_notified_at` is set to now, as on enabling, so the backlog is never sent (decided by the coordinator) | M4.6 |
 
 **Coordinator's answers (binding; they override the assumptions and any phase text that follows them):**
 - Q1: as assumed.
@@ -47,6 +48,7 @@ The decisions file (D-IC-20 to D-IC-25) leaves these open. Each phase is written
 - Q7: as assumed.
 - Q8: mostly as assumed, with a settle margin so a late commit is not lost: the tick collects only events with `at <= now - ISSUE_NOTIFY_SETTLE_NS` (a const, 60 s, with a doc comment saying why), and `last_notified_at` advances to the newest collected event's `at`. Test: an event newer than the margin waits for the next tick. D-IC-21's text in M4.1 says so.
 - Q9: singular and plural: "1 new or regressed issue" / "N new or regressed issues", in Slack, email subject and email body. Test both.
+- Q12: as stated (D-IC-21): when a source's channel list goes from empty to non-empty, `last_notified_at` is set to now.
 - Q10: as assumed. Q11: as stated (decided by the coordinator): `issue_occurrences` refuses windows `1m` and `5m` with 400 `condition.window`: "issue occurrences need a window of 15m or more".
 
 ## What it is, and what it is not
@@ -92,10 +94,10 @@ No new dependency. (`minijinja`, `serde`, `uuid`, `sqlx` and every web package a
 | M4.1 Decisions, spec 04, migration | `00-design.md`, `docs/mvp-decisions.md`, spec 04, migration `0025` | — |
 | M4.2 Storage `ScoreCount` | `crates/storage/src/reads/alerts.rs` | — |
 | M4.3 Link store | new `meta/issue_links.rs`, `meta/mod.rs`, new `test_support/issues.rs`, `test_support/mod.rs` | M4.1 |
-| M4.4 K condition | `api/alerts.rs`, `alerts/condition.rs`, `alerts/message.rs`, `routes/alert_rules.rs`, `routes/channels.rs`, `meta/alerts.rs` (tests), `alerts/deliver/tests.rs` (literal), `alerts/evaluate.rs` (the `measure` call and test literals) | — |
+| M4.4 K condition | `api/alerts.rs`, `alerts/condition.rs`, `alerts/message.rs`, `routes/alert_rules.rs`, `routes/channels.rs`, `meta/alerts.rs` (tests), `alerts/deliver/tests.rs` (literal), `alerts/evaluate.rs` (the `measure` call and test literals) | M4.3 (its route tests use the shared test helpers) |
 | M4.5 K evaluation | `alerts/evaluate.rs` | M4.2, M4.3, M4.4 |
 | M4.6 Source channels API | `api/issues.rs`, `routes/issues.rs` | M4.3, M4.4 |
-| M4.7 Issue messages | `alerts/message.rs`, `email/mod.rs`, two new templates | M4.4 |
+| M4.7 Issue messages | `alerts/message.rs`, `email/mod.rs`, two new templates | M4.3, M4.4 |
 | M4.8 Issue deliveries | `meta/alerts.rs`, `alerts/deliver.rs`, `alerts/deliver/tests.rs`, `routes/channels.rs` | M4.3, M4.7 |
 | M4.9 `notify_issues` tick | new `alerts/issue_notify.rs`, `alerts/mod.rs` | M4.3 |
 | M4.10a Shared issue reads | new `issues/read.rs`, `issues/mod.rs`, `routes/issues.rs` | M4.3, M4.6 |
@@ -105,15 +107,16 @@ No new dependency. (`minijinja`, `serde`, `uuid`, `sqlx` and every web package a
 | M4.12b Web rule form | `rule-form.tsx`, `rule-preview.tsx`, `rule-detail.tsx`, new `channel-checkboxes.tsx`, new `issue-scope-fields.tsx`, new `select-field.tsx`, `alerts/new.tsx`, tests | M4.12a |
 | M4.13 Web issue page | `issue-actions.tsx`, `$issueId.tsx`, the dataset dialog, `mocks/writes.ts`, tests | M4.12b |
 | M4.14 Web source editor | `source-form.tsx`, tests | M3 (editor), M4.12b |
-| M4.15 In-process tests | new `alerts/issue_links_tests.rs`, `alerts/mod.rs` | M4.5, M4.6, M4.8, M4.9, M4.10a |
+| M4.15 In-process tests | new `alerts/issue_links_tests.rs`, `alerts/mod.rs` | M4.5, M4.6, M4.8, M4.9 |
 | M4.16 CLI e2e | `crates/cli/tests/e2e.rs` | M4.11 |
 | M4.17 Docs | specs 06, 07, 09, 11, website pages, `CHANGELOG.md`, `docs/roadmap.md` | M4.1 |
 | Closing | generated files, checks | all |
 
 **Parallelism** (Edit lists below are disjoint inside each group; groups run when their dependencies are committed):
-- Start together: **M4.1, M4.2, M4.4, M4.12a**.
+- Start together: **M4.1, M4.2, M4.12a**.
 - After M4.1: **M4.3**, **M4.17**.
-- After M4.3 and M4.4: **M4.5** (also needs M4.2), **M4.6**, **M4.7** (needs M4.4 only), then **M4.8** (M4.3, M4.7), **M4.9** (M4.3). M4.5, M4.6, M4.8 and M4.9 touch different files and run in parallel.
+- After M4.3: **M4.4** (its route tests use the helpers of `test_support/issues.rs`), and **M4.9** (needs M4.3 only).
+- After M4.3 and M4.4: **M4.5** (also needs M4.2), **M4.6**, **M4.7** (needs M4.3 for `DigestItem` and M4.4), then **M4.8** (M4.3, M4.7). M4.5, M4.6, M4.8 and M4.9 touch different files and run in parallel.
 - After M4.6: **M4.10a**, then **M4.10b** (also needs M4.7) and **M4.11** together.
 - After M4.12a: **M4.12b**, then **M4.13** and **M4.14** (both need M4.12b: the prefilled `alerts/new` search and the channel checkboxes).
 - Last: **M4.15** (after M4.5, M4.6, M4.8, M4.9), **M4.16** (after M4.11), then the Closing section.
@@ -197,7 +200,7 @@ The digest JSON of `issue_notifications.digest` is `{"items":[{"issue_id":"<uuid
 
 **Steps:**
 1. Write the migration above verbatim.
-2. `00-design.md`: add `### D-IC-20 The issue_occurrences condition` to `### D-IC-25 End-to-end coverage` after `### D-IC-19`, as bullet lists whose text is the decisions summary of D-IC-20 to D-IC-25 (the coordinator's `ic-m4-decisions.md`, already amended with the settle margin, the singular wording, the window rule and the example ranking; copy its text, keep its wording). Then amend the rest of the doc:
+2. `00-design.md`: add `### D-IC-20 The issue_occurrences condition` to `### D-IC-25 End-to-end coverage` after `### D-IC-19`, as bullet lists whose text is Appendix A of this plan (the text between the `~~~markdown` fences: it already holds the settle margin, the singular wording, the window rule, the example ranking and the channel-list cut-off; copy it, keep its wording). Then amend the rest of the doc:
    - `### D-IC-14 Links`: replace the *Condition* bullets with "see D-IC-20"; replace the *Notifications* bullets with "see D-IC-21" (no `issue_event_id`); in the *Datasets* bullet replace "`metadata.issue_id`" with "metadata `cetra.issue_id` (D-IC-22)"; add "(D-IC-24)" after "MCP". Remove the sentence naming `alert_count_scores`.
    - `### D-IC-15`, bullet `cetra-storage`: replace "`alert_count_scores` (M4, D-IC-14)" with "`AlertMeasure::ScoreCount` (M4, D-IC-20)".
    - `## Architecture` § Tables: row `issue_sources`: replace "notification channel ids, last_notified_at" with "last_notified_at"; add rows `issue_source_channels` (source, channel) and `issue_notifications` (id, source, digest JSON, created_at).
@@ -208,7 +211,7 @@ The digest JSON of `issue_notifications.digest` is `{"items":[{"issue_id":"<uuid
 
 **Tests:** none (docs and SQL). The Closing checks (`just check-rust`) run every migration against the schema tests.
 
-**Done when:** `rustfmt` is not needed. By hand: the migration has every statement above in that order; `grep -rn "alert_count_scores" docs --exclude-dir=plans` finds nothing (the M4 plan itself and older plans are excluded); the D-IC-20 to D-IC-25 headings exist in `00-design.md` and rows in `mvp-decisions.md`; the D-IC-21 text names `ISSUE_NOTIFY_SETTLE_NS` and the D-IC-20 text the `15m` window rule. The migration changes the insta snapshot `crates/server/tests/snapshots/meta_schema.snap`; it is not edited here: the Closing accepts it (step 5, `cargo insta review`).
+**Done when:** `rustfmt` is not needed. By hand: the migration has every statement above in that order; `grep -n "alert_count_scores" docs/plans/ic-issue-clustering/00-design.md docs/mvp-decisions.md` and `grep -rn "alert_count_scores" docs/spec` find nothing (this plan and older plans keep the word); the D-IC-20 to D-IC-25 headings exist in `00-design.md` and rows in `mvp-decisions.md`; the D-IC-21 text names `ISSUE_NOTIFY_SETTLE_NS` and the D-IC-20 text the `15m` window rule. The migration changes the insta snapshot `crates/server/tests/snapshots/meta_schema.snap`; it is not edited here: the Closing accepts it (step 5, `cargo insta review`).
 
 **Commit:** `Record the IC M4 decisions and add the issue links migration`
 
@@ -324,6 +327,8 @@ pub(crate) async fn source_scope_ids(pool: &SqlitePool, project: ProjectId, sour
 pub(crate) async fn source_channel_ids(pool: &SqlitePool, source: Uuid) -> Result<Vec<Uuid>, MetaError>;
 pub(crate) async fn source_channel_ids_by_source(pool: &SqlitePool, project: ProjectId) -> Result<HashMap<Uuid, Vec<Uuid>>, MetaError>;
 pub(crate) async fn set_source_channels(conn: &mut SqliteConnection, source: Uuid, channels: &[Uuid]) -> Result<(), MetaError>;
+/// Whether the source has at least one channel (M4.6 uses it inside the update transaction).
+pub(crate) async fn source_has_channels(conn: &mut SqliteConnection, source: Uuid) -> Result<bool, MetaError>;
 pub(crate) async fn set_last_notified_at(conn: &mut SqliteConnection, source: Uuid, at: i64) -> Result<(), MetaError>;
 pub(crate) async fn due_sources(pool: &SqlitePool, now: i64) -> Result<Vec<NotifySource>, MetaError>;
 /// Whether `notify_source` would find at least one event now: the count of step 7.2 on the read pool, so a tick does not take the writer for a source with nothing to send.
@@ -345,7 +350,7 @@ pub(crate) async fn notify_source(conn: &mut SqliteConnection, source: &NotifySo
    ```
    (numbered placeholders: bind two values, the project as `?1` and the source as `?2`; the final `ORDER BY id` applies to the whole compound select). An empty list is `Some(vec![])`.
 3. `source_channel_ids`: `SELECT channel_id FROM issue_source_channels WHERE source_id = ? ORDER BY channel_id`, parsed to `Uuid`. `source_channel_ids_by_source`: the same for every source of `project` (`JOIN issue_sources s ON s.id = c.source_id WHERE s.project_id = ?`), grouped in a `HashMap` (sources without channels are absent).
-4. `set_source_channels`: `DELETE FROM issue_source_channels WHERE source_id = ?`, then one `INSERT` per id. The caller validated the ids (M4.6).
+4. `set_source_channels`: `DELETE FROM issue_source_channels WHERE source_id = ?`, then one `INSERT` per id. The caller validated the ids (M4.6). `source_has_channels`: `SELECT EXISTS (SELECT 1 FROM issue_source_channels WHERE source_id = ?)`.
 5. `set_last_notified_at`: `UPDATE issue_sources SET last_notified_at = ? WHERE id = ?`.
 6. `due_sources`, the selection query (exact):
    ```sql
@@ -394,7 +399,7 @@ pub(crate) async fn notify_source(conn: &mut SqliteConnection, source: &NotifySo
 - `issue_scope_of_a_missing_issue_is_none`, `issue_scope_is_project_scoped` (an issue of another project is `None`).
 - `source_scope_skips_ignored_and_merged_issues`: open and resolved issues are in; an ignored issue and the issues merged into it are out; a merged issue whose target is open is in.
 - `source_scope_of_a_source_without_issues_is_empty_not_none`, `source_scope_of_a_missing_source_is_none`.
-- `source_channels_round_trip_sorted`; `set_source_channels_replaces`; `deleting_a_channel_removes_it_from_a_source` (delete the `notification_channels` row by SQL; the link is gone); `deleting_a_source_removes_its_links_and_notifications`.
+- `source_channels_round_trip_sorted`; `set_source_channels_replaces`; `source_has_channels_follows_the_links` (false, true after `set_source_channels`, false after clearing); `deleting_a_channel_removes_it_from_a_source` (delete the `notification_channels` row by SQL; the link is gone); `deleting_a_source_removes_its_links_and_notifications`.
 - `due_sources_requires_enabled_channels_and_the_throttle`: not due at `last_notified_at + THROTTLE_NS - 1`, due at `last_notified_at + THROTTLE_NS`; not due when disabled; not due without channels; not due when `last_notified_at` is `NULL`; due when paused (`paused_reason` set); not due when the project or org is not `active`.
 - `notify_source_writes_one_notification_per_channel`: two channels give two pending deliveries with `event_id IS NULL`, one `issue_notifications` row, and `last_notified_at` equal to the newest event's `at`.
 - `notify_source_digest_is_newest_first_and_capped`: 25 events give 20 items (the 20 newest, in `at` descending order) and `more = 5`.
@@ -420,8 +425,8 @@ pub(crate) async fn put_issue(app: &TestApp, row: IssueRow)
 pub(crate) async fn put_event(app: &TestApp, issue: Uuid, kind: EventKind, at: i64)
 /// A notification channel row (kind slack, sealed config that is never opened) for tests that never deliver; returns its id. Tests that deliver create channels through the channels route.
 pub(crate) async fn put_channel(app: &TestApp, project: ProjectId, name: &str) -> Uuid
-/// One occurrence score of `issue` on `trace` (32 hex), `created_at = at` (absolute nanoseconds), written as the issue writer does (D-IC-18): the body of `occurrence` in the `routes/issues.rs` tests with `at` given instead of `hours_ago`.
-pub(crate) async fn occurrence(app: &TestApp, seeded: &Seeded, source: Uuid, issue: Uuid, trace: &str, at: i64, user: Option<&str>)
+/// One occurrence score of `issue` on `trace` (32 hex), `created_at = at` (absolute nanoseconds), written as the issue writer does (D-IC-18): the body of `occurrence` in the `routes/issues.rs` tests with `at` given instead of `hours_ago`. `span` is the value of the score metadata key `cetra.issue.span_id` (16 hex); `None` omits the key. The old helper always wrote `"b100000000000012"`: pass `Some("b100000000000012")` for that.
+pub(crate) async fn occurrence(app: &TestApp, seeded: &Seeded, source: Uuid, issue: Uuid, trace: &str, at: i64, user: Option<&str>, span: Option<&str>)
 ```
 `put_channel` inserts with `sqlx::query` through `app.state.meta.write` into `notification_channels (id, project_id, kind, name, config_enc, target_hint, created_at, updated_at)` with `config_enc = vec![0]`, `target_hint = "test"`. The `routes/issues.rs` tests keep their own private `occurrence` (hours-based); M4.10a replaces their private `issue_row` and `put_issue` by these.
 
@@ -438,7 +443,7 @@ pub(crate) async fn occurrence(app: &TestApp, seeded: &Seeded, source: Uuid, iss
 **Edit:**
 - `crates/server/src/api/alerts.rs`;
 - `crates/server/src/alerts/condition.rs`;
-- `crates/server/src/alerts/message.rs` (`value_text` and the `sample_notice` literal only);
+- `crates/server/src/alerts/message.rs` (`value_text` and its test `value_texts` only);
 - `crates/server/src/routes/alert_rules.rs`;
 - `crates/server/src/routes/channels.rs` (the `AlertCondition` literal only);
 - `crates/server/src/meta/alerts.rs` (the test literals only);
@@ -480,7 +485,7 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
    - new step 8 (scope), after step 7: for `IssueOccurrences`: both set → `error("source_id", "cannot be set with issue_id")`; neither → `error("issue_id", "one of issue_id and source_id is required")`. For every other metric: `issue_id` set → `error("issue_id", "applies to issue_occurrences only")`; `source_id` set → `error("source_id", "applies to issue_occurrences only")`.
    - `measure(condition: &AlertCondition) -> Option<AlertMeasure>`: every existing arm wrapped in `Some(...)`; `AlertMetric::IssueOccurrences => None` (the evaluator builds its own measure from the resolved names, M4.5). Update the doc comment.
    - `alerts/evaluate.rs`, `measure_rule`: replace `measure: measure(condition),` by a `let Some(measure) = measure(condition) else { return Err("query failed") };` placed before the request (no `unwrap`; M4.5 adds the issue branch above it, so the `else` is never taken). Fix the `AlertCondition` literals of the file's tests (`error_rate()` helper and the `cost` literal) with `issue_id: None, source_id: None`.
-3. `alerts/message.rs`: `value_text`: `AlertMetric::IssueOccurrences => format!("{value:.0}")`; update the doc comment (`12` for `issue_occurrences`). `sample_notice`: nothing to add (it has no `AlertCondition`). `Notice`-building code elsewhere is unchanged.
+3. `alerts/message.rs`: `value_text`: `AlertMetric::IssueOccurrences => format!("{value:.0}")`; update the doc comment (`12` for `issue_occurrences`). `sample_notice` and the `Notice`-building code elsewhere are unchanged (they hold no `AlertCondition`).
 4. `routes/alert_rules.rs`: `checked_condition`, after `normalize_condition` and the filter check, add the existence check, building `ApiError::BadRequest { detail: None, errors: vec![FieldError { field, message, position: None }] }` (reuse the error shape the function already returns):
    - `issue_id` set: `crate::meta::issues::get_issue(state.meta.reader(), project, id)`; `None` → field `condition.issue_id`, message `"no such issue in this project"`;
    - `source_id` set: `crate::meta::issues::get_source(state.meta.reader(), project, id)`; `None` → field `condition.source_id`, message `"no such issue source in this project"`.
@@ -488,7 +493,7 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
 5. Fix every struct literal of `AlertCondition` with `issue_id: None, source_id: None`: `routes/channels.rs` (one), `meta/alerts.rs` tests (one, the `condition(threshold)` helper), `alerts/deliver/tests.rs` (`rule_condition`), `alerts/evaluate.rs` tests (two), `alerts/condition.rs` tests (the `condition(metric)` helper). Fix every other literal that `grep -rn "AlertCondition {" crates/server/src` finds. The `condition(metric)` helper of `condition.rs` has window `5m`: tests that build an `IssueOccurrences` condition from it set `window: AlertWindow::M15`.
 6. Q5: the alert message code is unchanged: an `issue_occurrences` rule has no filter, so its "View traces" link is the trace list over the window.
 
-**Tests** (in `alerts/condition.rs` and `routes/alert_rules.rs` test modules):
+**Tests** (in `alerts/condition.rs`, `alerts/message.rs` and `routes/alert_rules.rs` test modules; the route tests build sources and issues with `put_source`/`put_issue` of `crate::test_support::issues`, created by M4.3, which this phase depends on):
 - `issue_occurrences_refuses_short_windows`: `1m` and `5m` give `condition.window` "issue occurrences need a window of 15m or more"; `15m`, `1h`, `6h`, `24h` pass; `error_rate` over `1m` still passes.
 - `issue_occurrences_threshold_is_checked`: `-1` is refused with `condition.threshold` "must be at least 0"; `0`, `3` and `2.5` pass; `NaN` is refused as for other metrics.
 - `issue_occurrences_refuses_fields_that_do_not_apply`: `filter`, `min_count`, `target`, `score_name` and `aggregation` each give their own field error; all of them together are collected in field order.
@@ -496,7 +501,7 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
 - `other_metrics_refuse_issue_and_source_ids`: `error_rate` with `issue_id` → `condition.issue_id` "applies to issue_occurrences only"; likewise `source_id`.
 - `issue_occurrences_json_round_trips`: serialize and parse back; `issue_id` serialized as a UUID string; an unknown field is still refused; an invalid UUID string is a parse error.
 - `measure_follows_the_condition` (existing) updated for `Option` (every old arm is `Some(...)`); `issue_occurrences_has_no_storage_measure`: `measure` returns `None`.
-- `value_text_formats` (existing) gets `issue_occurrences`: `value_text(IssueOccurrences, Some(12.0)) == "12"`, `Some(0.0) == "0"`, `None == "no data"`.
+- `value_texts` (existing, in `alerts/message.rs`) gets `issue_occurrences`: `value_text(IssueOccurrences, Some(12.0)) == "12"`, `Some(0.0) == "0"`, `None == "no data"`.
 - Route tests (`TestApp`): `create_issue_rule_with_a_known_issue` (201, condition echoes `issue_id`, `min_count` absent); `create_rule_with_an_unknown_issue_is_400` (`condition.issue_id`, "no such issue in this project"); `create_rule_with_an_issue_of_another_project_is_400`; `create_rule_with_an_unknown_source_is_400` (`condition.source_id`); `create_source_rule_with_a_known_source`; `update_to_an_unknown_issue_is_400`; `issue_rule_counts_toward_the_rule_limit` (with the plan limit helper the existing quota tests use).
 
 **Done when:** `rustfmt --edition 2024` on every edited `.rs` file succeeds; `grep -rn "AlertCondition {" crates/server/src` shows only literals with the two new fields; `grep -rn "measure(condition)" crates/server/src` shows only the `let Some(measure)` form.
@@ -541,9 +546,9 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
    - return `AlertValue { count: total, value: Some(total as f64) }`.
    The fixed reasons `issue not found` and `issue source not found` flow into `Evaluation::Failed` as any failed read does (K's existing path: the rule stays in its state, `last_error` set).
 3. `reading` needs no change: `min_count` is `None` for this metric, so a value is `Breaching` or `Clear`, never `Insufficient`. Add a comment on `reading`.
-4. `use` additions: `cetra_storage::MAX_COUNT_NAMES`, `cetra_storage::QueryContext` (if not imported), `crate::meta::issue_links::{issue_scope_ids, source_scope_ids}`.
+4. `use` additions: `cetra_storage::MAX_COUNT_NAMES`, `cetra_storage::QueryContext` (if not imported), `crate::api::alerts::AlertMetric` (the file imports only `AlertCondition, AlertEventKind, AlertState` today; its tests import `AlertMetric` themselves), `crate::meta::issue_links::{issue_scope_ids, source_scope_ids}`.
 
-**Tests** (in the file's test module; build sources, issues and occurrence scores with the helpers of `crate::test_support::issues` that M4.3 created: `source_row`/`put_source`, `issue_row`/`put_issue`, `occurrence(app, seeded, source, issue, trace, at, user)`; `measure_rule` is called directly with explicit `from`/`to`, so the API's window rule does not apply to it):
+**Tests** (in the file's test module; build sources, issues and occurrence scores with the helpers of `crate::test_support::issues` that M4.3 created: `source_row`/`put_source`, `issue_row`/`put_issue`, `occurrence(app, seeded, source, issue, trace, at, user, span)` (pass `None` for `span`); `measure_rule` is called directly with explicit `from`/`to`, so the API's window rule does not apply to it):
 - `issue_rule_counts_occurrences_in_the_window`: 3 scores in the window and 2 outside give `count 3`, `value Some(3.0)`.
 - `issue_rule_counts_merged_issues_with_their_target`: occurrences of a merged issue count on its target.
 - `issue_rule_on_a_merged_issue_follows_its_target`: a rule whose `issue_id` was later merged counts the target's whole group (D-IC-20).
@@ -554,7 +559,7 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
 - `names_over_the_cap_are_chunked`: a source with 1 001 issues (insert rows by SQL in one transaction; write one occurrence score for the first and one for the last) sums to 2 across two reads.
 - `missing_issue_fails_with_a_fixed_reason`: after deleting the issue's source by SQL, `measure_rule` returns `Err("issue not found")`; for a source rule `Err("issue source not found")`; `evaluate_once` records `last_error` with that reason and keeps the state.
 - `deleting_a_source_leaves_its_rules`: `DELETE …/issue-sources/{id}` leaves the alert rule in place (it then fails with the fixed reason).
-- `issue_rule_fires_and_resolves`: with the manual clock, a rule `gt 0` over `15m` (stored through the meta store; the API refuses shorter windows) goes `fired` when an occurrence is written and `resolved` after the window passes (`Clock::advance`), using `evaluate_once(&app.state, now)` directly.
+- `issue_rule_fires_and_resolves`: with the manual clock, a rule `gt 0` over `15m` (stored through the meta store; the API refuses shorter windows) goes `fired` when an occurrence is written; after the window passes (advance the clock past the window plus 1 minute) `evaluate_once(&app.state, now)` still leaves the state `firing` with `clear_streak` 1 (`CLEARS_TO_RESOLVE` is 2), and after 1 more minute a second `evaluate_once` makes it `resolved`. All through `evaluate_once(&app.state, now)` directly, with `Clock::advance`.
 - `old_metrics_are_unchanged`: the existing tests of this file still describe the four metrics (no edit needed; do not delete any).
 
 **Done when:** `rustfmt --edition 2024 crates/server/src/alerts/evaluate.rs` succeeds; `measure_rule` has no copy of the `open_query_on` call; the `IssueOccurrences` early return precedes the `measure(condition)` call.
@@ -565,7 +570,7 @@ The doc comments of `filter`, `min_count`, `target`, `score_name`, `aggregation`
 
 ## M4.6 Source channels API
 
-**Goal:** sources carry `channel_ids`; enabling a source starts its notification clock (D-IC-21).
+**Goal:** sources carry `channel_ids`; enabling a source, or giving it its first channel, starts its notification clock (D-IC-21).
 
 **Edit:** `crates/server/src/api/issues.rs`; `crates/server/src/routes/issues.rs`.
 
@@ -594,7 +599,7 @@ Fix every other constructor of `IssueSource`, `CreateIssueSourceRequest` and `Up
    - `create_issue_source`: the validated channel ids.
 2. Validation: `let channels = crate::routes::alert_rules::checked_channels(&state, project, &body.channel_ids).await?` (create), and for update only when `body.channel_ids` is `Some`. It returns the sorted, unique, project-owned ids, or `400` on `channel_ids` ("at most 10 channels", "duplicate channel", "unknown channel"). Keep the existing order and call it after `validate`.
 3. Create: `insert_checked(conn, org, row, limit, channels, now)`: after `insert_source`, `issue_links::set_source_channels(conn, row.id, &channels)`; and when `row.enabled`, `issue_links::set_last_notified_at(conn, row.id, now)` (`now` is the `state.clock.now_ns()` the handler already read; it equals `row.created_at`).
-4. Update: `update_checked(conn, project, org, stored, row, limit, channels: Option<Vec<Uuid>>, now)`: after `update_source`, `if let Some(channels) = channels { set_source_channels(...) }`; and when `!stored.enabled && row.enabled`, `set_last_notified_at(conn, row.id, now)`. A PATCH that only changes channels does not touch `last_notified_at`. The response reads the channel ids after the write.
+4. Update: `update_checked(conn, project, org, stored, row, limit, channels: Option<Vec<Uuid>>, now)`: before `update_source`, `let had_channels = issue_links::source_has_channels(conn, row.id).await?` (inside the transaction); after `update_source`, `if let Some(channels) = &channels { set_source_channels(conn, row.id, channels) }`; then `set_last_notified_at(conn, row.id, now)` when `!stored.enabled && row.enabled`, **or** when `channels` is `Some` and non-empty and `!had_channels` (the list went from empty to non-empty: a backlog is never sent, Q12). Changing a non-empty list to another non-empty list, or clearing it, does not touch `last_notified_at`; nor does a PATCH without `channel_ids` that keeps the source enabled. Create needs no extra rule: a source created enabled already has `last_notified_at = now`, a disabled one gets it when enabled. The response reads the channel ids after the write.
 5. Delete needs nothing (foreign keys cascade). Audit logs keep ids only.
 6. Permission is unchanged (`ManageEvaluation` on the source routes).
 
@@ -606,6 +611,8 @@ Fix every other constructor of `IssueSource`, `CreateIssueSourceRequest` and `Up
 - `creating_an_enabled_source_sets_last_notified_at`: the column equals the clock's `now` (read by SQL).
 - `creating_a_disabled_source_leaves_last_notified_at_null`; `enabling_a_disabled_source_sets_it_to_now` (clock advanced first); `disabling_and_re_enabling_resets_it` (again later `now`).
 - `a_patch_that_keeps_the_source_enabled_leaves_last_notified_at` (clock advanced; value unchanged).
+- `adding_the_first_channel_resets_the_cutoff`: an enabled source created without channels; clock advanced; a PATCH `channel_ids: [a]` sets `last_notified_at` to the new now.
+- `changing_channels_that_are_not_empty_keeps_the_cutoff`: from `[a]` to `[b]` (clock advanced), and from `[b]` to `[]`: the value is unchanged both times; adding a channel again after `[]` resets it (empty to non-empty).
 - `deleting_a_channel_removes_it_from_a_source` (route `DELETE …/channels/{id}`, then `GET` the source: `channel_ids` empty).
 - `a_viewer_cannot_set_channels` (a `ProjectPerm::ManageEvaluation` refusal is the existing behaviour: one assertion with a viewer cookie gets 403).
 
@@ -749,7 +756,7 @@ Issues {
 
 **Goal:** the delivery loop reads and sends issue notifications as it does rule events.
 
-**Edit:** `crates/server/src/meta/alerts.rs`; `crates/server/src/alerts/deliver.rs`; `crates/server/src/alerts/deliver/tests.rs`; `crates/server/src/routes/channels.rs` (the import and the one call to `send`, nothing else).
+**Edit:** `crates/server/src/meta/alerts.rs`; `crates/server/src/alerts/deliver.rs`; `crates/server/src/alerts/deliver/tests.rs`; `crates/server/src/routes/channels.rs` (the import and the one call to `send_to_channel`, nothing else).
 
 **Contract** (`meta/alerts.rs`): `DueDelivery` carries a body enum instead of `event`:
 ```rust
@@ -828,9 +835,9 @@ Merge: collect `(next_attempt_at, id string, DueDelivery)` triples, sort by `(ne
    ```rust
    pub(crate) enum Outgoing<'a> { Alert(&'a Notice), Issues(&'a IssuesNotice) }
    ```
-2. `send_one` is renamed and takes the enum: `pub(crate) async fn send(state: &AppState, org_id: OrgId, config: &ChannelConfig, outgoing: Outgoing<'_>, delivery_id: Uuid, now: i64) -> Result<(), SendError>`. There is no wrapper and no `send_one` or `send_issues` afterwards: every caller builds the enum. Update every caller in this phase: `routes/channels.rs` (the import and the test-send call: `Outgoing::Alert(&notice)`), `attempt_of` below, and every call in `alerts/deliver/tests.rs` (find them with `grep -rn "send_one" crates/server/src`). `Outgoing` is `pub(crate)` (`#[derive(Clone, Copy)]`).
-3. `send` is today's `send_one` body with the three body builders chosen by the enum: Slack `message::slack_body(n)` / `message::issues_slack_body(n)`; webhook `message::webhook_body(n)` / `message::issues_webhook_body(n)`; email: `send_email(state, org_id, recipients, &email, now)` where `email` is built once (`message::email(n)` / `message::issues_email(n)`) and `send_email`'s parameter becomes `email: &Email` instead of `notice: &Notice` (its quota, member and error logic are unchanged).
-4. `attempt_of`: `match &due.body { DueBody::Rule(event) => send(.., Outgoing::Alert(&notice_of(state, due, event)), ..), DueBody::Issues(issues) => send(.., Outgoing::Issues(&issues_notice_of(state, due, issues)), ..) }` (bind each notice to a local first so the borrow lives through the call). `notice_of` takes the event as a parameter (it read `due.event`); the telemetry call and the retry logic after it are unchanged.
+2. `send_one` is renamed and takes the enum: `pub(crate) async fn send_to_channel(state: &AppState, org_id: OrgId, config: &ChannelConfig, outgoing: Outgoing<'_>, delivery_id: Uuid, now: i64) -> Result<(), SendError>`. The new name is deliberately not `send`: `alerts/deliver/tests.rs` already has a helper `async fn send(app, config, now)` that must keep its name; after this phase its body calls `super::send_to_channel(&app.state, OrgId::new_v7(), config, Outgoing::Alert(&sample_notice(MessageKind::Fired, now)), Uuid::now_v7(), now)`. There is no wrapper and no `send_one` or `send_issues` afterwards: every caller builds the enum. Update every caller in this phase: `routes/channels.rs` (the import and the test-send call: `Outgoing::Alert(&notice)`), `attempt_of` below, and every call in `alerts/deliver/tests.rs` (find them with `grep -rn "send_one" crates/server/src`). `Outgoing` is `pub(crate)` (`#[derive(Clone, Copy)]`).
+3. `send_to_channel` is today's `send_one` body with the three body builders chosen by the enum: Slack `message::slack_body(n)` / `message::issues_slack_body(n)`; webhook `message::webhook_body(n)` / `message::issues_webhook_body(n)`; email: `send_email(state, org_id, recipients, &email, now)` where `email` is built once (`message::email(n)` / `message::issues_email(n)`) and `send_email`'s parameter becomes `email: &Email` instead of `notice: &Notice` (its quota, member and error logic are unchanged).
+4. `attempt_of`: `match &due.body { DueBody::Rule(event) => send_to_channel(.., Outgoing::Alert(&notice_of(state, due, event)), ..), DueBody::Issues(issues) => send_to_channel(.., Outgoing::Issues(&issues_notice_of(state, due, issues)), ..) }` (bind each notice to a local first so the borrow lives through the call). `notice_of` takes the event as a parameter (it read `due.event`); the telemetry call and the retry logic after it are unchanged.
 5. `issues_notice_of(state, due, issues) -> IssuesNotice`: `issue_urls` by `message::issue_url(public_url, &due.org_slug, &due.project_slug, item.issue_id)` per item, `issues_url` by `message::issues_url(.., issues.source_id)`, the rest copied from `issues` and `due`.
 6. Logs: unchanged lines (`"alert delivery"` with delivery id, channel, attempt, outcome). Never log titles.
 
@@ -907,6 +914,7 @@ pub(crate) async fn notify_issues(state: &AppState, now: i64) -> Result<NotifyRe
 - `a_paused_source_still_notifies`: `paused_reason` set; the digest is written.
 - `an_inactive_project_or_org_never_notifies`.
 - `enabling_a_source_sets_the_cutoff_so_the_backlog_is_not_sent`: a source whose issues' events predate the enabling (the route sets `last_notified_at = now`) sends nothing; only later events are sent.
+- `adding_the_first_channel_does_not_send_the_backlog`: an enabled source with old `created` events and no channel; the first channel is added through the source route (which sets `last_notified_at = now`); `notify_issues` 11 minutes later writes nothing; an event written after the route call is sent.
 - `regressed_events_are_sent_with_their_kind`: the digest holds `regressed` for a regression event and `created` for a new issue.
 - `the_digest_names_up_to_twenty_and_counts_the_rest` (25 events: 20 items, `more` 5, newest first).
 - `user_events_never_notify`: `state_changed`, `renamed` and `merged` events are not sent.
@@ -959,7 +967,7 @@ pub(crate) async fn occurrence_scores(
 ) -> Result<Vec<(Uuid, Score)>, ApiError>
 ```
 **Steps:**
-1. Move `Tally`, `score_name`, `issue_count`, `most_occurrences_first`, `names_of`, `total`, `name_counts`, `tallies`, and the constants `MAX_EXAMPLE_NAMES` and `OCCURRENCE_DEFAULT_PERIOD_NS` verbatim from `routes/issues.rs` to `issues/read.rs` (`DAY_NS` from `cetra_core`/where `routes/issues.rs` imports it) (with their doc comments and the `READ_TIMEOUT`/`open_query` imports from `crate::routes::read`); delete them from `routes/issues.rs` and import them (`use crate::issues::read::{…}`). Move their tests too, if any test targets them directly.
+1. Move `Tally`, `score_name`, `issue_count`, `most_occurrences_first`, `names_of`, `total`, `name_counts`, `tallies`, and the constants `MAX_EXAMPLE_NAMES` and `OCCURRENCE_DEFAULT_PERIOD_NS` verbatim from `routes/issues.rs` to `issues/read.rs` (with their doc comments), together with the imports they need in `issues/read.rs`: `std::{cmp::Reverse, collections::HashMap}`, `uuid::Uuid`, `cetra_core::ids::{OrgId, ProjectId}`, `cetra_core::score::Score`, `cetra_storage::{MAX_COUNT_NAMES, QueryContext, ScoreNameCount, ScoreNameCountsRequest, TimeWindow}` (check which of these the moved code uses), `crate::eval::budget::DAY_NS`, `crate::http::AppState`, `crate::http::error::ApiError`, `crate::routes::read::{READ_TIMEOUT, open_query}`; delete them from `routes/issues.rs` and import them (`use crate::issues::read::{…}`). Move their tests too, if any test targets them directly.
 2. `occurrence_scores`: the loop body of `get_issue_occurrences` that calls `cetra_storage::score_list` with `name: Some(name.as_str())`, `source: Some(ScoreSource::Issue)`, `limit: per_issue` and converts with `convert::scores(&page.batches, project)`; it returns `(issue, score)` for every converted score. `get_issue_occurrences` then builds its list with `example_issues(id, &merged, &by_name)` (it replaces the `by_count`/`truncate(MAX_EXAMPLE_NAMES)` lines: same result), calls `occurrence_scores` with it and `EXAMPLES_PER_NAME`, and builds the examples with `example_of(score, issue)` as today (sorting and truncation unchanged). The dataset route (M4.11) ranks with the same default window.
 3. No behaviour change: every existing test of `routes/issues.rs` must still describe the same answers.
 
@@ -1063,7 +1071,7 @@ pub(crate) async fn occurrence_scores(
 
 **Goal:** `POST /api/v1/projects/{project}/issues/{id}/dataset-items` (D-IC-22), through the shared bulk-add core.
 
-**Edit:** `crates/server/src/routes/datasets.rs`; `crates/server/src/api/datasets.rs`; new `crates/server/src/routes/issue_dataset_items.rs`; `crates/server/src/routes/mod.rs` (`pub(crate) mod issue_dataset_items;`); `crates/server/src/http/access.rs` (`routes.extend(crate::routes::issue_dataset_items::routes());` after the issues line); `crates/server/src/api/openapi.rs`.
+**Edit:** `crates/server/src/routes/datasets.rs`; `crates/server/src/api/datasets.rs`; new `crates/server/src/routes/issue_dataset_items.rs`; `crates/server/src/routes/mod.rs` (`pub(crate) mod issue_dataset_items;`); `crates/server/src/http/access.rs` (`routes.extend(crate::routes::issue_dataset_items::routes());` after the issues line); `crates/server/src/api/openapi.rs`; `crates/server/tests/openapi.rs`.
 
 **Contract:**
 ```rust
@@ -1117,8 +1125,20 @@ The answer of the new route is J's `FromTracesResult` with `201`.
        .build();
    ```
    and the path `format!("{PROJECT}/issues/{{id}}/dataset-items")` with `PathItem::new(HttpMethod::Post, dataset_items)` after the `merge` path. Do not regenerate `openapi.json`.
+4. `crates/server/tests/openapi.rs` compares an exact operation table and the declared 4xx codes of each operation id:
+   - in the `OPERATIONS` table, after the `post_issue_merge` row, add `("post", "/api/v1/projects/{project}/issues/{id}/dataset-items", "post_issue_dataset_items"),` (same tuple layout as its neighbours);
+   - in the if-chain of expected error codes, add `|| *id == "post_issue_dataset_items"` to the branch that holds `post_issue_merge` (it expects `400, 401, 403, 404, 409, 429`; the test collects 4xx codes only, so the declared 503 needs nothing, as for `post_evaluator_test`). The route declares no 413, so do not copy the `post_dataset_items_from_traces` branch.
 
-**Tests** (in `routes/issue_dataset_items.rs`, `TestApp`; build sources, issues and occurrence scores with the `crate::test_support::issues` helpers (M4.3: `put_source`, `put_issue`, `occurrence`), with spans committed through `app.commit_spans` so the traces load; a dataset through the datasets route):
+**Tests** (in `routes/issue_dataset_items.rs`, `TestApp`; build sources, issues and occurrence scores with the `crate::test_support::issues` helpers (M4.3: `put_source`, `put_issue`, `occurrence`; occurrences pass `Some(span)`, see below), with spans committed through `app.commit_spans` so the traces load; a dataset through the datasets route).
+
+**Recipe for loadable traces.** The dataset route copies the span named by `cetra.issue.span_id`; `load_trace` skips a trace whose span is not in the committed trace (`NoTargetSpan`). So every test below that must add an item first commits its traces with a local helper `async fn commit_trace(app: &TestApp, trace_hex: &str, span_hex: &str)`: it clones `crate::test_support::dataset_span(0)`, sets `trace_id` (from `trace_hex`), `span_id` (from `span_hex`) and `parent_span_id = None`, and commits it with `app.commit_spans(...)`; the occurrence of that trace passes `Some(span_hex)`. Tests that need several traces use the fixture traces `T1..T9` of the `routes/datasets.rs` tests (trace ids `a1000000000000000000000000000001` to `…09`, span `b100000000000011`) where those already exist in the seed, else `commit_trace` with generated hex ids. Per test:
+- `adds_the_newest_distinct_traces`: 2 traces (two issues of one group occur on the same one), `commit_trace` for both, all occurrences with their span;
+- `limit_caps_the_items`: 5 distinct traces (`T1..T5`);
+- `uses_the_occurrence_span_when_present`: one trace with two spans committed (root and a child); the first occurrence passes the child span id, the second (another trace) passes `None`;
+- `the_group_is_the_issue_and_the_seven_busiest_merged_issues`: 10 issues (target plus 9 merged), one trace each (`T1..T9` plus one `commit_trace`), extra occurrences of the busier merged issues on traces already used or committed;
+- `skipped_traces_are_listed`: one occurrence whose trace is never committed (a hex id with no spans), others committed.
+
+Tests:
 - `adds_the_newest_distinct_traces`: 3 occurrences on 2 traces (two issues of one group on the same trace) give 2 items; order newest first; one version holds them.
 - `limit_caps_the_items`: 5 traces, `limit 2` adds the 2 newest; the default adds all 5; `limit 0` and `limit 101` are 400 on `limit`.
 - `uses_the_occurrence_span_when_present`: an occurrence whose score metadata has `cetra.issue.span_id` copies that span's input/output; one without the key copies the trace root. Item `source_span_id` shows which.
@@ -1181,7 +1201,7 @@ The answer of the new route is J's `FromTracesResult` with `201`.
 
 **Goal:** the rule form creates and edits `issue_occurrences` rules, with a scope picker and a prefill (D-IC-23).
 
-**Edit:** `web/src/components/alerts/rule-form.tsx`; `web/src/components/alerts/rule-preview.tsx`; `web/src/components/alerts/rule-detail.tsx`; new `web/src/components/alerts/channel-checkboxes.tsx`; new `web/src/components/alerts/issue-scope-fields.tsx`; new `web/src/components/alerts/select-field.tsx`; `web/src/routes/$org/$project/alerts/new.tsx`; `web/src/routes/$org/$project/alerts/new.test.tsx`; `web/src/routes/$org/$project/alerts/$ruleId/edit.test.tsx`.
+**Edit:** `web/src/components/alerts/rule-form.tsx`; `web/src/components/alerts/rule-preview.tsx`; `web/src/components/alerts/rule-detail.tsx`; new `web/src/components/alerts/channel-checkboxes.tsx`; new `web/src/components/alerts/issue-scope-fields.tsx`; new `web/src/components/alerts/select-field.tsx`; `web/src/routes/$org/$project/alerts/new.tsx`; `web/src/routes/$org/$project/alerts/new.test.tsx`; `web/src/routes/$org/$project/alerts/$ruleId/edit.test.tsx`; `web/src/components/alerts/rule-panel.test.tsx`.
 
 **Contracts:**
 ```tsx
@@ -1214,8 +1234,8 @@ initial?: Partial<RuleFormValues>;   // create only: merged over DEFAULT_RULE_FO
 1. `channel-checkboxes.tsx`: move the Notifications fieldset's content (the channels query, skeleton, "No channels yet. Add a channel" link, the checkbox list with `channelKindLabel`, the limit, the error text) out of `rule-form.tsx` unchanged in markup and ids (so existing tests keep passing). `RuleForm` renders `<ChannelCheckboxes idPrefix="rule" … />` inside its fieldset (the `legend` and `aria-describedby` stay in the form).
 2. `select-field.tsx`: move the private `SelectField` function (and its `Option` type if it is local) of `rule-form.tsx` there, exported unchanged; `rule-form.tsx` and `issue-scope-fields.tsx` both import it from it (no import cycle).
    `issue-scope-fields.tsx`: a select (via `SelectField`) labelled **Scope** with options "One issue" (`issue`) and "All issues of a source" (`source`), then:
-   - scope `issue`: a select labelled **Issue** listing `GET /api/v1/projects/{project}/issues?state=all&limit=100` (use the query helpers of `web/src/api/queries-issues.ts`; read the file and use the list query it exports, or `$api.useQuery` with `query: { state: "all", limit: 100 }`); each option shows the title (cut to 60 characters) and the source name; when `issueId` is set and not in the page, fetch it with `issueQuery(org, project, issueId)` and add its option (so a prefilled issue always shows); error `errors["condition.issue_id"]`;
-   - scope `source`: a select labelled **Source** listing the project's issue sources (the sources list query of `queries-issues.ts`); error `errors["condition.source_id"]`;
+   - scope `issue`: a select labelled **Issue** listing `GET /api/v1/projects/{project}/issues?state=all&limit=100` (`$api.useQuery("get", "/api/v1/projects/{project}/issues", { params: { path: { project: projectRef(org, project) }, query: { state: "all", limit: 100 } } })`; the infinite `issuesInfiniteQuery` of `queries-issues.ts` is for paging and is not used here); each option shows the title (cut to 60 characters) and the source name; when `issueId` is set and not in the page, fetch it with `issueQuery(org, project, issueId)` and add its option (so a prefilled issue always shows); error `errors["condition.issue_id"]`;
+   - scope `source`: a select labelled **Source** listing the project's issue sources (`issueSourcesQuery(org, project)` of `queries-issues.ts`); error `errors["condition.source_id"]`;
    - description text: "Counts occurrences in the window, including the issues merged into it." (issue) / "Counts occurrences of every issue of the source that is not ignored or merged." (source).
 3. `rule-form.tsx`:
    - `METRIC_OPTIONS` gets `{ value: "issue_occurrences", label: "Issue occurrences" }` (last).
@@ -1233,7 +1253,7 @@ initial?: Partial<RuleFormValues>;   // create only: merged over DEFAULT_RULE_FO
 **Tests:**
 - `new.test.tsx` (MSW, as the file's existing tests): `creates an issue occurrences rule`: choose Metric "Issue occurrences" (the window changes from 5 minutes to 1 hour), the Scope "One issue", an issue from a mocked `issues` list, type a name, submit: the body has `condition: { metric: "issue_occurrences", window: "1h", comparator: "gt", threshold: 0, issue_id }` and no `min_count`/`filter`.
 - `the window list has no 1 or 5 minutes for issue occurrences`.
-- `the preview says there is none for issue occurrences` and the rule detail (in `rule-panel.test.tsx` if that file renders `rule-detail`, else the `$ruleId/index.test.tsx`; add the case to whichever test renders it, listed in the report) shows the Scope row with the issue title.
+- `the preview says there is none for issue occurrences` and `rule-panel.test.tsx` (the panel renders `rule-detail.tsx`): `the detail shows the Scope row with the issue title` (an issue rule fixture, `GET /issues/{id}` mocked) and `…falls back to the short id while the issue loads or fails`; likewise a source rule links to the source page with the source name.
 - `creates a source rule`: scope "All issues of a source", pick a source; body has `source_id`.
 - `prefills from the search params`: render `PAGE + "?metric=issue_occurrences&issue_id=<id>"`: the metric select shows "Issue occurrences", the window "1 hour", the threshold `0`, the issue select shows that issue (mock `GET /issues/{id}` for the fetch), nothing is saved until Create.
 - `an unknown metric in the search params is ignored` (renders the default error rate form).
@@ -1335,7 +1355,7 @@ initial?: Partial<RuleFormValues>;   // create only: merged over DEFAULT_RULE_FO
 **Method:** `TestApp::with_config(|config| config.security.allow_private_network_egress = true)`, `app.seed()`, a `HookReceiver::start(vec![200])`, a webhook channel and everything else through the HTTP routes with the seeded cookie (pattern: the loop test in `alerts/evaluate.rs`); sources, issues, events and channel rows come from the helpers of `crate::test_support::issues` (M4.3: `put_source`, `put_issue`, `put_event`, `occurrence`; delivering channels are created through the channels route). Events are written exactly as M1's and M3's writers write them (kind `created` or `regressed`, no actor, `at` = the write time); the writers themselves are covered by their own tests and by the CLI e2e (M4.16), which runs the real chain. **Every event time is more than `ISSUE_NOTIFY_SETTLE_NS` before the `now` of the pass that must send it.** Time moves with `app.state.clock.advance(Duration)` / `set`; passes are called directly with the clock's `now`: `evaluate::evaluate_once(&app.state, now)`, `issue_notify::notify_issues(&app.state, now)`, `deliver::deliver_once(&app.state, now)`. No `spawn_loops` (deterministic).
 
 **Tests:**
-- `an_issue_rule_fires_a_webhook_and_resolves`: create an error source and one issue with 3 occurrences, a rule `issue_occurrences` `gt 2` over `15m` with the webhook channel; `evaluate_once` → fired event; `deliver_once` → one request, `type == "alert.fired"`, `rule.metric == "issue_occurrences"`, `value == 3`, `count == 3`; advance past the window, `evaluate_once` → `resolved` event delivered.
+- `an_issue_rule_fires_a_webhook_and_resolves`: create an error source and one issue with 3 occurrences, a rule `issue_occurrences` `gt 2` over `15m` with the webhook channel; `evaluate_once` → fired event; `deliver_once` → one request, `type == "alert.fired"`, `rule.metric == "issue_occurrences"`, `value == 3`, `count == 3`; advance past the window plus 1 minute, `evaluate_once` (state stays `firing`, `clear_streak` 1: two clear readings are needed), advance 1 more minute, `evaluate_once` → `resolved` event, `deliver_once` → `type == "alert.resolved"` delivered.
 - `a_source_rule_counts_every_live_issue_and_sees_a_new_issue`: a source rule over two issues; add a third issue's occurrence between passes: the count follows.
 - `an_issue_rule_survives_a_merge`: merge the rule's issue into another: the next evaluation counts both.
 - `a_deleted_source_makes_the_rule_fail_with_a_fixed_reason`: `last_error == "issue source not found"` in `GET …/alert-rules/{id}`.
@@ -1370,7 +1390,7 @@ initial?: Partial<RuleFormValues>;   // create only: merged over DEFAULT_RULE_FO
 6. `POST …/issues/{id}/dataset-items` with `{"dataset": "issue-examples", "limit": 1}`: the body has one item (a second version).
 7. Create a Slack channel with a placeholder `https://hooks.example.com/x` URL (never called), set it on the source with `PATCH …/issue-sources/{id}` `{"channel_ids": [<id>]}`. Assert the source reads back `channel_ids` and that `DELETE …/channels/{id}` empties it. This checks the route surface only; no notification is awaited.
 
-Use the file's `Api` helpers (`get`, `post`, `delete`); if `Api` has no `patch`, add one next to `post` (same shape), in this file only.
+Use the file's `Api` helpers (`get`, `post`, `delete`); if `Api` has no `patch`, add one next to `post` (same shape, in this file only), including the `origin` header (`ORIGIN`) that `post` and `delete` send: the CSRF check refuses a PATCH without it.
 
 **Tests:** the one test above (its numbered assertions are its checks).
 
@@ -1397,10 +1417,10 @@ Use the file's `Api` helpers (`get`, `post`, `delete`); if `Api` has no `patch`,
 
 **Steps:**
 1. Spec 06 § Issues: replace "Alerts on ignored issues are M4's." by the rule of D-IC-20 (an issue-scoped rule counts an ignored issue; a source-scoped rule skips ignored issues); add a **Links** paragraph (alerts, notifications, datasets, MCP) pointing to specs 07 and 09; mention `issue_source_channels` and the 10-minute digest (D-IC-21) in the sources paragraph.
-2. Spec 07: intro "four metrics" → "five metrics"; the rule model table gets `issue_id`/`source_id` (`issue_occurrences` only, exactly one) and the "fields that do not apply" rule for the new metric (no `filter`, no `min_count`, threshold ≥ 0, zero is a value) and the window rule (`1m` and `5m` refused: 400 `condition.window`, "issue occurrences need a window of 15m or more"; an occurrence is written after its trace completes); § Evaluation: how the names are resolved at each evaluation (merge target, source scope, chunks of 1 000) and the fixed failure reasons; § Channels: the `issues.detected` webhook JSON of M4.7, the Slack and email shape, the 10-minute throttle, the quota; § Retention: `issue_notifications` pruned at 90 days.
+2. Spec 07: intro "four metrics" → "five metrics"; the rule model table gets `issue_id`/`source_id` (`issue_occurrences` only, exactly one) and the "fields that do not apply" rule for the new metric (no `filter`, no `min_count`, threshold ≥ 0, zero is a value) and the window rule (`1m` and `5m` refused: 400 `condition.window`, "issue occurrences need a window of 15m or more"; an occurrence is written after its trace completes); § Evaluation: how the names are resolved at each evaluation (merge target, source scope, chunks of 1 000) and the fixed failure reasons; § Channels: the `issues.detected` webhook JSON of M4.7, the Slack and email shape, the 10-minute throttle (state it precisely: the cut-off is the newest event's `at`, so two digests of one source are at least about 9 to 10 minutes apart), the quota; § Retention: `issue_notifications` pruned at 90 days.
 3. Spec 09: § Issues: `channel_ids` on the source create/update/read rows; the new route row `POST /projects/{project}/issues/{issue}/dataset-items` (body, 201 `FromTracesResult`, `ManageDatasets`, errors); § Evaluation & alerts: the condition fields; the MCP tool table gets `list_issues` (arguments, output, `ProjectPerm::View`), "seven" → "eight".
 4. Spec 11: issue page buttons ("Add examples to dataset", "Create alert"), the rule form's metric "Issue occurrences" and scope picker, the source editor's Notifications fieldset.
-5. `alerts.mdx`: a section "Alert on an issue" (metric, scope, the window rule: `15m` or more, because an occurrence is recorded after its trace completes; and advice: `1h` or more for LLM issues, longer than the refit period), the condition rules in the user's words (no filter, no minimum samples, threshold 0 or more, zero is a value), and the notification digest messages; style per `website/STYLE.md`. `mcp.mdx`: description "seven" → "eight", a table row for `list_issues`, an example question. `issues.mdx`: sections "Notifications", "Create an alert", "Add examples to a dataset". Every code block is tested or marked untested per `check-samples.mjs` (use plain prose and tables where possible).
+5. `alerts.mdx`: a section "Alert on an issue" (metric, scope, the window rule: `15m` or more, because an occurrence is recorded after its trace completes; and advice: `1h` or more for LLM issues, longer than the refit period), the condition rules in the user's words (no filter, no minimum samples, threshold 0 or more, zero is a value), and the notification digest messages (one message per source at most every 10 minutes: "at least about 9 to 10 minutes apart", because the clock runs from the newest event's time, and a first channel added to an enabled source starts from then, with no backlog); style per `website/STYLE.md`. `mcp.mdx`: description "seven" → "eight", a table row for `list_issues`, an example question. `issues.mdx`: sections "Notifications", "Create an alert", "Add examples to a dataset". Every code block is tested or marked untested per `check-samples.mjs` (use plain prose and tables where possible).
 6. `CHANGELOG.md` § `[Unreleased]` § Added: one line each for the `issue_occurrences` alert condition; issue notifications (channels on issue sources, digests); "Add examples to dataset" from an issue; the `list_issues` MCP tool. Under `### Upgrade notes`: "Migration `0025` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`." (only the second clause if the first is not user-visible; keep it short).
 7. `docs/roadmap.md`: the IC row: M4 "implemented", list the PR when known, decisions D-IC-20 to D-IC-25.
 
@@ -1424,3 +1444,50 @@ Run in this order, from the worktree, one command at a time (the machine is load
 7. A Sonnet code review of the whole M4 diff against this plan (`git diff <M3 end>..HEAD`), as the user's plan rules say; fixes by Haiku with exact briefs.
 
 Report (the coordinator relays it): what was done; any deviation from this plan, the design or the spec, and why; the answers given to Q1 to Q9; new dependencies (none); anything left unverified.
+
+---
+
+## Appendix A: decisions D-IC-20 to D-IC-25 (text to copy)
+
+The final text of the six decisions. M4.1 copies it into `00-design.md` (headings `### D-IC-20 …` to `### D-IC-25 …`, after `### D-IC-19`) and condenses it into `docs/mvp-decisions.md`. Wording is final; do not reword.
+
+~~~markdown
+### D-IC-20 The issue_occurrences condition
+- K gets a fifth metric `issue_occurrences` (amends D-K-2 "four conditions" and spec 07). `AlertCondition` gains two optional fields `issue_id` and `source_id` (UUID strings). Exactly one of them is set for `issue_occurrences`; both must be absent for the other metrics (D-K-2's "fields that do not apply must be absent").
+- For `issue_occurrences`: `filter`, `min_count`, `target`, `score_name`, `aggregation` are refused ("does not apply"). `threshold` is finite and >= 0. The value is the count; zero is a value (like `cost`), never "no data".
+- The window of an `issue_occurrences` rule is `15m` or more: `1m` and `5m` are refused (400 `condition.window`: "issue occurrences need a window of 15m or more"). An occurrence is written after its trace completes (a rooted trace idle 5 s, else the 60 s timeout, then the sweep), later than its `created_at` (the trace's start), so a window of a few minutes would miss occurrences written after the window moved on. Docs advise `1h` or more for LLM issues (refit lag).
+- `checked_condition` checks the issue or source exists in the rule's project (400 `condition.issue_id` / `condition.source_id`: "no such issue in this project" / "no such issue source in this project").
+- Storage: no new function; the existing `alert_value` gets a new measure. `cetra_storage::AlertMeasure` gets a variant `ScoreCount { names: Vec<String> }`: the number of live scores whose name is in `names` and whose `created_at` is in the window. No trace filter, no default exclusions, any target. At most `MAX_COUNT_NAMES` (1 000) names, else `InvalidRequest`. `AlertValue { count: n, value: Some(n as f64) }`.
+- Names at each evaluation (server, `alerts/evaluate.rs` before building the request):
+  - issue scope: resolve the issue; if it is merged, use its `merged_into` target (merges are retargeted, so one hop). Names = the target and every issue merged into it (`issue:<id>` each).
+  - source scope: every issue of the source whose state is not `ignored` or `merged`, plus the issues merged into each.
+  - The names are split into chunks of `MAX_COUNT_NAMES`, one `alert_value` each, counts summed (no cap on names).
+- If the issue or the source no longer exists (source deleted), the evaluation fails with the fixed reason `issue not found` / `issue source not found`, handled like any failed measure read (K's existing path). Deleting a source does not touch alert rules.
+- A rule on `issue_occurrences` counts toward D-K-14's rule limit like any rule.
+
+### D-IC-21 Issue notifications
+- Each issue source has one optional list of notification channels (K's project channels), used for both **new** and **regressed** issues: table `issue_source_channels(source_id, channel_id)`, both FKs `ON DELETE CASCADE`, primary key on the pair, index on `channel_id`. At most 10 channels per source, validated like `checked_channels` (owned by the project, no duplicates). Source create/update requests and responses get `channel_ids`. Permission: the source routes' (`ManageEvaluation`).
+- `issue_sources.last_notified_at INTEGER` (nullable). Enabling a source (create enabled, or disabled → enabled) sets it to now, so a backlog is never sent. The same when a source's channel list goes from empty to non-empty (a create with channels counts only if the source is enabled; an update): `last_notified_at` is set to now. Changing a non-empty list to another non-empty list, or to empty, does not touch it.
+- Replaces D-IC-14's `issue_event_id` column: a new table `issue_notifications(id TEXT PK, source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE, digest TEXT NOT NULL, created_at INTEGER NOT NULL)`. `digest` is JSON: `{"items":[{"issue_id","kind":"created"|"regressed","title"}], "more": n}` (at most 20 items, newest first). `notification_deliveries` is rebuilt (SQLite cannot drop NOT NULL): `event_id` nullable, new nullable `issue_notification_id REFERENCES issue_notifications(id) ON DELETE CASCADE`, `CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))`, the three existing indexes kept plus one on `issue_notification_id`.
+- The tick: the alert evaluation loop (each tick) runs `notify_issues(state, now)`. For each enabled source of an active project in an active org with at least one channel and `last_notified_at <= now - 10 min`: collect `issue_events` of its issues with kind `created` or `regressed` and `last_notified_at < at <= now - ISSUE_NOTIFY_SETTLE_NS` (a 60 s settle margin, so an event whose transaction committed a little after its `at` is not lost; `issue_events.at` is the write-time `now`). None → nothing. Else, in one transaction: insert one `issue_notifications` row (digest of up to 20, newest first, `more` = the rest), one pending delivery per channel, and set `last_notified_at` = the newest event's `at`. Events at or before `last_notified_at` are never sent. The cut-off is the newest collected event's `at`, which is up to the settle margin (60 s) older than the moment of the send, so two digests of one source are at least about 9 to 10 minutes apart (10 minutes from the first cut-off, not from the first send). Events of an issue that is ignored or merged by the time of the tick are still sent (accepted). A paused source still notifies; a disabled source does not.
+- Delivery: `due_deliveries` returns both kinds (rule deliveries as today; issue deliveries joined through `issue_notifications` → `issue_sources` → projects → orgs). Retries, backoff, `MAX_ATTEMPTS`, the delivery header and pruning are K's. `issue_notifications` are pruned like `alert_events` (90 days, cascading their deliveries).
+- Messages: webhook kind `issues.detected` with `{source_id, source_name, project, items, more, issues_url}`; Slack: a header "N new or regressed issues in <source>" ("1 new or regressed issue in <source>" for one), up to 20 lines (kind word + title linked to the issue page), "and N more", a button "View issues" → `/<org>/<project>/issues?source=<id>`; email: a new `Email::Issues` variant and `issue_notification.{html,txt}` templates, subject `"[<PRODUCT>] <N> new or regressed issues: <source name>"` (`issue` for N = 1, in the subject and the body). Email quota (D-K-19) applies as for alerts. The channel test-send is unchanged (alert sample).
+- Titles go to the user's own channels (as rule names do); logs carry ids and counts only.
+
+### D-IC-22 Add examples to a dataset
+- Route `POST /api/v1/projects/{project}/issues/{issue}/dataset-items`, body `{"dataset": "<id or name>", "limit": 1..=100 (default 100)}`, permission `ManageDatasets`. Answer: J's `FromTracesResult` (201).
+- The server picks the most recent occurrences by `created_at` of the issue and up to 7 merged issues (the 8 names the occurrences examples use: the merged issues with the most occurrences over the default occurrences window, the last 14 days ending now), one per trace (distinct traces), up to `limit`, any issue state. Each item uses the occurrence's span (`cetra.issue.span_id` in the score metadata) when present, else the trace root.
+- It reuses J's bulk-add code: the core of `add_from_traces` is extracted into a `pub(crate)` function taking the trace refs and a metadata map; the public J route passes an empty map, so J's API and D-J-25 are unchanged. Items get metadata `{"cetra.issue_id": "<issue id>"}` (namespaced like other `cetra.*` keys; amends D-IC-14's `metadata.issue_id`).
+- Web: "Add examples to dataset" on the issue page (members with `canManageDatasets`), a dialog with J's dataset picker (search + new dataset) and the result view with skipped traces, as `add-traces-to-dataset-dialog.tsx` does.
+
+### D-IC-23 Create alert from an issue
+- The issue page gets "Create alert": it opens `alerts/new` with search params `metric=issue_occurrences&issue_id=<id>`, and `RuleForm` takes initial values (prefill only; the user saves). Defaults: window 1h, comparator gt, threshold 0.
+- The rule form's metric picker gets "Issue occurrences" with an issue-or-source scope picker.
+
+### D-IC-24 MCP list_issues
+- An eighth read-only tool `list_issues` (amends D-H-11 "seven"). Arguments: `project` (required), `state` (`open` default, `resolved`, `ignored`, `all`), `source` (id, optional), `limit` (1–100, default 20), `max_chars`. Output `{issues: [{id, title, kind, state, regressed, source_id, first_seen, last_seen, count_7d, users_7d, url}], truncated, notes}`, sorted by last_seen desc. Counts over the last 7 days through the same tally helper as `GET /issues` (moved from `routes/issues.rs` to `issues/` as `pub(crate)`). `ProjectPerm::View`.
+
+### D-IC-25 End-to-end coverage
+- The CLI e2e (`crates/cli/tests/e2e.rs`) covers error issues with the real binary: an error trace creates an open issue with the trace as an example, resolve, a second trace regresses it, then "add examples to dataset" copies it. It does not wait for alerts (60 s tick).
+- Alerts on `issue_occurrences` and issue notifications are covered in-process with `AlertTiming::TEST`, a `HookReceiver` and the manual clock (the 10-minute throttle).
+~~~
