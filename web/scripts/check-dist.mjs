@@ -10,6 +10,8 @@ const needles = [
   "setupWorker",
   "mulberry32",
   "EXAMPLE0EXAMPLE0",
+  // The banner of the `demo` build (D-C-22).
+  "Demo, sample data",
 ];
 
 let files = [];
