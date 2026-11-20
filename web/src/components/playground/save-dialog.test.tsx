@@ -1,8 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { beforeEach, expect, it } from "vitest";
-import { server } from "@/mocks/node";
 import { emptyDraft, saveDraft } from "@/lib/playground";
+import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 import { recordRequests } from "@/test/requests";
 import versionTwoFixture from "../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
@@ -47,9 +47,7 @@ it("saves the messages as a new version of a chat prompt, moving the checked lab
   await user.click(within(dialog).getByRole("button", { name: "Save version" }));
 
   await waitFor(() =>
-    expect(within(dialog).getByRole("status")).toHaveTextContent(
-      "Saved as support-reply v3.",
-    ),
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Saved as support-reply v3."),
   );
   await waitFor(() =>
     expect(
@@ -116,8 +114,7 @@ it("saves the messages as a new chat prompt with the production label", async ()
   );
   await waitFor(() =>
     expect(
-      requests.calls.find((call) => call.method === "POST" && call.path.endsWith("/prompts"))
-        ?.body,
+      requests.calls.find((call) => call.method === "POST" && call.path.endsWith("/prompts"))?.body,
     ).toEqual({
       name: "faq-bot",
       type: "chat",

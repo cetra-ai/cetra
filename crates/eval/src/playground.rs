@@ -401,6 +401,8 @@ fn request_param_attrs(request: &ChatRequest) -> Vec<KeyValue> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use super::RENDER_MAX_BYTES;
     use std::sync::OnceLock;
 
     use cetra_core::enums::{SpanKind, SpanStatus};
@@ -568,7 +570,12 @@ mod tests {
             PlaygroundEntry::Message(text(Role::User, "last")),
         ];
         assert_eq!(
-            render_messages(&entries, &vars(&[]), &placeholder("many", many.clone()), true),
+            render_messages(
+                &entries,
+                &vars(&[]),
+                &placeholder("many", many.clone()),
+                true
+            ),
             Err(RenderError::TooMany)
         );
         assert_eq!(

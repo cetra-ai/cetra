@@ -151,13 +151,7 @@ describe("labelChoices and tagChoices", () => {
   it("offers latest and production first, then the other labels sorted", () => {
     expect(
       labelChoices(["production", "staging", "canary"], ["production", "prod"], undefined),
-    ).toEqual([
-      "latest",
-      "production",
-      "canary",
-      "prod",
-      "staging",
-    ]);
+    ).toEqual(["latest", "production", "canary", "prod", "staging"]);
   });
 
   it("keeps the selected label even when no loaded row has it", () => {

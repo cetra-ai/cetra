@@ -21,7 +21,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatCost } from "@/lib/format";
 
 /** The traces list path: the cache prefix a finished run invalidates. */
-export const RUNS_PATH = "/api/v1/projects/{project}/traces";
+export const RUNS_PATH = "/api/v1/projects/{project}/traces" as const;
 /** The runs listed reach this far back; the window is fixed when the panel opens. */
 const WINDOW_DAYS = 90;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -95,7 +95,7 @@ function RunList({ userId, onOpen }: { userId: string; onOpen: (traceId: string)
     to: range.to,
     filter: `environment = 'cetra-playground' AND metadata['cetra.playground.run_by'] = '${userId}'`,
   };
-  const { queryKey } = $api.queryOptions(RUNS_PATH, { params: { path, query } });
+  const { queryKey } = $api.queryOptions("get", RUNS_PATH, { params: { path, query } });
   const runs = useInfiniteQuery({
     queryKey,
     initialPageParam: null as string | null,

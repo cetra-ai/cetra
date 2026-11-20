@@ -446,6 +446,8 @@ describe("open in playground", () => {
     await renderApp(`/acme/support-bot/traces?mock=fixtures&trace=${TRACE}&span=b100000000000013`);
     const header = await screen.findByRole("region", { name: "Trace" });
     expect(within(header).getByRole("button", { name: "Run evaluator" })).toBeInTheDocument();
-    expect(within(header).queryByRole("link", { name: "Open in playground" })).not.toBeInTheDocument();
+    expect(
+      within(header).queryByRole("link", { name: "Open in playground" }),
+    ).not.toBeInTheDocument();
   });
 });

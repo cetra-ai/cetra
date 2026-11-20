@@ -379,8 +379,9 @@ it("deletes the prompt once its name is typed, and returns to the list", async (
   const user = userEvent.setup();
   const requests = recordRequests();
   server.use(
-    http.delete("/api/v1/projects/:project/prompts/:prompt", () =>
-      new HttpResponse(null, { status: 204 }),
+    http.delete(
+      "/api/v1/projects/:project/prompts/:prompt",
+      () => new HttpResponse(null, { status: 204 }),
     ),
   );
   const { router } = await renderApp("/acme/support-bot/prompts/support-reply");
@@ -393,9 +394,7 @@ it("deletes the prompt once its name is typed, and returns to the list", async (
   );
   await user.click(within(dialog).getByRole("button", { name: "Delete prompt" }));
 
-  await waitFor(() =>
-    expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"),
-  );
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"));
   expect(requests.calls.some((call) => call.method === "DELETE")).toBe(true);
   requests.stop();
 });
@@ -408,8 +407,9 @@ it("reads a deleted prompt again when it is opened after the delete", async () =
       reads.push(String(params.prompt));
       return HttpResponse.json(promptFixture);
     }),
-    http.delete("/api/v1/projects/:project/prompts/:prompt", () =>
-      new HttpResponse(null, { status: 204 }),
+    http.delete(
+      "/api/v1/projects/:project/prompts/:prompt",
+      () => new HttpResponse(null, { status: 204 }),
     ),
   );
   const { router } = await renderApp("/acme/support-bot/prompts/support-reply");
@@ -421,9 +421,7 @@ it("reads a deleted prompt again when it is opened after the delete", async () =
     "support-reply",
   );
   await user.click(within(dialog).getByRole("button", { name: "Delete prompt" }));
-  await waitFor(() =>
-    expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"),
-  );
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"));
 
   const grid = await screen.findByRole("grid", { name: "Prompts" });
   const before = reads.length;

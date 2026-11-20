@@ -11,8 +11,8 @@ import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import {
-  TemplateEditor,
   fieldMessage,
+  TemplateEditor,
   withoutTemplate,
 } from "@/components/prompts/template-editor";
 import { useProject } from "@/components/shell/project-context";
@@ -30,8 +30,8 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField } from "@/lib/datasets";
 import {
-  DEFAULT_PROTECTED_LABELS,
   type ChatEntry,
+  DEFAULT_PROTECTED_LABELS,
   emptyChat,
   fieldPositions,
   isValidPromptName,
@@ -177,11 +177,12 @@ function NewPromptForm({
       return;
     }
 
+    const labels = production && !productionLocked ? ["production"] : [];
     const body: Schema<"CreatePromptRequest"> = {
       name: trimmedName,
       type,
       template: type === "text" ? text : chat,
-      labels: production && !productionLocked ? ["production"] : [],
+      labels,
     };
     if (config.value !== undefined) {
       body.config = config.value as Schema<"CreatePromptRequest">["config"];
@@ -190,7 +191,7 @@ function NewPromptForm({
     if (message !== "") {
       body.commit_message = message;
     }
-    const touchesProtected = body.labels.some((label) => protectedLabels.includes(label));
+    const touchesProtected = labels.some((label) => protectedLabels.includes(label));
     create.mutate(
       { params: { path: { project: projectRef(org, project) } }, body },
       {

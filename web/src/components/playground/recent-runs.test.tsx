@@ -35,7 +35,7 @@ it("lists the user's playground runs, asking for the exact filter", async () => 
 
   const sheet = await screen.findByRole("dialog", { name: "Recent runs" });
   expect(await within(sheet).findByText("gpt-5-mini")).toBeInTheDocument();
-  expect(within(sheet).getByText("$0.0021")).toBeInTheDocument();
+  expect(within(sheet).getByText(/\$0\.0021/)).toBeInTheDocument();
   expect(filters).toContain(FILTER);
 });
 

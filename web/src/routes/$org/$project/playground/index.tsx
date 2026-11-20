@@ -1,5 +1,5 @@
-import { createFileRoute } from "@tanstack/react-router";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
+import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
@@ -13,10 +13,10 @@ import { FormError } from "@/components/form/form-error";
 import { MessageEditor } from "@/components/playground/message-editor";
 import { RecentRuns, RUNS_PATH } from "@/components/playground/recent-runs";
 import {
+  applyRunEvent,
   IDLE_RUN,
   RunColumn,
   type RunState,
-  applyRunEvent,
 } from "@/components/playground/run-column";
 import { SaveDialog } from "@/components/playground/save-dialog";
 import { SettingsPanel } from "@/components/playground/settings-panel";
@@ -25,15 +25,15 @@ import { Button } from "@/components/ui/button";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  blockedMessages,
   type Column,
   type Draft,
-  type Entry,
-  type Message,
-  blockedMessages,
   draftFromPromptVersion,
   draftFromSpan,
+  type Entry,
   emptyDraft,
   loadDraft,
+  type Message,
   runPlayground,
   saveDraft,
   toRunRequest,
@@ -182,7 +182,9 @@ function isBlankDraft(draft: Draft): boolean {
     draft.entries.every(
       (entry) =>
         "parts" in entry &&
-        entry.parts.every((part) => part.type === "text" && "content" in part && part.content === ""),
+        entry.parts.every(
+          (part) => part.type === "text" && "content" in part && part.content === "",
+        ),
     ) &&
     Object.keys(draft.variables).length === 0 &&
     Object.keys(draft.placeholders).length === 0 &&
@@ -232,9 +234,7 @@ async function loadPrompt(
 ): Promise<Loaded> {
   if (version !== undefined) {
     try {
-      const found = await queryClient.fetchQuery(
-        promptVersionQuery(org, project, name, version),
-      );
+      const found = await queryClient.fetchQuery(promptVersionQuery(org, project, name, version));
       return { draft: draftFromPromptVersion(found, fallbackConnectionId), cut: false };
     } catch (error) {
       if (problemOf(error)?.status !== 404) {
@@ -714,7 +714,11 @@ function PlaygroundWorkspace({
         </p>
       )}
       <FormError message={openError} />
-      <ResizablePanelGroup id="playground-split" orientation="horizontal" className="min-h-0 flex-1">
+      <ResizablePanelGroup
+        id="playground-split"
+        orientation="horizontal"
+        className="min-h-0 flex-1"
+      >
         <ResizablePanel id="playground-editor" defaultSize="40%" minSize="25%" className="min-h-0">
           <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-3">
             <MessageEditor

@@ -2,7 +2,7 @@ import { isProblem } from "@/api/problem";
 import { reportUnauthorized } from "@/api/session";
 import type { Schema } from "@/api/types";
 import { parseJsonField, prettyJson } from "@/lib/datasets";
-import { type ChatEntry, asChat } from "@/lib/prompts";
+import { asChat, type ChatEntry } from "@/lib/prompts";
 import { uuidv7 } from "@/lib/uuid";
 import { STORAGE_PREFIX } from "@/product";
 
@@ -41,7 +41,9 @@ export type Draft = {
   responseFormat: string;
   /** 1 to 4 columns. */
   columns: Column[];
-  source?: { prompt: { name: string; version: number } } | { span: { trace_id: string; span_id: string } };
+  source?:
+    | { prompt: { name: string; version: number } }
+    | { span: { trace_id: string; span_id: string } };
   /** Whether `{{ name }}` in the text parts is rendered from `variables` (D-V-38). */
   renderVariables: boolean;
 };
@@ -172,7 +174,9 @@ function splitLines(text: string, final: boolean): { lines: string[]; rest: stri
 }
 
 function isAbortError(error: unknown): boolean {
-  return typeof error === "object" && error !== null && "name" in error && error.name === "AbortError";
+  return (
+    typeof error === "object" && error !== null && "name" in error && error.name === "AbortError"
+  );
 }
 
 /**
@@ -415,7 +419,10 @@ function requestResponseFormat(
 }
 
 /** The placeholders the draft's entries name, as messages. Problems are recorded under `placeholders.<name>`. */
-function requestPlaceholders(draft: Draft, errors: Record<string, string>): Record<string, Message[]> {
+function requestPlaceholders(
+  draft: Draft,
+  errors: Record<string, string>,
+): Record<string, Message[]> {
   const result: Record<string, Message[]> = {};
   for (const name of placeholderNames(draft.entries)) {
     const text = draft.placeholders[name] ?? "";
@@ -623,10 +630,11 @@ export function draftFromPromptVersion(
   const params: Record<string, unknown> = isRecord(config.params) ? config.params : {};
   const entries: Entry[] =
     version.type === "chat"
-      ? asChat(version.template).map((entry): Entry =>
-          "type" in entry
-            ? { type: "placeholder", name: entry.name }
-            : textMessage(entry.role, entry.content),
+      ? asChat(version.template).map(
+          (entry): Entry =>
+            "type" in entry
+              ? { type: "placeholder", name: entry.name }
+              : textMessage(entry.role, entry.content),
         )
       : [textMessage("user", typeof version.template === "string" ? version.template : "")];
   const placeholders: Record<string, string> = {};
@@ -798,11 +806,12 @@ function readRaw(key: string): string | null {
 }
 
 function writeRaw(key: string, raw: string): void {
-  memory.set(key, raw);
   try {
     localStorage.setItem(key, raw);
+    memory.delete(key);
   } catch {
-    // Private mode or a full quota: the in-memory copy is kept.
+    // Private mode or a full quota: the in-memory copy serves.
+    memory.set(key, raw);
   }
 }
 

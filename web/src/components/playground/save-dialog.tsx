@@ -33,10 +33,10 @@ import {
 import { type Draft, toChatTemplate, toRunRequest } from "@/lib/playground";
 import {
   DEFAULT_PROTECTED_LABELS,
-  LABEL_FORBIDDEN_TEXT,
-  PROTECTED_REASON,
   isValidLabel,
   isValidPromptName,
+  LABEL_FORBIDDEN_TEXT,
+  PROTECTED_REASON,
 } from "@/lib/prompts";
 import { atLeast } from "@/lib/roles";
 
@@ -85,9 +85,7 @@ function configOf(draft: Draft, connections: Connections): Record<string, unknow
     ...(request.params === undefined ? {} : { params: request.params }),
     ...(request.tools === undefined ? {} : { tools: request.tools }),
     ...(request.tool_choice === undefined ? {} : { tool_choice: request.tool_choice }),
-    ...(request.response_format === undefined
-      ? {}
-      : { response_format: request.response_format }),
+    ...(request.response_format === undefined ? {} : { response_format: request.response_format }),
   };
 }
 
@@ -326,7 +324,10 @@ function SaveForm({
               setErrors({});
             }}
           >
-            <SelectTrigger id={`${idPrefix}-prompt`} aria-invalid={errors.prompt ? true : undefined}>
+            <SelectTrigger
+              id={`${idPrefix}-prompt`}
+              aria-invalid={errors.prompt ? true : undefined}
+            >
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -372,45 +373,45 @@ function SaveForm({
       />
 
       <fieldset aria-label="Labels" className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0">
-        {mode === "existing"
-          ? labels.map((label) => {
-              const locked = protectedLabels.includes(label) && !canProtect;
-              const id = `${idPrefix}-label-${label}`;
-              return (
-                <DisabledReason key={label} reason={locked ? PROTECTED_REASON : undefined}>
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id={id}
-                      checked={checked.includes(label)}
-                      disabled={locked}
-                      onCheckedChange={(next) => {
-                        setChecked((current) =>
-                          next === true
-                            ? [...current.filter((item) => item !== label), label]
-                            : current.filter((item) => item !== label),
-                        );
-                      }}
-                    />
-                    <Label htmlFor={id}>{label}</Label>
-                  </div>
-                </DisabledReason>
-              );
-            })
-          : (
-              <DisabledReason reason={productionLocked ? PROTECTED_REASON : undefined}>
+        {mode === "existing" ? (
+          labels.map((label) => {
+            const locked = protectedLabels.includes(label) && !canProtect;
+            const id = `${idPrefix}-label-${label}`;
+            return (
+              <DisabledReason key={label} reason={locked ? PROTECTED_REASON : undefined}>
                 <div className="flex items-center gap-2">
                   <Checkbox
-                    id={`${idPrefix}-production`}
-                    checked={production && !productionLocked}
-                    disabled={productionLocked}
+                    id={id}
+                    checked={checked.includes(label)}
+                    disabled={locked}
                     onCheckedChange={(next) => {
-                      setProduction(next === true);
+                      setChecked((current) =>
+                        next === true
+                          ? [...current.filter((item) => item !== label), label]
+                          : current.filter((item) => item !== label),
+                      );
                     }}
                   />
-                  <Label htmlFor={`${idPrefix}-production`}>Label as production</Label>
+                  <Label htmlFor={id}>{label}</Label>
                 </div>
               </DisabledReason>
-            )}
+            );
+          })
+        ) : (
+          <DisabledReason reason={productionLocked ? PROTECTED_REASON : undefined}>
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id={`${idPrefix}-production`}
+                checked={production && !productionLocked}
+                disabled={productionLocked}
+                onCheckedChange={(next) => {
+                  setProduction(next === true);
+                }}
+              />
+              <Label htmlFor={`${idPrefix}-production`}>Label as production</Label>
+            </div>
+          </DisabledReason>
+        )}
         <div className="flex flex-col gap-1.5">
           <Label htmlFor={`${idPrefix}-new-label`}>New label</Label>
           <Input

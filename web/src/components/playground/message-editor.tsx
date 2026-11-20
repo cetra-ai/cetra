@@ -214,7 +214,6 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
               </div>
               {isPlaceholder(entry) ? null : editsAsParts(entry) ? (
                 <PartsEditor
-                  key={`${index}:${entry.role}`}
                   number={number}
                   parts={entry.parts}
                   onChange={(parts) => {

@@ -1,13 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import {
-  ArrowDownToLine,
-  ArrowUpFromLine,
-  Coins,
-  Flag,
-  Timer,
-  Trash2,
-  Zap,
-} from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, Coins, Flag, Timer, Trash2, Zap } from "lucide-react";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import { useProject } from "@/components/shell/project-context";
@@ -224,7 +216,11 @@ export function RunColumn({
         {run.text}
       </pre>
       {run.toolCalls.map((call, index) => (
-        <div key={`${call.id}-${index}`} className="flex flex-col gap-1">
+        <div
+          // biome-ignore lint/suspicious/noArrayIndexKey: the calls are append-only and a provider may repeat an id
+          key={`${call.id}-${index}`}
+          className="flex flex-col gap-1"
+        >
           <p className="text-caption text-muted-foreground">Tool call: {call.name}</p>
           <pre className="font-mono text-body break-all whitespace-pre-wrap">
             {prettyJson(call.arguments)}

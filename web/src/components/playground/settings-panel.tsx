@@ -1,5 +1,6 @@
 import { placeholderNamesOf } from "@/components/playground/message-editor";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -52,15 +53,16 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
     <div className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
         <h2 className="text-body font-medium">Variables</h2>
-        <label className="flex items-center gap-2 text-body">
+        <div className="flex items-center gap-2 text-body">
           <Switch
+            id="playground-render-variables"
             checked={draft.renderVariables}
             onCheckedChange={(checked) => {
               onChange({ renderVariables: checked });
             }}
           />
-          Treat {"{{ }}"} as variables
-        </label>
+          <Label htmlFor="playground-render-variables">Treat {"{{ }}"} as variables</Label>
+        </div>
         {variables.length === 0 ? (
           <p className="text-caption text-muted-foreground">No variables.</p>
         ) : null}
@@ -148,7 +150,7 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
             ))}
           </SelectContent>
         </Select>
-        {errors.tool_choice ?? errors.toolChoice ? (
+        {(errors.tool_choice ?? errors.toolChoice) ? (
           <p className="text-caption text-destructive">{errors.tool_choice ?? errors.toolChoice}</p>
         ) : null}
       </div>
@@ -162,12 +164,12 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
           rows={5}
           placeholder='{"name": "answer", "schema": {"type": "object"}}'
           value={draft.responseFormat}
-          aria-invalid={errors.responseFormat ?? errors.response_format ? true : undefined}
+          aria-invalid={(errors.responseFormat ?? errors.response_format) ? true : undefined}
           onChange={(event) => {
             onChange({ responseFormat: event.target.value });
           }}
         />
-        {errors.responseFormat ?? errors.response_format ? (
+        {(errors.responseFormat ?? errors.response_format) ? (
           <p className="text-caption text-destructive">
             {errors.responseFormat ?? errors.response_format}
           </p>

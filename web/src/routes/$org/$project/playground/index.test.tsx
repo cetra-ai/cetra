@@ -1,12 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { beforeEach, expect, it } from "vitest";
-import { server } from "@/mocks/node";
 import { emptyDraft, saveDraft } from "@/lib/playground";
+import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import llmSpanFixture from "../../../../../../fixtures/api/responses/spans/a1000000000000000000000000000001/b100000000000012.json";
 import traceFixture from "../../../../../../fixtures/api/responses/traces/a1000000000000000000000000000001.json";
-import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const CONNECTION_ID = "01900000-0000-7000-8000-000000000400";
@@ -68,6 +69,15 @@ beforeEach(() => {
   localStorage.clear();
 });
 
+/**
+ * The split pane (react-resizable-panels) cancels pointerdown in jsdom, which has no geometry, so
+ * user.click never focuses a field and user.type loses its keys. Focus the field first, then type.
+ */
+async function typeIn(user: UserEvent, field: HTMLElement, text: string) {
+  field.focus();
+  await user.keyboard(text);
+}
+
 it("runs one column and streams the answer", async () => {
   const bodies: RunBody[] = [];
   server.use(
@@ -82,10 +92,7 @@ it("runs one column and streams the answer", async () => {
     }),
   );
   const { user } = await renderApp(PAGE);
-  await user.type(
-    await screen.findByRole("textbox", { name: "Text of message 2" }),
-    "Hello",
-  );
+  await typeIn(user, await screen.findByRole("textbox", { name: "Text of message 2" }), "Hello");
   await user.click(screen.getByRole("button", { name: "Run" }));
 
   expect(await screen.findByText("Hi there")).toBeInTheDocument();
@@ -114,7 +121,9 @@ it("run all sends one request per column", async () => {
   const { user } = await renderApp(PAGE);
   await user.click(await screen.findByRole("button", { name: "Add model" }));
   const [, second] = screen.getAllByRole("textbox", { name: "Model" });
-  await user.type(second as HTMLElement, "claude-x");
+  (second as HTMLElement).focus();
+  await user.clear(second as HTMLElement);
+  await user.keyboard("claude-x");
   await user.click(screen.getByRole("button", { name: "Run all" }));
 
   await waitFor(() => expect(models.length).toBe(2));
@@ -131,10 +140,10 @@ it("variables are listed and sent", async () => {
   );
   const { user } = await renderApp(PAGE);
   const text = await screen.findByRole("textbox", { name: "Text of message 2" });
-  await user.click(text);
+  text.focus();
   // user-event reads braces as key codes, so the text is pasted.
   await user.paste("Make {{product}} great");
-  await user.type(await screen.findByRole("textbox", { name: "product" }), "Cetra");
+  await typeIn(user, await screen.findByRole("textbox", { name: "product" }), "Cetra");
   await user.click(screen.getByRole("button", { name: "Run" }));
 
   await waitFor(() => expect(body).toBeDefined());
@@ -225,7 +234,8 @@ it("viewer cannot run", async () => {
 
 it("the draft survives a reload", async () => {
   const first = await renderApp(PAGE);
-  await first.user.type(
+  await typeIn(
+    first.user,
     await screen.findByRole("textbox", { name: "Text of message 2" }),
     "Keep me",
   );
@@ -287,8 +297,9 @@ it("reopens a past run from its LLM span", async () => {
   );
   await renderApp(`${PAGE}?run=${FIXTURE_TRACE}`);
 
-  expect(await screen.findByRole("textbox", { name: "Text of message 2" })).toHaveValue(
-    SPAN_QUESTION,
+  // The empty draft is shown first: wait for the run's text.
+  await waitFor(() =>
+    expect(screen.getByRole("textbox", { name: "Text of message 2" })).toHaveValue(SPAN_QUESTION),
   );
   expect(screen.getByRole("textbox", { name: "Text of message 1" })).toHaveValue(SPAN_SYSTEM);
 });

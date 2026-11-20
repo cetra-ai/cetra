@@ -63,7 +63,9 @@ function sseResponse(chunks: string[]): Response {
   });
 }
 
-async function collect(body: ReadableStream<Uint8Array>): Promise<{ event: string; data: string }[]> {
+async function collect(
+  body: ReadableStream<Uint8Array>,
+): Promise<{ event: string; data: string }[]> {
   const events: { event: string; data: string }[] = [];
   for await (const event of readSse(body)) {
     events.push(event);
@@ -213,7 +215,10 @@ it("reports a 401 to the session handler and throws", async () => {
   setUnauthorizedHandler(handler);
   server.use(
     http.post("*/api/v1/projects/*/playground/runs", () =>
-      HttpResponse.json({ status: 401, title: "Unauthorized", code: "unauthorized" }, { status: 401 }),
+      HttpResponse.json(
+        { status: 401, title: "Unauthorized", code: "unauthorized" },
+        { status: 401 },
+      ),
     ),
   );
   let caught: unknown;
@@ -280,7 +285,10 @@ it("skips unknown event names and data that is not JSON", async () => {
 });
 
 it("takes the model from the connection and the numbers from the column", () => {
-  const request = requestOf(emptyDraft(CONNECTION), column({ temperature: "0.5", maxTokens: "256" }));
+  const request = requestOf(
+    emptyDraft(CONNECTION),
+    column({ temperature: "0.5", maxTokens: "256" }),
+  );
   expect(request).toMatchObject({
     connection_id: CONNECTION,
     model: "gpt-4o",
@@ -464,9 +472,15 @@ it("reads a span as a draft, converting its tool definitions", () => {
     request_model: "claude-sonnet-4-5",
     model: "claude-sonnet-4-5",
     system_instructions: "Be kind.",
-    input: { format: "messages", value: [{ role: "user", parts: [{ type: "text", content: "Hello" }] }] },
+    input: {
+      format: "messages",
+      value: [{ role: "user", parts: [{ type: "text", content: "Hello" }] }],
+    },
     tool_definitions: JSON.stringify([
-      { type: "function", function: { name: "lookup", description: "Find it.", parameters: { type: "object" } } },
+      {
+        type: "function",
+        function: { name: "lookup", description: "Find it.", parameters: { type: "object" } },
+      },
       { name: "weather", input_schema: { type: "object" } },
       { name: "broken" },
     ]),

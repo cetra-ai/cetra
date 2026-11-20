@@ -23,8 +23,10 @@ it("navigates to a project by name", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
   const dialog = await openPalette(user);
+  // "Playground" is also a page of the project, so pick the project's own row.
   await user.type(within(dialog).getByRole("combobox"), "Playground");
-  await user.keyboard("{Enter}");
+  const projects = within(dialog).getByRole("group", { name: "Projects" });
+  await user.click(within(projects).getByRole("option", { name: /Playground/ }));
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/playground/traces");
   });
