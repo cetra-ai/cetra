@@ -42,7 +42,7 @@ use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::issues::{
     CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueSource,
-    IssueSourcePage, UpdateIssueSourceRequest,
+    IssueSourcePage, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
 };
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
@@ -488,11 +488,17 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create.json");
+    roundtrip::<MergeIssueRequest>("requests/issue-merge.json");
     // `UpdateIssueSourceRequest` has no `Serialize`, so it is only deserialized.
     let issue_update_text = fs::read_to_string(api_dir().join("requests/issue-source-update.json"))
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<UpdateIssueSourceRequest>(&issue_update_text)
         .unwrap_or_else(|error| panic!("requests/issue-source-update.json: {error}"));
+    // `UpdateIssueRequest` has no `Serialize`, so it is only deserialized.
+    let issue_patch_text = fs::read_to_string(api_dir().join("requests/issue-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateIssueRequest>(&issue_patch_text)
+        .unwrap_or_else(|error| panic!("requests/issue-update.json: {error}"));
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -544,6 +550,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_online_rule", "requests/online-rule-create.json"),
         ("post_issue_source", "requests/issue-source-create.json"),
         ("patch_issue_source", "requests/issue-source-update.json"),
+        ("patch_issue", "requests/issue-update.json"),
+        ("post_issue_merge", "requests/issue-merge.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
         (
             "post_online_rule_preview",

@@ -587,42 +587,6 @@ pub(crate) async fn retarget_merged(
     Ok(result.rows_affected())
 }
 
-/// `(id, title, state)` of the issues of `project` in `ids`. Missing ids are left out.
-///
-/// # Errors
-///
-/// Returns [`MetaError`] when the query fails, or `MetaError::Corrupt` for a stored value that
-/// does not decode.
-pub(crate) async fn titles(
-    pool: &SqlitePool,
-    project: ProjectId,
-    ids: &[Uuid],
-) -> Result<Vec<(Uuid, String, IssueState)>, MetaError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut builder =
-        QueryBuilder::<Sqlite>::new("SELECT id, title, state FROM issues WHERE project_id = ");
-    builder.push_bind(project.to_string());
-    builder.push(" AND id IN (");
-    let mut separated = builder.separated(", ");
-    for id in ids {
-        separated.push_bind(id.to_string());
-    }
-    separated.push_unseparated(")");
-    let records: Vec<(String, String, String)> = builder.build_query_as().fetch_all(pool).await?;
-    records
-        .into_iter()
-        .map(|(id, title, state)| {
-            Ok((
-                parse_uuid(&id, ISSUES, "id")?,
-                title,
-                IssueState::from_db(&state).ok_or_else(|| corrupt(ISSUES, "state"))?,
-            ))
-        })
-        .collect()
-}
-
 /// Open issues of `project`, per source. Sources without open issues are absent.
 ///
 /// # Errors
@@ -904,8 +868,8 @@ mod tests {
         EventKind, EventRow, IssueListQuery, IssueRow, IssueSort, IssueState, SourceKind,
         SourceRow, count_enabled_sources, delete_source, get_issue, get_issue_tx, get_source,
         insert_event, insert_issue, insert_source, issue_by_fingerprint, list_events, list_issues,
-        list_sources, merged_ids, open_counts, retarget_merged, sweep_sources, titles,
-        update_issue, update_source,
+        list_sources, merged_ids, open_counts, retarget_merged, sweep_sources, update_issue,
+        update_source,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{delete_project, insert_project, mark_project_deleting};
@@ -1180,12 +1144,6 @@ mod tests {
             None
         );
 
-        let found = titles(db.reader(), project, &[row.id]).await.unwrap();
-        assert_eq!(
-            found,
-            vec![(row.id, "renamed".to_owned(), IssueState::Resolved)]
-        );
-
         let id = row.id;
         let in_transaction = db
             .write(move |conn| Box::pin(async move { get_issue_tx(conn, project, id).await }))
@@ -1372,34 +1330,6 @@ mod tests {
         let mut into_c = merged_ids(db.reader(), project, c).await.unwrap();
         into_c.sort();
         assert_eq!(into_c, vec![a, b]);
-    }
-
-    #[tokio::test]
-    async fn titles_returns_the_named_issues_of_the_project() {
-        let (_dir, db) = crate::meta::test_db().await;
-        let (_, projects) = seed(&db, &["support"]).await;
-        let project = projects[0];
-        let src = source(project, "errors", true);
-        put_source(&db, src.clone()).await;
-        put_issue(&db, issue(1, src.id, project, "first", IssueState::Open, 1)).await;
-        put_issue(
-            &db,
-            issue(2, src.id, project, "second", IssueState::Ignored, 1),
-        )
-        .await;
-
-        let found = titles(
-            db.reader(),
-            project,
-            &[Uuid::from_u128(2), Uuid::from_u128(9)],
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            found,
-            vec![(Uuid::from_u128(2), "second".to_owned(), IssueState::Ignored)]
-        );
-        assert!(titles(db.reader(), project, &[]).await.unwrap().is_empty());
     }
 
     #[tokio::test]
