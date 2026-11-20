@@ -2,7 +2,6 @@
 //! issues they find with their counts, occurrences and history. Project members and above write
 //! the sources; every project reader lists and reads.
 
-use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Extension, State};
@@ -10,21 +9,16 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::score::{Score, ScoreTarget};
 use cetra_eval::Adapter;
 use cetra_eval::issue::cluster;
-use cetra_storage::{
-    MAX_COUNT_NAMES, QueryContext, ScoreListRequest, ScoreNameCount, ScoreNameCountsRequest,
-    TimeWindow, ViewName,
-};
+use cetra_storage::{TimeWindow, ViewName};
 use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, PageParams, TimeParam};
-use crate::api::convert;
 use crate::api::issues::{
     CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
     IssueExample, IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssuePage, IssueRefit,
@@ -39,6 +33,10 @@ use crate::eval::rule_check::field_error;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
+use crate::issues::read::{
+    OCCURRENCE_DEFAULT_PERIOD_NS, Tally, example_issues, most_occurrences_first, name_counts,
+    names_of, occurrence_scores, score_name, tallies, total,
+};
 use crate::issues::source_limit::{self, SourceLimitError};
 use crate::meta::MetaError;
 use crate::meta::connections;
@@ -48,17 +46,12 @@ use crate::meta::online_rules::PAUSE_BUDGET;
 
 use super::alert_rules::checked_channels;
 use super::orgs::page_named;
-use super::read::{READ_TIMEOUT, open_query};
+use super::read::open_query;
 
 /// Most ids one issue list filters by (`ids`).
 const MAX_IDS: usize = 100;
 /// Longest period of the occurrence days (`from` to `to`).
 const MAX_OCCURRENCE_PERIOD_NS: i64 = 90 * DAY_NS;
-/// Days an occurrence read covers when `from` is absent.
-const OCCURRENCE_DEFAULT_PERIOD_NS: i64 = 14 * DAY_NS;
-/// Most names an occurrence read takes examples from: the issue, then the seven merged issues with
-/// the most occurrences (D-IC-9).
-const MAX_EXAMPLE_NAMES: usize = 8;
 /// Examples read per name, and examples returned.
 const EXAMPLES_PER_NAME: usize = 20;
 const MAX_EXAMPLES: usize = 20;
@@ -989,104 +982,6 @@ fn normalize_filter(text: Option<String>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-/// Occurrence count and user count of a name set (D-IC-9).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct Tally {
-    count: u64,
-    /// The largest user count of the names, not their sum: a user can occur under several.
-    users: u64,
-}
-
-/// The occurrence score name of an issue (D-IC-11).
-fn score_name(issue: Uuid) -> String {
-    format!("issue:{issue}")
-}
-
-/// The occurrence count of an issue's own name in `counts`; 0 when it has none.
-fn issue_count(counts: &HashMap<String, Tally>, issue: Uuid) -> u64 {
-    counts
-        .get(&score_name(issue))
-        .map_or(0, |tally| tally.count)
-}
-
-/// Orders merged issues by their occurrence count, most first, then by id (D-IC-9).
-fn most_occurrences_first(merged: &mut [Uuid], counts: &HashMap<String, Tally>) {
-    merged.sort_by_key(|issue| (Reverse(issue_count(counts, *issue)), *issue));
-}
-
-/// The score names an issue counts: its own, then those of the issues merged into it (D-IC-9).
-fn names_of(issue: Uuid, merged: &[Uuid]) -> Vec<String> {
-    std::iter::once(issue)
-        .chain(merged.iter().copied())
-        .map(score_name)
-        .collect()
-}
-
-/// The tally of `names`, from the per-name tallies. Names without occurrences count nothing.
-fn total(names: &[String], tallies: &HashMap<String, Tally>) -> Tally {
-    names
-        .iter()
-        .filter_map(|name| tallies.get(name))
-        .fold(Tally::default(), |sum, tally| Tally {
-            count: sum.count.saturating_add(tally.count),
-            users: sum.users.max(tally.users),
-        })
-}
-
-/// The count rows of `names` in `window`, read in chunks of at most [`MAX_COUNT_NAMES`] names:
-/// the storage read refuses more, and an issue can have more names than that once its merged
-/// issues are counted. A name is in one chunk only, so its rows are not split.
-async fn name_counts(
-    ctx: &QueryContext,
-    names: &[String],
-    window: TimeWindow,
-    by_day: bool,
-) -> Result<Vec<ScoreNameCount>, ApiError> {
-    let mut rows = Vec::new();
-    for chunk in names.chunks(MAX_COUNT_NAMES) {
-        rows.extend(
-            cetra_storage::score_name_counts(
-                ctx,
-                ScoreNameCountsRequest {
-                    names: chunk,
-                    window,
-                    by_day,
-                    timeout: READ_TIMEOUT,
-                },
-            )
-            .await?,
-        );
-    }
-    Ok(rows)
-}
-
-/// Live occurrences of each name in `window`, per name (D-IC-9).
-async fn tallies(
-    state: &AppState,
-    org: OrgId,
-    project: ProjectId,
-    names: &[String],
-    window: TimeWindow,
-) -> Result<HashMap<String, Tally>, ApiError> {
-    if names.is_empty() {
-        return Ok(HashMap::new());
-    }
-    let ctx = open_query(state, org, project, None).await?;
-    let counts = name_counts(&ctx, names, window, false).await?;
-    Ok(counts
-        .into_iter()
-        .map(|row| {
-            (
-                row.name,
-                Tally {
-                    count: row.count,
-                    users: row.users,
-                },
-            )
-        })
-        .collect())
-}
-
 /// The period `[from, to)` of a read: `to` defaults to `now`, and `from` to `default_ns` before
 /// `to`.
 fn period(
@@ -1717,37 +1612,12 @@ async fn get_issue_occurrences(
         .collect();
 
     // The issue, then the merged issues with the most occurrences in the period (D-IC-9).
-    let mut by_count = merged.clone();
-    most_occurrences_first(&mut by_count, &by_name);
-    let mut example_issues = vec![id];
-    example_issues.extend(by_count);
-    example_issues.truncate(MAX_EXAMPLE_NAMES);
-
-    let mut examples = Vec::new();
-    for issue in example_issues {
-        let name = score_name(issue);
-        let page = cetra_storage::score_list(
-            &ctx,
-            ScoreListRequest {
-                target: None,
-                trace_id: None,
-                span_id: None,
-                session_id: None,
-                name: Some(name.as_str()),
-                source: Some(ScoreSource::Issue),
-                evaluator_id: None,
-                rule_id: None,
-                queue_id: None,
-                window: None,
-                limit: EXAMPLES_PER_NAME,
-                cursor: None,
-                timeout: READ_TIMEOUT,
-            },
-        )
-        .await?;
-        let scores = convert::scores(&page.batches, project)?;
-        examples.extend(scores.iter().filter_map(|score| example_of(score, issue)));
-    }
+    let issues = example_issues(id, &merged, &by_name);
+    let scored = occurrence_scores(&ctx, project, &issues, EXAMPLES_PER_NAME).await?;
+    let mut examples: Vec<IssueExample> = scored
+        .iter()
+        .filter_map(|(issue, score)| example_of(score, *issue))
+        .collect();
     examples.sort_by(|a, b| {
         b.created_at
             .cmp(&a.created_at)
@@ -2013,8 +1883,9 @@ mod tests {
         RefitRow,
     };
     use crate::scores::{self as score_writes, Writer};
-    use crate::test_support::issues::put_channel;
+    use crate::test_support::issues::{issue_row, put_channel, put_issue};
     use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
+    use cetra_storage::MAX_COUNT_NAMES;
 
     const HOUR_NS: i64 = 3_600_000_000_000;
     const TRACE_A: &str = "a1000000000000000000000000000001";
@@ -2288,44 +2159,6 @@ mod tests {
         .header(header::COOKIE.as_str(), &seeded.cookie)
         .send()
         .await
-    }
-
-    /// An issue of `source` with one time for its first and last occurrence.
-    fn issue_row(
-        project: ProjectId,
-        source: Uuid,
-        id: Uuid,
-        title: &str,
-        state: IssueState,
-        seen: i64,
-    ) -> IssueRow {
-        IssueRow {
-            id,
-            project_id: project,
-            source_id: source,
-            fingerprint: None,
-            title: title.to_owned(),
-            description: None,
-            state,
-            regressed: false,
-            merged_into: None,
-            first_seen: seen,
-            last_seen: seen,
-            resolved_at: None,
-            resolved_by: None,
-            created_at: seen,
-            updated_at: seen,
-            centroid: None,
-            member_count: 0,
-        }
-    }
-
-    async fn put_issue(app: &TestApp, row: IssueRow) {
-        app.state
-            .meta
-            .write(move |conn| Box::pin(async move { store::insert_issue(conn, &row).await }))
-            .await
-            .unwrap();
     }
 
     /// Writes one occurrence of `issue` on `trace`, `hours_ago` before now, as the issue writer
