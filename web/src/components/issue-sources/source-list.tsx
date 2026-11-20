@@ -16,7 +16,12 @@ type Source = Schema<"IssueSource">;
 
 export const CANNOT_MANAGE_SOURCES = "Only members can manage issue sources";
 
-const KIND_LABELS: Record<Schema<"IssueSourceKind">, string> = { error: "Errors" };
+export const KIND_LABELS: Record<Schema<"IssueSourceKind">, string> = {
+  error: "Errors",
+  score: "Bad scores",
+  feedback: "User feedback",
+  topic: "Topics",
+};
 
 /** "1 open issue" or "2 open issues". */
 export function openIssuesText(count: number): string {
@@ -144,7 +149,7 @@ function columnsOf(org: string, project: string, canManage: boolean): DataTableC
   ];
 }
 
-/** The project's issue sources. Activating a row opens its edit page. */
+/** The project's issue sources. Activating a row opens its source page. */
 export function SourceList({
   org,
   project,
@@ -169,7 +174,7 @@ export function SourceList({
       getRowId={(row) => row.id}
       onActivate={(row) => {
         void navigate({
-          to: "/$org/$project/issue-sources/$sourceId/edit",
+          to: "/$org/$project/issue-sources/$sourceId",
           params: { org, project, sourceId: row.id },
         });
       }}

@@ -2,8 +2,10 @@ import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { Bug } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { Schema } from "@/api/types";
 import { issueSourcesQuery, issuesInfiniteQuery } from "@/api/queries-issues";
 import { EmptyState } from "@/components/empty-state";
+import { KIND_LABELS } from "@/components/issue-sources/source-list";
 import { IssueList } from "@/components/issues/issue-list";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
@@ -43,6 +45,11 @@ const SORT_LABEL: Record<IssueSort, string> = {
   first_seen: "First seen",
 };
 
+/** The kinds the list can show: every kind of source, or all of them. The filter is client-side. */
+type KindFilter = "all" | Schema<"IssueSourceKind">;
+const KIND_FILTERS: readonly KindFilter[] = ["all", "error", "score", "feedback", "topic"];
+const KIND_FILTER_LABEL: Record<KindFilter, string> = { all: "All", ...KIND_LABELS };
+
 export const Route = createFileRoute("/$org/$project/issues/")({
   validateSearch: (search) => parseIssuesSearch(search),
   component: IssuesPage,
@@ -60,6 +67,7 @@ function IssuesPage() {
   });
   const state = search.state ?? "open";
   const sort = search.sort ?? "last_seen";
+  const [kind, setKind] = useState<KindFilter>("all");
   const list = useInfiniteQuery(
     issuesInfiniteQuery(org, project, {
       state,
@@ -93,8 +101,13 @@ function IssuesPage() {
     });
   };
 
-  const rows = list.data?.pages.flatMap((page) => page.data) ?? [];
-  const filtered = search.q !== undefined || search.source !== undefined || state !== "open";
+  // An issue's kind is its source's kind, looked up in the sources the page lists.
+  const sourceKinds = new Map((sources.data?.data ?? []).map((source) => [source.id, source.kind]));
+  const rows = (list.data?.pages.flatMap((page) => page.data) ?? []).filter(
+    (issue) => kind === "all" || sourceKinds.get(issue.source_id) === kind,
+  );
+  const filtered =
+    search.q !== undefined || search.source !== undefined || state !== "open" || kind !== "all";
   const nothing = !list.isPending && rows.length === 0;
 
   return (
@@ -131,6 +144,26 @@ function IssuesPage() {
             {(sources.data?.data ?? []).map((source) => (
               <SelectItem key={source.id} value={source.id}>
                 {source.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <Select
+          value={kind}
+          onValueChange={(value) => {
+            const next = KIND_FILTERS.find((option) => option === value);
+            if (next) {
+              setKind(next);
+            }
+          }}
+        >
+          <SelectTrigger aria-label="Kind" className="h-7 w-36 text-body">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {KIND_FILTERS.map((option) => (
+              <SelectItem key={option} value={option}>
+                {KIND_FILTER_LABEL[option]}
               </SelectItem>
             ))}
           </SelectContent>

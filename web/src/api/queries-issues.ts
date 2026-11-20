@@ -196,6 +196,33 @@ export function issueSourceKey(org: string, project: string, sourceId: string) {
   return issueSourceQuery(org, project, sourceId).queryKey;
 }
 
+/** One source's refits, newest first (the newest 50). */
+export function issueRefitsQuery(org: string, project: string, sourceId: string) {
+  return $api.queryOptions(
+    "get",
+    "/api/v1/projects/{project}/issue-sources/{id}/refits",
+    issueInit(org, project, sourceId),
+  );
+}
+
+/** The key of one source's refit list, for invalidation. */
+export function issueRefitsKey(org: string, project: string, sourceId: string) {
+  return issueRefitsQuery(org, project, sourceId).queryKey;
+}
+
+/** Asks for a refit of an LLM source now. Refreshes the source, the list and its refits. */
+export function useRefitIssueSource(org: string, project: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("post", "/api/v1/projects/{project}/issue-sources/{id}/refit", {
+    onSuccess: (_source, variables) => {
+      const sourceId = variables.params.path.id;
+      void queryClient.invalidateQueries({ queryKey: issueSourceKey(org, project, sourceId) });
+      void queryClient.invalidateQueries({ queryKey: issueSourcesKey(org, project) });
+      void queryClient.invalidateQueries({ queryKey: issueRefitsKey(org, project, sourceId) });
+    },
+  });
+}
+
 /** Edits an issue's title, description or state. Refreshes the issue, the list and its history. */
 export function usePatchIssue(org: string, project: string) {
   const queryClient = useQueryClient();

@@ -3,7 +3,7 @@ title: Issues
 description: Group production errors into issues that you can resolve, ignore and merge, and see how often they happen.
 ---
 
-This page shows how to group production errors into issues, and how to resolve, ignore and merge them.
+This page shows how to group production errors, bad scores, user feedback and topics into issues, and how to resolve, ignore and merge them.
 
 ## What an issue is
 
@@ -12,6 +12,8 @@ An issue is a recurring error in your production traces. An **issue source** rea
 Every occurrence is written as a score named `issue:<issue id>`, with the source `issue`. Occurrences do not count as billable units. The trace list can filter on them, and the trace view shows an issue chip for each issue of the trace.
 
 A source only sees traces that complete after you create it. Older traces do not become issues.
+
+Sources of other kinds read bad scores, user feedback and new traces, and group them with an LLM. See [Grouping bad scores, feedback and topics](#grouping-bad-scores-feedback-and-topics).
 
 ## Create an error source
 
@@ -88,10 +90,57 @@ Select **View traces** on an issue to open the trace list, filtered to the trace
 
 To filter the trace list by issue, select **Has issue** in the filter bar and choose the issues.
 
+## Grouping bad scores, feedback and topics
+
+A source can also read bad scores, user feedback or new traces. cetra summarizes each candidate with a chat model, embeds the summary, and groups the candidates into issues. The summaries and embeddings run on your LLM connections, so they cost tokens.
+
+### Create the source
+
+1. Open **Issue sources** under **Evaluate**, and select **New source**.
+2. Enter a **Name**, and choose a **Kind**:
+   - **Bad scores** reads the scores of the score names you choose, and keeps those in the bad third of their range.
+   - **User feedback** reads the feedback scores of the score names you choose, from the feedback sources you choose.
+   - **Topics** reads new production traces.
+3. For bad scores and user feedback, select one or more **Score names**. The list shows your score definitions. For a name that has no definition, enter it in the field and select **Add score name**.
+4. For user feedback, select **End users**, **Human reviewers**, or both.
+5. Optional: enter a **Filter** over the traces view to limit the traces. An empty filter matches every trace.
+6. Choose a **Chat connection** and a **Chat model**, then an **Embedding connection** and an **Embedding model**.
+7. Set the **Sample rate (%)** and the **Daily cap**. Optional: select **Limit spend**, then enter an amount and a period.
+8. Optional: select **Advanced** to set the **Join floor** and the **Minimum issue size**.
+9. Select **Create source**.
+
+### How candidates are made
+
+- A bad score is a score in the bad third of its score definition's range, in the definition's direction. A definition with no direction gives no bad scores.
+- A feedback candidate is a feedback score of a chosen name, from a chosen feedback source.
+- A topic candidate is a new production trace that matches the filter.
+
+The **Sample rate** is the share of matching items that become candidates. The **Daily cap** is the most candidates a UTC day admits, 500 by default. Candidates past the cap are dropped.
+
+### Cost and budgets
+
+Each candidate gets one summary from your chat model and one embedding from your embedding model. Set **Limit spend** to stop the source at an amount per day or per month, in UTC. The source pauses at the limit, and it resumes when the period turns or when you raise the budget. A model with no price cannot have a budget. Add its price under **Settings › Model prices** first.
+
+If a connection fails, the source pauses, and its page shows the provider's error. Fix the connection under **Settings › LLM connections**. A successful connection test resumes the source.
+
+### Refits
+
+cetra groups the waiting candidates in a refit. The first refit runs an hour after you create the source, and then one runs every 6 hours. To group the candidates now, open the source page and select **Refit now**. A refit started less than 10 minutes ago blocks a new one.
+
+- A candidate joins the issue nearest to it when their similarity is at least the **Join floor**. The floor is 0.80 by default, and it can be from 0.5 to 0.99. A higher floor needs the candidates to be more alike.
+- Candidates that are alike enough to form a group of at least the **Minimum issue size** become a new issue, which cetra names with the chat model. The minimum is 5 by default, and it can be from 2 to 100.
+- A candidate that does not join an issue or form a group waits for the next refit. After seven days, a candidate that is still unassigned becomes an outlier.
+
+The source page lists each refit with its counts, its cost, and its error when it stopped early.
+
+### Embedding models
+
+The embedding connection and model are fixed when you create the source. To embed with another model, create a new source. Anthropic connections cannot embed, so choose a connection from another provider for the embedding model.
+
 ## Plan limits
 
 The Free cloud plan allows one enabled issue source across your active projects. A disabled source does not count. Creating or enabling a second source on the Free plan fails with a message about the limit. Paid plans have no limit. See [Plans and licence](/docs/platform/plans-and-licence/).
 
 ## Not in this version
 
-Issues come from error spans only. Issues from low scores, negative feedback and topics, alerts on issues, and adding an issue's traces to a dataset are not available yet.
+Alerts and notifications on issues, adding an issue's traces to a dataset, and the MCP tools for issues are not available yet.

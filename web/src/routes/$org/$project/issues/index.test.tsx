@@ -146,3 +146,16 @@ it("says no issues match, not that there are none, when a filter leaves nothing"
   expect(await screen.findByText("No issues match.")).toBeInTheDocument();
   expect(screen.queryByText("No issues yet")).toBeNull();
 });
+
+it("the kind filter keeps the issues of the chosen kind, found through their source", async () => {
+  serveIssues();
+  const { user } = await renderApp(PAGE);
+
+  await screen.findByRole("grid", { name: "Issues" });
+  await choose(user, "Kind", "Topics");
+  expect(await screen.findByText("No issues match.")).toBeInTheDocument();
+
+  await choose(user, "Kind", "Errors");
+  const grid = await screen.findByRole("grid", { name: "Issues" });
+  expect(within(grid).getByText(TITLE)).toBeInTheDocument();
+});
