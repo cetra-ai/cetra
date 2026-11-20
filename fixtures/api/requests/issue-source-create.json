@@ -1,0 +1,6 @@
+{
+  "name": "Errors",
+  "kind": "error",
+  "filter": "status = 'error'",
+  "enabled": true
+}

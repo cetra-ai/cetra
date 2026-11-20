@@ -500,6 +500,31 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_online_rule_stats",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/issue-sources",
+        "list_issue_sources",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issue-sources",
+        "post_issue_source",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "get_issue_source",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "patch_issue_source",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "delete_issue_source",
+    ),
+    (
         "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
@@ -802,6 +827,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "resolve_model_price",
     "list_org_model_prices",
     "list_online_rules",
+    "list_issue_sources",
     "post_online_rule_preview",
     "post_backfill_estimate",
     "list_eval_jobs",
@@ -851,6 +877,7 @@ const TAGS: &[&str] = &[
     "internal",
     "deletions",
     "alerts",
+    "issues",
 ];
 
 const METHODS: &[&str] = &[
@@ -1129,10 +1156,16 @@ fn document_lint() {
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_online_rule" || *id == "patch_online_rule" || *id == "post_backfill"
+        } else if *id == "post_online_rule"
+            || *id == "patch_online_rule"
+            || *id == "post_backfill"
+            || *id == "post_issue_source"
+            || *id == "patch_issue_source"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
+            || *id == "get_issue_source"
+            || *id == "delete_issue_source"
             || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"
@@ -1264,6 +1297,7 @@ fn document_lint() {
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
         ("OnlineRulePage", "OnlineRule"),
+        ("IssueSourcePage", "IssueSource"),
         ("EvalJobPage", "EvalJob"),
         ("BackfillPage", "Backfill"),
     ];
@@ -1492,6 +1526,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("UpdateIssueSourceRequest", &["filter"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()
@@ -1549,6 +1584,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertRulePage",
         "AlertEventPage",
         "OnlineRulePage",
+        "IssueSourcePage",
         "EvalJobPage",
         "BackfillPage",
         "InternalUsagePage",
@@ -1562,6 +1598,10 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     expected.insert("CreateExperimentResponse.next_cursor".to_owned());
     expected.insert("ExperimentResults.next_cursor".to_owned());
     expected.insert("ExperimentComparison.next_cursor".to_owned());
+    // A source always shows its filter, pause and author, `null` when it has none.
+    expected.insert("IssueSource.filter".to_owned());
+    expected.insert("IssueSource.paused_reason".to_owned());
+    expected.insert("IssueSource.created_by".to_owned());
     assert_eq!(required_nullable, expected);
 }
 

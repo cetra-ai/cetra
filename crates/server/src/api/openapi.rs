@@ -93,6 +93,10 @@ use super::internal::{
     MembershipLookupRequest, MembershipOrg,
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
+use super::issues::{
+    CreateIssueSourceRequest, IssueSource, IssueSourceKind, IssueSourcePage,
+    UpdateIssueSourceRequest,
+};
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
     CreatedPersonalToken, PersonalToken,
@@ -448,6 +452,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<OnlineRulePreviewRequest>();
     set.insert::<OnlineRulePreview>();
     set.insert::<OnlineRuleStatsResponse>();
+    set.insert::<IssueSourceKind>();
+    set.insert::<IssueSource>();
+    set.insert::<IssueSourcePage>();
+    set.insert::<CreateIssueSourceRequest>();
+    set.insert::<UpdateIssueSourceRequest>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -566,6 +575,7 @@ pub fn openapi() -> OpenApi {
                 "alerts",
                 "Alert rules, alert events and notification channels.",
             ),
+            tag("issues", "Issue sources and the issues they find."),
             tag(
                 "internal",
                 "Endpoints the cloud control plane calls on a cell.",
@@ -625,6 +635,7 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("UpdateDatasetRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
+    ("UpdateIssueSourceRequest", "filter"),
 ];
 
 /// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
@@ -877,6 +888,7 @@ fn paths() -> Paths {
     let paths = score_paths(paths);
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
+    let paths = issue_source_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
@@ -2806,6 +2818,86 @@ fn online_rule_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/online-rules/{{id}}/resume"),
             PathItem::new(HttpMethod::Post, resume),
+        )
+}
+
+fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue source id.");
+    let list = operation("list_issue_sources", "issues", "List issue sources")
+        .description(Some(
+            "Any project member can read. `org_active_sources` counts the enabled sources of the whole org for the plan's active-source limit (D-IC-13).",
+        ))
+        .parameters(Some(with_query::<PageParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssueSourcePage", "One page of issue sources."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_issue_source", "issues", "Create an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-source limit.",
+        ))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreateIssueSourceRequest")))
+        .responses(responses(
+            "201",
+            json_of::<IssueSource>("The created source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let get = operation("get_issue_source", "issues", "Get an issue source")
+        .description(Some("Any project member can read."))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The source."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_issue_source", "issues", "Update an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. `kind` cannot change. Enabling a source checks the active-source limit.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueSourceRequest")))
+        .responses(responses(
+            "200",
+            json_of::<IssueSource>("The updated source."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let delete = operation("delete_issue_source", "issues", "Delete an issue source")
+        .description(Some(
+            "Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
         )
 }
 

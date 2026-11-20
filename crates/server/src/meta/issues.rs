@@ -250,6 +250,28 @@ pub(crate) async fn get_source(
     record.map(source_from).transpose()
 }
 
+/// The same read on the writer, inside a transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn get_source_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    id: Uuid,
+) -> Result<Option<SourceRow>, MetaError> {
+    let record: Option<SourceRecord> = sqlx::query_as(
+        "SELECT id, project_id, name, kind, filter, enabled, paused_reason, paused_at, \
+         created_by, created_at, updated_at \
+         FROM issue_sources WHERE project_id = ? AND id = ?",
+    )
+    .bind(project.to_string())
+    .bind(id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    record.map(source_from).transpose()
+}
+
 /// Inserts a source. A name already used in its project is [`MetaError::Conflict`].
 ///
 /// # Errors

@@ -26,6 +26,7 @@ import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import experimentDocument from "../../../fixtures/api/static/experiment.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
+import issueSourceDocument from "../../../fixtures/api/static/issue-source.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
@@ -270,6 +271,21 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_online_rule_preview",
     method: "post",
     path: "/api/v1/projects/{project}/online-rules/preview",
+  },
+  {
+    operationId: "post_issue_source",
+    method: "post",
+    path: "/api/v1/projects/{project}/issue-sources",
+  },
+  {
+    operationId: "patch_issue_source",
+    method: "patch",
+    path: "/api/v1/projects/{project}/issue-sources/{id}",
+  },
+  {
+    operationId: "delete_issue_source",
+    method: "delete",
+    path: "/api/v1/projects/{project}/issue-sources/{id}",
   },
   {
     operationId: "post_online_rule_resume",
@@ -698,6 +714,11 @@ const RESPONSES: Record<string, Respond> = {
   patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
   delete_online_rule: () => noContent(),
   post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
+  post_issue_source: ({ body }) =>
+    HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }, { status: 201 }),
+  patch_issue_source: ({ body }) =>
+    HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }),
+  delete_issue_source: () => noContent(),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
@@ -772,6 +793,21 @@ function trimmed(value: unknown): string | undefined {
     return undefined;
   }
   return value.trim();
+}
+
+/** The source fixture's overrides: the body's name, kind, filter and enabled, when given. */
+function sourceOverrides(body: Record<string, unknown>): {
+  name?: string;
+  kind?: string;
+  filter?: string | null;
+  enabled?: boolean;
+} {
+  return {
+    ...named(body),
+    ...(typeof body.kind === "string" ? { kind: body.kind } : {}),
+    ...("filter" in body ? { filter: typeof body.filter === "string" ? body.filter : null } : {}),
+    ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+  };
 }
 
 /** The connection fixture's overrides, with `name` from the body when it is a string. */

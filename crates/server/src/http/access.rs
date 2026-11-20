@@ -170,6 +170,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::routes::eval_jobs::routes());
     routes.extend(crate::routes::evaluators::routes());
     routes.extend(crate::routes::online_rules::routes());
+    routes.extend(crate::routes::issues::routes());
     routes.extend(crate::routes::backfills::routes());
     routes.extend(crate::routes::feedback::routes());
     routes.extend(crate::routes::saved_views::routes());

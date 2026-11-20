@@ -1084,6 +1084,20 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "application/json",
         ),
         example(
+            "list_issue_sources",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/issue-sources.json",
+            "application/json",
+        ),
+        example(
+            "get_issue_source",
+            params(&[("id", "01900000-0000-7000-8000-000000000900")]),
+            BTreeMap::new(),
+            "static/issue-source.json",
+            "application/json",
+        ),
+        example(
             "list_eval_jobs",
             BTreeMap::new(),
             BTreeMap::new(),

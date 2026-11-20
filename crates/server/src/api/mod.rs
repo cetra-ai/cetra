@@ -20,6 +20,7 @@ pub mod experiments;
 pub mod facets;
 pub mod internal;
 pub mod invites;
+pub mod issues;
 pub mod keys;
 pub mod members;
 pub mod metrics;
