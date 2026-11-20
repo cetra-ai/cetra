@@ -7,10 +7,12 @@ import {
   isValidLabel,
   isValidPromptName,
   labelChoices,
+  metricsWindow,
   parsePromptSearch,
   parsePromptsSearch,
   tagChoices,
   templateText,
+  tracesSearchFor,
   withPromptTab,
   withPromptVersion,
 } from "./prompts";
@@ -176,5 +178,30 @@ describe("prompt page search", () => {
 
   it("sets the tab and keeps the version", () => {
     expect(withPromptTab({ version: 1 }, "labels")).toEqual({ version: 1, tab: "labels" });
+  });
+});
+
+describe("metricsWindow", () => {
+  it("ends at now rounded down to the minute and spans the preset", () => {
+    const now = Date.parse("2026-11-20T10:07:42.500Z");
+    expect(metricsWindow("24h", now)).toEqual({
+      from: "2026-11-19T10:07:00.000Z",
+      to: "2026-11-20T10:07:00.000Z",
+    });
+    expect(metricsWindow("7d", now)).toEqual({
+      from: "2026-11-13T10:07:00.000Z",
+      to: "2026-11-20T10:07:00.000Z",
+    });
+    const thirty = metricsWindow("30d", now);
+    expect(Date.parse(thirty.to) - Date.parse(thirty.from)).toBe(30 * 24 * 60 * 60 * 1000);
+  });
+});
+
+describe("tracesSearchFor", () => {
+  it("filters the traces by the prompt and version, on the same window", () => {
+    expect(tracesSearchFor("support-reply", 2, "30d")).toEqual({
+      filter: "prompts @> ['support-reply@2']",
+      range: "30d",
+    });
   });
 });

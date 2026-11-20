@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
-import { useState } from "react";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -26,6 +26,7 @@ import {
   type Position,
   type PromptKind,
   templateText,
+  tracesSearchFor,
   VIEWER_REASON,
   withPromptVersion,
 } from "@/lib/prompts";
@@ -56,6 +57,7 @@ function draftKey(draft: Draft, type: PromptKind): string {
 /**
  * The template tab: the shown version read-only, and Edit, which changes the template and config
  * and saves them as a new version. The caller keys it by version, so an edit never carries over.
+ * `onDirtyChange` tells the page while an edit has unsaved changes, so it can ask before leaving.
  */
 export function TemplateTab({
   prompt,
@@ -63,12 +65,14 @@ export function TemplateTab({
   canManage,
   canProtect,
   protectedLabels,
+  onDirtyChange,
 }: {
   prompt: Schema<"Prompt">;
   version: PromptVersion;
   canManage: boolean;
   canProtect: boolean;
   protectedLabels: string[];
+  onDirtyChange: (dirty: boolean) => void;
 }) {
   const { org, project } = useProject();
   const queryClient = useQueryClient();
@@ -82,11 +86,26 @@ export function TemplateTab({
   const [saveOpen, setSaveOpen] = useState(false);
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | undefined>();
+  const changed = editing && draftKey(draft, version.type) !== baseline;
+
+  useEffect(() => {
+    onDirtyChange(changed);
+  }, [changed, onDirtyChange]);
+  // Another version unmounts this tab and drops its edit, so the page no longer sees it as dirty.
+  useEffect(() => () => onDirtyChange(false), [onDirtyChange]);
 
   if (!editing) {
     return (
       <div className="flex flex-col gap-4">
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          <Link
+            to="/$org/$project/traces"
+            params={{ org, project }}
+            search={tracesSearchFor(prompt.name, version.version, "7d")}
+            className="self-center text-body underline-offset-4 hover:underline"
+          >
+            Traces
+          </Link>
           <DisabledReason reason={canManage ? undefined : VIEWER_REASON}>
             <Button
               type="button"
@@ -110,8 +129,6 @@ export function TemplateTab({
       </div>
     );
   }
-
-  const changed = draftKey(draft, version.type) !== baseline;
 
   function openSave() {
     const config = parseJsonField(draft.config, { required: false, object: true });

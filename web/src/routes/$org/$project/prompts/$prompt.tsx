@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import { FileText } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import {
@@ -12,7 +12,9 @@ import {
 } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
 import { EmptyState } from "@/components/empty-state";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { LabelsTab } from "@/components/prompts/labels-tab";
+import { MetricsTab } from "@/components/prompts/metrics-tab";
 import { LATEST, LOAD_MORE, PromptHeader } from "@/components/prompts/prompt-header";
 import { TemplateTab } from "@/components/prompts/template-view";
 import { VersionsTab } from "@/components/prompts/versions-tab";
@@ -112,6 +114,10 @@ function PromptContent({
     },
   );
   const version = useQuery(promptVersionQuery(org, project, name, shown));
+  // Set by the template tab while its edit has unsaved changes.
+  const [dirty, setDirty] = useState(false);
+  // The navigation that waits for the user to confirm dropping the unsaved edit.
+  const [leaving, setLeaving] = useState<(() => void) | undefined>();
 
   if (versions.error) {
     throw versions.error;
@@ -125,18 +131,33 @@ function PromptContent({
   const missing = version.isError;
   const labels = version.data?.labels ?? [];
 
+  // Shows another version (undefined = the latest), keeping the tab unless one is given. With an
+  // unsaved edit in the template tab, the user confirms first: the edit is dropped by the change.
+  function goTo(next: number | undefined, nextTab?: PromptTab) {
+    const run = () => {
+      void navigate({
+        to: "/$org/$project/prompts/$prompt",
+        params: { org, project, prompt: name },
+        search: (previous) => {
+          const moved = withPromptVersion(previous, next);
+          return nextTab === undefined ? moved : withPromptTab(moved, nextTab);
+        },
+        state: true,
+      });
+    };
+    if (dirty && (next ?? latest) !== shown) {
+      setLeaving(() => run);
+      return;
+    }
+    run();
+  }
+
   function chooseVersion(value: string) {
     if (value === LOAD_MORE) {
       void versions.fetchNextPage();
       return;
     }
-    const next = value === LATEST ? undefined : Number(value);
-    void navigate({
-      to: "/$org/$project/prompts/$prompt",
-      params: { org, project, prompt: name },
-      search: (previous) => withPromptVersion(previous, next),
-      state: true,
-    });
+    goTo(value === LATEST ? undefined : Number(value));
   }
 
   function chooseTab(value: string) {
@@ -211,6 +232,9 @@ function PromptContent({
             <TabsTrigger value="labels" className="text-body">
               Labels
             </TabsTrigger>
+            <TabsTrigger value="metrics" className="text-body">
+              Metrics
+            </TabsTrigger>
           </TabsList>
           {/* Kept mounted while another tab is open, so an edit in progress survives a tab change. */}
           <TabsContent
@@ -227,6 +251,7 @@ function PromptContent({
                 canManage={canManage}
                 canProtect={canProtect}
                 protectedLabels={protectedLabels}
+                onDirtyChange={setDirty}
               />
             ) : (
               <Skeleton className="h-24 w-full" />
@@ -245,13 +270,39 @@ function PromptContent({
               canManage={canManage}
               canProtect={canProtect}
               protectedLabels={protectedLabels}
+              onShow={(number) => {
+                goTo(number === latest ? undefined : number, "template");
+              }}
             />
           </TabsContent>
           <TabsContent value="labels" className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-3">
             <LabelsTab prompt={name} />
           </TabsContent>
+          <TabsContent value="metrics" className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-3">
+            <MetricsTab prompt={name} />
+          </TabsContent>
         </Tabs>
       )}
+
+      <ConfirmDialog
+        open={leaving !== undefined}
+        onOpenChange={(open) => {
+          if (!open) {
+            setLeaving(undefined);
+          }
+        }}
+        title="Discard your edits?"
+        description="Showing another version drops the changes you have not saved to this template."
+        confirmLabel="Discard"
+        destructive
+        pending={false}
+        onConfirm={() => {
+          const run = leaving;
+          setLeaving(undefined);
+          setDirty(false);
+          run?.();
+        }}
+      />
     </div>
   );
 }

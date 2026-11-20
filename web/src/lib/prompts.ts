@@ -1,5 +1,6 @@
 import { problemOf } from "@/api/problem";
 import type { Schema } from "@/api/types";
+import { stringContains } from "@/components/filter-bar/logic";
 import { parseEnum, parseString } from "@/lib/search/common";
 
 export type PromptKind = Schema<"PromptKind">;
@@ -194,4 +195,37 @@ export function withPromptVersion(search: PromptSearch, version: number | undefi
 /** The search with the tab set. */
 export function withPromptTab(search: PromptSearch, tab: PromptTab): PromptSearch {
   return { ...search, tab };
+}
+
+/** The windows of the Metrics tab; they match the traces list presets of the same names. */
+export const METRICS_PRESETS = ["24h", "7d", "30d"] as const;
+export type MetricsPreset = (typeof METRICS_PRESETS)[number];
+
+const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+const METRICS_WINDOW_MS: Record<MetricsPreset, number> = {
+  "24h": DAY_MS,
+  "7d": 7 * DAY_MS,
+  "30d": 30 * DAY_MS,
+};
+
+/**
+ * The metrics window of a preset: it ends at `nowMs` rounded down to the minute, so one render
+ * after another asks for the same window. Both ends are RFC 3339 UTC.
+ */
+export function metricsWindow(preset: MetricsPreset, nowMs: number): { from: string; to: string } {
+  const to = Math.floor(nowMs / MINUTE_MS) * MINUTE_MS;
+  return {
+    from: new Date(to - METRICS_WINDOW_MS[preset]).toISOString(),
+    to: new Date(to).toISOString(),
+  };
+}
+
+/** The traces list search that shows the spans linked to one version, over a metrics window. */
+export function tracesSearchFor(
+  name: string,
+  version: number,
+  preset: MetricsPreset,
+): { filter: string; range: MetricsPreset } {
+  return { filter: stringContains("prompts", `${name}@${version}`), range: preset };
 }

@@ -1,5 +1,4 @@
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { promptVersionQuery } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
@@ -14,14 +13,14 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { prettyJson } from "@/lib/datasets";
-import { templateText, VIEWER_REASON, withPromptTab, withPromptVersion } from "@/lib/prompts";
+import { templateText, VIEWER_REASON } from "@/lib/prompts";
 
 type PromptVersion = Schema<"PromptVersion">;
 
 /**
  * The versions of a prompt, newest first. Each row can be shown in the template tab, compared
  * with the version before it (Diff) and get a label (Set label…). The diff is of the template,
- * then of the config.
+ * then of the config. `Show` asks the page to show the version, which may first ask about edits.
  */
 export function VersionsTab({
   prompt,
@@ -33,6 +32,7 @@ export function VersionsTab({
   canManage,
   canProtect,
   protectedLabels,
+  onShow,
 }: {
   prompt: Schema<"Prompt">;
   /** The version shown on the page. */
@@ -45,9 +45,9 @@ export function VersionsTab({
   canManage: boolean;
   canProtect: boolean;
   protectedLabels: string[];
+  /** Shows a version in the template tab. */
+  onShow: (version: number) => void;
 }) {
-  const { org, project } = useProject();
-  const navigate = useNavigate();
   const [picked, setPicked] = useState<number | undefined>();
   const [labelling, setLabelling] = useState<number | undefined>();
   const selected = picked ?? shown;
@@ -55,19 +55,6 @@ export function VersionsTab({
   const labelSuggestions = [
     ...new Set([...prompt.labels.map((item) => item.label), ...protectedLabels]),
   ];
-
-  function show(number: number) {
-    void navigate({
-      to: "/$org/$project/prompts/$prompt",
-      params: { org, project, prompt: prompt.name },
-      search: (previous) =>
-        withPromptTab(
-          withPromptVersion(previous, number === prompt.latest_version ? undefined : number),
-          "template",
-        ),
-      state: true,
-    });
-  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -104,7 +91,7 @@ export function VersionsTab({
                   variant="outline"
                   size="sm"
                   onClick={() => {
-                    show(version.version);
+                    onShow(version.version);
                   }}
                 >
                   Show

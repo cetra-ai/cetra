@@ -228,3 +228,31 @@ it("opens a prompt whose name has a dot", async () => {
 
   expect(await screen.findByRole("heading", { level: 2, name: "v1.2" })).toBeInTheDocument();
 });
+
+it("asks before dropping unsaved edits when another version is shown", async () => {
+  const user = userEvent.setup();
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  const system = screen.getByLabelText("Content of message 1") as HTMLTextAreaElement;
+  const original = system.value;
+  await user.type(system, " Be brief.");
+
+  await user.click(screen.getByRole("combobox", { name: "Version" }));
+  await user.click(await screen.findByRole("option", { name: "v1" }));
+  const confirm = await screen.findByRole("alertdialog", { name: "Discard your edits?" });
+  await user.click(within(confirm).getByRole("button", { name: "Cancel" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("alertdialog", { name: "Discard your edits?" })).toBeNull(),
+  );
+
+  // Cancelled: the page stays on the latest version and the edit is still there.
+  expect(screen.queryByText("Viewing version 1.")).not.toBeInTheDocument();
+  expect(screen.getByLabelText("Content of message 1")).toHaveValue(`${original} Be brief.`);
+
+  await user.click(screen.getByRole("combobox", { name: "Version" }));
+  await user.click(await screen.findByRole("option", { name: "v1" }));
+  const again = await screen.findByRole("alertdialog", { name: "Discard your edits?" });
+  await user.click(within(again).getByRole("button", { name: "Discard" }));
+  expect(await screen.findByText("Viewing version 1.")).toBeInTheDocument();
+});
