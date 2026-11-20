@@ -271,9 +271,11 @@ Order: M1 → M2 → (M3 ∥ M5) → M4. M1 and M3 both touch `cetra-storage`, s
 - **Track Q (control plane):** add `max_annotation_queues` to the plan catalog (Free 1, others unset) and to the tokens it signs, once M2 lands the token field.
 - **Track IC (issue clustering) and AS (assistant):** neither needs anything from AQ; an issue's traces could later be sent to a queue through `POST …/items`.
 
-## Open questions for the user
+## Settled by the user (2026-11-20)
 
-1. **Caps.** 100 queues per project, 100 000 items per queue, 1 000 ids per add and 10 000 per filter add. Are these the right sizes?
-2. **Retention deletes items (D-AQ-9).** When retention drops a trace's day, its queue items go too, completed ones included, so a queue's done count can shrink. The alternative keeps them as "no longer available" rows. Is deleting right?
-3. **One score per reviewer per target, whatever the queue (D-AQ-6).** The same trace annotated with the same definition in two queues keeps one score, tagged with the latest queue. The alternative puts `queue_id` in the derived id: one score per queue, but then the trace view's Annotate tab shows several scores of the same name by the same person. Is the trade-off right?
-4. **Viewers.** Can a viewer open a queue and see its items read-only (current design: yes, `View`), or should queues be hidden from viewers?
+The user confirmed the design on the four questions this doc left open:
+
+1. **Caps.** 100 queues per project, 100 000 items per queue, 1 000 ids per add, and 10 000 per filter add (D-AQ-8).
+2. **Retention.** Retention deletes queue items with their trace's day, completed ones included (D-AQ-9).
+3. **Scores.** A reviewer keeps one score per name and target, whatever the queue; `queue_id` is not part of the derived id (D-AQ-6).
+4. **Viewers.** Viewers open queues and see their items, read-only (D-AQ-11).
