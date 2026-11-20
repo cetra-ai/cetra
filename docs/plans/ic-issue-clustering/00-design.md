@@ -96,13 +96,13 @@ A project can have any number of sources, within the plan limit (D-IC-13).
 An `error` source makes no LLM or embedding call. For each error span of a completed trace that passes the filter and the sampling, it computes a **fingerprint**: the first 16 bytes of SHA-256 over `cetra.issue-fp.v1`, the span's `service_name`, its `name`, the exception type, and the normalized message. The exception type and message come from the last `exception` event, else from `status_message`.
 
 Normalization replaces these with placeholders, in this order:
-- UUIDs;
-- hex runs of 8 or more characters;
-- ISO timestamps;
-- email addresses;
-- IPv4 and IPv6 addresses;
 - URLs, reduced to their scheme and host;
+- email addresses;
+- UUIDs;
+- ISO 8601 timestamps;
+- IPv4 and IPv6 addresses;
 - file paths (two or more `/` or `\` separated segments);
+- hex runs of 8 or more characters containing at least one letter and one digit;
 - quoted strings longer than 2 characters;
 - numbers.
 
@@ -284,7 +284,7 @@ No crate dependency changes: `eval` still depends on `core` and `otel` only.
 
 These are fixed here so the plans copy them, not choose them.
 - **Fingerprint bytes.** SHA-256 over the label `cetra.issue-fp.v1`, then for each of the four fields (`service_name`, span name, exception type, normalized message), a `u32` big-endian byte length and the UTF-8 bytes. An absent field has length 0. The first 16 bytes, as lowercase hex, are the stored fingerprint.
-- **Normalization.** The rules run in the order D-IC-2 lists them. Each replaces a whole match with a fixed placeholder: `<uuid>`, `<hex>`, `<time>`, `<email>`, `<ip>`, `<url>`, `<path>`, `<str>`, `<n>`. A later rule never rewrites inside an earlier placeholder.
+- **Normalization.** The rules run in the order D-IC-2 lists them. Each replaces a whole match with a fixed placeholder: `<url>`, `<email>`, `<uuid>`, `<time>`, `<ip>`, `<path>`, `<hex>`, `<str>`, `<n>`. A later rule never rewrites inside an earlier placeholder.
 - **Clustering determinism.** Candidates enter the refit ordered by (`created_at`, id). The nearest-neighbour chain breaks distance ties by the lower index, and a cluster's members keep the input order. The same input always gives the same clusters.
 - **Vectors.** `cetra-eval` L2-normalizes every embedding it returns, so cosine similarity is a dot product. It refuses an answer of more than 4 096 dimensions or with a non-finite value (`EmbeddingInvalid`, permanent). The server checks the dimension against the source's (`embedding_dimension_changed`).
 - **Call traces.** A summary, embedding or naming call writes one trace in environment `cetra-eval`: a root `chain` span named `cetra.issue.summarize`, `cetra.issue.embed` or `cetra.issue.name`, with one `llm` or `embedding` child, built the way judge traces are (D161) and priced by `normalize`. A provider that reports no token count leaves the span unpriced. The budget then charges the estimate of D-IC-12.
