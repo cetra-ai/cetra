@@ -8,12 +8,10 @@ use reqwest::Url;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
-use super::answer::answer_schema;
 use super::http::provider_error;
 use super::{
-    Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
-    validate_model,
+    Adapter, CompletionCall, JudgeConnection, JudgeReply, JudgeUsage, RESPONSE_MAX_BYTES,
+    RawAnswer, StructuredOutput, endpoint, user_message, validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
@@ -32,7 +30,7 @@ const FILTERED_FINISH: &[&str] = &[
 pub(crate) async fn complete(
     client: &EgressClient,
     conn: &JudgeConnection,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     let url = generate_content_url(conn.base_url.as_ref(), call.model)?;
     let headers = headers(conn)?;
@@ -89,7 +87,7 @@ fn header_value(value: &Secret) -> Result<HeaderValue, JudgeError> {
     HeaderValue::from_bytes(value.expose().as_bytes()).map_err(|_| JudgeError::InvalidHeader)
 }
 
-fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
+fn request_body(mode: StructuredOutput, call: &CompletionCall<'_>) -> Result<Vec<u8>, JudgeError> {
     let mut generation = Map::new();
     generation.insert(
         "maxOutputTokens".to_owned(),
@@ -108,10 +106,7 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
             "responseMimeType".to_owned(),
             Value::String("application/json".to_owned()),
         );
-        generation.insert(
-            "responseJsonSchema".to_owned(),
-            answer_schema(call.output, call.include_reason),
-        );
+        generation.insert("responseJsonSchema".to_owned(), call.schema.clone());
     }
     let mut body = Map::new();
     body.insert(
@@ -127,9 +122,9 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
             "tools".to_owned(),
             serde_json::json!([{
                 "functionDeclarations": [{
-                    "name": JUDGEMENT_TOOL,
-                    "description": JUDGEMENT_DESCRIPTION,
-                    "parametersJsonSchema": answer_schema(call.output, call.include_reason),
+                    "name": call.tool_name,
+                    "description": call.tool_description,
+                    "parametersJsonSchema": call.schema,
                 }]
             }]),
         );
@@ -138,7 +133,7 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
             serde_json::json!({
                 "functionCallingConfig": {
                     "mode": "ANY",
-                    "allowedFunctionNames": [JUDGEMENT_TOOL],
+                    "allowedFunctionNames": [call.tool_name],
                 }
             }),
         );

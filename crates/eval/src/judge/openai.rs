@@ -6,12 +6,10 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
-use super::answer::answer_schema;
 use super::http::provider_error;
 use super::{
-    Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
-    validate_model,
+    Adapter, CompletionCall, JudgeConnection, JudgeReply, JudgeUsage, RESPONSE_MAX_BYTES,
+    RawAnswer, StructuredOutput, endpoint, user_message, validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
@@ -22,7 +20,7 @@ const DEFAULT_BASE: &str = "https://api.openai.com/v1";
 pub(crate) async fn complete(
     client: &EgressClient,
     conn: &JudgeConnection,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     validate_model(call.model)?;
     let url = endpoint(conn.base_url.as_ref(), DEFAULT_BASE, "chat/completions")?;
@@ -84,7 +82,7 @@ fn header_bytes(bytes: &[u8]) -> Result<HeaderValue, JudgeError> {
     HeaderValue::from_bytes(bytes).map_err(|_| JudgeError::InvalidHeader)
 }
 
-fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
+fn request_body(mode: StructuredOutput, call: &CompletionCall<'_>) -> Result<Vec<u8>, JudgeError> {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(call.model.to_owned()));
     body.insert(
@@ -103,7 +101,6 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 .ok_or(JudgeError::InvalidRequest)?,
         );
     }
-    let schema = answer_schema(call.output, call.include_reason);
     match mode {
         StructuredOutput::Native => {
             body.insert(
@@ -111,9 +108,9 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 serde_json::json!({
                     "type": "json_schema",
                     "json_schema": {
-                        "name": "judge_answer",
+                        "name": call.schema_name,
                         "strict": true,
-                        "schema": schema,
+                        "schema": call.schema,
                     }
                 }),
             );
@@ -124,9 +121,9 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 serde_json::json!([{
                     "type": "function",
                     "function": {
-                        "name": JUDGEMENT_TOOL,
-                        "description": JUDGEMENT_DESCRIPTION,
-                        "parameters": schema,
+                        "name": call.tool_name,
+                        "description": call.tool_description,
+                        "parameters": call.schema,
                         "strict": true,
                     }
                 }]),
@@ -135,7 +132,7 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 "tool_choice".to_owned(),
                 serde_json::json!({
                     "type": "function",
-                    "function": {"name": JUDGEMENT_TOOL}
+                    "function": {"name": call.tool_name}
                 }),
             );
         }

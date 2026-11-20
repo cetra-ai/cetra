@@ -12,11 +12,11 @@ use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) use answer::Answer;
-pub(crate) use answer::{RawAnswer, parse_answer};
+pub(crate) use answer::{RawAnswer, answer_schema, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
 use reqwest::Url;
+use serde_json::Value;
 
-use crate::config::JudgeOutput;
 use crate::egress::EgressClient;
 use crate::error::JudgeError;
 use crate::secret::Secret;
@@ -160,16 +160,20 @@ impl std::fmt::Debug for JudgeConnection {
     }
 }
 
-/// One judge invocation. The caller owns the model, prompt, and output definition.
-pub(crate) struct JudgeCall<'a> {
+/// One completion call. The caller owns the model, prompt, and answer schema.
+pub(crate) struct CompletionCall<'a> {
     /// Provider model id.
     pub(crate) model: &'a str,
     /// Rendered prompt. Sent as one user message.
     pub(crate) prompt: &'a str,
-    /// Score the model must produce.
-    pub(crate) output: &'a JudgeOutput,
-    /// Include `explanation` in the schema.
-    pub(crate) include_reason: bool,
+    /// JSON Schema of the answer object.
+    pub(crate) schema: &'a Value,
+    /// OpenAI `json_schema.name` in native mode. `^[a-zA-Z0-9_-]{1,64}$`.
+    pub(crate) schema_name: &'a str,
+    /// Function name forced in [`StructuredOutput::Tool`].
+    pub(crate) tool_name: &'a str,
+    /// Function description sent in [`StructuredOutput::Tool`].
+    pub(crate) tool_description: &'a str,
     /// Sampling temperature. Omitted from the request when unset.
     pub(crate) temperature: Option<f64>,
     /// Completion cap, including reasoning tokens.
@@ -178,14 +182,13 @@ pub(crate) struct JudgeCall<'a> {
     pub(crate) timeout: Duration,
 }
 
-impl std::fmt::Debug for JudgeCall<'_> {
+impl std::fmt::Debug for CompletionCall<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("JudgeCall")
+            .debug_struct("CompletionCall")
             .field("model", &self.model)
             .field("prompt_bytes", &self.prompt.len())
-            .field("output", &self.output)
-            .field("include_reason", &self.include_reason)
+            .field("tool_name", &self.tool_name)
             .field("temperature", &self.temperature)
             .field("max_output_tokens", &self.max_output_tokens)
             .field("timeout", &self.timeout)
@@ -199,16 +202,13 @@ impl std::fmt::Debug for JudgeCall<'_> {
 /// pretty-printed answer schema. Native and tool modes send the prompt as is.
 pub(crate) fn user_message(
     mode: StructuredOutput,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<String, JudgeError> {
     match mode {
         StructuredOutput::Native | StructuredOutput::Tool => Ok(call.prompt.to_owned()),
         StructuredOutput::Prompt => {
-            let schema = serde_json::to_string_pretty(&answer::answer_schema(
-                call.output,
-                call.include_reason,
-            ))
-            .map_err(|_| JudgeError::InvalidRequest)?;
+            let schema = serde_json::to_string_pretty(call.schema)
+                .map_err(|_| JudgeError::InvalidRequest)?;
             Ok(format!(
                 "{prompt}\n\n{PROMPT_INSTRUCTION}\n{schema}",
                 prompt = call.prompt
@@ -257,7 +257,7 @@ pub struct JudgeUsage {
 pub(crate) async fn call(
     client: &EgressClient,
     conn: &JudgeConnection,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     match conn.adapter {
         Adapter::OpenAi => openai::complete(client, conn, call).await,
@@ -319,7 +319,10 @@ pub(crate) fn endpoint(
 
 #[cfg(test)]
 mod tests {
-    use super::{Adapter, JudgeConnection, StructuredOutput, UnknownName};
+    use super::{
+        Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, StructuredOutput,
+        UnknownName, answer_schema,
+    };
     use crate::secret::Secret;
 
     #[test]
@@ -387,11 +390,14 @@ mod tests {
     #[test]
     fn prompt_mode_appends_the_schema_after_a_blank_line() {
         let output = crate::config::JudgeOutput::Boolean;
-        let call = super::JudgeCall {
+        let schema = answer_schema(&output, false);
+        let call = super::CompletionCall {
             model: "m",
             prompt: "Grade.",
-            output: &output,
-            include_reason: false,
+            schema: &schema,
+            schema_name: "judge_answer",
+            tool_name: JUDGEMENT_TOOL,
+            tool_description: JUDGEMENT_DESCRIPTION,
             temperature: None,
             max_output_tokens: 1,
             timeout: std::time::Duration::from_secs(1),

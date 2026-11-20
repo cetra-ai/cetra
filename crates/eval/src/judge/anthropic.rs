@@ -8,12 +8,10 @@
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{Map, Value};
 
-use super::answer::answer_schema;
 use super::http::provider_error;
 use super::{
-    Adapter, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeCall, JudgeConnection, JudgeReply,
-    JudgeUsage, RESPONSE_MAX_BYTES, RawAnswer, StructuredOutput, endpoint, user_message,
-    validate_model,
+    Adapter, CompletionCall, JudgeConnection, JudgeReply, JudgeUsage, RESPONSE_MAX_BYTES,
+    RawAnswer, StructuredOutput, endpoint, user_message, validate_model,
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
@@ -25,7 +23,7 @@ const ANTHROPIC_VERSION: &str = "2026-10-21";
 pub(crate) async fn complete(
     client: &EgressClient,
     conn: &JudgeConnection,
-    call: &JudgeCall<'_>,
+    call: &CompletionCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     validate_model(call.model)?;
     let url = endpoint(conn.base_url.as_ref(), DEFAULT_BASE, "v1/messages")?;
@@ -81,7 +79,7 @@ fn header_value(value: &Secret) -> Result<HeaderValue, JudgeError> {
     HeaderValue::from_bytes(value.expose().as_bytes()).map_err(|_| JudgeError::InvalidHeader)
 }
 
-fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>, JudgeError> {
+fn request_body(mode: StructuredOutput, call: &CompletionCall<'_>) -> Result<Vec<u8>, JudgeError> {
     let mut body = Map::new();
     body.insert("model".to_owned(), Value::String(call.model.to_owned()));
     body.insert("max_tokens".to_owned(), Value::from(call.max_output_tokens));
@@ -97,7 +95,6 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 .ok_or(JudgeError::InvalidRequest)?,
         );
     }
-    let schema = answer_schema(call.output, call.include_reason);
     match mode {
         StructuredOutput::Native => {
             body.insert(
@@ -105,7 +102,7 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
                 serde_json::json!({
                     "format": {
                         "type": "json_schema",
-                        "schema": schema,
+                        "schema": call.schema,
                     }
                 }),
             );
@@ -114,14 +111,14 @@ fn request_body(mode: StructuredOutput, call: &JudgeCall<'_>) -> Result<Vec<u8>,
             body.insert(
                 "tools".to_owned(),
                 serde_json::json!([{
-                    "name": JUDGEMENT_TOOL,
-                    "description": JUDGEMENT_DESCRIPTION,
-                    "input_schema": schema,
+                    "name": call.tool_name,
+                    "description": call.tool_description,
+                    "input_schema": call.schema,
                 }]),
             );
             body.insert(
                 "tool_choice".to_owned(),
-                serde_json::json!({"type": "tool", "name": JUDGEMENT_TOOL}),
+                serde_json::json!({"type": "tool", "name": call.tool_name}),
             );
         }
         StructuredOutput::Prompt => {}

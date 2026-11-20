@@ -16,7 +16,10 @@ use crate::check::{CheckInput, run_check};
 use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfig};
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{ConfigError, EvalError, JudgeError, WebhookError};
-use crate::judge::{Adapter, JudgeCall, JudgeConnection, JudgeUsage, call, parse_answer};
+use crate::judge::{
+    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, JudgeUsage,
+    answer_schema, call, parse_answer,
+};
 use crate::mapping::resolve::Variables;
 use crate::secret::Secret;
 use crate::template::PromptTemplate;
@@ -203,11 +206,14 @@ impl EvalRunner {
             Ok(prompt) => prompt,
             Err(error) => return Finished::failed(error),
         };
-        let request = JudgeCall {
+        let schema = answer_schema(&config.output, config.include_reason);
+        let request = CompletionCall {
             model: &config.model,
             prompt: &prompt,
-            output: &config.output,
-            include_reason: config.include_reason,
+            schema: &schema,
+            schema_name: "judge_answer",
+            tool_name: JUDGEMENT_TOOL,
+            tool_description: JUDGEMENT_DESCRIPTION,
             temperature: config.temperature,
             max_output_tokens: config.max_output_tokens,
             timeout: std::time::Duration::from_millis(u64::from(config.timeout_ms)),
