@@ -54,21 +54,21 @@ Each trace has these fields:
 - the person and the repository and branch, when the hook has run and you trusted it. Codex sends no person on its spans;
 - `metadata.coding_agent` set to `codex`.
 
-Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see cost per person, repository, branch and session, and tool usage.
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
 
 ## Content
 
 Codex does not put prompts, tool arguments or tool output on its spans. Codex keeps that content in its log events, and cetra drops log events.
 
-So a turn shows its model, its tokens and its cost, and each tool's name, but no prompt and no tool input or output. `--no-content` changes nothing for Codex.
+So a turn shows its model, its tokens and its API-equivalent cost, and each tool's name, but no prompt and no tool input or output. `--no-content` changes nothing for Codex.
 
-## Cost
+## API-equivalent cost
 
 cetra prices each turn from the turn's token totals, using its price table. Codex's own cost figure is in its log events and metrics, which cetra drops.
 
 Codex is priced per turn, not per model call. The result is the same as pricing each call, except when a long-context price applies to some calls in a turn and not to others.
 
-If you use a subscription plan, the cost shown is what the same tokens would cost at API prices. It is not what you pay.
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
 
 ## Limits
 

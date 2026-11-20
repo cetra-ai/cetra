@@ -55,7 +55,7 @@ Each trace has these fields:
 - the person: the account email Claude Code sends when you sign in to a Claude account, else the email the hook sent, else your account id. Claude Code's anonymous install id is used only when no other source is set;
 - `metadata.coding_agent` set to `claude-code`, and `metadata.repository` and `metadata.branch` when they are known. The repository comes from the hook, or from Claude Code's own repository attribute. The branch comes from the hook only.
 
-Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see cost per person, repository, branch and session, and tool usage. Its description says that cost is an API-price equivalent (see Cost below).
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage. Every cost in it is labelled API-equivalent cost (see API-equivalent cost below).
 
 ## Content
 
@@ -71,11 +71,11 @@ Claude Code does not send the answer text on spans. It sends that text only as l
 
 With `--no-content`, setup leaves all three settings off. The turn then shows no prompt, and the tools show no input or output.
 
-## Cost
+## API-equivalent cost
 
 cetra prices each model call from its token counts, using its price table. It does not read Claude Code's own cost figure.
 
-If you use a subscription plan, the cost shown is what the same tokens would cost at API prices. It is not what you pay. Use it to compare sessions, people and repositories with each other.
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay. Use it to compare sessions, people and repositories with each other.
 
 ## Claude Agent SDK
 

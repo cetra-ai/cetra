@@ -56,7 +56,7 @@ This document holds the decisions, the contracts and the milestones. Each milest
 - **A proxy or gateway** (D4: post-MVP).
 - **Agent plugins and marketplaces.** No Claude Code plugin package and no VS Code extension. The setup command writes hooks into the user's settings. A plugin can come later and run the same `cetra agents hook`.
 - **Windows hook support.** `cetra` ships for Linux and macOS (track N). On Windows the agents can still export spans, set up by hand from the docs page, but without the hook.
-- **Qwen Code, opencode, Cline, Kiro, Windsurf.** Qwen Code joins the MVP only if M1's capture shows spans identical to Gemini CLI's (§ Open questions 4).
+- **Qwen Code, opencode, Cline, Kiro, Windsurf.** Qwen Code joins the MVP only if M1's capture shows spans identical to Gemini CLI's (§ Answered questions 4, D-CA-17).
 
 ## How it fits together
 
@@ -276,7 +276,7 @@ cetra agents remove <agent>
 
 - Model calls are priced by the project's price table (spec 02 § Cost computation). The agents' own figures are not read: Claude Code's and Codex's are in logs and metrics, and Copilot's `github.copilot.cost` is a billing multiplier, not dollars.
 - The models these agents use are in the LiteLLM snapshot. A model without a price is `cost_source = none`, as everywhere, and a custom price fixes it (track T).
-- **For a subscription user (Claude Max, ChatGPT plans, Copilot), the cost shown is what the same tokens would cost at API prices, not what the user pays.** The docs page and the dashboard template's description say so.
+- **For a subscription user (Claude Max, ChatGPT plans, Copilot), the figure is labelled "API-equivalent cost" (D-CA-15): what the same tokens would cost at API prices, not what the user pays.** The docs page and the dashboard template's description say so.
 
 ## Dashboard template (D-CA-11)
 
@@ -339,7 +339,7 @@ The decisions are recorded in `docs/mvp-decisions.md` § Track CA. Here are the 
   - Interactive Codex was not captured. If its turns share one long trace, the re-linking rule still gives one root span per turn, but the trace holds the whole session. The docs name the tested modes.
 - **Protocols.**
   - Gemini CLI's `otlpProtocol=http` is either protobuf or JSON, and cetra accepts both.
-  - Copilot CLI refuses `http://` endpoints, and `cetra serve` has no TLS. A self-hosted cetra therefore needs TLS in front of it for Copilot CLI, which the docs page says. VS Code Copilot and cetra cloud are not affected.
+  - Copilot CLI refuses `http://` endpoints, and `cetra serve` has no TLS. A self-hosted cetra therefore needs TLS in front of it for Copilot CLI: the docs page documents a reverse proxy (Caddy or nginx) with TLS, and `cetra serve` gets no TLS (D-CA-16). VS Code Copilot and cetra cloud are not affected.
 - **Codex's cost is per turn.** Pricing the turn's summed tokens differs from pricing each call only when a long-context tier applies to some calls and not others. This is accepted.
 - **Gemini's output tokens.** Its spans carry only `gen_ai.usage.input_tokens` and `output_tokens`. Whether `output_tokens` includes the thoughts is unverified, since the mock's thoughts did not show on the span. Cache and reasoning counts are absent.
 
@@ -407,11 +407,11 @@ pub fn normalize(
 
 **What the hook sends.** `repository` is the `origin` URL with its user-info removed, never the raw URL with a token. The server canonicalizes it, so the CLI does not depend on `cetra-otel` (AGENTS.md § Crate dependency graph).
 
-## Open questions for the user
+## Answered questions
 
-The user asked on 2026-11-20 to go ahead with the milestones while these are open. Until they answer, the plans follow the proposed answer to each, and changing one later is a small change.
+The user answered the four questions on 2026-11-20:
 
-1. **Content on by default in `cetra agents setup`?** Proposed: yes for prompts, tool arguments and tool output, like the SDKs' `capture_content=true`. Raw API bodies are never turned on, and `--no-content` turns everything off.
-2. **Cost for subscription users.** Is the API-price equivalent, labelled as such in the docs and the template description, acceptable as "cost"? Or should the template call it "API-equivalent cost"?
-3. **Copilot CLI on a self-hosted instance** needs TLS in front of cetra, because Copilot refuses `http://` endpoints. Is documenting that enough, or should `cetra serve` get TLS? That would be its own track, outside CA.
-4. **Qwen Code.** Should it be in the MVP when M1 shows its spans match Gemini CLI's (a `qwen_code` convention reusing Gemini's rules)? Otherwise it is out.
+1. Content is on by default in `cetra agents setup`; `--no-content` turns it off; raw API bodies are never captured (D-CA-14).
+2. The subscription figure is labelled "API-equivalent cost" in the template and the docs (D-CA-15).
+3. Copilot CLI on a self-hosted instance: a reverse proxy with TLS in front of cetra is documented; `cetra serve` gets no TLS (D-CA-16).
+4. Qwen Code joins the MVP if its captured spans match Gemini CLI's; another session decides that from the M1 capture (D-CA-17).

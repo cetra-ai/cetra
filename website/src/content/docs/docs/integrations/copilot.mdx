@@ -46,7 +46,7 @@ Each trace has these fields:
 - `metadata.coding_agent` set to `copilot`;
 - `metadata.repository` and `metadata.branch` from VS Code's `github.copilot.git.repository` and `github.copilot.git.branch` attributes. Copilot CLI sends neither.
 
-Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see cost per person, repository, branch and session, and tool usage.
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
 
 ## Content
 
@@ -57,16 +57,50 @@ Content is on by default:
 
 With `--no-content`, setup leaves both off, and the spans carry no content.
 
-## Cost
+## API-equivalent cost
 
 cetra prices each model call from its token counts, using its price table. It does not read Copilot's `github.copilot.cost` attribute, because that value is a billing multiplier, not dollars.
 
-If you use a Copilot plan, the cost shown is what the same tokens would cost at API prices. It is not what you pay.
+API-equivalent cost is what the same tokens would cost at API prices. If you use a Copilot plan, it is not what you pay.
+
+## Self-hosted cetra
+
+Copilot CLI exports only to `https://` endpoints, and `cetra serve` does not serve TLS. On a self-hosted instance, put a reverse proxy with TLS in front of cetra's OTLP port, 4318, and give Copilot CLI the proxy's address.
+
+With Caddy, the proxy gets a certificate for the name you give it:
+
+```caddy
+otel.example.com {
+	reverse_proxy 127.0.0.1:4318
+}
+```
+
+With nginx, use a certificate that you provide:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name otel.example.com;
+    ssl_certificate     /etc/nginx/certs/otel.example.com.crt;
+    ssl_certificate_key /etc/nginx/certs/otel.example.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:4318;
+    }
+}
+```
+
+Then run setup with the proxy's `https://` address:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup copilot --url https://otel.example.com
+```
 
 ## Limits
 
 - Copilot was not captured. The shapes come from GitHub's attribute reference, and they have not been checked against a real run of Copilot.
-- Copilot CLI exports only to `https://` endpoints. A self-hosted cetra on `http://` cannot receive Copilot CLI's traces, so put TLS in front of cetra first. cetra does not serve TLS itself.
+- Copilot CLI exports only to `https://` endpoints. A self-hosted cetra on `http://` cannot receive Copilot CLI's traces, so put a reverse proxy with TLS in front of it (see Self-hosted cetra above). cetra does not serve TLS itself.
 - Copilot CLI has no hook in this integration, so its traces have no repository or branch.
 - `cetra agents setup` does not run on Windows.
 

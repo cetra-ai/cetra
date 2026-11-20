@@ -274,12 +274,12 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
     id: "coding_agents",
     name: "Coding agents",
     description:
-      "Cost, sessions and tool use of coding agents (Claude Code, Codex, Gemini CLI, Copilot) by person, repository and branch. For subscription plans the cost is what the tokens would cost at API prices.",
+      "Cost, sessions and tool use of coding agents (Claude Code, Codex, Gemini CLI, Copilot) by person, repository and branch. Cost is API-equivalent cost: what the tokens would cost at API prices, whatever plan pays for them.",
     definition: {
       widgets: [
         numberAt(
           "agents-1",
-          "Cost",
+          "API-equivalent cost",
           0,
           FIFTH,
           query("traces", [{ agg: "sum", field: "cost_total" }], { filter: AGENT }),
@@ -314,66 +314,66 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
         ),
         chartAt(
           "agents-6",
-          "Cost over time by agent",
+          "API-equivalent cost by agent",
           0,
           4,
           { type: "area", stacked: true },
-          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("traces", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: AGENT,
             breakdown: { field: "metadata['coding_agent']", limit: 5, other: true },
           }),
         ),
         chartAt(
           "agents-7",
-          "Cost over time by model",
+          "API-equivalent cost by model",
           HALF,
           4,
           { type: "area", stacked: true },
-          query("spans", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("spans", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: `${LLM} AND ${AGENT}`,
             breakdown: { field: "model", limit: 5, other: true },
           }),
         ),
         chartAt(
           "agents-8",
-          "Top people by cost",
+          "Top people by API-equivalent cost",
           0,
           4 + CHART_HEIGHT,
           { type: "bar_h" },
-          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("traces", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: `${AGENT} AND user_id IS NOT NULL`,
             breakdown: { field: "user_id", limit: 10, other: false },
           }),
         ),
         chartAt(
           "agents-9",
-          "Top repositories by cost",
+          "Top repositories by API-equivalent cost",
           HALF,
           4 + CHART_HEIGHT,
           { type: "bar_h" },
-          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("traces", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: `${AGENT} AND metadata['repository'] IS NOT NULL`,
             breakdown: { field: "metadata['repository']", limit: 10, other: false },
           }),
         ),
         chartAt(
           "agents-10",
-          "Top branches by cost",
+          "Top branches by API-equivalent cost",
           0,
           4 + 2 * CHART_HEIGHT,
           { type: "bar_h" },
-          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("traces", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: `${AGENT} AND metadata['branch'] IS NOT NULL`,
             breakdown: { field: "metadata['branch']", limit: 10, other: false },
           }),
         ),
         chartAt(
           "agents-11",
-          "Top sessions by cost",
+          "Top sessions by API-equivalent cost",
           HALF,
           4 + 2 * CHART_HEIGHT,
           { type: "bar_h" },
-          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+          query("traces", [{ agg: "sum", field: "cost_total", label: "API-equivalent cost" }], {
             filter: `${AGENT} AND session_id IS NOT NULL`,
             breakdown: { field: "session_id", limit: 10, other: false },
           }),
@@ -399,15 +399,15 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
         ),
         chartAt(
           "agents-13",
-          "Cost per turn by agent",
+          "API-equivalent cost per turn by agent",
           HALF,
           4 + 3 * CHART_HEIGHT,
           { type: "table" },
           query(
             "traces",
             [
-              { agg: "p50", field: "cost_total", label: "p50 cost" },
-              { agg: "p95", field: "cost_total", label: "p95 cost" },
+              { agg: "p50", field: "cost_total", label: "p50 API-equivalent cost" },
+              { agg: "p95", field: "cost_total", label: "p95 API-equivalent cost" },
             ],
             {
               filter: AGENT,

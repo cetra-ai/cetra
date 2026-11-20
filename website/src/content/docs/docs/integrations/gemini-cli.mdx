@@ -53,19 +53,19 @@ Each trace has these fields:
 - the person and the repository and branch, from the hook. Gemini CLI puts no person on its spans;
 - `metadata.coding_agent` set to `gemini-cli`.
 
-Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see cost per person, repository, branch and session, and tool usage.
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
 
 ## Content
 
 Setup writes `logPrompts: true`, and Gemini CLI sends the prompts and the model's answers on its spans. With `--no-content`, setup writes `logPrompts: false`, which drops the prompts; whether Gemini CLI also drops the answers was not tested.
 
-## Cost
+## API-equivalent cost
 
 cetra prices each model call from its token counts, using its price table. Gemini CLI does not report a cost.
 
 Gemini CLI's spans carry only input and output token counts. Cache and reasoning tokens are not on the spans, so cetra does not count them.
 
-If you use a subscription plan, the cost shown is what the same tokens would cost at API prices. It is not what you pay.
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
 
 ## Limits
 
