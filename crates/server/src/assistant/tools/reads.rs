@@ -1228,13 +1228,11 @@ mod tests {
             check_body("Refund mention", "refund"),
         )
         .await;
-        let rule = post_route(
-            &app,
-            &seeded,
-            "/online-rules",
-            rule_body(&response_id(&evaluator)),
-        )
-        .await;
+        // The evaluator is a check, which takes no budget: the rule goes without one.
+        let mut body = rule_body(&response_id(&evaluator));
+        body.as_object_mut().unwrap().remove("budget_usd");
+        body.as_object_mut().unwrap().remove("budget_period");
+        let rule = post_route(&app, &seeded, "/online-rules", body).await;
         let rule_id = response_id(&rule);
 
         let listed = call(&app, &scope_of(&seeded), "list_online_rules", json!({})).await;

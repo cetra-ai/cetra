@@ -156,7 +156,7 @@ fn accepted(kind: AssistantDraftKind, draft: Value) -> (Value, (AssistantDraftKi
         AssistantDraftKind::OnlineRule => "online_rule",
     };
     (
-        json!({"accepted": true, "kind": name, "draft": draft.clone()}),
+        json!({"accepted": true, "kind": name, "draft": draft}),
         (kind, draft),
     )
 }
@@ -471,7 +471,9 @@ pub(super) async fn draft_online_rule(
         budget_period: args.budget_period,
         enabled: args.enabled,
     };
-    let evaluator = get_evaluator(state.meta.reader(), project, args.evaluator_id).await?;
+    let evaluator = get_evaluator(state.meta.reader(), project, args.evaluator_id)
+        .await
+        .map_err(ApiError::from)?;
     validate(
         state,
         org,
