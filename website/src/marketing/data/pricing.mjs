@@ -130,3 +130,11 @@ export function monthlyPrice(plan, units) {
 export function suggestedPlan(units) {
   return units <= PLANS[0].includedUnits ? PLANS[0] : PLANS[1];
 }
+
+/**
+ * A unit count for display, with thousands separators: 100000 → "100,000".
+ * @param {number} n
+ */
+export function formatUnits(n) {
+  return n.toLocaleString("en-US");
+}

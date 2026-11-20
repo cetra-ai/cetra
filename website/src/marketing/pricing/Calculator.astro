@@ -1,0 +1,158 @@
+---
+import { formatUnits, monthlyPrice, PLANS, suggestedPlan } from "../data/pricing.mjs";
+
+const DEFAULT_SPANS = 1_000_000;
+const DEFAULT_SCORES = 50_000;
+
+/** The estimate text for one plan. The script below repeats this function; keep them the same. */
+function estimate(plan: Parameters<typeof monthlyPrice>[0], units: number): string {
+  const price = monthlyPrice(plan, units);
+  if (price === null) return `Not available above ${formatUnits(plan.includedUnits)} a month`;
+  return `$${Math.round(price).toLocaleString("en-US")}`;
+}
+
+const units = DEFAULT_SPANS + DEFAULT_SCORES;
+const suggested = suggestedPlan(units).id;
+---
+
+<div class="calc">
+  <div class="fields">
+    <div class="field">
+      <label for="calc-spans">Spans a month</label>
+      <input
+        id="calc-spans"
+        type="number"
+        min="0"
+        step="10000"
+        value="1000000"
+        inputmode="numeric"
+      />
+    </div>
+    <div class="field">
+      <label for="calc-scores">Scores a month</label>
+      <input
+        id="calc-scores"
+        type="number"
+        min="0"
+        step="1000"
+        value="50000"
+        inputmode="numeric"
+      />
+    </div>
+  </div>
+  <output id="calc-out" for="calc-spans calc-scores" aria-live="polite" class="out">
+    {
+      PLANS.map((plan) => (
+        <span class="row" data-plan={plan.id}>
+          <span class="row-name">{plan.name}</span>
+          <span class="eyebrow" data-suggested hidden={plan.id !== suggested}>Suggested</span>
+          <span class="row-value" data-value>{estimate(plan, units)}</span>
+        </span>
+      ))
+    }
+  </output>
+  <p class="muted note">
+    You can set a spend cap: ingestion stops at the cap, so the bill never passes it. Large
+    volumes get lower rates; talk to us.
+  </p>
+</div>
+
+<script>
+  import { monthlyPrice, PLANS, suggestedPlan } from "../data/pricing.mjs";
+
+  const spans = document.getElementById("calc-spans") as HTMLInputElement;
+  const scores = document.getElementById("calc-scores") as HTMLInputElement;
+  const out = document.getElementById("calc-out") as HTMLOutputElement;
+
+  /** A count from an input: empty, negative or not a number counts as 0. */
+  function count(input: HTMLInputElement): number {
+    const n = Number(input.value);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+
+  /** The estimate text for one plan. Same rules as the frontmatter of Calculator.astro. */
+  function estimate(plan: (typeof PLANS)[number], units: number): string {
+    const price = monthlyPrice(plan, units);
+    if (price === null) {
+      return `Not available above ${plan.includedUnits.toLocaleString("en-US")} a month`;
+    }
+    return `$${Math.round(price).toLocaleString("en-US")}`;
+  }
+
+  function render() {
+    const units = count(spans) + count(scores);
+    const suggested = suggestedPlan(units).id;
+    for (const plan of PLANS) {
+      const row = out.querySelector<HTMLElement>(`[data-plan="${plan.id}"]`);
+      const value = row?.querySelector("[data-value]");
+      const badge = row?.querySelector<HTMLElement>("[data-suggested]");
+      if (!value || !badge) continue;
+      value.textContent = estimate(plan, units);
+      badge.hidden = plan.id !== suggested;
+    }
+  }
+
+  spans.addEventListener("input", render);
+  scores.addEventListener("input", render);
+  render();
+</script>
+
+<style>
+  .calc {
+    margin-top: var(--space-7);
+    max-width: 44rem;
+    display: grid;
+    gap: var(--space-5);
+  }
+  .fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+  .field {
+    display: grid;
+    gap: var(--space-2);
+  }
+  label {
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  input {
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    font: inherit;
+    width: 100%;
+  }
+  .out {
+    display: grid;
+    border-top: 1px solid var(--line);
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2) var(--space-3);
+    padding-block: var(--space-4);
+    border-bottom: 1px solid var(--line);
+  }
+  .row-name {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+  }
+  .row-value {
+    margin-left: auto;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+  }
+  .note {
+    font-size: var(--text-sm);
+  }
+  @media (max-width: 560px) {
+    .fields {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

@@ -37,6 +37,9 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
       </div>
     </Card>
   </div>
+  <div class="more">
+    <Button href="/pricing/" variant="ghost">See pricing →</Button>
+  </div>
 </Section>
 
 <style>
@@ -72,6 +75,11 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     flex-wrap: wrap;
     gap: var(--space-3);
     margin-top: var(--space-5);
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-6);
   }
   @media (max-width: 860px) {
     .cards {

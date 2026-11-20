@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  formatUnits,
   monthlyPrice,
   OVERAGE_PER_100K,
   PLANS,
@@ -60,6 +61,11 @@ test("monthly price", () => {
   assert.equal(monthlyPrice(pro, 1_200_000), 190);
   assert.equal(monthlyPrice(free, 100_000), 0);
   assert.equal(monthlyPrice(free, 100_001), null);
+});
+
+test("formatUnits", () => {
+  assert.equal(formatUnits(100_000), "100,000");
+  assert.equal(formatUnits(0), "0");
 });
 
 test("suggested plan", () => {
