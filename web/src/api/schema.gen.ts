@@ -6459,9 +6459,8 @@ export interface components {
             /**
              * Format: int32
              * @description Most values or keys returned (1 to 100, default 10). Ignored by histograms.
-             * @default 10
              */
-            limit: number;
+            limit?: number;
             /**
              * @description Case-insensitive substring the value or key must contain. 1 to 200 characters after
              *     trimming. Ignored by histograms.

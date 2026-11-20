@@ -30863,7 +30863,6 @@
             "type": "integer",
             "format": "int32",
             "description": "Most values or keys returned (1 to 100, default 10). Ignored by histograms.",
-            "default": 10,
             "maximum": 100,
             "minimum": 1
           },

@@ -45,7 +45,7 @@ pub struct FacetFieldRequest {
     pub field: String,
     /// Most values or keys returned (1 to 100, default 10). Ignored by histograms.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schema(minimum = 1, maximum = 100, default = 10)]
+    #[schema(minimum = 1, maximum = 100)]
     pub limit: Option<u32>,
     /// Case-insensitive substring the value or key must contain. 1 to 200 characters after
     /// trimming. Ignored by histograms.
