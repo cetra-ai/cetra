@@ -838,6 +838,7 @@ Decisions of track IC (`docs/plans/ic-issue-clustering/00-design.md`), numbered 
 | D-IC-23 | Create alert from an issue | **"Create alert" opens the rule form prefilled** (`metric=issue_occurrences`, the issue, window 1h, `gt`, threshold 0). The user saves. |
 | D-IC-24 | MCP list_issues | **A tenth read-only tool, `list_issues`** (`project`, `state`, `source`, `limit`, `max_chars`), with the same counts as `GET /issues` over 7 days, under `ProjectPerm::View`. |
 | D-IC-25 | End-to-end coverage | **The CLI e2e covers error issues with the real binary; alerts and issue notifications are covered in-process** with `AlertTiming::TEST`, a `HookReceiver` and the manual clock, so no test waits for the 60 s tick. |
+| D-IC-26 | Open questions answered | **The user, 2026-11-20: the design stands as built.** Occurrence scores are not billed (D-IC-11); an issue keeps its LLM-written title and description after its members are deleted; a regression reopens the issue; the defaults stay (daily cap 500, floor 0.80, minimum issue size 5, a refit every 6 h on at least 20 pending candidates, kept after a comparison with Langfuse, LangWatch, Opik and MLflow); topics share the Issues page; a digest counts events, not distinct issues (D-IC-21). |
 
 ## Track AQ — Annotation queues
 
