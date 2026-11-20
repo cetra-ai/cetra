@@ -33,6 +33,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their
+  test sends to the org's verified members whatever `auth.signup` is (D-K-21). Unset, it keeps the
+  old rule: members only under open signup.
 - Alert rules on issues: the `issue_occurrences` metric counts the occurrences of one issue or of a source's issues in a window of 15 minutes or more (D-IC-20).
 - Issue notifications: an issue source can send its new and regressed issues to project channels, in one message per 10 minutes at most (D-IC-21).
 - Issues: "Add examples to dataset" copies an issue's newest occurrence traces into a dataset, and "Create alert" opens an alert rule for the issue (D-IC-22, D-IC-23).

@@ -587,6 +587,25 @@ impl Default for EntitlementDefaults {
     }
 }
 
+/// Whom email alert channels may reach (D-K-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailRecipients {
+    /// Only verified, enabled members of the channel's org.
+    Members,
+    /// Any address.
+    Any,
+}
+
+/// `[alerts]` (D-K-21).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AlertsConfig {
+    /// Unset: [`EmailRecipients::Members`] under open signup, [`EmailRecipients::Any`] otherwise.
+    /// Read it through [`ServerConfig::email_recipients`].
+    pub email_recipients: Option<EmailRecipients>,
+}
+
 /// `[orgs]` (D-P-31).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -705,6 +724,9 @@ pub struct ServerConfig {
     /// `[orgs]` settings (D-P-31).
     #[serde(default)]
     pub orgs: OrgsConfig,
+    /// `[alerts]` settings (D-K-21).
+    #[serde(default)]
+    pub alerts: AlertsConfig,
     /// `[demo]` settings: the demo org and the limits of its visitors (08 § Demo org, D187).
     #[serde(default)]
     pub demo: DemoConfig,
@@ -758,6 +780,17 @@ impl ServerConfig {
             delete_objects: !self.restore_mode,
             ..self.storage.clone()
         }
+    }
+
+    /// Whom email alert channels and their test sends may reach (D-K-21): `alerts.email_recipients`,
+    /// or when it is unset, members under open signup and any address otherwise.
+    pub fn email_recipients(&self) -> EmailRecipients {
+        self.alerts
+            .email_recipients
+            .unwrap_or(match self.auth.signup {
+                SignupPolicy::Open => EmailRecipients::Members,
+                SignupPolicy::InviteOnly | SignupPolicy::Disabled => EmailRecipients::Any,
+            })
     }
 }
 
@@ -1908,8 +1941,9 @@ mod tests {
     use figment::error::{Actual, Kind};
 
     use super::{
-        ALIASES, ConfigError, DemoConfig, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
-        ServerConfig, SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
+        ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
+        MediaConfig, OrgsConfig, Secret, ServerConfig, SmtpUrl, Tls, issuer_problem, load_from,
+        oidc_env_name,
     };
     use crate::api::account::SignupPolicy;
 
@@ -2570,6 +2604,58 @@ mod tests {
     fn orgs_refuses_unknown_keys() {
         let error = load_from(Some("[orgs]\nallow_all = true\n"), &[]).unwrap_err();
         assert!(error.to_string().contains("allow_all"), "{error}");
+    }
+
+    #[test]
+    fn alerts_default_follows_the_signup_policy() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.alerts, AlertsConfig::default());
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+
+        let config = load_from(None, &[("CETRA_AUTH_SIGNUP", "open")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+
+        let config = load_from(None, &[("CETRA_AUTH_SIGNUP", "disabled")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+    }
+
+    #[test]
+    fn alerts_email_recipients_members_under_invite_only() {
+        let config = load_from(Some("[alerts]\nemail_recipients = \"members\"\n"), &[]).unwrap();
+        assert_eq!(
+            config.alerts.email_recipients,
+            Some(EmailRecipients::Members)
+        );
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+    }
+
+    #[test]
+    fn alerts_email_recipients_any_under_open_signup() {
+        let config = load_from(
+            Some("[alerts]\nemail_recipients = \"any\"\n"),
+            &[("CETRA_AUTH_SIGNUP", "open")],
+        )
+        .unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+    }
+
+    #[test]
+    fn alerts_email_recipients_from_env() {
+        let config = load_from(None, &[("CETRA_ALERTS__EMAIL_RECIPIENTS", "members")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+    }
+
+    #[test]
+    fn alerts_email_recipients_rejects_an_unknown_value() {
+        let error =
+            load_from(Some("[alerts]\nemail_recipients = \"everyone\"\n"), &[]).unwrap_err();
+        assert!(matches!(error, ConfigError::Figment(_)), "{error}");
+    }
+
+    #[test]
+    fn alerts_refuses_unknown_keys() {
+        let error = load_from(Some("[alerts]\nzz = 1\n"), &[]).unwrap_err();
+        assert!(matches!(error, ConfigError::Figment(_)), "{error}");
     }
 
     const DEMO_ORG: &str = "0195f0a0-0000-7000-8000-000000000001";

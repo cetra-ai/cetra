@@ -16,6 +16,7 @@ use crate::api::alerts::{
     AlertCondition, AlertEventKind, AlertMetric, AlertState, AlertWindow, Comparator,
 };
 use crate::auth::roles::OrgRole;
+use crate::config::EmailRecipients;
 use crate::meta::alerts::{
     Evaluation, EventDetails, NewChannel, NewRule, Recorded, delete_channel, insert_channel,
     insert_rule, record_evaluation,
@@ -1061,6 +1062,84 @@ async fn permanent_failure_and_unreadable_config() {
         error.as_deref(),
         Some("the channel config could not be read")
     );
+}
+
+#[tokio::test]
+async fn members_policy_skips_non_members_under_invite_only() {
+    let app = TestApp::with_mailer_config(|config| {
+        config.alerts.email_recipients = Some(EmailRecipients::Members);
+    })
+    .await;
+    let seeded = app.seed().await;
+    app.verify_email(seeded.user_id).await;
+    let config = email(&["ada@example.com", "eve@example.com"]);
+    let outcome = send_to_channel(
+        &app.state,
+        seeded.org_id,
+        &config,
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
+        Uuid::now_v7(),
+        NOW,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        Err(permanent(
+            "1 recipient(s) skipped: not verified members of the organization"
+        ))
+    );
+    let sent: Vec<String> = app.sent().into_iter().map(|mail| mail.to).collect();
+    assert_eq!(sent, ["ada@example.com"]);
+}
+
+#[tokio::test]
+async fn members_policy_with_no_member_fails_without_sending() {
+    let app = TestApp::with_mailer_config(|config| {
+        config.alerts.email_recipients = Some(EmailRecipients::Members);
+    })
+    .await;
+    let seeded = app.seed().await;
+    app.verify_email(seeded.user_id).await;
+    let config = email(&["eve@example.com"]);
+    let outcome = send_to_channel(
+        &app.state,
+        seeded.org_id,
+        &config,
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
+        Uuid::now_v7(),
+        NOW,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        Err(permanent(
+            "no recipient is a verified member of the organization"
+        ))
+    );
+    assert!(app.sent().is_empty());
+}
+
+#[tokio::test]
+async fn any_policy_sends_to_everyone_under_open_signup() {
+    let app = TestApp::with_mailer_config(|config| {
+        config.auth.signup = SignupPolicy::Open;
+        config.alerts.email_recipients = Some(EmailRecipients::Any);
+    })
+    .await;
+    let seeded = app.seed().await;
+    let config = email(&["eve@example.com"]);
+    let outcome = send_to_channel(
+        &app.state,
+        seeded.org_id,
+        &config,
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
+        Uuid::now_v7(),
+        NOW,
+    )
+    .await;
+    assert_eq!(outcome, Ok(()));
+    let sent: Vec<String> = app.sent().into_iter().map(|mail| mail.to).collect();
+    assert_eq!(sent, ["eve@example.com"]);
 }
 
 #[tokio::test]
