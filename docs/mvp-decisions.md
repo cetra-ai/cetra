@@ -822,7 +822,7 @@ Decisions of track CA (`docs/plans/ca-coding-agents/00-design.md`, research in `
 | D-CA-14 | Content in setup | **The user, 2026-11-20: content is on by default in `cetra agents setup`.** Prompts, tool arguments and tool output are captured, as the SDKs' `capture_content` does. `--no-content` turns it off. Raw API bodies are never captured. |
 | D-CA-15 | Cost label | **The user, 2026-11-20: every cost that the coding-agent template and pages show is labelled "API-equivalent cost".** For a subscription user it is what the same tokens would cost at API prices, not what the user pays. The label applies to the dashboard template's titles, measures and description and to the integrations pages. |
 | D-CA-16 | Copilot CLI and TLS | **The user, 2026-11-20: a reverse proxy (Caddy or nginx) with TLS in front of cetra, documented for Copilot CLI on self-hosted instances.** Copilot CLI exports only to `https://` endpoints. `cetra serve` gets no TLS. |
-| D-CA-17 | Qwen Code | **The user, 2026-11-20: Qwen Code joins the MVP if its captured spans match Gemini CLI's.** Another session decides that from the M1 capture. This row records the decision only; Qwen Code is not done. |
+| D-CA-17 | Qwen Code | **The user, 2026-11-20: Qwen Code joins the MVP if its captured spans match Gemini CLI's.** Another session decides that from the M1 capture. This row records the decision only; Qwen Code is not done. Checked the same day against Qwen Code 0.27.2 (research § 6): its spans follow Claude Code's shape in GenAI semconv, not Gemini CLI's, so it is not added; its spans already normalize through the generic rules, and making it a fifth agent is a new decision. |
 
 ## Open
 

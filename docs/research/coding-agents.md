@@ -506,6 +506,37 @@ The prompt's trace is rooted at `turn/start` and has 391 spans. The useful ones:
 
 **Hooks.** `SessionStart` and `BeforeAgent` ran, each with `session_id`, `cwd`, `hook_event_name` and `timestamp`.
 
+### Qwen Code (checked for D-CA-17)
+
+**Setup.** Qwen Code 0.27.2 ran with the same setup, with these differences:
+- the OpenAI-compatible API (`OPENAI_BASE_URL`, `/v1/chat/completions`, streamed);
+- `telemetry` in `~/.qwen/settings.json`, with `otlpProtocol = "http"` sending JSON to `<otlpEndpoint>/v1/traces`, `/v1/logs` and `/v1/metrics`.
+
+**Model calls.** Three: two for the prompt and one for a background "auto-memory extractor" (`subagent_name = managed-auto-memory-extractor`), which is its own trace.
+
+**Spans.** Resource `service.name = qwen-code`. **Its spans do not match Gemini CLI's**: they follow Claude Code's shape and use GenAI semconv names.
+- `qwen-code.interaction`:
+  - `gen_ai.operation.name = invoke_agent`, `gen_ai.agent.name = qwen-code`;
+  - `gen_ai.input.messages` and `gen_ai.output.messages` in the canonical `parts` format.
+- `qwen-code.llm_request`:
+  - `gen_ai.operation.name = chat`, `gen_ai.provider.name = openai`, `gen_ai.request.model`;
+  - messages, tool definitions;
+  - `gen_ai.usage.input_tokens`, `output_tokens`, `cache_read.input_tokens`;
+  - `gen_ai.response.time_to_first_chunk`.
+- `qwen-code.tool`: `execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`. Its children are `qwen-code.tool.execution` and `qwen-code.hook`.
+- `session.id` and `gen_ai.conversation.id` equal the hooks' `session_id` (`SessionStart` and `BeforeAgent` ran).
+
+**Extras.** It also exports `@opentelemetry/instrumentation-undici` HTTP client spans. One of them was a `GET https://models.dev/api.json`, made despite the mock.
+
+**Consequence.** D-CA-17's condition, "matches Gemini CLI", is not met, so Qwen Code is not added.
+
+Its spans already normalize through the generic GenAI rules: `agent`, `llm` with tokens and cost, `tool` with input and output. What it lacks is the `coding_agent`, `repository` and `branch` keys and the tool rename. Adding it as a fifth agent would need:
+- a detection rule (`service.name = qwen-code`);
+- `cetra agents setup qwen-code`;
+- a capture.
+
+That is a new decision for the user.
+
 ### Consequences (in the design doc)
 
 - **Claude Code:** most rules already apply, since `invoke_agent` and `execute_tool` are semconv operation names. The missing pieces are its token names, the tool name, the tool input and output, and the prompt.
