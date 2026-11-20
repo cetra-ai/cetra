@@ -225,7 +225,7 @@ This gives, with no new storage:
 - deletion cascades: a deleted trace or user takes its occurrences with it (track M);
 - the data window (D175).
 
-**Units.** Occurrence scores are not billable units, and the units cap does not refuse them. They are derived by cetra from data already billed, like judge-trace spans (D-I-31). An error storm or a re-swept trace must not bill the customer. `scores::write` leaves rows of source `issue` out of `usage_daily.scores` and out of its cap check. This is open question 1, decided this way until the user says otherwise.
+**Units.** Occurrence scores are not billable units, and the units cap does not refuse them. They are derived by cetra from data already billed, like judge-trace spans (D-I-31). An error storm or a re-swept trace must not bill the customer. `scores::write` leaves rows of source `issue` out of `usage_daily.scores` and out of its cap check. The user confirmed this (D-IC-26).
 
 **Hiding.** Issue scores never trigger a candidate. Source `issue` is left out of three reads, each of which filters `source <> 'issue'`: the latest-scores read, a user's score list and the dashboard scores source. `GET /scores` and the SQL `scores` view still return issue occurrences (source `issue`), and the web scores tab hides them. The trace and session views show issue chips instead.
 
@@ -372,7 +372,7 @@ issue events (created, regressed) ─► K channels       occurrence scores ─�
 
 Deletion (track M):
 - A trace, user or project deletion deletes the matching `issue_candidates` rows, as track J's cascade does for dataset items copied from traces (D24). The occurrence scores go with the scores.
-- An issue keeps its title and description after its members are deleted. See the open questions.
+- An issue keeps its title and description after its members are deleted (D-IC-26).
 - Dropping a project or org cascades by foreign key.
 
 ### API (summary; the plans give the exact types)
@@ -410,10 +410,13 @@ Each milestone ends in working, tested behaviour, with its spec sections, `CHANG
 
 M1 and M2 can run in parallel: M1 touches `cetra-core`, `cetra-storage`, `cetra-server` and `web/`, and M2 only `cetra-eval`; they share `CHANGELOG.md` and the decision log, merged by hand. There is no backfill: a source sees traces and scores from its creation on (a non-goal of the MVP; I's backfill is the model if users ask). M5 is a small plan written when AQ has landed.
 
-## Open questions
+## Decided questions
 
-1. **Units.** Should occurrence scores count as billable units (D173)? The design says no (D-IC-11): they are derived, rewrites are idempotent, and an error storm must not bill. Counting them would mean one unit per distinct issue per trace, and up to the daily cap per topic source.
-2. **Deletion and titles.** After every member of an issue is deleted (a GDPR deletion by user, for example), should the issue's LLM-written title and description be deleted or regenerated? The design keeps them, since they are aggregates written in generic words by the prompt, but a strict reading of D24 may want them removed when the issue has no members left.
-3. **Regression rule.** Sentry-style reopening of a resolved issue (this design) versus MLflow's "a regression is a new issue".
-4. **Defaults.** Daily cap 500, floor 0.80, minimum issue size 5, refit every 6 h: are these right for the cloud's Free and Starter orgs?
-5. **Topic issues.** Topics are not problems. Should they be shown on the same Issues page (filtered by kind), or on their own "Topics" page?
+The user answered the design's open questions on 2026-11-20 (D-IC-26). Each answer keeps the design as built.
+
+1. **Units.** Occurrence scores are not billable units (D-IC-11).
+2. **Deletion and titles.** An issue keeps its LLM-written title and description after all of its members are deleted.
+3. **Regression rule.** A regression reopens the resolved issue, Sentry style; it does not create a new one.
+4. **Defaults.** Daily cap 500, floor 0.80, minimum issue size 5, a refit every 6 h on at least 20 pending candidates. Compared with the open-source competitors on 2026-11-20: the floor sits between Opik's fixed 0.75 and the p95-radius rules of Langfuse and LangWatch; size 5 equals LangWatch's minimum (Langfuse uses 15); the refit is the most frequent and needs the fewest items (Langfuse refits daily on 100 or more summaries, LangWatch every 2 to 7 days on more than 100 unassigned traces). The user kept 6 h and 20, because candidates join existing issues continuously and a refit only creates issues from the remainder.
+5. **Topic issues.** Topics share the Issues page, filtered by kind.
+6. **Digest counts.** A notification digest counts events, not distinct issues: an issue created and then regressed in one window counts twice, and events past the first 20 are counted in "and N more" but never sent later (D-IC-21).
