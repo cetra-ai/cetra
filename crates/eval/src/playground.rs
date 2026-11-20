@@ -98,7 +98,8 @@ pub enum RenderError {
 }
 
 /// Expands placeholders in place and renders the `text` parts of the request's own messages with
-/// `variables` (placeholder messages are copied unrendered). At most 200 messages after expansion,
+/// `variables` (placeholder messages are copied unrendered). When `render_variables` is false the
+/// request's own messages are copied as written (D-V-38). At most 200 messages after expansion,
 /// and at most [`RENDER_MAX_BYTES`] of `text` parts in all, checked before each part is appended.
 ///
 /// # Errors
@@ -111,6 +112,7 @@ pub fn render_messages(
     entries: &[PlaygroundEntry],
     variables: &BTreeMap<String, String>,
     placeholders: &BTreeMap<String, Vec<Message>>,
+    render_variables: bool,
 ) -> Result<Vec<Message>, RenderError> {
     let mut messages = Vec::new();
     let mut budget = RENDER_MAX_BYTES;
@@ -128,7 +130,13 @@ pub fn render_messages(
             }
             PlaygroundEntry::Message(message) => {
                 ensure_room(messages.len(), 1)?;
-                messages.push(render_message(index, message, variables, &mut budget)?);
+                messages.push(render_message(
+                    index,
+                    message,
+                    variables,
+                    render_variables,
+                    &mut budget,
+                )?);
             }
         }
     }
@@ -160,8 +168,13 @@ fn render_message(
     index: usize,
     message: &Message,
     variables: &BTreeMap<String, String>,
+    render_variables: bool,
     budget: &mut usize,
 ) -> Result<Message, RenderError> {
+    if !render_variables {
+        spend(budget, text_bytes(message))?;
+        return Ok(message.clone());
+    }
     let mut rendered = message.clone();
     for (part_index, part) in rendered.parts.iter_mut().enumerate() {
         if let Part::Text { content, .. } = part {
@@ -501,6 +514,7 @@ mod tests {
             &entries,
             &vars(&[("product", "tea")]),
             &placeholder("history", history),
+            true,
         )
         .expect("renders");
         assert_eq!(out.len(), 4);
@@ -521,7 +535,7 @@ mod tests {
             PlaygroundEntry::Message(text(Role::System, "fine")),
             PlaygroundEntry::Message(message),
         ];
-        let error = render_messages(&entries, &vars(&[]), &BTreeMap::new())
+        let error = render_messages(&entries, &vars(&[]), &BTreeMap::new(), true)
             .expect_err("a variable is missing");
         assert!(matches!(
             &error,
@@ -536,7 +550,7 @@ mod tests {
     #[test]
     fn missing_placeholder() {
         let entries = vec![placeholder_entry("history")];
-        let error = render_messages(&entries, &vars(&[]), &BTreeMap::new())
+        let error = render_messages(&entries, &vars(&[]), &BTreeMap::new(), true)
             .expect_err("the placeholder is missing");
         assert_eq!(
             error,
@@ -554,13 +568,45 @@ mod tests {
             PlaygroundEntry::Message(text(Role::User, "last")),
         ];
         assert_eq!(
-            render_messages(&entries, &vars(&[]), &placeholder("many", many.clone())),
+            render_messages(&entries, &vars(&[]), &placeholder("many", many.clone()), true),
             Err(RenderError::TooMany)
         );
         assert_eq!(
-            render_messages(&entries[..1], &vars(&[]), &placeholder("many", many))
+            render_messages(&entries[..1], &vars(&[]), &placeholder("many", many), true)
                 .map(|messages| messages.len()),
             Ok(200)
+        );
+    }
+
+    #[test]
+    fn variables_off_keeps_the_text_as_written() {
+        let entries = vec![
+            PlaygroundEntry::Message(text(Role::User, "Tell me about {{product}} {{absent}}")),
+            placeholder_entry("history"),
+        ];
+        let history = vec![text(Role::Assistant, "ok {{product}}")];
+        let out = render_messages(
+            &entries,
+            &vars(&[("product", "tea")]),
+            &placeholder("history", history),
+            false,
+        )
+        .expect("nothing is rendered, so nothing is missing");
+        assert_eq!(out.len(), 2);
+        assert_eq!(first_text(&out[0]), "Tell me about {{product}} {{absent}}");
+        // Placeholders are expanded either way.
+        assert_eq!(first_text(&out[1]), "ok {{product}}");
+    }
+
+    #[test]
+    fn variables_off_still_counts_the_text_budget() {
+        let entries = vec![PlaygroundEntry::Message(text(
+            Role::User,
+            &"x".repeat(RENDER_MAX_BYTES + 1),
+        ))];
+        assert_eq!(
+            render_messages(&entries, &vars(&[]), &BTreeMap::new(), false),
+            Err(RenderError::TooLarge)
         );
     }
 
@@ -575,16 +621,16 @@ mod tests {
             ))]
         };
         // Four megabytes of value, in one part: exactly the budget.
-        assert!(render_messages(&uses(4), &variables, &BTreeMap::new()).is_ok());
+        assert!(render_messages(&uses(4), &variables, &BTreeMap::new(), true).is_ok());
         assert_eq!(
-            render_messages(&uses(5), &variables, &BTreeMap::new()),
+            render_messages(&uses(5), &variables, &BTreeMap::new(), true),
             Err(RenderError::TooLarge)
         );
         // Placeholder messages count too: three of 2 MiB are over the budget.
         let entries = vec![placeholder_entry("history")];
         let history = vec![text(Role::User, &"y".repeat(2 << 20)); 3];
         assert_eq!(
-            render_messages(&entries, &vars(&[]), &placeholder("history", history)),
+            render_messages(&entries, &vars(&[]), &placeholder("history", history), true),
             Err(RenderError::TooLarge)
         );
     }

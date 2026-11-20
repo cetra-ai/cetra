@@ -118,8 +118,13 @@ async fn run_playground(
     check_model(&body.model)?;
     check_source(body.source.as_ref())?;
     let max_tokens = check_max_tokens(body.params.max_tokens)?;
-    let messages =
-        render_messages(&entries, &body.variables, &placeholders).map_err(render_error)?;
+    let messages = render_messages(
+        &entries,
+        &body.variables,
+        &placeholders,
+        body.render_variables,
+    )
+    .map_err(render_error)?;
     let request = ChatRequest {
         model: body.model.clone(),
         messages,
@@ -1069,6 +1074,62 @@ mod tests {
         assert_eq!(response.status, 400, "{}", text(&response));
         let problem: Value = response.json();
         assert_eq!(problem["errors"][0]["field"], "messages[0].parts[0]");
+    }
+
+    #[tokio::test]
+    async fn render_variables_on_renders_and_refuses_a_missing_variable() {
+        let (_mock, base) = provider(vec![]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut body = run_body(connection);
+        // The default is true: the same as sending `render_variables: true`.
+        body["render_variables"] = json!(true);
+        body["variables"] = json!({});
+        body["messages"] = json!([
+            {"role": "user", "parts": [{"type": "text", "content": "Hi {{absent}}"}]}
+        ]);
+        let response = app
+            .request(Method::POST, &run_path(&seeded))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let problem: Value = response.json();
+        assert_eq!(problem["errors"][0]["field"], "messages[0].parts[0]");
+    }
+
+    #[tokio::test]
+    async fn render_variables_off_sends_the_text_as_written() {
+        let (_mock, base) = provider(vec![chat_turn("Fine.", 1, 4, 1)]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut body = run_body(connection);
+        body["render_variables"] = json!(false);
+        body["variables"] = json!({});
+        body["messages"] = json!([
+            {"role": "user", "parts": [{"type": "text", "content": "Hi {{absent}}"}]}
+        ]);
+        let events = read_events(stream_run(&app, &seeded, &body).await).await;
+        assert_eq!(names(&events).last().copied(), Some("done"), "{events:?}");
+        let trace_id = events[0].1["trace_id"].as_str().expect("trace id");
+        let detail = trace_detail(&app, &seeded, trace_id)
+            .await
+            .expect("the playground trace");
+        let span_id = detail["spans"][0]["span"]["span_id"]
+            .as_str()
+            .expect("span id");
+        let span_path = format!(
+            "/api/v1/projects/{}/traces/{trace_id}/spans/{span_id}",
+            seeded.project.id
+        );
+        let span = app
+            .request(Method::GET, &span_path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(span.status, 200, "{}", text(&span));
+        assert!(text(&span).contains("Hi {{absent}}"), "{}", text(&span));
     }
 
     #[tokio::test]
