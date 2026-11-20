@@ -6200,6 +6200,11 @@ export interface components {
             max_alert_rules?: number;
             /**
              * Format: int64
+             * @description Annotation queues.
+             */
+            max_annotation_queues?: number;
+            /**
+             * Format: int64
              * @description Projects.
              */
             max_projects?: number;

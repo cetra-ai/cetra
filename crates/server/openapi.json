@@ -25625,6 +25625,12 @@
             "description": "Alert rules.",
             "minimum": 0
           },
+          "max_annotation_queues": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Annotation queues.",
+            "minimum": 0
+          },
           "max_projects": {
             "type": "integer",
             "format": "int64",

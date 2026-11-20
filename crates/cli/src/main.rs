@@ -805,8 +805,8 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     writeln!(out, "retention window: {window}")
 }
 
-/// The nine limits in D-P-13 order.
-fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 9] {
+/// The ten limits in D-P-13 order.
+fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 10] {
     [
         ("units_included", limits.units_included),
         ("units_cap", limits.units_cap),
@@ -817,6 +817,7 @@ fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 9] {
         ("max_projects", limits.max_projects),
         ("max_alert_rules", limits.max_alert_rules),
         ("max_active_online_rules", limits.max_active_online_rules),
+        ("max_annotation_queues", limits.max_annotation_queues),
     ]
 }
 
@@ -1183,6 +1184,10 @@ mod tests {
         );
         assert!(text.contains("units_included: 200000\n"), "{text}");
         assert!(text.contains("units_cap: unlimited\n"), "{text}");
+        assert!(
+            text.contains("max_annotation_queues: unlimited\n"),
+            "{text}"
+        );
         assert!(text.contains("retention window: unlimited\n"), "{text}");
         assert!(text.contains("units this month: 1240\n"), "{text}");
     }

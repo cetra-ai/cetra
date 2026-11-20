@@ -547,6 +547,8 @@ pub struct EntitlementDefaults {
     pub max_projects: Option<u64>,
     pub max_alert_rules: Option<u64>,
     pub max_active_online_rules: Option<u64>,
+    /// Annotation queues per org (D-AQ-10).
+    pub max_annotation_queues: Option<u64>,
 }
 
 impl Default for EntitlementDefaults {
@@ -563,6 +565,7 @@ impl Default for EntitlementDefaults {
             max_projects: None,
             max_alert_rules: None,
             max_active_online_rules: None,
+            max_annotation_queues: None,
         }
     }
 }
@@ -2585,6 +2588,17 @@ mod tests {
         assert_eq!(defaults.max_projects, None);
         assert_eq!(defaults.max_alert_rules, None);
         assert_eq!(defaults.max_active_online_rules, None);
+        assert_eq!(defaults.max_annotation_queues, None);
+    }
+
+    #[test]
+    fn max_annotation_queues_from_env() {
+        let config = load_from(
+            None,
+            &[("CETRA_ENTITLEMENTS__DEFAULTS__MAX_ANNOTATION_QUEUES", "2")],
+        )
+        .unwrap();
+        assert_eq!(config.entitlements.defaults.max_annotation_queues, Some(2));
     }
 
     #[test]
