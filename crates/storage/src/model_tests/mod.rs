@@ -167,7 +167,7 @@ fn run_case_s3_remote(ops: &[Op], seed: u64, pair: (P, P)) {
 }
 
 /// The bucket of a`CETRA_MODEL_S3_REMOTE=1` run: `CETRA_TEST_S3_ENDPOINT` and
-/// `CETRA_TEST_S3_BUCKET`, with the region and addressing style `tests/s3.rs` reads, and the
+/// `CETRA_TEST_S3_BUCKET`, with the region and addressing style `tests/it/s3.rs` reads, and the
 /// `AWS_*` credentials from the environment.
 fn remote_bucket() -> AmazonS3 {
     let endpoint = std::env::var("CETRA_TEST_S3_ENDPOINT")
