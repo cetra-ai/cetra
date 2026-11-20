@@ -1,0 +1,97 @@
+---
+title: Issues
+description: Group production errors into issues that you can resolve, ignore and merge, and see how often they happen.
+---
+
+This page shows how to group production errors into issues, and how to resolve, ignore and merge them.
+
+## What an issue is
+
+An issue is a recurring error in your production traces. An **issue source** reads the error spans of completed traces. Each distinct error becomes one issue. Each trace that contains the error is an **occurrence** of the issue.
+
+Every occurrence is written as a score named `issue:<issue id>`, with the source `issue`. Occurrences do not count as billable units. The trace list can filter on them, and the trace view shows an issue chip for each issue of the trace.
+
+A source only sees traces that complete after you create it. Older traces do not become issues.
+
+## Create an error source
+
+1. Open the project and select **Issue sources** under **Evaluate**.
+2. Select **New source**.
+3. Enter a **Name**. The name must be unique in the project.
+4. Keep **Kind** set to **Errors**.
+5. Optional: enter a **Filter** in the same syntax as the trace list filter, to limit the spans the source reads. cetra always adds `status = 'error'`, so the filter does not need it.
+6. Keep **Enabled** on, and select **Create source**.
+
+## How errors are grouped
+
+cetra gives each error span a fingerprint from four values:
+
+- the service name;
+- the span name;
+- the exception type;
+- the error message, after normalization.
+
+The exception type and the message come from the span's last `exception` event. When that event has no message, cetra uses the span's status message.
+
+Normalization replaces the parts of a message that change from one occurrence to the next, so the same error with different values is one issue:
+
+| Part of the message | Becomes |
+|---|---|
+| A URL | `<url:SCHEME://HOST>`, with the scheme and host only |
+| An email address | `<email>` |
+| A UUID | `<uuid>` |
+| An ISO 8601 date or timestamp | `<time>` |
+| An IPv4 or IPv6 address | `<ip>` |
+| A file path with two or more segments | `<path>` |
+| A hex string of 8 or more characters that has letters and digits | `<hex>` |
+| A quoted string of 3 or more characters | `<str>` |
+| A number | `<n>` |
+
+Then cetra collapses runs of whitespace and cuts the message at 512 characters.
+
+Known limits: a compressed IPv6 address such as `fe80::1` is not recognized, and a date such as `11/20/2026` becomes `<path>`. Normalization removes common shapes of personal data, but a message can still contain a name in plain words. Check the titles of the issues you share.
+
+The title of an issue is the exception type, or the span name when there is no exception type, followed by the normalized message. You can rename an issue.
+
+## States
+
+An issue is in one of four states:
+
+| State | Meaning |
+|---|---|
+| Open | Needs attention. New issues start here. |
+| Resolved | You fixed the problem. |
+| Ignored | You muted the issue. cetra keeps counting its occurrences. |
+| Merged | You merged it into another issue. |
+
+On the issue page, select **Resolve**, **Ignore** or **Reopen** to change the state.
+
+## Regression
+
+When an error of a resolved issue happens again, cetra reopens the issue, marks it **Regressed** and records a `regressed` event. cetra compares the start time of each trace with the time you resolved the issue. A trace that started before you resolved the issue does not reopen it, even when it finishes later.
+
+The **History** section of the issue page lists every change, with the person who made it.
+
+## Merge issues
+
+Merge an issue into another one when both describe the same problem.
+
+1. Open the issue and select **Merge into…**.
+2. Choose the issue to merge into. It must belong to the same source and must not be merged itself.
+3. Select **Merge**.
+
+The merged issue stops, and its occurrences count on the issue you merged into. Merging cannot be undone.
+
+## View traces
+
+Select **View traces** on an issue to open the trace list, filtered to the traces of that issue. The filter also includes the issues merged into it, up to eight issues in total. The page says when it leaves some out.
+
+To filter the trace list by issue, select **Has issue** in the filter bar and choose the issues.
+
+## Plan limits
+
+The Free cloud plan allows one enabled issue source across your active projects. A disabled source does not count. Creating or enabling a second source on the Free plan fails with a message about the limit. Paid plans have no limit. See [Plans and licence](/docs/platform/plans-and-licence/).
+
+## Not in this version
+
+Issues come from error spans only. Issues from low scores, negative feedback and topics, alerts on issues, and adding an issue's traces to a dataset are not available yet.

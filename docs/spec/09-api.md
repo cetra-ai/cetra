@@ -153,6 +153,24 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET/POST /alert-rules` · `GET/PATCH/DELETE /alert-rules/{id}` · `GET /alert-rules/{id}/events` | rules and their state; events newest first, paged, with their deliveries. Reads: role viewer; writes: member (07, D-K-9). `GET /alert-events` lists the events of all the project's rules, newest first, paged, with their deliveries; role viewer. The lists of rules and channels are not paged (at most 100 and 20 per project). |
 | `GET/POST /channels` · `PATCH/DELETE /channels/{id}` · `POST /channels/{id}/test` | channel configs are write-only (D-K-6); the test sends one sample message synchronously and answers `{ok, error?}` |
 
+### Issues
+
+Track IC (spec 06 § Issues, D-IC-1, D-IC-3, D-IC-9, D-IC-10, D-IC-13). Reads need role viewer. Writes to sources, state, title, description and merges need role member (D-I-24). Only `kind: "error"` exists in M1.
+
+| Method & path | Notes |
+|---|---|
+| `GET /projects/{project}/issue-sources` | the sources, paged, with `open_issues` on each and `org_active_sources` (the org's enabled count, D-IC-13) |
+| `POST /projects/{project}/issue-sources` | `{name, kind: "error", filter?, enabled?}` → `201` with the source. `name` is 1 to 128 characters after trimming and unique in the project; `filter` is a `spans` filter, checked (`400 invalid_filter`, field `filter`). An unknown field, such as a sample rate, is `400`. Enabling past the plan limit is `403 plan_limit` |
+| `GET/PATCH/DELETE /projects/{project}/issue-sources/{id}` | `PATCH` takes `{name?, filter?, enabled?}`; `null` or `""` clears `filter`; `kind` is refused (`400`); enabling past the limit is `403 plan_limit`. `DELETE` answers `204`, deletes the source's issues and their events, and keeps the occurrence scores until their traces go |
+| `GET /projects/{project}/issues` | the issues, paged by `cursor` with `limit` (1–1000, default 50), newest first by `last_seen` (or `first_seen` with `sort`). Filters: `state` (a comma list of `open`, `resolved`, `ignored`, `merged`, or `all` for every state but `merged`; default `open`), `source_id`, `q` (title contains, ignoring case), `ids` (at most 100). `from` and `to` set the period of `count` and `users` (default the last 24 hours, `from` inclusive, `to` exclusive). An unknown `state`, `sort` or `ids` is `400` |
+| `GET /projects/{project}/issues/{id}` | one issue, with `count` and `users` over the last 24 hours. Each issue has `score_name` (`issue:<id>`), `merged_from` (the issues merged into it) and `merged_into` |
+| `PATCH /projects/{project}/issues/{id}` | `{title?, description?, state?}`. `title` is 1 to 200 characters after trimming and records a `renamed` event; `description` is at most 2 000 characters, and `null` or `""` clears it with no event; `state` is `open`, `resolved` or `ignored` and records `state_changed`. `state: "merged"` is `400`: merge with the merge route. A merged issue is `409` (`a merged issue cannot change`) |
+| `POST /projects/{project}/issues/{id}/merge` | `{into}` → `200` with the target issue. `into` must be an issue of the same source that is not merged. `409` when the issue is already merged, the target is merged, or the two are the same issue; `404` when either is missing (D-IC-9) |
+| `GET /projects/{project}/issues/{id}/occurrences` | `{days, examples}`. `days` has one entry per UTC day with occurrences in the period (`from`, `to`; default the 14 days before `to`, at most 90 days, longer is `400`), oldest first, each with `count` and `users`. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period, each with `trace_id`, `span_id`, `created_at`, `reason` and `issue_id` |
+| `GET /projects/{project}/issues/{id}/events` | the newest 100 events, newest first: `kind` (`created`, `state_changed`, `renamed`, `merged` or `regressed`), `actor_user_id`, `from_value`, `to_value`, `at` |
+
+Errors use the usual problem document (§ Conventions). Issue JSON uses RFC 3339 instants.
+
 ### Pricing & GDPR
 
 | Method & path | Notes |

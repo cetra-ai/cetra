@@ -93,6 +93,7 @@ export default defineConfig({
                     { label: "Evaluators and LLM judges", link: "/docs/evaluation/evaluators/" },
                     { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },
+                    { label: "Issues", link: "/docs/evaluation/issues/" },
                     { label: "Datasets", link: "/docs/evaluation/datasets/" },
                     { label: "Experiments", link: "/docs/evaluation/experiments/" },
                   ],

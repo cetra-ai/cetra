@@ -162,6 +162,46 @@ Live enqueues are capped at 10 000 per rule per UTC hour; extra matches are drop
 
 A backfill runner, one of the eval loops, runs each backfill to its end, oldest first (D-I-39). It reads `trace_list` or `span_list` page by page, newest first, with the rule's filter and strict exclusions, so evaluation and experiment traces are never targets (D-I-17); the plan's data window applies (D-I-34). Each target is sampled as live targets are (D-I-10); targets the rule already scored are skipped by looking up their derived score ids; the rest are queued as backfill jobs at the lowest priority, re-queuing a failed or skipped job of the same target (D-I-11, D-I-40). The rule's budget applies when the jobs run (D-I-15), and queued backfill jobs expire after 7 days (D-I-28). A failed read fails the backfill and keeps the jobs already queued; a rule disabled during a run fails it (`rule disabled`); a rule whose filter, variable mapping, sample rate, target or evaluator changes during a run fails it (`rule changed`); a pause, resume or budget change does not, and an edit to the evaluator itself (its template or output) during a run is not detected; a deleted rule takes its backfills with it; a backfill running at shutdown is marked `failed` (`interrupted`) at the next start (D-I-41). There is no cancel; disabling the rule stops its jobs.
 
+## Issues
+
+Track IC (`docs/plans/ic-issue-clustering/`, D-IC-1 to D-IC-18). An **issue** is a recurring problem that a source finds in production traces. It has a title, a state and counts. M1 has one kind of source, `error`. The kinds `score`, `feedback` and `topic` (LLM-summarized, clustered by embeddings, refit periodically) come in M3.
+
+**Sources** (`issue_sources`, D-IC-1). A source has a `name` (unique in the project, 1 to 128 characters), a `kind` that cannot change, an optional `filter` and `enabled`. An `error` source takes a `spans` filter (at most 4 096 bytes, checked at save, `invalid_filter` otherwise). The read ANDs it with `status = 'error'`. An `error` source makes no LLM or embedding call, so it has no sample rate, cap or connection: the LLM fields are refused. Members manage sources (D-I-24).
+
+**Reading.** An enabled error source makes its project tracked by the completion sweeper of § Online rules (D-I-8, D-I-9). For each completed trace, the sweeper reads the error spans that pass the filter through `error_spans`: at most 50 per trace, earliest first, with their trace and span ids, start time, service name, name, status message and the type and message of their last `exception` event. A source sees traces completed from its creation on; there is no backfill. A filter that does not parse skips that source for the batch, and the other sources go on.
+
+**Fingerprints** (D-IC-2, D-IC-17). Each error span gets a fingerprint: the first 16 bytes of SHA-256 over the label `cetra.issue-fp.v1` and four fields, each written as its UTF-8 byte length (a 4-byte big-endian integer) followed by its bytes. The fields are the service name, the span name, the exception type and the normalized message. An absent field has length 0. The exception type and message come from the last `exception` event; the message falls back to the span's status message. Normalization replaces, in this order:
+1. URLs with `<url:SCHEME://HOST>`: the lowercased scheme and host, without userinfo, port or path;
+2. email addresses with `<email>`;
+3. UUIDs with `<uuid>`;
+4. ISO 8601 dates and timestamps with `<time>`;
+5. IPv4 and IPv6 addresses with `<ip>`;
+6. paths of two or more `/` or `\` separated segments with `<path>`;
+7. hex runs of 8 or more characters that contain a letter and a digit with `<hex>`;
+8. quoted strings of three or more characters with `<str>`;
+9. numbers with `<n>`.
+
+It then collapses whitespace, trims, and cuts the result at 512 characters. Only the first 8 192 characters of a message are read. Known limits, accepted: compressed IPv6 (`fe80::1`) is not recognized, and a date such as `11/20/2026` becomes path-like text.
+
+**Issues** (D-IC-2, D-IC-3). A fingerprint maps to exactly one issue of its source. A new fingerprint creates its issue at once, with the state `open`. The title is `<exception type, or span name>: <normalized message, or "(no message)">`, cut at 200 characters, and a member can rename it. Every issue belongs to one source; a source has no refit. Deleting a source deletes its issues and their events; the occurrence scores stay until their traces are deleted (D-IC-3, D-IC-11).
+
+**Occurrences** (D-IC-11, D-IC-18). Each trace of an issue gets one occurrence score: source `issue`, name `issue:<issue id>`, data type `boolean`, value `true`, the trace as target, and the normalized message as reason. Its id is a UUIDv7 whose timestamp is the occurrence time: the start of the trace's earliest error span with that fingerprint, clamped to now. A rewrite of the same trace and issue replaces the same row, so re-sweeps are idempotent. The occurrence carries the user and session of the first error span of the group that has them. Occurrences older than the project's retention are not written.
+
+Occurrence scores are not billable units and do not count toward the units cap (D-I-31, D-IC-11). Source `issue` is left out of every list of score names, of the score columns of the lists, of the latest-scores read, of users' score lists and of the dashboard scores source. The trace view reads them for its issue chips, and the trace list filters on them with `has_score('issue:<id>')`.
+
+**Counts.** An issue stores no count. Its counts are read from the occurrence scores of its name and of the issues merged into it (D-IC-9, D-IC-18), so a deleted trace drops out of them. `users` is the largest user count of those names, an approximation when merged issues share users.
+
+**Lifecycle** (D-IC-10). The states are `open`, `resolved`, `ignored` and `merged`. A member sets `open`, `resolved` or `ignored`. Only a merge sets `merged`, and it is final.
+- **Regression.** A trace of the issue that started after `resolved_at` sets a resolved issue back to `open`, marks it `regressed` and records a `regressed` event. Trace start times decide, not completion times: a trace that started before the resolution does not reopen the issue, even when it completes later.
+- **Ignored** issues keep counting their occurrences. Alerts on ignored issues are M4's.
+- Every change records an event (`created`, `state_changed`, `renamed`, `merged`, `regressed`) with its actor (a user, or the system for `created` and `regressed`) and the values before and after. A description change records no event.
+
+**Merge** (D-IC-9). A member merges an issue into another issue of the same source that is not merged. The merged issue's state becomes `merged`, its later error spans join the target's fingerprint, and its counts are read with the target's. The chain is one level deep: an issue cannot merge into a merged target, and no issue merges into itself. There is no unmerge; renaming and setting a state cover the other mistakes.
+
+**Limits.** On the Free plan an org has at most one enabled issue source across its active projects, paused or not (`max_active_issue_sources`, D-IC-13). Creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction. Paid plans have no limit.
+
+**Privacy.** Titles, reasons and descriptions come from span payloads. They are stored only in `meta.db` and in the scores' reason, and logs carry ids and counts only (§ Logs and privacy in the design).
+
 ## Datasets
 
 Track J (D-J-2–D-J-9).
