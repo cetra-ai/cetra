@@ -11,21 +11,29 @@ use arrow::compute::cast;
 use arrow::datatypes::{DataType, TimeUnit};
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
 use cetra_core::schema::{event_field, spans};
+use cetra_core::score::{ScoreTarget, ScoreValue};
 use cetra_eval::issue::fingerprint::{ErrorFields, fingerprint_hex, normalize_message};
 use cetra_storage::{ErrorSpansRequest, QueryContext, RunError, error_spans};
 use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::convert::ConvertError;
+use crate::api::scores::ScoreCreate;
 use crate::entitlements::{Visibility, query_options};
+use crate::eval::budget::DAY_NS;
+use crate::eval::execute::{after_commit, borrowed_users};
 use crate::eval::pending::Completed;
 use crate::eval::trigger::{READ_TIMEOUT, SweepCtx};
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::issues::{self, EventKind, EventRow, IssueRow, IssueState};
+use crate::meta::projects::{self, ProjectRow};
+use crate::scores::{self, Writer, occurrence_id};
 
 /// Longest issue title, in characters.
 const TITLE_CHARS: usize = 200;
+/// Most occurrence scores one write takes (the API's per-request cap).
+const OCCURRENCE_CHUNK: usize = 1_000;
 /// Stands in for a missing message in a title.
 const NO_MESSAGE: &str = "(no message)";
 /// The event name whose attributes carry the exception (OpenTelemetry semantic conventions).
@@ -58,6 +66,17 @@ pub(crate) async fn sweep_batch(
         tracing::warn!(project_id = %ctx.project, "an error read could not start");
         return Err(());
     };
+    let project = match projects::project_by_id(ctx.state.meta.reader(), ctx.project).await {
+        Ok(Some(project)) => project,
+        Ok(None) => {
+            tracing::warn!(project_id = %ctx.project, "an error sweep found no project");
+            return Err(());
+        }
+        Err(error) => {
+            tracing::warn!(project_id = %ctx.project, error = %error, "the project could not be read");
+            return Err(());
+        }
+    };
     let ids: Vec<String> = batch
         .iter()
         .map(|entry| entry.trace_id.to_string())
@@ -66,7 +85,7 @@ pub(crate) async fn sweep_batch(
     let mut created = 0;
     let mut error_span_count = 0;
     let mut skipped = 0;
-    let mut occurrences: Vec<Occurrence> = Vec::new();
+    let mut total = Outcome::default();
     for source in ctx.sources {
         let read = error_spans(
             &query,
@@ -110,7 +129,7 @@ pub(crate) async fn sweep_batch(
         if groups.is_empty() {
             continue;
         }
-        let (issues_created, written) =
+        let (issues_created, found) =
             write_groups(ctx.state, ctx.project, source.id, groups, ctx.now)
                 .await
                 .map_err(|error| {
@@ -122,7 +141,8 @@ pub(crate) async fn sweep_batch(
                     );
                 })?;
         created += issues_created;
-        occurrences.extend(written);
+        let outcome = write_occurrences(ctx, &project, source.id, found).await?;
+        total.add(&outcome);
     }
     tracing::debug!(
         project_id = %ctx.project,
@@ -130,10 +150,169 @@ pub(crate) async fn sweep_batch(
         error_spans = error_span_count,
         skipped,
         issues_created = created,
-        occurrences = occurrences.len(),
+        occurrences = total.written,
+        occurrences_blocked = total.blocked,
+        occurrences_too_old = total.too_old,
+        occurrences_blocked_after_write = total.blocked_after_write,
         "error issues swept"
     );
     Ok(())
+}
+
+/// What became of the occurrences of a batch, for the debug log.
+#[derive(Default)]
+struct Outcome {
+    /// Written as occurrence scores.
+    written: usize,
+    /// Dropped before the write: a deletion blocks their trace or user (D-M-6).
+    blocked: usize,
+    /// Dropped before the write: older than the project's retention.
+    too_old: usize,
+    /// Written, then blocked by a deletion that came meanwhile; a follow-up deletion was filed.
+    blocked_after_write: usize,
+}
+
+impl Outcome {
+    fn add(&mut self, other: &Self) {
+        self.written += other.written;
+        self.blocked += other.blocked;
+        self.too_old += other.too_old;
+        self.blocked_after_write += other.blocked_after_write;
+    }
+}
+
+/// Writes the occurrences of one source as occurrence scores (D-IC-11, D-IC-18). An occurrence
+/// whose trace or user a deletion blocks is dropped (D-M-6), and so is one older than the project's
+/// retention: `scores::write` would refuse its whole chunk. The rest are written in chunks of
+/// [`OCCURRENCE_CHUNK`]. After each chunk, the after-commit check files a follow-up deletion for a
+/// trace that a deletion blocked meanwhile.
+///
+/// # Errors
+///
+/// `Err(())` when a write fails. The batch is then retried; the occurrence ids are stable, so a
+/// rewrite replaces the same rows.
+async fn write_occurrences(
+    ctx: &SweepCtx<'_>,
+    project: &ProjectRow,
+    source: Uuid,
+    occurrences: Vec<Occurrence>,
+) -> Result<Outcome, ()> {
+    let mut outcome = Outcome::default();
+    let cutoff = project.retention_days.map(|days| {
+        ctx.now
+            .saturating_sub(i64::from(days).saturating_mul(DAY_NS))
+    });
+    let mut kept = Vec::with_capacity(occurrences.len());
+    for occurrence in occurrences {
+        let users = occurrence_users(&occurrence);
+        let blocked = ctx
+            .state
+            .deletions
+            .guard
+            .blocking(
+                ctx.project,
+                occurrence.trace_id,
+                &borrowed_users(&users),
+                ctx.now,
+            )
+            .is_some();
+        if blocked {
+            outcome.blocked += 1;
+        } else if cutoff.is_some_and(|cutoff| id_time(occurrence.at) < cutoff) {
+            outcome.too_old += 1;
+        } else {
+            kept.push(occurrence);
+        }
+    }
+    for chunk in kept.chunks(OCCURRENCE_CHUNK) {
+        let items: Vec<ScoreCreate> = chunk
+            .iter()
+            .map(|occurrence| occurrence_score(project.id, occurrence))
+            .collect();
+        if let Err(error) = scores::write(
+            ctx.state,
+            project,
+            Writer::Issue { source_id: source },
+            items,
+        )
+        .await
+        {
+            tracing::warn!(
+                project_id = %ctx.project,
+                source_id = %source,
+                count = chunk.len(),
+                error = %error,
+                "issue occurrences could not be written"
+            );
+            return Err(());
+        }
+        outcome.written += chunk.len();
+        for occurrence in chunk {
+            let users = occurrence_users(occurrence);
+            if after_commit(
+                ctx.state,
+                ctx.project,
+                occurrence.trace_id,
+                &borrowed_users(&users),
+                occurrence.trace_id,
+            )
+            .await
+            {
+                outcome.blocked_after_write += 1;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+/// The time a UUIDv7 of `at` carries: milliseconds, as `scores::write` reads it back (D-G-26).
+fn id_time(at: i64) -> i64 {
+    at.max(0) / 1_000_000 * 1_000_000
+}
+
+/// The occurrence's end user, as the deletion guard takes it. Error spans do not carry their
+/// ingest time here, so the occurrence time stands in for it. Ingest comes after a span starts, so
+/// this is the earlier of the two, and the guard blocks at least as often as with the real time.
+fn occurrence_users(occurrence: &Occurrence) -> Vec<(String, i64)> {
+    occurrence
+        .user_id
+        .iter()
+        .map(|user| (user.clone(), occurrence.at))
+        .collect()
+}
+
+/// The score of an occurrence (D-IC-18): named for its issue, stamped with its time through the
+/// id, on its trace, with the trace's user and session and the span it came from.
+fn occurrence_score(project: ProjectId, occurrence: &Occurrence) -> ScoreCreate {
+    ScoreCreate {
+        score_id: Some(occurrence_id(
+            project,
+            occurrence.trace_id,
+            occurrence.issue_id,
+            occurrence.at,
+        )),
+        target: ScoreTarget::Trace {
+            trace_id: occurrence.trace_id,
+        },
+        session_id: occurrence.session_id.clone(),
+        user_id: occurrence.user_id.clone(),
+        name: format!("issue:{}", occurrence.issue_id),
+        value: ScoreValue::Boolean(true),
+        reason: occurrence.reason.clone(),
+        source: None,
+        metadata: BTreeMap::from([
+            (
+                "cetra.issue.source_id".to_owned(),
+                occurrence.source_id.to_string(),
+            ),
+            (
+                "cetra.issue.span_id".to_owned(),
+                occurrence.span_id.to_string(),
+            ),
+        ]),
+        experiment_id: None,
+        dataset_item_id: None,
+    }
 }
 
 /// One error span of a batch, decoded. Its text is payload: it is never logged.
@@ -371,8 +550,7 @@ struct Hit {
     session_id: Option<String>,
 }
 
-/// One occurrence of an issue in a trace. M1.6c writes these as occurrence scores.
-#[cfg_attr(not(test), allow(dead_code))] // M1.6c writes these
+/// One occurrence of an issue in a trace, written as an occurrence score by [`write_occurrences`].
 struct Occurrence {
     source_id: Uuid,
     issue_id: Uuid,

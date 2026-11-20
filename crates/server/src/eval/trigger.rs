@@ -2549,5 +2549,357 @@ mod tests {
             assert_eq!(issues_of(&app).await.len(), 1);
             assert_eq!(app.state.pending.len(), 0);
         }
+
+        /// The live occurrence scores of `trace` in `project`, as the API lists them.
+        async fn occurrences_on(
+            app: &TestApp,
+            seeded: &Seeded,
+            project: ProjectId,
+            trace: TraceId,
+        ) -> Vec<cetra_core::score::Score> {
+            let response = app
+                .request(
+                    Method::GET,
+                    &format!("/api/v1/projects/{project}/scores?trace_id={trace}&source=issue"),
+                )
+                .header(header::COOKIE.as_str(), &seeded.cookie)
+                .send()
+                .await;
+            let page: Value = response.json();
+            page["data"]
+                .as_array()
+                .expect("data")
+                .iter()
+                .map(|item| serde_json::from_value(item.clone()).expect("a score"))
+                .collect()
+        }
+
+        /// The id of the issue titled `title`.
+        async fn issue_id_of(app: &TestApp, title: &str) -> Uuid {
+            let (id,): (Uuid,) = sqlx::query_as("SELECT id FROM issues WHERE title = ?")
+                .bind(title)
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+            id
+        }
+
+        #[tokio::test]
+        async fn error_span_becomes_an_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            let mut span = error_span(trace_id(1), start, "api", "ValueError", "bad id 42");
+            span.user_id = Some("user-1".to_owned());
+            span.session_id = Some("session-1".to_owned());
+            app.commit_spans(&seeded.project, vec![span]).await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let issue = issue_id_of(&app, "ValueError: bad id <n>").await;
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            let score = &scores[0];
+            assert_eq!(score.name, format!("issue:{issue}"));
+            assert_eq!(score.source, cetra_core::enums::ScoreSource::Issue);
+            assert_eq!(score.created_at, (start / 1_000_000) * 1_000_000);
+            assert_eq!(score.user_id.as_deref(), Some("user-1"));
+            assert_eq!(score.session_id.as_deref(), Some("session-1"));
+            assert_eq!(score.metadata.len(), 2, "{:?}", score.metadata);
+            assert!(score.metadata.contains_key("cetra.issue.span_id"));
+        }
+
+        #[tokio::test]
+        async fn two_error_spans_of_one_issue_in_one_trace_give_one_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            let start = at - 30 * SECOND;
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        start + SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 42",
+                    ),
+                    error_span(trace_id(1), start, "api", "ValueError", "bad id 43"),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            // The occurrence is the trace's earliest error span.
+            assert_eq!(scores[0].created_at, (start / 1_000_000) * 1_000_000);
+        }
+
+        #[tokio::test]
+        async fn a_resweep_writes_no_second_occurrence() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            // A later span of the same error joins the trace; its earliest span is unchanged.
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 20 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 43",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            assert_eq!(
+                scores[0].created_at,
+                ((at - 30 * SECOND) / 1_000_000) * 1_000_000
+            );
+        }
+
+        #[tokio::test]
+        async fn a_future_span_start_is_clamped_to_now() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at + 10 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            sweep_once(&app.state, now).await.unwrap();
+            let scores = occurrences_on(&app, &seeded, project, trace_id(1)).await;
+            assert_eq!(scores.len(), 1, "{scores:?}");
+            assert_eq!(scores[0].created_at, (now / 1_000_000) * 1_000_000);
+        }
+
+        #[tokio::test]
+        async fn an_occurrence_older_than_retention_is_skipped() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let (short, _) = app.add_project(&seeded, "short", Some(1)).await;
+            error_source(&app, short.id, None).await;
+            let at = set_clock(&app);
+            let day = 86_400 * SECOND;
+            app.commit_spans(
+                &short,
+                vec![
+                    error_span(trace_id(1), at - 2 * day, "api", "ValueError", "bad id 1"),
+                    error_span(
+                        trace_id(2),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 2",
+                    ),
+                ],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, short.id, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            // The rest of the batch is still written.
+            assert_eq!(
+                occurrences_on(&app, &seeded, short.id, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn ignored_issue_still_gets_occurrences() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            exec(
+                &app,
+                "UPDATE issues SET state = 'ignored' WHERE title = ?",
+                vec!["ValueError: bad id <n>".to_owned()],
+            )
+            .await;
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(2),
+                    at - 20 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 43",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert_eq!(issues_of(&app).await[0].1, "ignored");
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+        }
+
+        #[tokio::test]
+        async fn occurrences_bill_no_units() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![error_span(
+                    trace_id(1),
+                    at - 30 * SECOND,
+                    "api",
+                    "ValueError",
+                    "bad id 42",
+                )],
+            )
+            .await;
+            app.state.clock.advance(Duration::from_secs(6));
+            let now = app.state.clock.now_ns();
+            let before = app
+                .state
+                .usage
+                .month_units(&app.state.meta, seeded.org_id, now)
+                .await
+                .unwrap();
+            sweep_once(&app.state, now).await.unwrap();
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .len(),
+                1
+            );
+            let after = app
+                .state
+                .usage
+                .month_units(&app.state.meta, seeded.org_id, now)
+                .await
+                .unwrap();
+            assert_eq!(after, before);
+        }
+
+        #[tokio::test]
+        async fn deletion_guard_blocks_occurrences() {
+            let app = TestApp::new().await;
+            let seeded = app.seed().await;
+            let project = seeded.project.id;
+            error_source(&app, project, None).await;
+            let at = set_clock(&app);
+            app.commit_spans(
+                &seeded.project,
+                vec![
+                    error_span(
+                        trace_id(1),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 42",
+                    ),
+                    error_span(
+                        trace_id(2),
+                        at - 30 * SECOND,
+                        "api",
+                        "ValueError",
+                        "bad id 43",
+                    ),
+                ],
+            )
+            .await;
+            let now = app.state.clock.now_ns();
+            app.state
+                .deletions
+                .guard
+                .add_traces(project, &[trace_id(1)], Uuid::now_v7(), now);
+            app.state.clock.advance(Duration::from_secs(6));
+            sweep_once(&app.state, app.state.clock.now_ns())
+                .await
+                .unwrap();
+            assert!(
+                occurrences_on(&app, &seeded, project, trace_id(1))
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                occurrences_on(&app, &seeded, project, trace_id(2))
+                    .await
+                    .len(),
+                1
+            );
+            // The issue itself is still created: only the occurrence is dropped.
+            assert_eq!(issues_of(&app).await.len(), 1);
+        }
     }
 }
