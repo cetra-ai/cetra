@@ -297,6 +297,43 @@ A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
 
 Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
 
+## Assistant
+
+Conversations of the in-app assistant (track AS, D-AS-10): private to their author in one project.
+
+```sql
+-- In-app assistant conversations (track AS, D-AS-10).
+CREATE TABLE assistant_conversations (
+  id TEXT PRIMARY KEY,                 -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',      -- '' until the first user message (M3) or a rename
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+);
+CREATE INDEX assistant_conversations_owner ON assistant_conversations(project_id, user_id, last_active_at);
+CREATE INDEX assistant_conversations_idle ON assistant_conversations(last_active_at);
+CREATE TABLE assistant_messages (
+  conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,                -- 1, 2, … within the conversation
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+  parts TEXT NOT NULL,                 -- JSON array of message parts (spec 04 § Assistant)
+  context TEXT,                        -- JSON page context of a user message (D-AS-14)
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'cancelled', 'failed')),
+  feedback TEXT CHECK (feedback IN ('up', 'down')),
+  turn_trace_id TEXT,                  -- 32 lowercase hex characters
+  stub_after INTEGER,                  -- tool messages: when their results become stubs; NULL once stubbed
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+);
+CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL;
+```
+
+> `parts` is a JSON array of parts. The message parts of spec 01 are used where they fit: `{type: "text", content}` and `{type: "tool_call", id, name, arguments}`. Two parts are the assistant's own: `{type: "tool_result", id, name, ok, result, size_bytes, rows?, stubbed}` (the tool's JSON answer, `null` once stubbed) and `{type: "draft", id, kind, draft}` (`kind` is `filter`, `sql`, `dashboard`, `evaluator` or `online_rule`; D-AS-6). A user message holds text parts and its page context in `context`; an assistant message holds text, tool calls and drafts; a tool message holds tool results.
+>
+> Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). Both run hourly. Conversations are deleted with their project, org or author.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).

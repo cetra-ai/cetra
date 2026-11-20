@@ -8,6 +8,7 @@
 
 pub(crate) mod alerts;
 pub(crate) mod api_keys;
+pub(crate) mod assistant;
 pub(crate) mod backfills;
 pub(crate) mod connections;
 pub(crate) mod dashboards;
