@@ -94,6 +94,7 @@ pub(super) async fn resolve(
                 if stored {
                     // Running jobs are kept: the guard stops them (D-M-6).
                     crate::meta::eval_jobs::delete_jobs(conn, &jobs).await?;
+                    crate::meta::issues::delete_candidates_of_deletion(conn, project, id).await?;
                     let cascade =
                         crate::meta::experiments::delete_copies_of_tx(conn, id, project).await?;
                     return Ok((true, cascade));

@@ -1904,7 +1904,6 @@ pub(crate) async fn pause_sources_of_connection(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn resume_connection_pauses(
     conn: &mut SqliteConnection,
     connection: Uuid,
@@ -1952,7 +1951,6 @@ pub(crate) async fn clear_budget_pauses(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the delete fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn delete_candidates_of_deletion(
     conn: &mut SqliteConnection,
     project: ProjectId,
@@ -2484,8 +2482,12 @@ mod tests {
         start_candidate_attempt, sweep_sources, update_issue, update_source,
     };
     use super::{
-        any_pending, clear_budget_pauses, pause_source, pause_sources_of_connection,
-        prune_candidates, prune_to_window, resume_connection_pauses,
+        any_pending, clear_budget_pauses, delete_candidates_of_deletion, pause_source,
+        pause_sources_of_connection, prune_candidates, prune_to_window, resume_connection_pauses,
+    };
+    use crate::meta::deletions::{
+        ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails, insert_deletion,
+        insert_traces,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{delete_project, insert_project, mark_project_deleting};
@@ -4446,5 +4448,80 @@ mod tests {
             .await
             .unwrap();
         assert!(!missing);
+    }
+
+    #[tokio::test]
+    async fn a_deletion_deletes_the_candidates_of_its_traces_in_its_project() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["a", "b"]).await;
+        let (project_a, project_b) = (projects[0], projects[1]);
+        let source_a = scored_source(project_a, "scores", SourceKind::Score);
+        let source_b = scored_source(project_b, "scores", SourceKind::Score);
+        put_source(&db, source_a.clone()).await;
+        put_source(&db, source_b.clone()).await;
+        // Candidates 1 and 2 are on the deleted traces; 3 is on another trace, and 4 is the
+        // deleted trace 1 of the other project.
+        let on = |id: u128, source: &SourceRow, byte: u8| CandidateRow {
+            trace_id: Some(trace(byte)),
+            ..candidate(
+                id,
+                source,
+                &format!("dedup-{id}"),
+                CandidateStatus::Pending,
+                NOW,
+            )
+        };
+        for row in [
+            on(1, &source_a, 1),
+            on(2, &source_a, 2),
+            on(3, &source_a, 3),
+            on(4, &source_b, 1),
+        ] {
+            assert!(put_candidate(&db, row).await);
+        }
+
+        let deletion = Uuid::from_u128(77);
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_deletion(
+                    conn,
+                    &NewDeletion {
+                        id: deletion,
+                        org_id: org,
+                        project_id: Some(project_a),
+                        kind: DeletionKind::TraceIds,
+                        user_id: None,
+                        request: RequestDetails::default(),
+                        actor_kind: ActorKind::User,
+                        actor_id: Uuid::from_u128(1000),
+                        state: DeletionState::Resolving,
+                        created_at: NOW,
+                    },
+                )
+                .await?;
+                insert_traces(conn, deletion, &[trace(1), trace(2)]).await
+            })
+        })
+        .await
+        .unwrap();
+
+        let removed = db
+            .write(move |conn| {
+                Box::pin(
+                    async move { delete_candidates_of_deletion(conn, project_a, deletion).await },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed, 2);
+        for (id, expected) in [(1, 0), (2, 0), (3, 1), (4, 1)] {
+            let found: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM issue_candidates WHERE id = ?")
+                    .bind(Uuid::from_u128(id).to_string())
+                    .fetch_one(db.reader())
+                    .await
+                    .unwrap();
+            assert_eq!(found, expected, "candidate {id}");
+        }
     }
 }

@@ -408,6 +408,7 @@ A deletion may cover rows of a `spans` or `scores` file only when its `deletion_
 The server stores a resolved scope and its cascades in one transaction, before it registers the deletion (D-M-3):
 - Dataset items whose `source_trace_id` is in scope are hard-deleted, all versions (track J).
 - `experiment_items` referencing those traces, or snapshotting a deleted item revision, are deleted (track J, D-J-9); `eval_jobs` referencing them are deleted unless `running` (D-M-6).
+- Issue candidates of the deleted traces (track IC).
 - A running judge job, and any judge run that loaded its target before the deletion, is stopped by the server's 24-hour deletion guard before it commits a judge trace or a score; a copy it committed just before the guard saw the deletion has an `ingest_time` after the cut-off, so the executor stores a follow-up `trace_ids` deletion of the judge trace and the target (D-M-6).
 - `alert_events` hold only aggregates; they are pruned after 90 days with their deliveries (D-K-10).
 
