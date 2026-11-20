@@ -269,6 +269,7 @@ pub(super) async fn observe_scores(
                 source: None,
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: None,
                 limit,
                 cursor: cursor.as_deref(),
@@ -501,7 +502,10 @@ pub(super) async fn observe_filter_trace_ids(
         },
     )
     .await?;
-    Ok(ids.iter().map(|id| hex(id.as_bytes())).collect())
+    Ok(ids
+        .iter()
+        .map(|target| hex(target.trace_id.as_bytes()))
+        .collect())
 }
 
 /// `alert_value` for `measure` over `window`, with no filter.

@@ -7,6 +7,19 @@ Use this page to look up the signature of every export. There is one section per
 
 ## `@cetra-ai/sdk`
 
+### `AddedQueueItems`
+
+{/* untested: signature */}
+```ts
+interface AddedQueueItems {
+  readonly added: number;
+  readonly existing: number;
+  readonly skipped: readonly SkippedQueueItem[];
+}
+```
+
+The answer of `client.annotationQueues.addItems()`. A target already in the queue counts as `existing`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
 ### `AiTelemetry`
 
 {/* untested: signature */}
@@ -35,6 +48,69 @@ interface AiTelemetryOptions {
 ```
 
 The options of `aiTelemetry()`. See [Vercel AI SDK](/docs/reference/typescript/opentelemetry/#vercel-ai-sdk).
+
+### `AnnotationQueue`
+
+{/* untested: signature */}
+```ts
+interface AnnotationQueue {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly instructions: string | undefined;
+  readonly target: QueueTarget;
+  readonly definitionIds: readonly string[];
+  readonly version: number;
+  readonly createdBy: string | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly counts: QueueCounts;
+}
+```
+
+A queue as the server returns it, with its item counts by status. Pass its `version` to `update()`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueueItem`
+
+{/* untested: signature */}
+```ts
+interface AnnotationQueueItem {
+  readonly id: string;
+  readonly queueId: string;
+  readonly traceId: string | undefined;
+  readonly spanId: string | undefined;
+  readonly sessionId: string | undefined;
+  readonly targetTime: string;
+  readonly status: QueueItemStatus;
+  readonly skipReason: string | undefined;
+  readonly leasedByUserId: string | undefined;
+  readonly leaseExpiresAt: string | undefined;
+  readonly doneByUserId: string | undefined;
+  readonly doneAt: string | undefined;
+  readonly addedBy: "user" | "pat" | "key";
+  readonly addedById: string;
+  readonly createdAt: string;
+}
+```
+
+One target of a queue, as `client.annotationQueues.items()` returns it. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueues`
+
+{/* untested: signature */}
+```ts
+class AnnotationQueues {
+  list(): Promise<AnnotationQueue[]>;
+  get(queueId: string): Promise<AnnotationQueue>;
+  create(name: string, options: { target: QueueTarget; definitionIds: readonly string[]; description?: string; instructions?: string }): Promise<AnnotationQueue>;
+  update(queueId: string, options: { version: number; name?: string; description?: string; instructions?: string; definitionIds?: readonly string[] }): Promise<AnnotationQueue>;
+  delete(queueId: string): Promise<void>;
+  addItems(queueId: string, targets: QueueTargets): Promise<AddedQueueItems>;
+  items(queueId: string, options?: { status?: QueueItemStatus }): Promise<AnnotationQueueItem[]>;
+}
+```
+
+The annotation queue operations of `client.annotationQueues`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
 
 ### `ApiError`
 
@@ -99,11 +175,12 @@ A chat message: its role and its text. A placeholder is filled with a list of th
 class Client {
   constructor(options?: ClientOptions);
   readonly datasets: Datasets;
+  readonly annotationQueues: AnnotationQueues;
   readonly prompts: Prompts;
 }
 ```
 
-The REST client for datasets, prompts and experiments. It reads the key and the base URL the way `init()` does and throws `ConfigError` without a key. `prompts` holds the prompt operations: `get`, `list`, `create`, `createVersion` and `setLabel`. See [Datasets and experiments](/docs/reference/typescript/scores-datasets-experiments/#datasets-and-experiments).
+The REST client for datasets, prompts, experiments and annotation queues. It reads the key and the base URL the way `init()` does and throws `ConfigError` without a key. `prompts` holds the prompt operations: `get`, `list`, `create`, `createVersion` and `setLabel`. See [Datasets and experiments](/docs/reference/typescript/scores-datasets-experiments/#datasets-and-experiments).
 
 ### `ClientOptions`
 
@@ -413,6 +490,48 @@ type PromptValues = Readonly<Record<string, string | number | boolean | readonly
 ```
 
 The values of `Prompt.compile()`. A string, number or boolean fills `{{ name }}` (a boolean is `true` or `false`, and `1.0` is `1`); a list of messages fills a placeholder. A value of any other type throws `TypeError`.
+### `QueueCounts`
+
+{/* untested: signature */}
+```ts
+interface QueueCounts {
+  readonly pending: number;
+  readonly completed: number;
+  readonly skipped: number;
+}
+```
+
+The item counts of an annotation queue, by status. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueItemStatus`
+
+{/* untested: signature */}
+```ts
+type QueueItemStatus = "pending" | "completed" | "skipped";
+```
+
+The status of a queue item, and the filter of `items()`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueTarget`
+
+{/* untested: signature */}
+```ts
+type QueueTarget = "trace" | "span" | "session";
+```
+
+What the items of a queue are. It is fixed when the queue is created. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueTargets`
+
+{/* untested: signature */}
+```ts
+type QueueTargets =
+  | { readonly traceIds: readonly string[] }
+  | { readonly spans: readonly (readonly [string, string])[] }
+  | { readonly sessionIds: readonly string[] };
+```
+
+What `addItems()` adds: exactly one of the three keys. A span is a `[traceId, spanId]` pair. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
 
 ### `Run`
 
@@ -491,6 +610,18 @@ interface ScorerArgs {
 ```
 
 The one object a scorer receives. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `SkippedQueueItem`
+
+{/* untested: signature */}
+```ts
+interface SkippedQueueItem {
+  readonly index: number;
+  readonly message: string;
+}
+```
+
+A target that `addItems()` did not add. `index` is its position in the list you passed. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
 
 ### `SpanHandle`
 

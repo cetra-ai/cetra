@@ -90,6 +90,7 @@ export default defineConfig({
                     { label: "Overview", link: "/docs/evaluation/" },
                     { label: "Scores", link: "/docs/evaluation/scores/" },
                     { label: "Human annotation", link: "/docs/evaluation/annotation/" },
+                    { label: "Annotation queues", link: "/docs/evaluation/annotation-queues/" },
                     { label: "Evaluators and LLM judges", link: "/docs/evaluation/evaluators/" },
                     { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },

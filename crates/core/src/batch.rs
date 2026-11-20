@@ -373,6 +373,7 @@ struct ScoreColumns {
     rule_id: StringBuilder,
     experiment_id: StringBuilder,
     dataset_item_id: StringBuilder,
+    queue_id: StringBuilder,
     author_user_id: StringBuilder,
     metadata: MapBuilder<StringBuilder, StringBuilder>,
     created_at: TimestampNanosecondBuilder,
@@ -403,6 +404,7 @@ impl ScoreColumns {
             rule_id: string_builder(rows, rows * 36),
             experiment_id: string_builder(rows, rows * 36),
             dataset_item_id: string_builder(rows, rows * 36),
+            queue_id: string_builder(rows, rows * 36),
             author_user_id: string_builder(rows, rows * 36),
             metadata: utf8_map(rows, metadata_bytes.0, metadata_bytes.1),
             created_at: timestamp_builder(rows),
@@ -444,6 +446,7 @@ impl ScoreColumns {
         append_uuid_opt(&mut self.rule_id, score.rule_id);
         append_uuid_opt(&mut self.experiment_id, score.experiment_id);
         append_uuid_opt(&mut self.dataset_item_id, score.dataset_item_id);
+        append_uuid_opt(&mut self.queue_id, score.queue_id);
         append_uuid_opt(&mut self.author_user_id, score.author_user_id);
         append_map(&mut self.metadata, &score.metadata)?;
         self.created_at.append_value(score.created_at);
@@ -472,6 +475,7 @@ impl ScoreColumns {
             finish_string(self.rule_id),
             finish_string(self.experiment_id),
             finish_string(self.dataset_item_id),
+            finish_string(self.queue_id),
             finish_string(self.author_user_id),
             Arc::new(self.metadata.finish()),
             finish_timestamp(self.created_at),
@@ -846,6 +850,7 @@ mod tests {
             (schema::scores::RULE_ID, full.rule_id),
             (schema::scores::EXPERIMENT_ID, full.experiment_id),
             (schema::scores::DATASET_ITEM_ID, full.dataset_item_id),
+            (schema::scores::QUEUE_ID, full.queue_id),
             (schema::scores::AUTHOR_USER_ID, full.author_user_id),
         ] {
             let text = uuid_text(id);
@@ -922,6 +927,7 @@ mod tests {
         score.rule_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e2".parse().unwrap());
         score.experiment_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e3".parse().unwrap());
         score.dataset_item_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e4".parse().unwrap());
+        score.queue_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e6".parse().unwrap());
         score.author_user_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e5".parse().unwrap());
         score.created_at = 1_767_261_600_000_000_000;
         score.updated_at = 1_767_261_601_000_000_000;
@@ -976,6 +982,7 @@ mod tests {
             rule_id: None,
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
             author_user_id: None,
             metadata,
             created_at: 0,

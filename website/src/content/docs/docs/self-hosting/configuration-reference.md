@@ -117,6 +117,7 @@ These settings decide what an organization gets without a licence key or a plan 
 | `entitlements.defaults.max_projects` | | integer | unset (unlimited) | Active projects per organization. |
 | `entitlements.defaults.max_alert_rules` | | integer | unset (unlimited) | Alert rules per organization. |
 | `entitlements.defaults.max_active_online_rules` | | integer | unset (unlimited) | Active online rules per organization. |
+| `entitlements.defaults.max_annotation_queues` | | integer | unset (unlimited) | Annotation queues per organization (D-AQ-10). |
 
 ## `[orgs]`
 

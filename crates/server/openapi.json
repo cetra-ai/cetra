@@ -6941,6 +6941,1992 @@
         }
       }
     },
+    "/api/v1/projects/{project}/annotation-queues": {
+      "get": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "List annotation queues",
+        "description": "Queues of the project, by name then id, with their item counts over the data window. `target_trace_id` keeps the queues that hold a visible trace or span item of that trace; `target_session_id` the queues that hold a visible item of that session; both at once is 400. Readable with a read key and a read-only token.",
+        "operationId": "list_annotation_queues",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_trace_id",
+            "in": "query",
+            "description": "Only queues that hold a visible trace or span item of this trace (32 hex digits).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_session_id",
+            "in": "query",
+            "description": "Only queues that hold a visible item of this session. Not with `target_trace_id`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of annotation queues.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueuePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Create an annotation queue",
+        "description": "Creates a queue at version 1 with 1 to 50 distinct score definitions of the project, in review order. The name is unique in the project (409). A project holds at most 100 queues (409), and the org's plan may cap them (403 `plan_limit`). A session or a read-write personal access token with role member or above, or a `write` API key.",
+        "operationId": "create_annotation_queue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAnnotationQueue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}": {
+      "get": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Get an annotation queue",
+        "description": "One queue with its item counts over the data window. Any other id is 404. Readable with a read key and a read-only token.",
+        "operationId": "get_annotation_queue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Delete an annotation queue",
+        "description": "Deletes the queue and its items. The score definitions and the scores stay. Same roles as create.",
+        "operationId": "delete_annotation_queue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Update an annotation queue",
+        "description": "Changes the fields given; omitted fields are unchanged, and `\"\"` clears the description or the instructions. The score definitions, when given, replace the whole list. `version` must be the stored version, else 409 with the stored version in `detail`. A successful update raises the version by one. Same roles as create.",
+        "operationId": "update_annotation_queue",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAnnotationQueue"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated queue.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueue"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items": {
+      "get": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "List annotation queue items",
+        "description": "Items of the queue by id, optionally of one status, over the data window. An absent queue is 404. Readable with a read key and a read-only token.",
+        "operationId": "list_annotation_queue_items",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only items with this status.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/QueueItemStatus"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of queue items.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItemPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Add items to an annotation queue",
+        "description": "Adds 1 to 1 000 targets by id. A trace queue takes a `trace_id`, a span queue a `trace_id` and a `span_id`, a session queue a `session_id`. A target that is unknown, hidden by the data window, an evaluation trace, of the wrong kind for the queue, or blocked by a deletion is listed in `skipped` and not added. A target already in the queue counts as `existing`. The answer is 201 whatever the counts. A queue that would pass 100 000 items is 422 and nothing is added. Same roles as create.",
+        "operationId": "add_annotation_queue_items",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddQueueItems"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The counts and the skipped targets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddedQueueItems"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/matching": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Add the targets a filter matches to an annotation queue",
+        "description": "Adds what the queue kind's list filter matches over `from` to `to`, the same selection as the preview: at most 10 000 targets per call (`capped` says more matched; which are added is not specified). Evaluation traces are never matched. A target already in the queue counts as `existing`; a target a deletion blocks counts as `blocked` and is not added. The answer is 201 whatever the counts. A queue that would pass 100 000 items is 422 and nothing is added. Same roles as create.",
+        "operationId": "add_annotation_queue_matching",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueMatchingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The counts of the add.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueMatchingAdded"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Count the targets a filter would add to an annotation queue",
+        "description": "Counts what the queue kind's list filter matches over `from` to `to`: traces for a trace queue, spans for a span queue, sessions for a session queue. A session queue takes no `search`. At most 10 000 are counted (`capped` says more matched). Evaluation traces are never matched. Same roles as create.",
+        "operationId": "preview_annotation_queue_matching",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueueMatchingRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The number of matching targets.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueueMatchingPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}": {
+      "get": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Get an annotation queue item",
+        "description": "One item of the queue. An unknown id, an item of another queue and an item the data window hides are all 404. Readable with a read key and a read-only token.",
+        "operationId": "get_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Remove an annotation queue item",
+        "description": "Removes one item from the queue. The score definitions and the scores stay. Same roles as create.",
+        "operationId": "remove_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Complete an annotation queue item",
+        "description": "Marks a pending item completed by the caller and clears its lease. Refused with 409 while another reviewer holds a live lease, or when the item is not pending. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "complete_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The completed item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Lease an annotation queue item",
+        "description": "Takes or renews the 5-minute lease of a pending item that is free, expired or already the caller's. Another reviewer's live lease is 409 with the holder in `errors`. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "lease_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The leased item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Release an annotation queue item lease",
+        "description": "Clears the lease when the caller holds it; otherwise changes nothing. Answers 204 either way. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "release_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Released."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Reopen an annotation queue item",
+        "description": "Sets a completed or skipped item back to pending, clearing its reason and done fields. A pending item is 409. Any body is ignored. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "reopen_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reopened item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Skip an annotation queue item",
+        "description": "Marks a pending item skipped, with an optional reason, and clears its lease. The same 409s as complete. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "skip_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "item_id",
+            "in": "path",
+            "description": "Annotation queue item id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SkipQueueItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The skipped item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/annotation-queues/{id}/next": {
+      "post": {
+        "tags": [
+          "annotation_queues"
+        ],
+        "summary": "Claim the next item of an annotation queue",
+        "description": "Leases the first free pending item after `after` (by id), wrapping to the first when none follows, for 5 minutes, and releases the caller's other leases in the queue. Answers 204 with no body when nothing is free. A session or a read-write personal access token with role member or above; API keys cannot call it.",
+        "operationId": "next_annotation_queue_item",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Annotation queue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NextQueueItem"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The claimed item.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnnotationQueueItem"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "Nothing is free."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/api-keys": {
       "get": {
         "tags": [
@@ -18852,6 +20838,16 @@
             }
           },
           {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Only scores written from this annotation queue (D-AQ-6).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Inclusive `created_at` start. RFC 3339 or epoch milliseconds.",
@@ -21101,6 +23097,53 @@
         },
         "additionalProperties": false
       },
+      "AddQueueItems": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/items`.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QueueItemTarget"
+            },
+            "description": "1 to 1 000 targets."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AddedQueueItems": {
+        "type": "object",
+        "description": "The answer of an add. A target already in the queue counts as `existing`.",
+        "required": [
+          "added",
+          "existing",
+          "skipped"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets added.",
+            "minimum": 0
+          },
+          "existing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets that were already in the queue.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedQueueItem"
+            },
+            "description": "Targets that were not added: unknown, hidden, evaluation or guarded."
+          }
+        }
+      },
       "AdminLicense": {
         "type": "object",
         "description": "`GET /api/v1/admin/license`. Never contains the key.",
@@ -21733,6 +23776,207 @@
           "6h",
           "24h"
         ]
+      },
+      "AnnotationQueue": {
+        "type": "object",
+        "description": "An annotation queue with its counts.",
+        "required": [
+          "id",
+          "name",
+          "target",
+          "definition_ids",
+          "version",
+          "created_at",
+          "updated_at",
+          "counts"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/QueueCounts",
+            "description": "Item counts by status, over the items the data window shows."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "created_by": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Creator. Omitted for an API key's queue and when the user is gone."
+          },
+          "definition_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The score definitions a review fills in, in order (1 to 50)."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 1 000 characters. Omitted when none."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Queue id."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "Markdown for the reviewers, 0 to 10 000 characters. Omitted when none."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, unique in the project."
+          },
+          "target": {
+            "$ref": "#/components/schemas/QueueTarget",
+            "description": "What the items are."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last update, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Incremented by every change. A `PATCH` names the version it read."
+          }
+        }
+      },
+      "AnnotationQueueItem": {
+        "type": "object",
+        "description": "One target of a queue: a trace, a span or a session.",
+        "required": [
+          "id",
+          "queue_id",
+          "target_time",
+          "status",
+          "added_by",
+          "added_by_id",
+          "created_at"
+        ],
+        "properties": {
+          "added_by": {
+            "$ref": "#/components/schemas/QueueItemAddedBy",
+            "description": "Who added the item."
+          },
+          "added_by_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The id of the user, personal token or key that added the item."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the item was added. JSON is RFC 3339."
+          },
+          "done_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the item was completed or skipped. Omitted while pending. JSON is RFC 3339."
+          },
+          "done_by_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Who completed or skipped the item. Omitted while pending."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Item id."
+          },
+          "lease_expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the lease ends. Set only while the lease is live. JSON is RFC 3339."
+          },
+          "leased_by_user_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The reviewer who holds the lease. Set only while the lease is live."
+          },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The queue the item is in."
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Session id. Session items. Omitted otherwise."
+          },
+          "skip_reason": {
+            "type": "string",
+            "description": "Why it was skipped. Omitted unless skipped with a reason."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "Span id, 16 lowercase hex digits. Span items. Omitted otherwise."
+          },
+          "status": {
+            "$ref": "#/components/schemas/QueueItemStatus",
+            "description": "Where the item is in its review."
+          },
+          "target_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The trace's start, or the session's earliest visible trace start. JSON is RFC 3339."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Trace id, 32 lowercase hex digits. Trace and span items. Omitted otherwise."
+          }
+        }
+      },
+      "AnnotationQueueItemPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnnotationQueueItem"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "AnnotationQueuePage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AnnotationQueue"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
       },
       "ApiKey": {
         "type": "object",
@@ -22543,6 +24787,42 @@
           "notify_while_firing": {
             "type": "boolean",
             "description": "Default false."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateAnnotationQueue": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/annotation-queues`.",
+        "required": [
+          "name",
+          "target",
+          "definition_ids"
+        ],
+        "properties": {
+          "definition_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Score definitions of the project, 1 to 50, all distinct, in review order."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 1 000 characters."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "Markdown for the reviewers, 0 to 10 000 characters."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 100 characters after trimming."
+          },
+          "target": {
+            "$ref": "#/components/schemas/QueueTarget",
+            "description": "What the items are. Fixed for the queue's life."
           }
         },
         "additionalProperties": false
@@ -27136,6 +29416,18 @@
         },
         "additionalProperties": false
       },
+      "NextQueueItem": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/next`. `{}` is enough.",
+        "properties": {
+          "after": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The item to move on from: the next free item after it by id, wrapping around. Need not\nexist."
+          }
+        },
+        "additionalProperties": false
+      },
       "NotificationChannel": {
         "type": "object",
         "description": "A notification channel. The URL, the secret and header values are never returned (D-K-6).",
@@ -27521,6 +29813,12 @@
             "type": "integer",
             "format": "int64",
             "description": "Alert rules.",
+            "minimum": 0
+          },
+          "max_annotation_queues": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Annotation queues.",
             "minimum": 0
           },
           "max_projects": {
@@ -28404,6 +30702,7 @@
           "query_timeout",
           "query_too_large",
           "too_many_traces",
+          "too_many_items",
           "busy",
           "restore_mode",
           "unauthorized",
@@ -29038,6 +31337,166 @@
         },
         "additionalProperties": false
       },
+      "QueueCounts": {
+        "type": "object",
+        "description": "Item counts of a queue, by status.",
+        "required": [
+          "pending",
+          "completed",
+          "skipped"
+        ],
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items reviewed.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items not reviewed yet.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Items passed over.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueItemAddedBy": {
+        "type": "string",
+        "description": "Who added an item.",
+        "enum": [
+          "user",
+          "pat",
+          "key"
+        ]
+      },
+      "QueueItemStatus": {
+        "type": "string",
+        "description": "Where an item is in its review (D-AQ-5).",
+        "enum": [
+          "pending",
+          "completed",
+          "skipped"
+        ]
+      },
+      "QueueItemTarget": {
+        "type": "object",
+        "description": "One target to add to a queue. Exactly the fields of the queue's target are set.",
+        "properties": {
+          "session_id": {
+            "type": "string",
+            "description": "Session id. Session queues."
+          },
+          "span_id": {
+            "type": "string",
+            "description": "Span id, 16 lowercase hex digits. Span queues."
+          },
+          "trace_id": {
+            "type": "string",
+            "description": "Trace id, 32 lowercase hex digits. Trace and span queues."
+          }
+        },
+        "additionalProperties": false
+      },
+      "QueueMatchingAdded": {
+        "type": "object",
+        "description": "The answer of an add by filter. A target already in the queue counts as `existing`.",
+        "required": [
+          "added",
+          "existing",
+          "blocked",
+          "capped"
+        ],
+        "properties": {
+          "added": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets added.",
+            "minimum": 0
+          },
+          "blocked": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Matched targets not added because a deletion blocks them.",
+            "minimum": 0
+          },
+          "capped": {
+            "type": "boolean",
+            "description": "More than 10 000 targets matched: only the first 10 000 by id were considered."
+          },
+          "existing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets that were already in the queue.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueMatchingPreview": {
+        "type": "object",
+        "description": "How many targets a filter would add. `matched` is at most 10 000; `capped` says more matched.",
+        "required": [
+          "matched",
+          "capped"
+        ],
+        "properties": {
+          "capped": {
+            "type": "boolean",
+            "description": "More than 10 000 targets matched: only the first 10 000 by id are added."
+          },
+          "matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Targets the filter matches, at most 10 000.",
+            "minimum": 0
+          }
+        }
+      },
+      "QueueMatchingRequest": {
+        "type": "object",
+        "description": "Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview` and\n`POST .../items/matching`: the queue kind's list filter over a window. `search` is not taken\nby a session queue.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "Filter text over the queue kind's list: `traces`, `spans` or `sessions`."
+          },
+          "from": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Start of the window: the targets' own start, `[from, to)`."
+          },
+          "include_experiments": {
+            "type": "boolean",
+            "description": "Keep the experiment traces, as the list does. Evaluation traces are never matched."
+          },
+          "search": {
+            "type": "string",
+            "description": "Full-text search over the traces or spans. Refused on a session queue."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "End of the window, exclusive."
+          }
+        },
+        "additionalProperties": false
+      },
+      "QueueTarget": {
+        "type": "string",
+        "description": "What a queue's items are (D-AQ-2). Fixed at creation.",
+        "enum": [
+          "trace",
+          "span",
+          "session"
+        ]
+      },
       "ReasoningPart": {
         "type": "object",
         "description": "Model reasoning, separate from the user-visible text.",
@@ -29536,6 +31995,11 @@
             "$ref": "#/components/schemas/ProjectId",
             "description": "Partition key. Spec 01 `project_id`."
           },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Annotation queue the score was written from (D-AQ-6). Spec 01 `queue_id`."
+          },
           "reason": {
             "type": "string",
             "description": "Explanation. Spec 01 `reason`."
@@ -29663,6 +32127,11 @@
           "name": {
             "type": "string",
             "description": "Score name."
+          },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Annotation queue the score is written from (D-AQ-6). Not part of the derived id."
           },
           "reason": {
             "type": "string",
@@ -30515,6 +32984,37 @@
           "verification_required": {
             "type": "boolean",
             "description": "The account cannot sign in until the email is verified."
+          }
+        }
+      },
+      "SkipQueueItem": {
+        "type": "object",
+        "description": "Body of `POST .../items/{item_id}/skip`. `{}` is enough.",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "Why the item is skipped. Free text, 0 to 1 000 characters after trimming; blank is none."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SkippedQueueItem": {
+        "type": "object",
+        "description": "A target that was not added, and why.",
+        "required": [
+          "index",
+          "message"
+        ],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Position of the target in the request.",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string",
+            "description": "Why it was not added. Never the rejected value."
           }
         }
       },
@@ -31813,6 +34313,41 @@
         },
         "additionalProperties": false
       },
+      "UpdateAnnotationQueue": {
+        "type": "object",
+        "description": "Body of `PATCH /api/v1/projects/{project}/annotation-queues/{id}`. Omitted fields are\nunchanged.",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "definition_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "The whole list of score definitions, 1 to 50, all distinct, in review order."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, 0 to 1 000 characters. `\"\"` clears it."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "Markdown for the reviewers, 0 to 10 000 characters. `\"\"` clears it."
+          },
+          "name": {
+            "type": "string",
+            "description": "Display name, 1 to 100 characters after trimming."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the caller read. Must be the stored one, else `409`."
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateChannelRequest": {
         "type": "object",
         "description": "Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map.",
@@ -32833,6 +35368,10 @@
     {
       "name": "dashboards",
       "description": "Custom dashboards and their widget definitions."
+    },
+    {
+      "name": "annotation_queues",
+      "description": "Annotation queues: lists of traces, spans or sessions that reviewers label one at a time."
     },
     {
       "name": "sql",

@@ -42,5 +42,17 @@
     "path": "/acme/support-bot/alerts",
     "waitFor": "High error rate",
     "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "annotation-queues",
+    "path": "/acme/support-bot/annotation-queues",
+    "waitFor": "Relevance review",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "annotation-queue-review",
+    "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
+    "waitFor": "Complete and next",
+    "now": "2026-01-01T11:00:00Z"
   }
 ]

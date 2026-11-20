@@ -32,6 +32,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
+- Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.
+- Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).
+- `Client.annotation_queues` (Python) and `client.annotationQueues` (TypeScript): create annotation queues and add traces, spans or sessions to them.
+- Scores carry an optional `queue_id`, the annotation queue they were written from, and `GET /scores` filters by it.
 - Playground API (D-V-20 to D-V-26, D-V-33 to D-V-37): POST /playground/runs streams a model run over SSE through the org's LLM connection, traces it into the reserved cetra-playground environment (not billed), with per-user and per-org limits; cetra-playground is reserved everywhere cetra-eval is.
 - Prompt links on spans and traces (D-V-15, D-V-16): `cetra.prompt.name`/`version` and Langfuse's prompt attributes fill `prompt_name`, `prompt_version` and the traces' `prompts` list (filter with `prompts @> ['name@version']`); `GET /prompts/{name}/metrics` gives per-version cost, latency, errors and scores (D-V-17). Spans are now normalized with `schema_version` 2.
 - `cetra agents setup` and `cetra agents remove` connect Claude Code, Codex, Gemini CLI and Copilot to cetra, with a hook that reports each session's repository, branch and person.

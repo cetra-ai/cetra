@@ -298,6 +298,20 @@ Both SDKs follow these rules (D-V-14, D-V-15):
 - Before `init()`, or with the SDK disabled (no key), a fetch is a failed first fetch with the reason `sdk disabled`. The 402 pause (D-P-34) does not apply to fetches.
 - `compile` takes strings, numbers and booleans for variables, and lists of `{role, content}` mappings for placeholders. Any other value is a programming error (`TypeError`). A missing variable or placeholder, or an invalid template (including an invalid fallback, on the fetch), raises `PromptCompileError`, which names the prompt and never quotes the template or the values.
 - `client.prompts` is not cached. It uses the client's timeouts and retries: reads retry, writes are sent once.
+### Annotation queues
+
+```python
+queue = client.annotation_queues.create("Weekly review", target="trace", definition_ids=[d1, d2])
+result = client.annotation_queues.add_items(queue.id, trace_ids=["4bf92f3577b34da6a3ce929d0e0e4736"])
+items = client.annotation_queues.items(queue.id, status="pending")
+```
+
+Rules (D-AQ-8, D-AQ-11):
+- `add_items` takes exactly one of `trace_ids`, `spans` or `session_ids`, else `ValueError`; a string for a list argument is a `TypeError`. Every check runs before the first request.
+- `add_items` sends batches of 1,000 targets, each a retried `POST`. It sums `added` and `existing`, and shifts each `skipped[].index` by the batch's start, so an index is the position in the caller's list.
+- A target already in the queue counts as `existing` and keeps its review state.
+- `create`, `update` and `delete` follow the dataset writes: sent once, deletes retried as DELETE requests are. `update` takes the `version` read; a stale one is a 409.
+- The reviewer actions (lease, complete, skip, reopen) are web only: they need a person, and the SDK does not expose them.
 
 ## TypeScript API (`npm i @cetra-ai/sdk`; ESM only; Node ≥ 22.12, Bun, Deno; edge runtimes via the fetch-based exporter)
 
@@ -353,6 +367,7 @@ await cetra.flush();
 - Transport: one fetch-based exporter on every runtime (D-F-8).
 - Browser bundle (`cetra/browser`): only `feedback({ baseUrl, publicKey, traceId, spanId?, name?, value, comment? })` — no tracing. It posts spec 06's end-user feedback body to `POST {baseUrl}/api/public/feedback` with `Authorization: Bearer <pk-cetra-…>`; it imports nothing from OTel and resolves to `{ ok: boolean }`, never throwing (D-F-16).
 - Datasets/experiments: `new cetra.Client()`, `client.datasets.*`, `cetra.evaluate({ dataset, task, scorers, experimentName, metadata, concurrency, repetitions })` with the same semantics as Python.
+- Annotation queues: `client.annotationQueues.*`, the same methods in camelCase.
 
 ## Raw OpenTelemetry (no SDK)
 

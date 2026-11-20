@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ApiError,
   Client,
   currentTraceId,
   evaluate,
@@ -92,6 +93,45 @@ describe.skipIf(baseUrl === "")("e2e", () => {
       );
     } finally {
       await client.datasets.delete(created.id);
+    }
+  }, 30_000);
+
+  it("runs an annotation queue round trip", async () => {
+    // The REST client needs no init(): it reads the key and URL it is given.
+    const client = new Client({ apiKey, baseUrl });
+    // Score definitions need ManageEvaluation, which API keys cannot use (D-I-24).
+    // When the key is refused, only the create-with-unknown-definition check runs.
+    const definition = await fetch(`${baseUrl}/api/v1/projects/current/score-definitions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({ name: `e2e-ts-${uuid7()}`, data_type: "boolean" }),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (definition.status === 403) {
+      const refused = await client.annotationQueues
+        .create(`e2e-ts-${uuid7()}`, { target: "trace", definitionIds: [uuid7()] })
+        .catch((error: unknown) => error);
+      expect(refused).toBeInstanceOf(ApiError);
+      expect(refused).toMatchObject({ status: 400 });
+      return;
+    }
+    expect(definition.status).toBe(201);
+    const definitionId = ((await definition.json()) as { id: string }).id;
+
+    const queue = await client.annotationQueues.create(`e2e-ts-${uuid7()}`, {
+      target: "trace",
+      definitionIds: [definitionId],
+    });
+    try {
+      const result = await client.annotationQueues.addItems(queue.id, {
+        traceIds: [uuid7().replace(/-/g, "")],
+      });
+      expect(result.added).toBe(0);
+      expect(result.skipped[0]?.index).toBe(0);
+      expect(await client.annotationQueues.items(queue.id)).toEqual([]);
+      expect((await client.annotationQueues.list()).map((item) => item.id)).toContain(queue.id);
+    } finally {
+      await client.annotationQueues.delete(queue.id);
     }
   }, 30_000);
 

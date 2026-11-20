@@ -689,6 +689,7 @@ mod tests {
                 "rule_id",
                 "experiment_id",
                 "dataset_item_id",
+                "queue_id",
                 "author_user_id",
                 "metadata",
                 "created_at",

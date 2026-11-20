@@ -13,6 +13,7 @@ mod facets;
 mod prompts;
 mod scores;
 mod sessions;
+mod targets;
 mod traces;
 mod users;
 mod widgets;
@@ -29,7 +30,7 @@ pub use alerts::{AlertMeasure, AlertValue, AlertValueRequest, alert_value};
 pub use buckets::{Bucket, BucketWidth};
 pub use deletions::{
     FilterDeletionRequest, MAX_FILTER_DELETION_TRACES, UserDeletionScope, eval_trace_ids,
-    filter_trace_ids, user_deletion_scope,
+    filter_trace_ids, session_ids_of_traces, user_deletion_scope,
 };
 pub use experiments::{
     ExperimentScore, ExperimentScoreMean, ExperimentTrace, MAX_EXPERIMENT_SCORES,
@@ -51,6 +52,11 @@ pub use sessions::{
     MAX_SESSION_TURNS, SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW,
     SESSION_LAST_OUTPUT_PREVIEW, SessionDetailData, SessionExtrasRequest, SessionListRequest,
     SessionSort, session_detail, session_extras, session_list,
+};
+pub use targets::{
+    FilteredTargets, MAX_TARGET_IDS, SessionTarget, SessionTargetFilter, SpanTarget,
+    SpanTargetFilter, TraceTarget, filter_session_targets, filter_span_targets, session_targets,
+    span_targets, trace_targets,
 };
 pub use traces::{
     MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS,

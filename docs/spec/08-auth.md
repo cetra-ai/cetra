@@ -105,6 +105,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | Run the playground: model runs through an LLM connection (D-V-26) | | ✓ | ✓ | ✓ |
 | Create prompt versions, move unprotected prompt labels (D-V-13) | | ✓ | ✓ | ✓ |
 | Move protected prompt labels, edit the protected list (D-V-10) | | | ✓ | ✓ |
+| Create and edit annotation queues, add and remove items (D-AQ-11) | | ✓ | ✓ | ✓ |
 | Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
@@ -117,6 +118,8 @@ Prompts: every project member and a `read` key read them; members and above, rea
 Playground runs: `ProjectPerm::RunPlayground`. Members and above run through a session or a read-write PAT, and never with an API key, because a run spends the org's provider money (D-V-26). Viewers open the playground and see its traces, but cannot run.
 
 Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
+
+Annotation queues: `ManageQueues` (member, a `write` key, a read-write PAT) for queues and items; `Review` (member, sessions and read-write PATs only) for next, lease, complete, skip and reopen (D-AQ-11).
 
 LLM connections belong to the org. Org admins and owners manage and test them, and every org member can list them without their keys (D-I-4, D-I-24).
 

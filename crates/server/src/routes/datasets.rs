@@ -6308,6 +6308,7 @@ mod tests {
             rule_id: None,
             experiment_id: Some(experiment),
             dataset_item_id: None,
+            queue_id: None,
             author_user_id: None,
             metadata: std::collections::BTreeMap::new(),
             created_at: now,

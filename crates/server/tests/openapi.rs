@@ -312,6 +312,91 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/annotation-queues",
+        "list_annotation_queues",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues",
+        "create_annotation_queue",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "get_annotation_queue",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "update_annotation_queue",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "delete_annotation_queue",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "list_annotation_queue_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "add_annotation_queue_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+        "preview_annotation_queue_matching",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+        "add_annotation_queue_matching",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "get_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "remove_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/next",
+        "next_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "lease_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "release_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+        "complete_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+        "skip_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+        "reopen_annotation_queue_item",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/dashboards",
         "list_dashboards",
     ),
@@ -927,6 +1012,7 @@ const TAGS: &[&str] = &[
     "schema",
     "saved_views",
     "dashboards",
+    "annotation_queues",
     "sql",
     "media",
     "internal",
@@ -1257,8 +1343,35 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
-        } else if *id == "get_dataset_export" {
+        } else if *id == "get_dataset_export"
+            || *id == "list_annotation_queues"
+            || *id == "get_annotation_queue"
+            || *id == "delete_annotation_queue"
+            || *id == "list_annotation_queue_items"
+            || *id == "get_annotation_queue_item"
+            || *id == "remove_annotation_queue_item"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "add_annotation_queue_items" {
+            // The test only collects 4xx codes; the add and preview operations also declare 503.
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
+        } else if *id == "preview_annotation_queue_matching" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
+        } else if *id == "add_annotation_queue_matching" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
+        } else if *id == "next_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
+        } else if *id == "skip_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "lease_annotation_queue_item"
+            || *id == "complete_annotation_queue_item"
+            || *id == "reopen_annotation_queue_item"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "release_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "create_annotation_queue" || *id == "update_annotation_queue" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_experiment_finish" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_experiment" {
@@ -1640,6 +1753,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "DashboardPage",
+        "AnnotationQueuePage",
+        "AnnotationQueueItemPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",

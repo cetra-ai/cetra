@@ -5,6 +5,7 @@
 """
 
 import os
+import secrets
 import time
 from collections.abc import Callable
 from typing import Any
@@ -121,3 +122,40 @@ def test_dataset_experiment_round_trip() -> None:
     finally:
         cetra.shutdown()
         client.datasets.delete(dataset.id)
+
+
+def test_annotation_queue_round_trip() -> None:
+    base_url = os.environ["CETRA_E2E_BASE_URL"]
+    key = os.environ["CETRA_E2E_API_KEY"]
+    client = cetra.Client(api_key=key, base_url=base_url)
+    # Score definitions need ManageEvaluation, which API keys lack (D-I-24). This file has
+    # no session or PAT sign-in, so a refused key skips the definition step and checks
+    # that a queue with an unknown definition is refused instead.
+    definition = requests.post(
+        f"{base_url}/api/v1/projects/current/score-definitions",
+        json={"name": f"e2e-py-{cetra.uuid7()}", "data_type": "boolean"},
+        headers={"Authorization": f"Bearer {key}"},
+        timeout=REQUEST_TIMEOUT_S,
+    )
+    if definition.status_code == 403:
+        with pytest.raises(cetra.ApiError) as refused:
+            client.annotation_queues.create(
+                f"e2e-py-{cetra.uuid7()}", target="trace", definition_ids=[cetra.uuid7()]
+            )
+        assert refused.value.status == 400
+        return
+    definition.raise_for_status()
+    definition_id: str = definition.json()["id"]
+
+    queue = client.annotation_queues.create(
+        f"e2e-py-{cetra.uuid7()}", target="trace", definition_ids=[definition_id]
+    )
+    try:
+        # A random trace id is unknown to the server: it is skipped, at index 0.
+        result = client.annotation_queues.add_items(queue.id, trace_ids=[secrets.token_hex(16)])
+        assert result.added == 0
+        assert result.skipped[0].index == 0
+        assert client.annotation_queues.items(queue.id) == []
+        assert queue.id in {listed.id for listed in client.annotation_queues.list()}
+    finally:
+        client.annotation_queues.delete(queue.id)

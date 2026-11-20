@@ -140,6 +140,7 @@ fn score_of(body: FeedbackRequest) -> ScoreCreate {
         metadata: BTreeMap::new(),
         experiment_id: None,
         dataset_item_id: None,
+        queue_id: None,
     }
 }
 

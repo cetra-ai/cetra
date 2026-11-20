@@ -49,6 +49,9 @@ pub struct ScoreCreate {
     /// Dataset item (stable id) the score is about; set together with `experiment_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_item_id: Option<Uuid>,
+    /// Annotation queue the score is written from (D-AQ-6). Not part of the derived id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<Uuid>,
 }
 
 /// `POST …/scores` and `POST /api/v1/scores` body.
@@ -134,6 +137,9 @@ pub struct ScoreListParams {
     /// Scores written by this online rule.
     #[serde(default)]
     pub rule_id: Option<Uuid>,
+    /// Only scores written from this annotation queue (D-AQ-6).
+    #[serde(default)]
+    pub queue_id: Option<Uuid>,
     /// Inclusive `created_at` start. RFC 3339 or epoch milliseconds.
     #[serde(default)]
     pub from: Option<TimeParam>,

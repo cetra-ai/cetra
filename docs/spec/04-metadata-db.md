@@ -297,6 +297,63 @@ A **Widget** is `{id, title, layout: {x, y, w, h}, kind, chart?, query?}`:
 
 Limits: names 1–100 characters (not unique), 50 widgets per dashboard, `definition` at most 256 KiB, 100 dashboards per project. An invalid definition is `400 bad_request` with the path of each error in `errors` (e.g. `widgets[3].query.measures[0].field`). A definition stored before a column was removed still loads; the widget's query answers its own 400.
 
+## Annotation queues
+
+Annotation queues (track AQ, D-AQ-2 to D-AQ-9): a queue of trace, span or session items that members review in order against an ordered list of score definitions. Each queue has one target kind, fixed at creation (D-AQ-2).
+
+```sql
+-- Annotation queues (track AQ, D-AQ-2–D-AQ-9).
+CREATE TABLE annotation_queues (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  instructions TEXT,                  -- Markdown
+  target TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE annotation_queue_definitions (
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  definition_id TEXT NOT NULL REFERENCES score_definitions(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (queue_id, definition_id)
+);
+
+CREATE TABLE annotation_queue_items (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id TEXT,                      -- lowercase hex; trace and span items
+  span_id TEXT,                       -- lowercase hex; span items
+  session_id TEXT,                    -- session items
+  target_time INTEGER NOT NULL,       -- ns: trace start, or the session's earliest visible trace start
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'skipped')),
+  skip_reason TEXT,
+  leased_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  lease_expires_at INTEGER,
+  done_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  done_at INTEGER,
+  added_by_kind TEXT NOT NULL CHECK (added_by_kind IN ('user', 'pat', 'key')),
+  added_by_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX annotation_queue_items_target ON annotation_queue_items(
+  queue_id, coalesce(trace_id, ''), coalesce(span_id, ''), coalesce(session_id, '')
+);
+CREATE INDEX annotation_queue_items_claim ON annotation_queue_items(queue_id, status, id);
+CREATE INDEX annotation_queue_items_trace ON annotation_queue_items(project_id, trace_id) WHERE trace_id IS NOT NULL;
+CREATE INDEX annotation_queue_items_session ON annotation_queue_items(project_id, session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX annotation_queue_items_time ON annotation_queue_items(project_id, target_time);
+```
+
+One kind per queue (D-AQ-2). Items are unique per target within a queue. `target_time` drives retention and the data window (D-AQ-9). The lease is `leased_by_user_id` plus `lease_expires_at`: 5 minutes, claimed atomically on the writer (D-AQ-4). At most 100 queues per project, 100 000 items per queue, 50 definitions per queue.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).

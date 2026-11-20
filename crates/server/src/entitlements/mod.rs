@@ -73,7 +73,7 @@ impl FeatureSet {
     }
 }
 
-/// The nine limits of D-P-13 for one org. `None` is unlimited.
+/// The ten limits of D-P-13 for one org. `None` is unlimited.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct Limits {
     pub(crate) units_included: Option<u64>,
@@ -85,6 +85,7 @@ pub(crate) struct Limits {
     pub(crate) max_projects: Option<u64>,
     pub(crate) max_alert_rules: Option<u64>,
     pub(crate) max_active_online_rules: Option<u64>,
+    pub(crate) max_annotation_queues: Option<u64>,
 }
 
 /// The instance defaults, resolved from config once (`[entitlements.defaults]`).
@@ -121,6 +122,7 @@ impl Defaults {
                 max_projects: config.max_projects,
                 max_alert_rules: config.max_alert_rules,
                 max_active_online_rules: config.max_active_online_rules,
+                max_annotation_queues: config.max_annotation_queues,
             },
         }
     }
