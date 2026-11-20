@@ -18,7 +18,11 @@ const BASELINE_ID = "01900000-0000-7000-8000-000000000e01";
 const ITEM_ID = "01900000-0000-7000-8000-000000000d01";
 
 /** Writes that later sub-phases add under the covered prefixes. */
-const LATER_TRACKS: string[] = [];
+const LATER_TRACKS: string[] = [
+  // Track AS M4 adds the org assistant setting page and its mocks.
+  "post_org_assistant_test",
+  "put_org_assistant",
+];
 
 beforeEach(() => {
   server.use(...writeHandlers);
