@@ -433,6 +433,35 @@ fn stubbed_parts(conversation_id: &str, seq: i64, parts: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn insert_message_raw(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    seq: i64,
+    role: &str,
+    parts: &str,
+    context: Option<&str>,
+    stub_after: Option<i64>,
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO assistant_messages \
+         (conversation_id, seq, role, parts, context, stub_after, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(conversation.to_string())
+    .bind(seq)
+    .bind(role)
+    .bind(parts)
+    .bind(context)
+    .bind(stub_after)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::meta::{MetaDb, orgs, projects, test_db, users};
@@ -519,34 +548,6 @@ mod tests {
     /// Raw SQL with no binds, for status and feedback changes the store does not make yet.
     async fn raw_on(conn: &mut SqliteConnection, sql: &'static str) -> Result<(), MetaError> {
         sqlx::query(sql).execute(&mut *conn).await?;
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn insert_message(
-        conn: &mut SqliteConnection,
-        conversation: Uuid,
-        seq: i64,
-        role: &str,
-        parts: &str,
-        context: Option<&str>,
-        stub_after: Option<i64>,
-        now: i64,
-    ) -> Result<(), MetaError> {
-        sqlx::query(
-            "INSERT INTO assistant_messages \
-             (conversation_id, seq, role, parts, context, stub_after, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(conversation.to_string())
-        .bind(seq)
-        .bind(role)
-        .bind(parts)
-        .bind(context)
-        .bind(stub_after)
-        .bind(now)
-        .execute(&mut *conn)
-        .await?;
         Ok(())
     }
 
@@ -725,8 +726,8 @@ mod tests {
         let created = create(&db, w.project, w.owner, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, created.id, 1, "user", "[]", None, None, 10).await?;
-                insert_message(conn, created.id, 2, "assistant", "[]", None, None, 10).await
+                insert_message_raw(conn, created.id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, created.id, 2, "assistant", "[]", None, None, 10).await
             })
         })
         .await
@@ -776,7 +777,7 @@ mod tests {
         let created = create(&db, w.project, w.owner, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(
+                insert_message_raw(
                     conn,
                     created.id,
                     2,
@@ -787,7 +788,7 @@ mod tests {
                     10,
                 )
                 .await?;
-                insert_message(
+                insert_message_raw(
                     conn,
                     created.id,
                     1,
@@ -798,7 +799,7 @@ mod tests {
                     10,
                 )
                 .await?;
-                insert_message(conn, created.id, 3, "assistant", "[]", None, None, 10).await
+                insert_message_raw(conn, created.id, 3, "assistant", "[]", None, None, 10).await
             })
         })
         .await
@@ -817,9 +818,9 @@ mod tests {
         let created = create(&db, w.project, w.owner, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, created.id, 1, "user", "[]", None, None, 10).await?;
-                insert_message(conn, created.id, 2, "assistant", "[]", None, None, 10).await?;
-                insert_message(conn, created.id, 3, "tool", "[]", None, None, 10).await?;
+                insert_message_raw(conn, created.id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, created.id, 2, "assistant", "[]", None, None, 10).await?;
+                insert_message_raw(conn, created.id, 3, "tool", "[]", None, None, 10).await?;
                 raw_on(
                     conn,
                     "UPDATE assistant_messages SET status = 'cancelled', feedback = 'up' WHERE seq = 2",
@@ -889,9 +890,9 @@ mod tests {
         let b = create(&db, w.project, w.owner, 20).await;
         let c = create(&db, w.project, w.owner, 30).await;
         db.write(move |conn| {
-            Box::pin(
-                async move { insert_message(conn, c.id, 1, "user", "[]", None, None, 30).await },
-            )
+            Box::pin(async move {
+                insert_message_raw(conn, c.id, 1, "user", "[]", None, None, 30).await
+            })
         })
         .await
         .unwrap();
@@ -930,7 +931,7 @@ mod tests {
         let second_parts = r#"[{"type":"tool_result","id":"c2","name":"query_sql","ok":true,"result":{"rows":[2]},"size_bytes":12,"rows":1,"stubbed":false}]"#;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(
+                insert_message_raw(
                     conn,
                     created.id,
                     1,
@@ -941,7 +942,7 @@ mod tests {
                     10,
                 )
                 .await?;
-                insert_message(
+                insert_message_raw(
                     conn,
                     created.id,
                     2,
@@ -952,7 +953,7 @@ mod tests {
                     10,
                 )
                 .await?;
-                insert_message(
+                insert_message_raw(
                     conn,
                     created.id,
                     3,
@@ -1006,7 +1007,8 @@ mod tests {
         let created = create(&db, w.project, w.owner, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, created.id, 1, "tool", "not json", None, Some(10), 10).await
+                insert_message_raw(conn, created.id, 1, "tool", "not json", None, Some(10), 10)
+                    .await
             })
         })
         .await
@@ -1030,7 +1032,8 @@ mod tests {
         db.write(move |conn| {
             Box::pin(async move {
                 for seq in 1..=501_i64 {
-                    insert_message(conn, created.id, seq, "tool", "[]", None, Some(10), 10).await?;
+                    insert_message_raw(conn, created.id, seq, "tool", "[]", None, Some(10), 10)
+                        .await?;
                 }
                 Ok(())
             })
@@ -1058,7 +1061,7 @@ mod tests {
         let in_project = create(&db, w.project, w.owner, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, in_project.id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, in_project.id, 1, "user", "[]", None, None, 10).await?;
                 sqlx::query("DELETE FROM projects WHERE id = ?")
                     .bind(w.project.to_string())
                     .execute(&mut *conn)
@@ -1075,7 +1078,7 @@ mod tests {
         let by_user = create(&db, w.second, w.other, 10).await;
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, by_user.id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, by_user.id, 1, "user", "[]", None, None, 10).await?;
                 sqlx::query("DELETE FROM users WHERE id = ?")
                     .bind(w.other.to_string())
                     .execute(&mut *conn)
@@ -1093,7 +1096,7 @@ mod tests {
         let org = w.org.clone();
         db.write(move |conn| {
             Box::pin(async move {
-                insert_message(conn, by_org.id, 1, "user", "[]", None, None, 10).await?;
+                insert_message_raw(conn, by_org.id, 1, "user", "[]", None, None, 10).await?;
                 sqlx::query("DELETE FROM orgs WHERE id = ?")
                     .bind(org)
                     .execute(&mut *conn)
