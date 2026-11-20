@@ -8,6 +8,7 @@ import { liveScoreDefinitionsQuery } from "@/api/queries-evaluation";
 import { useCreateIssueSource, usePatchIssueSource } from "@/api/queries-issues";
 import { connectionsInit } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
+import { ChannelCheckboxes } from "@/components/alerts/channel-checkboxes";
 import { DisabledReason } from "@/components/disabled-reason";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
@@ -82,6 +83,8 @@ interface FormValues {
   /** The budget in USD, as typed. */
   budget: string;
   period: Period;
+  /** The notification channels, in the order they were ticked. */
+  channelIds: string[];
 }
 
 function percentText(rate: number): string {
@@ -112,6 +115,7 @@ function initialValues(source: Source | undefined): FormValues {
       limitSpend: false,
       budget: "",
       period: "day",
+      channelIds: [],
     };
   }
   return {
@@ -132,6 +136,7 @@ function initialValues(source: Source | undefined): FormValues {
     limitSpend: source.budget_usd !== undefined,
     budget: source.budget_usd !== undefined ? String(source.budget_usd) : "",
     period: source.budget_period ?? "day",
+    channelIds: source.channel_ids ?? [],
   };
 }
 
@@ -217,6 +222,7 @@ function createBodyOf(values: FormValues): Schema<"CreateIssueSourceRequest"> {
     name: values.name.trim(),
     kind: values.kind,
     enabled: values.enabled,
+    channel_ids: values.channelIds,
     ...(filter.length > 0 ? { filter } : {}),
   };
   if (!isLlm(values.kind)) {
@@ -258,6 +264,9 @@ function patchBodyOf(values: FormValues, source: Source): Schema<"UpdateIssueSou
   }
   if (values.enabled !== source.enabled) {
     body.enabled = values.enabled;
+  }
+  if (!sameNames(values.channelIds, source.channel_ids ?? [])) {
+    body.channel_ids = values.channelIds;
   }
   if (!isLlm(source.kind)) {
     return body;
@@ -341,6 +350,7 @@ const SHOWN_FIELDS = new Set([
   "min_issue_size",
   "budget_usd",
   "budget_period",
+  "channel_ids",
 ]);
 
 /** Where a save's error goes: under the control that shows it, or the form-level alert. */
@@ -871,6 +881,31 @@ export function SourceForm({
             </div>
           </section>
         ) : null}
+
+        <fieldset
+          aria-labelledby="source-channels-label"
+          aria-describedby="source-channels-help"
+          className="flex flex-col gap-2"
+        >
+          <span id="source-channels-label" className="text-body leading-none font-medium">
+            Notifications
+          </span>
+          <p id="source-channels-help" className="text-caption text-muted-foreground">
+            New and regressed issues are sent to these channels, in one message per source at most
+            every 10 minutes.
+          </p>
+          <ChannelCheckboxes
+            org={org}
+            project={project}
+            idPrefix="source"
+            selected={values.channelIds}
+            onToggle={(id, checked) => {
+              set({ channelIds: toggled(values.channelIds, id, checked) });
+            }}
+            disabled={pending}
+            error={errors.channel_ids}
+          />
+        </fieldset>
 
         <div className="flex items-center gap-2">
           <Switch

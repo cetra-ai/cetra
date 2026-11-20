@@ -2,18 +2,30 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
+import { SLACK_CHANNEL_ID } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
+import channelsFixture from "../../../../../../../fixtures/api/static/channels.json";
 import sourceFixture from "../../../../../../../fixtures/api/static/issue-source.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const SOURCE_ID = sourceFixture.id;
 const EDIT_URL = `/acme/support-bot/issue-sources/${SOURCE_ID}/edit`;
 const LIST_URL = "/acme/support-bot/issue-sources";
+const EMAIL_ID = channelsFixture.data[0].id;
 
 /** Serves the fixture source on its detail route. */
 function found() {
   server.use(
     http.get("/api/v1/projects/:project/issue-sources/:id", () => HttpResponse.json(sourceFixture)),
+  );
+}
+
+/** Serves the fixture source with the given notification channels on its detail route. */
+function foundWithChannels(channelIds: string[]) {
+  server.use(
+    http.get("/api/v1/projects/:project/issue-sources/:id", () =>
+      HttpResponse.json({ ...sourceFixture, channel_ids: channelIds }),
+    ),
   );
 }
 
@@ -56,6 +68,39 @@ it("sends only the changed fields", async () => {
   await waitFor(() => expect(patched.body()).toEqual({ name: "Errors v2" }));
   await waitFor(() => expect(router.state.location.pathname).toBe(LIST_URL));
   await waitFor(() => expect(router.state.status).toBe("idle"));
+});
+
+it("shows the stored channels ticked", async () => {
+  foundWithChannels([EMAIL_ID, SLACK_CHANNEL_ID]);
+  await renderApp(EDIT_URL);
+
+  expect(await screen.findByRole("checkbox", { name: "On-call email (Email)" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Team Slack (Slack)" })).toBeChecked();
+  expect(screen.getByRole("checkbox", { name: "Pager webhook (Webhook)" })).not.toBeChecked();
+});
+
+it("sends the channels that are left when one is unticked", async () => {
+  foundWithChannels([EMAIL_ID, SLACK_CHANNEL_ID]);
+  const patched = capturePatch();
+  const { user } = await renderApp(EDIT_URL);
+
+  await user.click(await screen.findByRole("checkbox", { name: "Team Slack (Slack)" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(patched.body()).toEqual({ channel_ids: [EMAIL_ID] }));
+});
+
+it("sends no channel list when the channels are unchanged", async () => {
+  foundWithChannels([EMAIL_ID, SLACK_CHANNEL_ID]);
+  const patched = capturePatch();
+  const { user } = await renderApp(EDIT_URL);
+
+  const name = await screen.findByLabelText("Name");
+  await user.clear(name);
+  await user.type(name, "Errors v2");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+
+  await waitFor(() => expect(patched.body()).toEqual({ name: "Errors v2" }));
 });
 
 it("sends an empty filter to clear it", async () => {
