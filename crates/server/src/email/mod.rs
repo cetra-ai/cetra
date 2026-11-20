@@ -16,6 +16,7 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use minijinja::{AutoEscape, Environment, Value, context};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
+use serde::Serialize;
 
 use crate::api::account::OrgRole;
 use crate::config::{ServerConfig, SmtpUrl, Tls};
@@ -47,6 +48,14 @@ const TEMPLATES: &[(&str, &str)] = &[
     ("test.html", include_str!("templates/test.html")),
     ("alert.txt", include_str!("templates/alert.txt")),
     ("alert.html", include_str!("templates/alert.html")),
+    (
+        "issue_notification.txt",
+        include_str!("templates/issue_notification.txt"),
+    ),
+    (
+        "issue_notification.html",
+        include_str!("templates/issue_notification.html"),
+    ),
     (
         "usage_notice.txt",
         include_str!("templates/usage_notice.txt"),
@@ -95,6 +104,18 @@ pub(crate) enum Email {
         rule_url: String,
         traces_url: String,
     },
+    /// New or regressed issues of a source (D-IC-21).
+    Issues {
+        source_name: String,
+        project_name: String,
+        /// `items.len() + more`.
+        total: u64,
+        /// At most 20; titles cut to 100 characters.
+        items: Vec<IssueLine>,
+        more: u64,
+        /// `<public_url>/<org slug>/<project slug>/issues?source=<source id>`.
+        issues_url: String,
+    },
     /// The month's usage reached 80 % or 100 % of `units_included` (D-P-38), sent to owners.
     UsageNotice {
         /// Org display name.
@@ -110,6 +131,21 @@ pub(crate) enum Email {
         /// `<public_url>/<org slug>/settings/plan`.
         url: String,
     },
+}
+
+/// One line of an issue notification email.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct IssueLine {
+    /// `new` or `regressed`.
+    pub(crate) kind: &'static str,
+    pub(crate) title: String,
+    /// The issue page URL.
+    pub(crate) url: String,
+}
+
+/// `issue` for one, `issues` otherwise (Q9). Used by every issue message.
+pub(crate) fn issues_noun(total: u64) -> &'static str {
+    if total == 1 { "issue" } else { "issues" }
 }
 
 /// Subject, plain text, and HTML for one [`Email`].
@@ -369,6 +405,29 @@ impl Mailer {
                     traces_url => traces_url,
                 },
             ),
+            Email::Issues {
+                source_name,
+                project_name,
+                total,
+                items,
+                more,
+                issues_url,
+            } => {
+                let items_values: Vec<Value> = items.iter().map(Value::from_serialize).collect();
+                (
+                    "issue_notification.txt",
+                    "issue_notification.html",
+                    context! {
+                        source_name => source_name,
+                        project_name => project_name,
+                        total => *total,
+                        noun => issues_noun(*total),
+                        items => items_values,
+                        more => *more,
+                        issues_url => issues_url,
+                    },
+                )
+            }
         };
         Ok(Rendered {
             subject,
@@ -597,6 +656,12 @@ fn subject(email: &Email) -> String {
         Email::Alert {
             state, rule_name, ..
         } => format!("[{PRODUCT}] {state}: {rule_name}"),
+        Email::Issues {
+            source_name, total, ..
+        } => format!(
+            "[{PRODUCT}] {total} new or regressed {}: {source_name}",
+            issues_noun(*total)
+        ),
     }
 }
 
@@ -607,6 +672,7 @@ fn template_name(email: &Email) -> &'static str {
         Email::VerifyEmail { .. } => "verify_email",
         Email::Test => "test",
         Email::Alert { .. } => "alert",
+        Email::Issues { .. } => "issue_notification",
         Email::UsageNotice { .. } => "usage_notice",
     }
 }
@@ -822,6 +888,13 @@ mod tests {
         assert!(without.text.contains("as viewer"));
         assert!(!without.text.contains("invited you"));
         assert!(without.html.contains("as viewer"));
+    }
+
+    #[test]
+    fn issues_noun_is_singular_for_one() {
+        assert_eq!(super::issues_noun(0), "issues");
+        assert_eq!(super::issues_noun(1), "issue");
+        assert_eq!(super::issues_noun(2), "issues");
     }
 
     #[test]

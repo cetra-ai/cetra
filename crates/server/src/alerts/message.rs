@@ -1,5 +1,7 @@
 //! Notification bodies and links (spec 07 § Channels, D-K-8).
 
+use std::fmt;
+
 use serde::Serialize;
 use url::form_urlencoded::Serializer;
 use uuid::Uuid;
@@ -10,7 +12,8 @@ use cetra_core::time_serde;
 
 use crate::api::alerts::{AlertMetric, AlertWindow, Comparator};
 use crate::config::PublicUrl;
-use crate::email::Email;
+use crate::email::{Email, IssueLine, issues_noun};
+use crate::meta::issue_links::{DIGEST_ITEMS, DigestItem, DigestKind};
 
 /// Why a message is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +283,183 @@ pub(crate) fn email(notice: &Notice) -> Email {
     }
 }
 
+/// Everything an issue notification shows (D-IC-21). Never log it: it holds titles and names.
+#[derive(Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct IssuesNotice {
+    pub(crate) notification_id: Uuid,
+    pub(crate) source_id: Uuid,
+    pub(crate) source_name: String,
+    pub(crate) project_id: ProjectId,
+    pub(crate) project_name: String,
+    pub(crate) items: Vec<DigestItem>,
+    pub(crate) more: u64,
+    /// When the notification was recorded.
+    pub(crate) occurred_at: i64,
+    /// `<public_url>/<org_slug>/<project_slug>/issues?source=<source id>`.
+    pub(crate) issues_url: String,
+    /// The issue page URL of each item, in the order of `items`.
+    pub(crate) issue_urls: Vec<String>,
+}
+
+impl fmt::Debug for IssuesNotice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuesNotice")
+            .field("items", &self.items.len())
+            .field("more", &self.more)
+            .finish()
+    }
+}
+
+/// `<public_url>/<org_slug>/<project_slug>/issues/<issue_id>`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn issue_url(
+    public_url: &PublicUrl,
+    org_slug: &str,
+    project_slug: &str,
+    issue_id: Uuid,
+) -> String {
+    public_url.join(&format!("/{org_slug}/{project_slug}/issues/{issue_id}"))
+}
+
+/// `<public_url>/<org_slug>/<project_slug>/issues?source=<source_id>`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn issues_url(
+    public_url: &PublicUrl,
+    org_slug: &str,
+    project_slug: &str,
+    source_id: Uuid,
+) -> String {
+    public_url.join(&format!(
+        "/{org_slug}/{project_slug}/issues?source={source_id}"
+    ))
+}
+
+/// `new` for a created issue, `regressed` for a regressed one.
+#[cfg_attr(not(test), allow(dead_code))]
+fn kind_word(kind: DigestKind) -> &'static str {
+    match kind {
+        DigestKind::Created => "new",
+        DigestKind::Regressed => "regressed",
+    }
+}
+
+/// An issue title cut to 100 characters (Q7).
+#[cfg_attr(not(test), allow(dead_code))]
+fn cut_title(title: &str) -> String {
+    title.chars().take(100).collect()
+}
+
+/// `items.len() + more`: the number of new or regressed issues in the notification.
+#[cfg_attr(not(test), allow(dead_code))]
+fn total(notice: &IssuesNotice) -> u64 {
+    u64::try_from(notice.items.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(notice.more)
+}
+
+/// The Slack Block Kit body of an issue notification. The sender serializes it. `issue_urls`
+/// is read in step with `items`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn issues_slack_body(notice: &IssuesNotice) -> serde_json::Value {
+    let total = total(notice);
+    // Slack limits a header to 150 characters. The header is plain text: it is not escaped.
+    let header: String = format!(
+        "{total} new or regressed {} in {}",
+        issues_noun(total),
+        notice.source_name
+    )
+    .chars()
+    .take(150)
+    .collect();
+    let text = slack_escape(&header);
+    let mut blocks =
+        vec![serde_json::json!({"type": "header", "text": {"type": "plain_text", "text": header}})];
+    for (item, url) in notice.items.iter().zip(&notice.issue_urls) {
+        // Cut the raw title, then escape, so an entity is never split. `|` would end the link
+        // text early, so it becomes `¦`.
+        let title = slack_escape(&cut_title(&item.title)).replace('|', "¦");
+        blocks.push(serde_json::json!({"type": "section", "text": {
+            "type": "mrkdwn",
+            "text": format!("• *{}* <{url}|{title}>", kind_word(item.kind)),
+        }}));
+    }
+    if notice.more > 0 {
+        blocks.push(serde_json::json!({"type": "context", "elements": [
+            {"type": "mrkdwn", "text": format!("and {} more", notice.more)},
+        ]}));
+    }
+    blocks.push(serde_json::json!({"type": "actions", "elements": [
+        {"type": "button", "text": {"type": "plain_text", "text": "View issues"}, "url": notice.issues_url},
+    ]}));
+    serde_json::json!({"text": text, "blocks": blocks})
+}
+
+/// The `issues.detected` webhook body (D-IC-21, Q1). Its items hold `issue_id`, `kind` and the
+/// whole `title`, and no URL.
+#[derive(Debug, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct IssuesPayload<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) notification_id: Uuid,
+    #[serde(with = "time_serde")]
+    pub(crate) occurred_at: i64,
+    pub(crate) source_id: Uuid,
+    pub(crate) source_name: &'a str,
+    pub(crate) project: WebhookProject<'a>,
+    pub(crate) items: &'a [DigestItem],
+    pub(crate) more: u64,
+    pub(crate) issues_url: &'a str,
+}
+
+/// The signed `issues.detected` webhook body. The payload holds strings, numbers and UUIDs
+/// only, so serializing it cannot fail.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn issues_webhook_body(notice: &IssuesNotice) -> Vec<u8> {
+    let payload = IssuesPayload {
+        kind: "issues.detected",
+        notification_id: notice.notification_id,
+        occurred_at: notice.occurred_at,
+        source_id: notice.source_id,
+        source_name: &notice.source_name,
+        project: WebhookProject {
+            id: notice.project_id,
+            name: &notice.project_name,
+        },
+        items: &notice.items,
+        more: notice.more,
+        issues_url: &notice.issues_url,
+    };
+    serde_json::to_vec(&payload).unwrap_or_default()
+}
+
+/// The email for an issue notification. Titles are cut to 100 characters; at most
+/// [`DIGEST_ITEMS`] lines.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn issues_email(notice: &IssuesNotice) -> Email {
+    let items = notice
+        .items
+        .iter()
+        .zip(&notice.issue_urls)
+        .take(DIGEST_ITEMS)
+        .map(|(item, url)| IssueLine {
+            kind: kind_word(item.kind),
+            title: cut_title(&item.title),
+            url: url.clone(),
+        })
+        .collect();
+    Email::Issues {
+        source_name: notice.source_name.clone(),
+        project_name: notice.project_name.clone(),
+        total: total(notice),
+        items,
+        more: notice.more,
+        issues_url: notice.issues_url.clone(),
+    }
+}
+
 /// A sample notice: error_rate, gt 0.05, 5m, value 0.125, count 48, window [now − 5 min, now).
 #[cfg(test)]
 pub(crate) fn sample_notice(kind: MessageKind, now: i64) -> Notice {
@@ -309,6 +489,8 @@ pub(crate) fn sample_notice(kind: MessageKind, now: i64) -> Notice {
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
+
+    use crate::email::Mailer;
 
     use super::*;
 
@@ -441,6 +623,262 @@ mod tests {
             panic!("an alert email");
         };
         assert_eq!((state, value.as_str()), ("No data", "no data"));
+    }
+
+    /// `count` items, alternately created and regressed, plus `more` further issues.
+    fn sample_issues_notice(count: usize, more: u64) -> IssuesNotice {
+        let items: Vec<DigestItem> = (0..count)
+            .map(|index| DigestItem {
+                issue_id: Uuid::now_v7(),
+                kind: if index % 2 == 0 {
+                    DigestKind::Created
+                } else {
+                    DigestKind::Regressed
+                },
+                title: format!("Timeout in tool {index}"),
+            })
+            .collect();
+        let issue_urls = items
+            .iter()
+            .map(|item| {
+                format!(
+                    "https://obs.example.com/acme/support-bot/issues/{}",
+                    item.issue_id
+                )
+            })
+            .collect();
+        IssuesNotice {
+            notification_id: Uuid::now_v7(),
+            source_id: Uuid::now_v7(),
+            source_name: "Errors".to_owned(),
+            project_id: "01900000-0000-7000-8000-000000000001"
+                .parse()
+                .expect("a project id"),
+            project_name: "Support bot".to_owned(),
+            items,
+            more,
+            occurred_at: 1_000_000_000_000,
+            issues_url: "https://obs.example.com/acme/support-bot/issues?source=s".to_owned(),
+            issue_urls,
+        }
+    }
+
+    fn issues_blocks(notice: &IssuesNotice) -> Vec<Value> {
+        let body = issues_slack_body(notice);
+        body["blocks"].as_array().expect("blocks").clone()
+    }
+
+    #[test]
+    fn issue_urls_are_built_from_the_public_url() {
+        let id = Uuid::parse_str("01900000-0000-7000-8000-00000000000a").expect("uuid");
+        assert_eq!(
+            issue_url(&public(), "acme", "bot", id),
+            format!("https://obs.example.com/acme/bot/issues/{id}")
+        );
+        assert_eq!(
+            issues_url(&public(), "acme", "bot", id),
+            format!("https://obs.example.com/acme/bot/issues?source={id}")
+        );
+    }
+
+    #[test]
+    fn issues_webhook_body_has_the_documented_shape() {
+        let notice = sample_issues_notice(2, 3);
+        let body: Value = serde_json::from_slice(&issues_webhook_body(&notice)).expect("json");
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "issues_url",
+                "items",
+                "more",
+                "notification_id",
+                "occurred_at",
+                "project",
+                "source_id",
+                "source_name",
+                "type",
+            ]
+        );
+        assert_eq!(body["type"], "issues.detected");
+        assert_eq!(body["notification_id"], notice.notification_id.to_string());
+        assert_eq!(body["source_id"], notice.source_id.to_string());
+        assert_eq!(body["source_name"], "Errors");
+        assert_eq!(body["project"]["name"], "Support bot");
+        assert_eq!(
+            body["project"]["id"],
+            serde_json::to_value(notice.project_id).expect("a value")
+        );
+        assert_eq!(body["more"], 3);
+        assert_eq!(body["issues_url"], notice.issues_url.as_str());
+        assert!(
+            body["occurred_at"]
+                .as_str()
+                .is_some_and(|text| text.contains('T') && text.ends_with('Z'))
+        );
+        assert_eq!(body["items"][0]["kind"], "created");
+        assert_eq!(body["items"][1]["kind"], "regressed");
+        assert_eq!(
+            body["items"][0]["issue_id"],
+            notice.items[0].issue_id.to_string()
+        );
+        assert_eq!(body["items"][0]["title"], "Timeout in tool 0");
+        let mut item_keys: Vec<&str> = body["items"][0]
+            .as_object()
+            .expect("an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        item_keys.sort_unstable();
+        assert_eq!(item_keys, ["issue_id", "kind", "title"]);
+    }
+
+    #[test]
+    fn issues_webhook_body_keeps_the_whole_title() {
+        let mut notice = sample_issues_notice(1, 0);
+        let title = "t".repeat(300);
+        notice.items[0].title = title.clone();
+        let body: Value = serde_json::from_slice(&issues_webhook_body(&notice)).expect("json");
+        assert_eq!(body["items"][0]["title"], title.as_str());
+    }
+
+    #[test]
+    fn issues_slack_body_singular() {
+        let notice = sample_issues_notice(1, 0);
+        let body = issues_slack_body(&notice);
+        assert_eq!(
+            body["blocks"][0]["text"]["text"],
+            "1 new or regressed issue in Errors"
+        );
+        assert_eq!(body["text"], "1 new or regressed issue in Errors");
+    }
+
+    #[test]
+    fn issues_slack_body_header_and_lines() {
+        let notice = sample_issues_notice(3, 0);
+        let body = issues_slack_body(&notice);
+        assert_eq!(body["text"], "3 new or regressed issues in Errors");
+        let blocks = issues_blocks(&notice);
+        assert_eq!(blocks.len(), 5, "header, three items, actions");
+        assert_eq!(
+            blocks[0]["text"]["text"],
+            "3 new or regressed issues in Errors"
+        );
+        assert_eq!(
+            blocks[1]["text"]["text"],
+            format!("• *new* <{}|Timeout in tool 0>", notice.issue_urls[0])
+        );
+        assert_eq!(
+            blocks[2]["text"]["text"],
+            format!("• *regressed* <{}|Timeout in tool 1>", notice.issue_urls[1])
+        );
+        assert_eq!(blocks[3]["type"], "section");
+        assert!(blocks.iter().all(|block| block["type"] != "context"));
+        assert_eq!(blocks[4]["type"], "actions");
+    }
+
+    #[test]
+    fn issues_slack_body_with_more() {
+        let notice = sample_issues_notice(20, 5);
+        let body = issues_slack_body(&notice);
+        assert_eq!(
+            body["blocks"][0]["text"]["text"],
+            "25 new or regressed issues in Errors"
+        );
+        let blocks = issues_blocks(&notice);
+        assert_eq!(blocks.len(), 23, "header, twenty items, context, actions");
+        assert_eq!(blocks[21]["type"], "context");
+        assert_eq!(blocks[21]["elements"][0]["text"], "and 5 more");
+        assert_eq!(blocks[22]["type"], "actions");
+        assert_eq!(blocks[22]["elements"][0]["text"]["text"], "View issues");
+        assert_eq!(blocks[22]["elements"][0]["url"], notice.issues_url.as_str());
+    }
+
+    #[test]
+    fn issues_slack_body_cuts_and_escapes_titles() {
+        let mut notice = sample_issues_notice(1, 0);
+        notice.source_name = "s".repeat(200);
+        notice.items[0].title = format!("<b>&|{}", "x".repeat(300));
+        let blocks = issues_blocks(&notice);
+        let header = blocks[0]["text"]["text"].as_str().expect("a header");
+        assert_eq!(header.chars().count(), 150);
+        let line = blocks[1]["text"]["text"].as_str().expect("a line");
+        let expected = format!(
+            "• *new* <{}|&lt;b&gt;&amp;¦{}>",
+            notice.issue_urls[0],
+            "x".repeat(95)
+        );
+        assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn issues_email_subject_and_body() {
+        let mailer = Mailer::stub("cetra <noreply@example.com>", Default::default());
+        let one = mailer
+            .render(&issues_email(&sample_issues_notice(1, 0)))
+            .expect("renders");
+        assert_eq!(
+            one.subject,
+            format!("[{PRODUCT}] 1 new or regressed issue: Errors")
+        );
+        assert!(
+            one.text.contains("1 new or regressed issue in Errors"),
+            "{}",
+            one.text
+        );
+        assert!(
+            one.html.contains("1 new or regressed issue in Errors"),
+            "{}",
+            one.html
+        );
+        assert!(!one.html.contains("1 new or regressed issues"));
+        assert!(!one.text.contains("1 new or regressed issues"));
+
+        let three = mailer
+            .render(&issues_email(&sample_issues_notice(3, 0)))
+            .expect("renders");
+        assert_eq!(
+            three.subject,
+            format!("[{PRODUCT}] 3 new or regressed issues: Errors")
+        );
+
+        for (count, more) in [(0, 0), (0, 4), (20, 0), (20, 5)] {
+            let rendered = mailer
+                .render(&issues_email(&sample_issues_notice(count, more)))
+                .expect("renders");
+            assert!(rendered.text.contains("View the issues"));
+            assert!(rendered.html.contains("View the issues"));
+        }
+    }
+
+    #[test]
+    fn issues_email_html_escapes_titles() {
+        let mailer = Mailer::stub("cetra <noreply@example.com>", Default::default());
+        let mut notice = sample_issues_notice(1, 0);
+        notice.items[0].title = "<script>alert(1)</script>".to_owned();
+        let rendered = mailer.render(&issues_email(&notice)).expect("renders");
+        assert!(
+            !rendered.html.contains("<script>alert"),
+            "{}",
+            rendered.html
+        );
+        assert!(rendered.html.contains("&lt;script&gt;"));
+        assert!(rendered.text.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn notice_debug_hides_titles() {
+        let notice = sample_issues_notice(2, 1);
+        let debug = format!("{notice:?}");
+        assert_eq!(debug, "IssuesNotice { items: 2, more: 1 }");
+        assert!(!debug.contains("Timeout"));
+        assert!(!debug.contains("Errors"));
     }
 
     #[test]
