@@ -1828,7 +1828,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn history_reaches_the_model() {
+    async fn a_second_turn_answers_over_the_stored_history() {
         let base = provider(vec![text_turn("First.", 1), text_turn("Second.", 1)]).await;
         let (app, seeded) = new_app().await;
         let connection = connection(&app, &seeded, &base, 4).await;

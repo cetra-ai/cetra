@@ -704,7 +704,7 @@ pub fn build_assistant_trace(input: &AssistantTurnTrace<'_>, ingest: &IngestCont
 - `stops_at_sixteen_model_calls`: 16 turns that each call `get_project_settings`. `Done { finish_reason: "limit", steps: 16 }`, and the last stored message names the limit.
 - `cancel_stores_a_cancelled_message`: a mock turn with `ttft_ms` 5,000. Drop the receiver after `Start`. Within 2 s an assistant message with status `cancelled` is stored, and the trace has an error root `cancelled`.
 - `busy_connection_ends_the_turn`: a connection with `max_concurrency` 1; hold its slot with `interactive::acquire`; run a turn with `permit_wait` 200 ms: `Error { class: "retryable", message: "the LLM connection is busy" }`.
-- `history_reaches_the_model`: a second turn in the same conversation answers. The mock cannot check the request, so only assert that the engine built 4 provider messages for it, through a `#[cfg(test)]` hook or by calling `history::provider_messages` on the stored rows.
+- `a_second_turn_answers_over_the_stored_history`: a second turn in the same conversation answers. The mock cannot check the request, so only assert that the engine built 4 provider messages for it, through a `#[cfg(test)]` hook or by calling `history::provider_messages` on the stored rows.
 - `trace_holds_no_payload`: after `runs_a_tool_then_answers`, no stored span's `input`, `output`, attributes or metadata contain the SQL text or the answer text.
 - `audit_log_has_no_payload`: a canary in the user message and in the mock answer is absent from the captured logs.
 
