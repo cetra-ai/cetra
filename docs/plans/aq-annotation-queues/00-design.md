@@ -97,7 +97,7 @@ Queues and items live in `meta.db`: they are few, mutable and need atomic claims
 ### Score column (M1)
 
 - `scores.queue_id`: Utf8, nullable, the queue that produced the score.
-  - It is a field of `cetra-core`'s `Score` and `ScoreCreate`, a column of the Arrow schema and the storage `scores` table, of the `scores` SQL view and the filter DSL, and a `queue_id` filter of `GET /scores`.
+  - It is a field of `cetra-core`'s `Score` and of the server's `ScoreCreate`, a column of the Arrow schema, the storage `scores` table and the `scores` SQL view, and a `queue_id` filter of `GET /scores`.
   - It is set by whoever writes the score: the reviewer form sends it, and the API may send it.
 - **Not part of the derived score id** (D-AQ-6). The derived id stays `(project, target, name, source, author)` (spec 06). A reviewer's session-written (`human`) score of name N on target T is one row whether it was written from the trace view or from a queue, and the latest write sets `queue_id`.
   - Annotating the same trace in two queues with the same definition keeps one score, tagged with the second queue.
@@ -238,7 +238,7 @@ UI, in `/$org/$project/annotation-queues`:
 Each milestone is one plan, written when it starts. Each one keeps `just check` green, updates the specs it touches, `openapi.json` and `fixtures/api`, adds a `CHANGELOG.md` line, and updates the docs site's pages for its user-visible part.
 
 **M1 — `queue_id` on scores.**
-- **Delivers:** the column through `cetra-core` (`Score`, `ScoreCreate`, Arrow schema and batch conversion), storage (the `scores` table, the SQL view and the filter DSL field), the server's score write and `GET /scores?queue_id=`, the fixtures and specs 01, 05 and 09, and the regenerated SQL schema reference. The field is accepted unchecked until M2 adds the lookup.
+- **Delivers:** the column through `cetra-core` (`Score`, Arrow schema and batch conversion), storage (the `scores` table and SQL view), the server's `ScoreCreate`, the server's score write and `GET /scores?queue_id=`, the fixtures and specs 01, 05 and 09, and the regenerated SQL schema reference. The field is accepted unchecked until M2 adds the lookup.
 - **Depends on:** nothing. The `cetra-core` change needs the coordinator's approval (shared contract).
 - **Leaves out:** queues.
 
@@ -266,7 +266,7 @@ Order: M1 → M2 → (M3 ∥ M5) → M4. M1 and M3 both touch `cetra-storage`, s
 
 ## Requests to other tracks (§ Requests)
 
-- **Coordinator:** approve the `cetra-core` change of M1 (`Score.queue_id`, `ScoreCreate.queue_id`, a column of the `scores` Arrow schema).
+- **Coordinator:** approve the `cetra-core` change of M1 (`Score.queue_id` and a column of the `scores` Arrow schema).
 - **Track Q (control plane):** add `max_annotation_queues` to the plan catalog (Free 1, others unset) and to the tokens it signs, once M2 lands the token field.
 - **Track IC (issue clustering) and AS (assistant):** neither needs anything from AQ; an issue's traces could later be sent to a queue through `POST …/items`.
 
