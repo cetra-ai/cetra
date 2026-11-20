@@ -337,3 +337,37 @@ it("shows the header at once on a first load, and the skeleton only after 200ms"
   const panel = await screen.findByRole("region", { name: "Span" });
   expect(within(panel).getByText("support-agent")).toBeInTheDocument();
 });
+
+it("shows the prompt link with its version", async () => {
+  server.use(
+    http.get(SPAN_URL, ({ params }) => {
+      if (params.span_id !== LLM_SPAN) {
+        return passthrough();
+      }
+      return HttpResponse.json({ ...llmSpan, prompt_name: "support-reply", prompt_version: 2 });
+    }),
+  );
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  const link = within(panel).getByRole("link", { name: "support-reply@2" });
+  const url = new URL(link.getAttribute("href") ?? "", "http://x");
+  expect(url.pathname).toBe("/acme/support-bot/prompts/support-reply");
+  expect(url.searchParams.get("version")).toBe("2");
+});
+
+it("links a name-only prompt without a version", async () => {
+  server.use(
+    http.get(SPAN_URL, ({ params }) => {
+      if (params.span_id !== LLM_SPAN) {
+        return passthrough();
+      }
+      return HttpResponse.json({ ...llmSpan, prompt_name: "support-reply" });
+    }),
+  );
+  await renderApp(`/acme/support-bot/traces?trace=${TRACE_1}&span=${LLM_SPAN}`);
+  const panel = await screen.findByRole("region", { name: "Span" });
+  const link = within(panel).getByRole("link", { name: "support-reply" });
+  const url = new URL(link.getAttribute("href") ?? "", "http://x");
+  expect(url.pathname).toBe("/acme/support-bot/prompts/support-reply");
+  expect(url.searchParams.has("version")).toBe(false);
+});

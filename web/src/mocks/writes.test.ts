@@ -80,6 +80,8 @@ it("lists every account and admin write of the contract", () => {
         path.startsWith("/api/v1/projects/{project}/datasets") ||
         path.startsWith("/api/v1/projects/{project}/scores") ||
         path.startsWith("/api/v1/projects/{project}/experiments") ||
+        path.startsWith("/api/v1/projects/{project}/prompts") ||
+        path.startsWith("/api/v1/projects/{project}/prompt-settings") ||
         path.startsWith("/api/v1/projects/{project}/annotation-queues");
       if (covered && !LATER_TRACKS.includes(operationId)) {
         expected.push({ operationId, method, path });

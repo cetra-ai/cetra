@@ -3,6 +3,10 @@ import type { Schema } from "@/api/types";
 import datasetItemDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json";
 import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
 import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
+import promptSettingsDocument from "../../../fixtures/api/responses/prompt-settings.json";
+import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
+import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
+import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
@@ -379,6 +383,37 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_experiment_finish",
     method: "post",
     path: "/api/v1/projects/{project}/experiments/{id}/finish",
+  },
+  {
+    operationId: "put_prompt_settings",
+    method: "put",
+    path: "/api/v1/projects/{project}/prompt-settings",
+  },
+  { operationId: "post_prompt", method: "post", path: "/api/v1/projects/{project}/prompts" },
+  {
+    operationId: "patch_prompt",
+    method: "patch",
+    path: "/api/v1/projects/{project}/prompts/{prompt}",
+  },
+  {
+    operationId: "delete_prompt",
+    method: "delete",
+    path: "/api/v1/projects/{project}/prompts/{prompt}",
+  },
+  {
+    operationId: "put_prompt_label",
+    method: "put",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+  },
+  {
+    operationId: "delete_prompt_label",
+    method: "delete",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+  },
+  {
+    operationId: "post_prompt_version",
+    method: "post",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/versions",
   },
   {
     operationId: "create_annotation_queue",
@@ -816,6 +851,14 @@ const RESPONSES: Record<string, Respond> = {
     }),
   post_experiment_finish: ({ params }) =>
     HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
+  put_prompt_settings: () => HttpResponse.json(promptSettingsDocument),
+  post_prompt: ({ body }) =>
+    HttpResponse.json({ ...promptVersion1Document, ...named(body) }, { status: 201 }),
+  patch_prompt: ({ body }) => HttpResponse.json({ ...promptDocument, ...named(body) }),
+  delete_prompt: () => noContent(),
+  put_prompt_label: () => HttpResponse.json(promptDocument),
+  delete_prompt_label: () => noContent(),
+  post_prompt_version: () => HttpResponse.json(promptVersion2Document, { status: 201 }),
   create_annotation_queue: ({ body }) =>
     HttpResponse.json(
       { ...annotationQueueDocument, name: trimmed(body.name) ?? annotationQueueDocument.name },

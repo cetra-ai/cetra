@@ -230,6 +230,21 @@ pub fn render(
     source: &str,
     values: &BTreeMap<String, String>,
 ) -> Result<String, PlainTemplateError> {
+    Ok(render_up_to(source, values, usize::MAX)?.unwrap_or_default())
+}
+
+/// Renders like [`render`], but stops before the output would be longer than `max_bytes`: then
+/// it answers `Ok(None)`, having built no more than `max_bytes` bytes. Each piece (a text
+/// segment or a value) is checked before it is appended (D-V-37).
+///
+/// # Errors
+///
+/// The same errors as [`render`].
+pub fn render_up_to(
+    source: &str,
+    values: &BTreeMap<String, String>,
+    max_bytes: usize,
+) -> Result<Option<String>, PlainTemplateError> {
     let segments = scan(source)?;
     for segment in &segments {
         if let Segment::Var(name) = segment
@@ -240,18 +255,18 @@ pub fn render(
             });
         }
     }
-    let mut out = String::with_capacity(source.len());
+    let mut out = String::new();
     for segment in segments {
-        match segment {
-            Segment::Text(text) => out.push_str(text),
-            Segment::Var(name) => {
-                if let Some(value) = values.get(name) {
-                    out.push_str(value);
-                }
-            }
+        let piece: &str = match segment {
+            Segment::Text(text) => text,
+            Segment::Var(name) => values.get(name).map_or("", String::as_str),
+        };
+        if out.len().saturating_add(piece.len()) > max_bytes {
+            return Ok(None);
         }
+        out.push_str(piece);
     }
-    Ok(out)
+    Ok(Some(out))
 }
 
 /// `[A-Za-z_][A-Za-z0-9_]*`, ASCII only.

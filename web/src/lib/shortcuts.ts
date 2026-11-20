@@ -11,6 +11,8 @@ export const GO_TARGETS = {
   r: { id: "go-annotation-queues", to: "/$org/$project/annotation-queues" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
+  m: { id: "go-prompts", to: "/$org/$project/prompts" },
+  l: { id: "go-playground", to: "/$org/$project/playground" },
 } as const;
 
 type GoTarget = (typeof GO_TARGETS)[keyof typeof GO_TARGETS];

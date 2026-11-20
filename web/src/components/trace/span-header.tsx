@@ -142,6 +142,19 @@ export function SpanHeader({ span, detached }: { span: HeaderSpan; detached: boo
             </Link>
           </Pair>
         ) : null}
+        {span.prompt_name ? (
+          <Pair label="prompt">
+            <Link
+              to="/$org/$project/prompts/$prompt"
+              params={{ org, project, prompt: span.prompt_name }}
+              search={span.prompt_version ? { version: span.prompt_version } : {}}
+              className="focus-ring rounded-sm underline-offset-2 hover:underline"
+            >
+              {span.prompt_name}
+              {span.prompt_version ? `@${span.prompt_version}` : ""}
+            </Link>
+          </Pair>
+        ) : null}
         {span.user_id ? (
           <Pair label="user">
             <Link

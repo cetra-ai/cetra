@@ -3,6 +3,7 @@ import {
   Clock,
   Coins,
   DollarSign,
+  FileText,
   Layers,
   MessageSquare,
   MessageSquareText,
@@ -28,6 +29,7 @@ import { SPAN_COLUMN_IDS, type SpanColumnId } from "@/lib/search/spans";
 const TAGS_SHOWN = 2;
 
 const HIDDEN = new Set<SpanColumnId>([
+  "prompt",
   "provider",
   "service",
   "release",
@@ -44,6 +46,7 @@ const LABELS: Record<SpanColumnId, string> = {
   kind: "Kind",
   name: "Name",
   model: "Model",
+  prompt: "Prompt",
   input: "Input",
   output: "Output",
   duration: "Duration",
@@ -187,6 +190,29 @@ function spanColumnDefs(
               />
               <span className="truncate">{model}</span>
             </span>
+          </FilterHit>
+        );
+      },
+    },
+    {
+      id: "prompt",
+      size: 140,
+      header: "Prompt",
+      meta: { icon: FileText },
+      cell: ({ row }) => {
+        const name = row.original.prompt_name;
+        if (!name) {
+          return "—";
+        }
+        const version = row.original.prompt_version;
+        return (
+          <FilterHit
+            label={`Filter by prompt ${name}`}
+            field={{ column: "prompt_name" }}
+            value={name}
+            onFilter={onFilter}
+          >
+            {version ? `${name}@${version}` : name}
           </FilterHit>
         );
       },
