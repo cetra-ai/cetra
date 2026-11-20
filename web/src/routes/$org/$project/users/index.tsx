@@ -347,6 +347,7 @@ function UsersPage() {
                   }
                   presets={
                     <PresetChips
+                      hold={hold}
                       view="traces"
                       filter={search.filter ?? ""}
                       onFilter={(text) => {

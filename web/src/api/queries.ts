@@ -388,11 +388,17 @@ export function facetQuery(org: string, project: string, query: FacetAsk) {
  * latest cached answer to the same question over a window of the same length, instead of a
  * loading state.
  */
-export function useFacetQuery(org: string, project: string, query: FacetAsk) {
+export function useFacetQuery(
+  org: string,
+  project: string,
+  query: FacetAsk,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const client = useQueryClient();
   const options = facetQuery(org, project, query);
   return useQuery({
     ...options,
+    enabled,
     placeholderData: (previous) => previous ?? latestFacetAnswer(client, options.queryKey),
   });
 }

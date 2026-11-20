@@ -24,17 +24,23 @@ import {
 } from "@/lib/facets";
 import { formatCost, formatDuration } from "@/lib/format";
 
-/** The preset chips of row 2 (D6). `scope` is the list's window and flags, as the facet panel's. */
+/**
+ * The preset chips of row 2 (D6). `scope` is the list's window and flags, as the facet panel's.
+ * While `hold` (the list waits for its default saved view), the p95s are not asked: the view may
+ * change the window, and asking with the panel's sections makes one facet request (D-C-23).
+ */
 export function PresetChips({
   view,
   filter,
   onFilter,
   scope,
+  hold = false,
 }: {
   view: FacetView;
   filter: string;
   onFilter: (text: string) => void;
   scope: FacetScope;
+  hold?: boolean;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1">
@@ -50,6 +56,7 @@ export function PresetChips({
             filter={filter}
             onFilter={onFilter}
             scope={scope}
+            hold={hold}
           />
         ),
       )}
@@ -89,6 +96,7 @@ function BoundPreset({
   filter,
   onFilter,
   scope,
+  hold,
 }: {
   preset: PresetDef;
   p95Field: string;
@@ -96,16 +104,22 @@ function BoundPreset({
   filter: string;
   onFilter: (text: string) => void;
   scope: FacetScope;
+  hold: boolean;
 }) {
   const { org, project } = useProject();
-  const query = useFacetQuery(org, project, {
-    view,
-    field: p95Field,
-    from: scope.from,
-    to: scope.to,
-    includeEval: scope.includeEval,
-    includeExperiments: scope.includeExperiments,
-  });
+  const query = useFacetQuery(
+    org,
+    project,
+    {
+      view,
+      field: p95Field,
+      from: scope.from,
+      to: scope.to,
+      includeEval: scope.includeEval,
+      includeExperiments: scope.includeExperiments,
+    },
+    { enabled: !hold },
+  );
   const p95 = query.data?.histogram?.p95;
   const bound = p95 === undefined ? undefined : roundP95(p95);
   const pressed = presetActive(filter, preset);
