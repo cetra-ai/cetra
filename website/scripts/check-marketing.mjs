@@ -100,7 +100,7 @@ function isNamed(element, html) {
  * The findings for one built page, as messages (without the route).
  * `distFiles` holds the built paths, e.g. "/docs/index.html".
  */
-export function checkPage(route, html, { noindex, distFiles = new Set() }) {
+export function checkPage(route, html, { noindex, distFiles = new Set(), launched = LAUNCHED }) {
   const findings = [];
   const stripped = stripBlocks(html);
 
@@ -158,8 +158,9 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
     const href = a.get("href");
     if (href === "#") findings.push('href="#" not allowed');
     if (href === undefined || !href.startsWith("/") || href.startsWith("//")) continue;
-    // The holding page at / has no anchors until launch.
-    if (!LAUNCHED && (href === "/" || href.startsWith("/#"))) continue;
+    // Before launch, / is the holding page, which has no anchors: its links are skipped.
+    // From launch on, / is the homepage and its links are checked like any other.
+    if (!launched && (href === "/" || href.startsWith("/#"))) continue;
     const path = href.replace(/[?#].*$/, "");
     const built = path.endsWith("/") ? distFiles.has(`${path}index.html`) : distFiles.has(path);
     if (!built) findings.push(`broken internal link: ${href}`);
@@ -229,7 +230,7 @@ function assetPath(href = "") {
   return href.replace(/[?#].*$/, "");
 }
 
-/** The routes of the built pages outside /docs/. The holding page's "/" is left out until launch. */
+/** The routes of the built pages outside /docs/. Before launch "/" is the holding page and is left out. */
 export function listedRoutes(distFiles, launched) {
   return [...distFiles]
     .filter((file) => file.endsWith("/index.html") && !file.startsWith("/docs/"))
