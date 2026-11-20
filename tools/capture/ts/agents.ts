@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 /** Below the runner's own program timeout (PROGRAM_TIMEOUT, 120 s, in tools/capture/src/run.rs). */
 const AGENT_TIMEOUT_MS = 90_000;
 
+/** After SIGTERM to the agent's process group, the group gets SIGKILL this long later. */
+const KILL_GRACE_MS = 5_000;
+
 const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 export interface AgentRun {
@@ -89,23 +92,44 @@ export async function runAgent(run: AgentRun): Promise<void> {
 
   await new Promise<void>((resolve, reject) => {
     let timedOut = false;
+    // Detached, the agent leads its own process group, so a group signal also
+    // reaches the subprocesses it started.
     const child = spawn(bin, run.args, {
       cwd: repo,
+      detached: true,
       stdio: ["ignore", 2, "inherit"],
       env,
     });
+    const signalGroup = (signal: NodeJS.Signals): void => {
+      if (child.pid === undefined) {
+        return;
+      }
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        // The group is already gone.
+      }
+    };
+    let killTimer: NodeJS.Timeout | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      signalGroup("SIGTERM");
+      killTimer = setTimeout(() => signalGroup("SIGKILL"), KILL_GRACE_MS);
     }, AGENT_TIMEOUT_MS);
-    child.on("error", (error) => {
+    const clearTimers = (): void => {
       clearTimeout(timer);
+      clearTimeout(killTimer);
+    };
+    child.on("error", (error) => {
+      clearTimers();
       const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
       reject(new Error(`agent could not start (${code})`));
     });
     child.on("exit", (code, signal) => {
-      clearTimeout(timer);
-      if (code === 0 && !timedOut) {
+      clearTimers();
+      if (timedOut) {
+        reject(new Error("agent timed out"));
+      } else if (code === 0) {
         resolve();
       } else {
         reject(new Error(`agent exited with ${code ?? signal}`));

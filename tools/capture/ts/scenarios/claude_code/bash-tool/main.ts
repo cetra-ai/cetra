@@ -1,23 +1,14 @@
-import { agentPaths, runAgent } from "../../../agents.ts";
-import { writeMeta } from "../../../harness.ts";
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (value === undefined) {
-    throw new Error(`${name} is unset`);
-  }
-  return value;
-}
+import { runAgent } from "../../../agents.ts";
+import { requiredEnv, writeMeta } from "../../../harness.ts";
 
 async function main(): Promise<void> {
-  agentPaths();
   await runAgent({
     bin: "claude",
     args: ["-p", "Run echo hello with Bash", "--allowedTools", "Bash", "--output-format", "text"],
     homeFiles: {},
     env: {
-      ANTHROPIC_API_KEY: required("ANTHROPIC_API_KEY"),
-      ANTHROPIC_BASE_URL: required("CETRA_CAPTURE_MOCK_URL"),
+      ANTHROPIC_API_KEY: requiredEnv("ANTHROPIC_API_KEY"),
+      ANTHROPIC_BASE_URL: requiredEnv("CETRA_CAPTURE_MOCK_URL"),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
       DISABLE_AUTOUPDATER: "1",
       CLAUDE_CODE_ENABLE_TELEMETRY: "1",
@@ -27,7 +18,7 @@ async function main(): Promise<void> {
       OTEL_METRICS_EXPORTER: "none",
       OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf",
       OTEL_EXPORTER_OTLP_COMPRESSION: "none",
-      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: required("CETRA_CAPTURE_OTLP_ENDPOINT"),
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: requiredEnv("CETRA_CAPTURE_OTLP_ENDPOINT"),
       OTEL_TRACES_EXPORT_INTERVAL: "500",
       OTEL_METRICS_INCLUDE_REPOSITORY: "true",
       OTEL_LOG_USER_PROMPTS: "1",

@@ -24,12 +24,16 @@ export function setup(): NodeTracerProvider {
   return provider;
 }
 
-export function mockUrl(pathSuffix = ""): string {
-  const base = process.env.CETRA_CAPTURE_MOCK_URL;
-  if (base === undefined) {
-    throw new Error("CETRA_CAPTURE_MOCK_URL is unset");
+export function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (value === undefined) {
+    throw new Error(`${name} is unset`);
   }
-  return base + pathSuffix;
+  return value;
+}
+
+export function mockUrl(pathSuffix = ""): string {
+  return requiredEnv("CETRA_CAPTURE_MOCK_URL") + pathSuffix;
 }
 
 export async function finish(

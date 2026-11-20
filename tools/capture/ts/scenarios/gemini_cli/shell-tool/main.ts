@@ -1,18 +1,9 @@
-import { agentPaths, runAgent } from "../../../agents.ts";
-import { writeMeta } from "../../../harness.ts";
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (value === undefined) {
-    throw new Error(`${name} is unset`);
-  }
-  return value;
-}
+import { runAgent } from "../../../agents.ts";
+import { requiredEnv, writeMeta } from "../../../harness.ts";
 
 async function main(): Promise<void> {
-  agentPaths();
   // Gemini appends /v1/traces itself, so the base is the endpoint without it.
-  const otlpBase = required("CETRA_CAPTURE_OTLP_ENDPOINT").replace(/\/v1\/traces$/, "");
+  const otlpBase = requiredEnv("CETRA_CAPTURE_OTLP_ENDPOINT").replace(/\/v1\/traces$/, "");
   await runAgent({
     bin: "gemini",
     args: ["-p", "Run echo hello with the shell", "--yolo"],
@@ -34,8 +25,8 @@ async function main(): Promise<void> {
       )}\n`,
     },
     env: {
-      GEMINI_API_KEY: required("GEMINI_API_KEY"),
-      GOOGLE_GEMINI_BASE_URL: required("CETRA_CAPTURE_MOCK_URL"),
+      GEMINI_API_KEY: requiredEnv("GEMINI_API_KEY"),
+      GOOGLE_GEMINI_BASE_URL: requiredEnv("CETRA_CAPTURE_MOCK_URL"),
       GEMINI_CLI_TRUST_WORKSPACE: "true",
     },
   });
