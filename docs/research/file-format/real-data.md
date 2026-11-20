@@ -378,6 +378,73 @@ The scan reads the group column as dictionary arrays (`ScanBatches::keep_diction
 - A first version ran one task per file and accumulated each file on one thread: light's four large files took 28.6 ms instead of 20.6. Splitting the files as the scan's partitions fixed it.
 - The rule changes no other query of the bench: the others have no `GROUP BY`, or group on an expression (`date_trunc`), which stays in DataFusion.
 
+## ClickHouse with Langfuse's schema
+
+Langfuse, now owned by ClickHouse, stores spans in ClickHouse. This compares Strata with that
+storage on our data (2026-11-20, ClickHouse 26.12.1.59, `bench/clickhouse/`).
+
+**Setup.**
+- Langfuse's current tables, from its migrations: `events_full`, ordered by (project, start minute, trace id hash), with zstd(3) `input` and `output`, full-text `text` indexes on their lowercase forms, and bloom filters on the trace, span, user and session ids; and `events_core`, filled by a materialized view with `input` and `output` cut to 200 characters, which Langfuse's lists and rollups read.
+- Each dataset's `pq_default` spans are loaded into them (`load.sql`: `span_kind = 'llm'` becomes `type = 'GENERATION'`, an error status `level = 'ERROR'`, tokens and costs go to `usage_details` and `cost_details`, metadata to `metadata_names` and `metadata_values`), then merged with `OPTIMIZE ... FINAL`, as a long-running table would be.
+- The bench's queries are written for these tables as Langfuse would: lists and rollups on `events_core`, payload and full trace reads on `events_full`, a trace by `trace_id =`. A text search is Langfuse's own predicate (`events-predicate.ts`): `position(lower(input), lower(needle)) > 0` with `hasAllTokens` on the text index; it matches words, case-insensitively. "Exact" is `position(input, needle) > 0`, the case-sensitive substring the other formats run; no index serves it.
+- One server on the same VM, its caches as configured by default, the query cache and the query condition cache off (they return or skip by earlier runs of the same query). Times are the server's (`query_log`), median of 30 runs (FineWeb 5); ours are in-process, median of 30 (5), all run in one session after ClickHouse's; the idle ClickHouse server stayed up during ours (about a tenth of one of the 12 cores).
+
+**Size** (MiB; ClickHouse is `events_full` + `events_core`):
+
+| Dataset | Strata | Parquet default | Vortex compact | ClickHouse |
+|---|---|---|---|---|
+| light | 159 | 152 | 137 | 315 (158 + 157) |
+| payload | 253 | 333 | 317 | 507 (390 + 117) |
+| swe | 25 | 37 | 33 | 85 (76 + 9) |
+| openswe | 30 | 48 | 159 | 149 (140 + 8) |
+| toucan | 190 | 247 | 234 | 409 (327 + 82) |
+| wildchat | 564 | 593 | 585 | 912 (749 + 163) |
+| FineWeb | 9,444 | 7,892 | 7,775 | 9,006 (8,766 + 239) |
+
+ClickHouse takes 1.6–5× Strata's space on the agent and chat data: it compresses each value on its own, so resent histories are stored again, and `events_core` keeps a second copy of the narrow columns and of 200-character previews. On unique text (FineWeb) the two are within 5%.
+
+**Queries** (ms):
+
+| Dataset | Query | Strata | Parquet | Vortex compact | ClickHouse |
+|---|---|---|---|---|---|
+| light | `count_errors_6h` | 7.1 | 15.4 | 6.9 | **6.1** |
+| light | `model_rollup_day` | 22.4 | 45.3 | **21.4** | 67.1 |
+| light | `list_llm_1h` | 12.0 | 79.2 | 21.7 | **11.0** |
+| light | `metadata_filter` | **5.2** | 51.6 | — | 28.1 |
+| light | `user_filter` | **3.3** | 10.5 | 8.7 | 5.0 |
+| light | trace lookup, all columns | **5.6** | 27.1 | 29.4 | 17.7 |
+| light | trace lookup, light columns | **1.2** | 8.4 | 7.2 | 6.4 |
+| toucan | `model_rollup_day` | 11.7 | 15.2 | **10.4** | 18.0 |
+| toucan | `list_llm_1h` | 8.6 | 28.9 | 12.4 | **7.1** |
+| toucan | `metadata_filter` | **3.1** | 16.9 | — | 9.4 |
+| toucan | trace lookup, all columns | **6.2** | 23.8 | 25.5 | 23.7 |
+| toucan | `substring_input` (a rare word) | 57.2 | 192.5 | 101.8 | **3.7** Langfuse / 107 exact |
+| toucan | `scan_all_payload` | 296 | 307 | **214** | 228 (1.1 from `input_length`) |
+| wildchat | `model_rollup_day` | 14.9 | 23.0 | **13.4** | 31.2 |
+| wildchat | `list_llm_1h` | 10.1 | 47.8 | 20.5 | **9.8** |
+| wildchat | `substring_input` (a rare word) | 74.2 | 378 | 250 | **4.7** Langfuse / 197 exact |
+| wildchat | `scan_all_payload` | 637 | 728 | 453 | **426** |
+| payload | `substring_input` (a rare word) | 33.8 | 201 | 138 | 34.8 Langfuse / 123 exact |
+| FineWeb | absent phrase | **100** | 6,665 | 5,889 | 221 Langfuse / 4,725 exact |
+| FineWeb | count "help me" | **2,866** | 6,578 | 5,875 | 5,551 Langfuse / 4,678 exact |
+| FineWeb | newest 100 "help me" | **95** | 3,672 | 6,943 | 994 / 876 |
+| FineWeb | newest 100 rare phrase | **113** | 8,382 | 10,358 | 1,400 / 1,510 |
+| FineWeb | newest match of the long phrase | **108** | 6,535 | 5,878 | 388 / 4,725 |
+| FineWeb | count "help me", last day | **1,060** | 2,583 | 2,283 | 1,908 / 1,635 |
+| FineWeb | count "help me", last hour | **71** | 505 | 189 | 333 / 322 |
+| FineWeb | newest "help me", last 5 min | 49 | 820 | 335 | 44 / **41** |
+| FineWeb | newest rare phrase, last hour | **24** | 835 | 356 | 318 / 319 |
+| FineWeb | spans per hour | 79 | 83 | 79 | **12** |
+
+The other datasets follow the same pattern. On payload, swe and openswe Strata is 1.5–6× faster on trace lookups, metadata and user filters, and rollups; `list_llm_1h` goes to Strata on swe and openswe (3.1 and 3.5 ms against 6.2 and 5.7) and to ClickHouse on payload (7.3 against 9.5); Langfuse's word search takes 3.2–3.5 ms against Strata's 17–24 on swe and openswe, and ties on payload (35 against 34).
+
+**What it shows:**
+- **Trace views are Strata's.** A full trace takes 5–7 ms against ClickHouse's 18–34 ms: ClickHouse finds the trace's granules by bloom filter, then decompresses whole granules of `input` and `output` (64 MiB `index_granularity_bytes`); Strata reads the trace's rows and their chunks.
+- **Search: ClickHouse wins rare words, Strata wins phrases and newest-first.** The text index answers a rare word from its postings in 3–5 ms, where Strata decompresses the candidate frames (17–74 ms). For phrases, ClickHouse's postings only narrow to the rows holding every word, and it decompresses all of them: on FineWeb Strata is 2× faster on an absent phrase, 1.9× on the "help me" count, and 9–12× on the newest matches, which ClickHouse finds only after evaluating every candidate. Langfuse's search is also not a substring search: it counts 50,870 "help me" rows (case-insensitive), where the byte search counts 49,835.
+- **Rollups and filters on narrow columns: Strata or Vortex, not ClickHouse**, whose rollups are 1.5–3× slower; it wins `count_errors_6h` on light (6.1 against 7.1) and an hourly histogram over FineWeb, where its 239 MiB `events_core`, sorted by start minute, answers in 12 ms against 79.
+- **Full payload scans: ClickHouse and Vortex** are 23–35% ahead of Strata on payload, toucan and wildchat, level on swe, behind on openswe; with its precomputed `input_length` column ClickHouse needs no scan at all for lengths.
+- **Writes:** loading the Parquet files took ClickHouse 14–47 s per dataset plus 7–61 s of merging; FineWeb took 473 s plus 158 s, against Strata's 69–75 s (§ Writer threads and file size). These include reading the Parquet files and building the text indexes, so they compare only roughly.
+
 ## Simulated S3
 
 Every number above is local disk with the OS page cache warm, where a request costs microseconds. On S3 a request costs a first-byte latency, and one request runs at one connection's throughput, so the same reader can rank differently. `FMT_SIM_S3=1` estimates S3 times without S3 (2026-11-20, `bench/src/sim.rs`):

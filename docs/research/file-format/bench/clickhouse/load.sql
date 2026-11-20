@@ -1,0 +1,40 @@
+-- Our spans (the pq_default Parquet files of a dataset) as Langfuse events. {SRC} is the
+-- file glob under user_files. events_core is filled by its materialized view.
+INSERT INTO events_full (
+    project_id, trace_id, span_id, parent_span_id, start_time, end_time, name, type,
+    environment, release, user_id, session_id, tags, level, status_message,
+    provided_model_name, model_parameters, usage_details, cost_details, tool_definitions,
+    input, output, metadata_names, metadata_values, service_name, scope_name, scope_version,
+    source, event_ts, is_deleted)
+SELECT
+    project_id,
+    lower(hex(trace_id)),
+    lower(hex(span_id)),
+    if(parent_span_id IS NULL, '', lower(hex(parent_span_id))),
+    start_time,
+    end_time,
+    name,
+    multiIf(span_kind = 'llm', 'GENERATION', span_kind = 'tool', 'TOOL', span_kind = 'agent', 'AGENT', 'SPAN'),
+    ifNull(environment, 'default'),
+    ifNull(release, ''),
+    ifNull(user_id, ''),
+    ifNull(session_id, ''),
+    tags,
+    if(status = 'error', 'ERROR', 'DEFAULT'),
+    ifNull(status_message, ''),
+    ifNull(model, ''),
+    ifNull(request_params, ''),
+    map('input', toUInt64(ifNull(input_tokens, 0)), 'output', toUInt64(ifNull(output_tokens, 0)), 'total', toUInt64(ifNull(total_tokens, 0))),
+    map('input', toDecimal128(ifNull(cost_input, 0), 12), 'output', toDecimal128(ifNull(cost_output, 0), 12), 'total', toDecimal128(ifNull(cost_total, 0), 12)),
+    if(tool_definitions IS NULL, map(), map('tools', tool_definitions)),
+    ifNull(input, ''),
+    ifNull(output, ''),
+    mapKeys(metadata),
+    mapValues(metadata),
+    ifNull(service_name, ''),
+    ifNull(scope_name, ''),
+    ifNull(scope_version, ''),
+    'otel',
+    start_time,
+    0
+FROM file('{SRC}', Parquet);

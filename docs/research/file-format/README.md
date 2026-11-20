@@ -582,6 +582,8 @@ Two gaps remain:
 
 - **Grouping on codes:** a `GROUP BY` on a dictionary column with plain aggregates now runs in Strata, per dictionary code (`StrataAggregateRule`). `model_rollup_day` dropped by 6–25%; Strata now wins it on four of six datasets and trails Vortex compact by about 1 ms on the other two.
 
+- **ClickHouse with Langfuse's schema:** on our data, ClickHouse takes 1.6–5× Strata's space on agent and chat data (the same on FineWeb). Strata is 1.5–6× faster on trace views, filters and rollups, and on phrase and newest-first searches (FineWeb: 9–12× on the newest matches); ClickHouse's text index wins rare-word searches (3–5 ms against 17–74), its sorted `events_core` an hourly histogram (12 against 79 ms), and it leads full payload scans with Vortex.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong
