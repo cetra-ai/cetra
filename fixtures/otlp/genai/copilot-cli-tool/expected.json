@@ -11,6 +11,10 @@
       "status": "ok",
       "service_name": "github-copilot",
       "session_id": "conv-copilot-1",
+      "user_id": "pseudo-user-1",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
       "provider": "github",
       "request_model": "gpt-5.5",
       "operation": "invoke_agent",
@@ -34,7 +38,7 @@
         "genai"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -47,6 +51,9 @@
       "end_time": "2025-12-31T23:59:57.000000000Z",
       "status": "ok",
       "service_name": "github-copilot",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
       "provider": "github",
       "request_model": "gpt-5.5",
       "response_model": "gpt-5.5-2026-10-01",
@@ -77,19 +84,22 @@
         "genai"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
       "trace_id": "0af7651916cd43dd8448eb211c80319c",
       "span_id": "53995c3f42cd8ad8",
       "parent_span_id": "b7ad6b7169203331",
-      "name": "execute_tool bash",
+      "name": "bash",
       "span_kind": "tool",
       "start_time": "2025-12-31T23:59:57.000000000Z",
       "end_time": "2025-12-31T23:59:58.000000000Z",
       "status": "ok",
       "service_name": "github-copilot",
+      "metadata": {
+        "coding_agent": "copilot"
+      },
       "operation": "execute_tool",
       "input": "{\"command\":\"echo hello\"}",
       "input_format": "json",
@@ -98,6 +108,7 @@
       "input_preview": "{\"command\":\"echo hello\"}",
       "output_preview": "hello",
       "attributes": {
+        "cetra.span_name": "execute_tool bash",
         "gen_ai.operation.name": "execute_tool",
         "gen_ai.tool.call.id": "call_1",
         "gen_ai.tool.name": "bash"
@@ -108,7 +119,7 @@
         "genai"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     }
   ],
   "media": [],

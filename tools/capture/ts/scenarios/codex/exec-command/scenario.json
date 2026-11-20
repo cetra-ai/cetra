@@ -1,6 +1,6 @@
 {
   "description": "Codex CLI 0.167.2 `codex exec` runs one exec_command tool call; trace export, filtered to the turn's spans.",
-  "spec_refs": ["02 § Convention detection"],
+  "spec_refs": ["02 § Coding agents"],
   "instrumentation": "@openai/codex",
   "libraries": ["@openai/codex"],
   "span_names": [
@@ -30,7 +30,7 @@
   "turns": [
     {
       "api": "openai.responses",
-      "model": "gpt-5.5-codex",
+      "model": "gpt-5.3-codex",
       "message": {
         "text": null,
         "reasoning": null,
@@ -43,7 +43,7 @@
     },
     {
       "api": "openai.responses",
-      "model": "gpt-5.5-codex",
+      "model": "gpt-5.3-codex",
       "message": {
         "text": "Done: the command printed hello.",
         "reasoning": null,

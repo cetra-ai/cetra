@@ -137,6 +137,9 @@ pub struct Expected {
     pub media: Vec<ExpectedMedia>,
     /// Input spans the normalizer must reject.
     pub rejected_spans: u32,
+    /// Input spans the normalizer must discard on purpose (D-CA-6). Omitted when 0.
+    #[serde(default)]
+    pub discarded: u64,
 }
 
 /// One extracted blob. The bytes live in `input.json`, not here.

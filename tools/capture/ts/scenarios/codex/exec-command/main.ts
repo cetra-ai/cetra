@@ -15,7 +15,7 @@ async function main(): Promise<void> {
       "Run echo hello",
     ],
     homeFiles: {
-      ".codex/config.toml": `model = "gpt-5.5-codex"
+      ".codex/config.toml": `model = "gpt-5.3-codex"
 model_provider = "mock"
 
 [model_providers.mock]

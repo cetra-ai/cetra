@@ -37,7 +37,7 @@ const YEAR_2000_NS: i64 = 946_684_800_i64 * 1_000_000_000;
 const NANOS_PER_DAY: i64 = 86_400_i64 * 1_000_000_000;
 
 /// Core stores this on every span and does not expose it as a constant.
-const SCHEMA_VERSION: u16 = 1;
+const SCHEMA_VERSION: u16 = 2;
 
 /// Clock, project, and limits for one ingest request.
 ///
@@ -728,7 +728,7 @@ mod tests {
                 .attributes
                 .get(metadata_key::NORMALIZE_WARNING)
         );
-        assert_eq!(normalized.spans[0].schema_version, 1);
+        assert_eq!(normalized.spans[0].schema_version, 2);
         assert_eq!(normalized.spans[0].span_kind, SpanKind::Span);
         assert!(normalized.spans[0].conventions.is_empty());
     }

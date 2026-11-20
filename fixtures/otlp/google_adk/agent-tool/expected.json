@@ -18,7 +18,7 @@
       "scope_name": "gcp.vertex.agent",
       "scope_version": "2.14.0",
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -50,7 +50,7 @@
         "genai"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -94,7 +94,7 @@
         "google_adk"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -142,7 +142,7 @@
         "google_adk"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -185,7 +185,7 @@
         "google_adk"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -233,7 +233,7 @@
         "google_adk"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     },
     {
       "project_id": "01900000-0000-7000-8000-000000000001",
@@ -277,7 +277,7 @@
         "google_adk"
       ],
       "ingest_time": "2026-01-01T00:00:00.000000000Z",
-      "schema_version": 1
+      "schema_version": 2
     }
   ],
   "media": [],

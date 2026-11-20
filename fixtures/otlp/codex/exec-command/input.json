@@ -4,21 +4,21 @@
       "resource": {
         "attributes": [
           {
+            "key": "telemetry.sdk.name",
+            "value": {
+              "stringValue": "opentelemetry"
+            }
+          },
+          {
             "key": "telemetry.sdk.language",
             "value": {
               "stringValue": "rust"
             }
           },
           {
-            "key": "service.name",
+            "key": "env",
             "value": {
-              "stringValue": "codex_exec"
-            }
-          },
-          {
-            "key": "telemetry.sdk.name",
-            "value": {
-              "stringValue": "opentelemetry"
+              "stringValue": "capture"
             }
           },
           {
@@ -34,9 +34,9 @@
             }
           },
           {
-            "key": "env",
+            "key": "service.name",
             "value": {
-              "stringValue": "capture"
+              "stringValue": "codex_exec"
             }
           }
         ],
@@ -84,7 +84,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "24"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -156,13 +156,13 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "3956145"
+                    "intValue": "4063988"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "4038037"
+                    "intValue": "4257428"
                   }
                 }
               ],
@@ -181,8 +181,8 @@
               "flags": 257,
               "name": "session_task.turn",
               "kind": 1,
-              "startTimeUnixNano": "1767225590007000000",
-              "endTimeUnixNano": "1767225590368000000",
+              "startTimeUnixNano": "1767225590008000000",
+              "endTimeUnixNano": "1767225590319000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -205,7 +205,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "28"
                   }
                 },
                 {
@@ -235,13 +235,13 @@
                 {
                   "key": "model",
                   "value": {
-                    "stringValue": "gpt-5.5-codex"
+                    "stringValue": "gpt-5.3-codex"
                   }
                 },
                 {
                   "key": "codex.turn.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
@@ -289,20 +289,20 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "18281998"
+                    "intValue": "16420225"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "342124446"
+                    "intValue": "294852555"
                   }
                 }
               ],
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590365000000",
+                  "timeUnixNano": "1767225590316000000",
                   "name": "codex.turn_profile",
                   "attributes": [
                     {
@@ -382,8 +382,8 @@
               "flags": 257,
               "name": "run_turn",
               "kind": 1,
-              "startTimeUnixNano": "1767225590007000000",
-              "endTimeUnixNano": "1767225590364000000",
+              "startTimeUnixNano": "1767225590008000000",
+              "endTimeUnixNano": "1767225590316000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -406,7 +406,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "33"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -436,13 +436,13 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "14689254"
+                    "intValue": "13298151"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "342464294"
+                    "intValue": "295169428"
                   }
                 }
               ],
@@ -461,8 +461,8 @@
               "flags": 257,
               "name": "codex.sampling",
               "kind": 1,
-              "startTimeUnixNano": "1767225590117000000",
-              "endTimeUnixNano": "1767225590208000000",
+              "startTimeUnixNano": "1767225590070000000",
+              "endTimeUnixNano": "1767225590162000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -485,7 +485,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "33"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -546,8 +546,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590128000000",
-              "endTimeUnixNano": "1767225590128000000",
+              "startTimeUnixNano": "1767225590082000000",
+              "endTimeUnixNano": "1767225590082000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -570,7 +570,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "28"
                   }
                 },
                 {
@@ -588,13 +588,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 0.0056099999999999995
+                    "doubleValue": 0.0058200000000000005
                   }
                 },
                 {
@@ -625,8 +625,87 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590128000000",
-              "endTimeUnixNano": "1767225590158000000",
+              "startTimeUnixNano": "1767225590082000000",
+              "endTimeUnixNano": "1767225590112000000",
+              "attributes": [
+                {
+                  "key": "code.file.path",
+                  "value": {
+                    "stringValue": "core/src/session/turn.rs"
+                  }
+                },
+                {
+                  "key": "code.module.name",
+                  "value": {
+                    "stringValue": "codex_core::session::turn"
+                  }
+                },
+                {
+                  "key": "code.line.number",
+                  "value": {
+                    "intValue": "2908"
+                  }
+                },
+                {
+                  "key": "thread.id",
+                  "value": {
+                    "intValue": "28"
+                  }
+                },
+                {
+                  "key": "thread.name",
+                  "value": {
+                    "stringValue": "tokio-rt-worker"
+                  }
+                },
+                {
+                  "key": "target",
+                  "value": {
+                    "stringValue": "codex_core::session::turn"
+                  }
+                },
+                {
+                  "key": "codex.request.reasoning_effort",
+                  "value": {
+                    "stringValue": "default"
+                  }
+                },
+                {
+                  "key": "codex.response.receive_wait_ms",
+                  "value": {
+                    "doubleValue": 30.5093
+                  }
+                },
+                {
+                  "key": "busy_ns",
+                  "value": {
+                    "intValue": "0"
+                  }
+                },
+                {
+                  "key": "idle_ns",
+                  "value": {
+                    "intValue": "0"
+                  }
+                }
+              ],
+              "droppedAttributesCount": 0,
+              "events": [],
+              "droppedEventsCount": 0,
+              "links": [],
+              "droppedLinksCount": 0,
+              "status": null
+            },
+            {
+              "traceId": "fa64fb35579841d823191655671c939b",
+              "spanId": "510657cc18d3b5be",
+              "traceState": "",
+              "parentSpanId": "91bfbfe3b9fe57ba",
+              "flags": 257,
+              "name": "handle_responses",
+              "kind": 1,
+              "startTimeUnixNano": "1767225590112000000",
+              "endTimeUnixNano": "1767225590124000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -667,92 +746,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 30.470188
-                  }
-                },
-                {
-                  "key": "busy_ns",
-                  "value": {
-                    "intValue": "0"
-                  }
-                },
-                {
-                  "key": "idle_ns",
-                  "value": {
-                    "intValue": "0"
-                  }
-                }
-              ],
-              "droppedAttributesCount": 0,
-              "events": [],
-              "droppedEventsCount": 0,
-              "links": [],
-              "droppedLinksCount": 0,
-              "status": null
-            },
-            {
-              "traceId": "fa64fb35579841d823191655671c939b",
-              "spanId": "510657cc18d3b5be",
-              "traceState": "",
-              "parentSpanId": "91bfbfe3b9fe57ba",
-              "flags": 257,
-              "name": "handle_responses",
-              "kind": 1,
-              "startTimeUnixNano": "1767225590158000000",
-              "endTimeUnixNano": "1767225590171000000",
-              "attributes": [
-                {
-                  "key": "code.file.path",
-                  "value": {
-                    "stringValue": "core/src/session/turn.rs"
-                  }
-                },
-                {
-                  "key": "code.module.name",
-                  "value": {
-                    "stringValue": "codex_core::session::turn"
-                  }
-                },
-                {
-                  "key": "code.line.number",
-                  "value": {
-                    "intValue": "2908"
-                  }
-                },
-                {
-                  "key": "thread.id",
-                  "value": {
-                    "intValue": "31"
-                  }
-                },
-                {
-                  "key": "thread.name",
-                  "value": {
-                    "stringValue": "tokio-rt-worker"
-                  }
-                },
-                {
-                  "key": "target",
-                  "value": {
-                    "stringValue": "codex_core::session::turn"
-                  }
-                },
-                {
-                  "key": "codex.request.reasoning_effort",
-                  "value": {
-                    "stringValue": "medium"
-                  }
-                },
-                {
-                  "key": "codex.response.receive_wait_ms",
-                  "value": {
-                    "doubleValue": 12.198397
+                    "doubleValue": 12.147731
                   }
                 },
                 {
@@ -795,8 +795,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590171000000",
-              "endTimeUnixNano": "1767225590202000000",
+              "startTimeUnixNano": "1767225590124000000",
+              "endTimeUnixNano": "1767225590156000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -819,7 +819,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -837,13 +837,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 30.394459
+                    "doubleValue": 30.40707
                   }
                 },
                 {
@@ -861,13 +861,13 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "418720"
+                    "intValue": "546252"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "31018948"
+                    "intValue": "31456444"
                   }
                 }
               ],
@@ -886,8 +886,8 @@
               "flags": 257,
               "name": "exec_command",
               "kind": 1,
-              "startTimeUnixNano": "1767225590202000000",
-              "endTimeUnixNano": "1767225590252000000",
+              "startTimeUnixNano": "1767225590156000000",
+              "endTimeUnixNano": "1767225590208000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -910,7 +910,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -982,20 +982,20 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "13598306"
+                    "intValue": "16337251"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "36214632"
+                    "intValue": "35467789"
                   }
                 }
               ],
               "droppedAttributesCount": 0,
               "events": [
                 {
-                  "timeUnixNano": "1767225590252000000",
+                  "timeUnixNano": "1767225590208000000",
                   "name": "codex.tool_result_ready",
                   "attributes": [
                     {
@@ -1019,7 +1019,7 @@
                     {
                       "key": "dispatch_to_result_ready_ms",
                       "value": {
-                        "doubleValue": 49.783078
+                        "doubleValue": 51.77789
                       }
                     },
                     {
@@ -1093,8 +1093,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590202000000",
-              "endTimeUnixNano": "1767225590208000000",
+              "startTimeUnixNano": "1767225590156000000",
+              "endTimeUnixNano": "1767225590162000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1117,7 +1117,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "3"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -1135,13 +1135,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 5.088204
+                    "doubleValue": 4.556089999999999
                   }
                 },
                 {
@@ -1208,8 +1208,8 @@
               "flags": 257,
               "name": "codex.sampling",
               "kind": 1,
-              "startTimeUnixNano": "1767225590255000000",
-              "endTimeUnixNano": "1767225590359000000",
+              "startTimeUnixNano": "1767225590211000000",
+              "endTimeUnixNano": "1767225590314000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1232,7 +1232,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "32"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -1293,8 +1293,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590265000000",
-              "endTimeUnixNano": "1767225590265000000",
+              "startTimeUnixNano": "1767225590223000000",
+              "endTimeUnixNano": "1767225590223000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1317,7 +1317,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "33"
+                    "intValue": "34"
                   }
                 },
                 {
@@ -1335,13 +1335,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 0.00668
+                    "doubleValue": 0.0063
                   }
                 },
                 {
@@ -1372,8 +1372,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590265000000",
-              "endTimeUnixNano": "1767225590296000000",
+              "startTimeUnixNano": "1767225590223000000",
+              "endTimeUnixNano": "1767225590254000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1396,7 +1396,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "33"
+                    "intValue": "34"
                   }
                 },
                 {
@@ -1414,13 +1414,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 30.605248000000003
+                    "doubleValue": 30.386999000000003
                   }
                 },
                 {
@@ -1451,8 +1451,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590296000000",
-              "endTimeUnixNano": "1767225590309000000",
+              "startTimeUnixNano": "1767225590254000000",
+              "endTimeUnixNano": "1767225590266000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1475,7 +1475,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "31"
+                    "intValue": "28"
                   }
                 },
                 {
@@ -1493,13 +1493,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 12.409927
+                    "doubleValue": 12.101111
                   }
                 },
                 {
@@ -1536,8 +1536,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590309000000",
-              "endTimeUnixNano": "1767225590321000000",
+              "startTimeUnixNano": "1767225590266000000",
+              "endTimeUnixNano": "1767225590277000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1578,13 +1578,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 12.286907
+                    "doubleValue": 11.258978
                   }
                 },
                 {
@@ -1615,8 +1615,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590321000000",
-              "endTimeUnixNano": "1767225590327000000",
+              "startTimeUnixNano": "1767225590277000000",
+              "endTimeUnixNano": "1767225590283000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1639,7 +1639,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "32"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -1657,13 +1657,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 6.062544
+                    "doubleValue": 5.896865
                   }
                 },
                 {
@@ -1694,8 +1694,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590327000000",
-              "endTimeUnixNano": "1767225590333000000",
+              "startTimeUnixNano": "1767225590283000000",
+              "endTimeUnixNano": "1767225590289000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1718,7 +1718,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "32"
+                    "intValue": "3"
                   }
                 },
                 {
@@ -1736,13 +1736,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 6.1369229999999995
+                    "doubleValue": 6.052555
                   }
                 },
                 {
@@ -1773,8 +1773,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590333000000",
-              "endTimeUnixNano": "1767225590354000000",
+              "startTimeUnixNano": "1767225590289000000",
+              "endTimeUnixNano": "1767225590309000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1797,7 +1797,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "32"
+                    "intValue": "34"
                   }
                 },
                 {
@@ -1815,13 +1815,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 18.384521
+                    "doubleValue": 18.270118
                   }
                 },
                 {
@@ -1833,13 +1833,13 @@
                 {
                   "key": "busy_ns",
                   "value": {
-                    "intValue": "685729"
+                    "intValue": "590962"
                   }
                 },
                 {
                   "key": "idle_ns",
                   "value": {
-                    "intValue": "19801730"
+                    "intValue": "19421343"
                   }
                 }
               ],
@@ -1858,8 +1858,8 @@
               "flags": 257,
               "name": "handle_responses",
               "kind": 1,
-              "startTimeUnixNano": "1767225590354000000",
-              "endTimeUnixNano": "1767225590359000000",
+              "startTimeUnixNano": "1767225590309000000",
+              "endTimeUnixNano": "1767225590314000000",
               "attributes": [
                 {
                   "key": "code.file.path",
@@ -1882,7 +1882,7 @@
                 {
                   "key": "thread.id",
                   "value": {
-                    "intValue": "32"
+                    "intValue": "33"
                   }
                 },
                 {
@@ -1900,13 +1900,13 @@
                 {
                   "key": "codex.request.reasoning_effort",
                   "value": {
-                    "stringValue": "medium"
+                    "stringValue": "default"
                   }
                 },
                 {
                   "key": "codex.response.receive_wait_ms",
                   "value": {
-                    "doubleValue": 4.676065
+                    "doubleValue": 4.63107
                   }
                 },
                 {

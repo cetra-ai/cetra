@@ -168,7 +168,7 @@ Rules that apply to every agent:
 - **A tool span takes its tool's name.** The span's original name moves to `attributes['cetra.span_name']`.
 - **Placeholders mean no content.** `<REDACTED>` (Claude Code) and `[REDACTED]` (Codex) read as uncaptured content, like OpenInference's `__REDACTED__` (D-B1-10).
 - **Codex's internal spans are discarded.** Codex exports every `tracing` span of the process: about 700 for a one-tool prompt (`fs.get_metadata`, `auth`, `append_items`, …), with no setting to filter them.
-  - On spans detected as Codex, `normalize` keeps only the turn span and the tool dispatch spans, and discards the rest. Discarded spans are neither stored nor rejected: they do not appear in `partial_success`, and they are not units.
+  - On spans detected as Codex, `normalize` keeps only the turn span and the tool dispatch spans, and discards the rest. Discarded spans are neither stored nor rejected, and not units; `normalize` counts them in `Normalized.discarded`.
   - Kept spans are re-linked by rule, because their real parents are discarded. The turn span's `span_id` becomes the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ `turn.id`), and its parent is cleared. A tool span's parent becomes that same value, computed from its own `turn.id`. This needs no other span of the batch.
   - The turn span ends after its tools, so it is usually exported in a later batch. The rule above still links them.
 - **Gemini CLI's process attributes are dropped.** Gemini puts the whole command line, prompt included, in the resource (`process.command_args`, `process.command`), even with `logPrompts` off. On its spans those keys, and `process.owner`, are removed from `resource_attributes`.

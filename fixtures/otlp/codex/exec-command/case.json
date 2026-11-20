@@ -8,9 +8,9 @@
     "libraries": {
       "@openai/codex": "0.167.2"
     },
-    "captured_at": "2026-11-20T09:49:43Z"
+    "captured_at": "2026-11-20T10:50:06Z"
   },
   "spec_refs": [
-    "02 § Convention detection"
+    "02 § Coding agents"
   ]
 }

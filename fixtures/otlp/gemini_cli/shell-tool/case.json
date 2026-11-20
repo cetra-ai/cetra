@@ -11,7 +11,7 @@
     "captured_at": "2026-11-20T10:29:59Z"
   },
   "spec_refs": [
-    "02 § Convention detection"
+    "02 § Coding agents"
   ],
   "notes": "check-capture ignores the values of gen_ai.input.messages, gen_ai.system_instructions and gen_ai.output.messages: they carry the date, paths and measured timings."
 }

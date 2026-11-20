@@ -69,7 +69,7 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
     };
     let mut expected_spans = expected.spans.clone();
     sort_spans(&mut expected_spans);
-    let expected = Value::Object(Map::from_iter([
+    let mut expected_document = Map::from_iter([
         (
             "spans".to_owned(),
             serde_json::to_value(&expected_spans).map_err(|err| err.to_string())?,
@@ -79,7 +79,11 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
             "rejected_spans".to_owned(),
             Value::from(expected.rejected_spans),
         ),
-    ]));
+    ]);
+    if expected.discarded > 0 {
+        expected_document.insert("discarded".to_owned(), Value::from(expected.discarded));
+    }
+    let expected = Value::Object(expected_document);
     let diff = first_diff(&actual, &expected, &label);
     // A matching case keeps its file, so float noise in costs never churns it.
     if bless {
@@ -128,7 +132,7 @@ fn fit(label: &str, name: &str, value: u64) -> Result<usize, String> {
 fn document(normalized: &Normalized) -> Value {
     let mut spans = normalized.spans.clone();
     sort_spans(&mut spans);
-    Value::Object(Map::from_iter([
+    let mut document = Map::from_iter([
         (
             "spans".to_owned(),
             serde_json::to_value(&spans).unwrap_or(Value::Null),
@@ -138,7 +142,11 @@ fn document(normalized: &Normalized) -> Value {
             "rejected_spans".to_owned(),
             Value::from(normalized.rejections.total()),
         ),
-    ]))
+    ]);
+    if normalized.discarded > 0 {
+        document.insert("discarded".to_owned(), Value::from(normalized.discarded));
+    }
+    Value::Object(document)
 }
 
 fn expected_media(media: &[ExpectedMedia]) -> Value {
