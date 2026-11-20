@@ -15,6 +15,7 @@ import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
+import { facetsHandler } from "@/test/facets";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
@@ -1646,25 +1647,21 @@ it("clears the checked traces when the search changes", async () => {
 
 it("keeps the facet panel and its typed value search when the filter changes", async () => {
   server.use(
-    http.get("/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const field = url.searchParams.get("field");
+    facetsHandler((ask) => {
       const values =
-        field === "status"
+        ask.field === "status"
           ? [
               { value: "ok", count: 100 },
               { value: "error", count: 17 },
             ]
           : [];
-      return HttpResponse.json({
-        view: url.searchParams.get("view"),
-        field,
+      return {
         kind: "values",
         total: values.reduce((sum, item) => sum + item.count, 0),
         missing: 0,
         values,
         more: false,
-      });
+      };
     }),
   );
   const { router, user } = await renderApp("/acme/support-bot/traces?range=15m");

@@ -116,11 +116,10 @@ describe("askFacet", () => {
       askFacet("acme/support-bot", { ...shared, filter: "status = 'error'" }, { field: "name" }),
     ]);
     expect(bodies).toHaveLength(2);
-    expect(bodies.map((body) => body.fields)).toEqual([
-      [{ field: "span_kind" }],
-      [{ field: "name" }],
-    ]);
-    expect(bodies.map((body) => body.filter)).toEqual([undefined, "status = 'error'"]);
+    // The two requests may be recorded in either order.
+    const byFilter = [...bodies].sort((a, b) => (a.filter ?? "").localeCompare(b.filter ?? ""));
+    expect(byFilter.map((body) => body.fields)).toEqual([[{ field: "span_kind" }], [{ field: "name" }]]);
+    expect(byFilter.map((body) => body.filter)).toEqual([undefined, "status = 'error'"]);
   });
 
   it("the same field asked twice is sent once", async () => {

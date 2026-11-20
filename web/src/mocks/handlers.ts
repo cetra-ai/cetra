@@ -1,6 +1,10 @@
 import { type HttpHandler, HttpResponse, http } from "msw";
+import type { Schema } from "@/api/types";
 import dashboardQuerySeries from "../../../fixtures/api/responses/dashboard-query-series.json";
 import dashboardQueryTotal from "../../../fixtures/api/responses/dashboard-query-total.json";
+import facetsSessions from "../../../fixtures/api/responses/facets-sessions.json";
+import facetsSpans from "../../../fixtures/api/responses/facets-spans.json";
+import facetsTraces from "../../../fixtures/api/responses/facets-traces.json";
 import { type MockEntry, type MockOperation, operations } from "./manifest";
 
 const NOT_FOUND = {
@@ -22,8 +26,38 @@ const widgetQueryFixture = http.post(
   },
 );
 
+const FACETS_EXAMPLES: Record<
+  Schema<"FacetsRequest">["view"],
+  Schema<"FacetsResponse">
+> = {
+  traces: facetsTraces as Schema<"FacetsResponse">,
+  spans: facetsSpans as Schema<"FacetsResponse">,
+  sessions: facetsSessions as Schema<"FacetsResponse">,
+};
+
+/**
+ * The facet batch answers each field from the per-view examples (`requests/facets-<view>.json`);
+ * a field with no example gets a `not_found` error. The manifest serves GET only, so this POST is
+ * answered here.
+ */
+const facetsFixture = http.post("/api/v1/projects/:project/facets", async ({ request }) => {
+  const body = (await request.json()) as Schema<"FacetsRequest">;
+  const example = FACETS_EXAMPLES[body.view];
+  return HttpResponse.json({
+    view: body.view,
+    results: body.fields.map(
+      (ask) =>
+        example.results.find((result) => result.field === ask.field) ?? {
+          field: ask.field,
+          error: NOT_FOUND,
+        },
+    ),
+  });
+});
+
 export const handlers: HttpHandler[] = [
   widgetQueryFixture,
+  facetsFixture,
   ...sortBySpecificity(operations).map((operation) =>
     http.get(operation.mswPath, ({ request, params }) => {
       const entry = selectEntry(operation, pathParamsOf(params), queryOf(request.url));
