@@ -73,7 +73,8 @@ it("gives every project page its go letter and back again", () => {
   expect(goKeyOf("/$org/$project/spans")).toBe("p");
   expect(goKeyOf("/$org/$project/sessions")).toBe("s");
   expect(goKeyOf("/$org/$project/experiments")).toBe("x");
-  expect(goKeyOf("/$org/$project/prompts")).toBe("r");
+  expect(goKeyOf("/$org/$project/prompts")).toBe("m");
+  expect(goKeyOf("/$org/$project/annotation-queues")).toBe("r");
   expect(goKeyOf("/$org/$project/playground")).toBe("l");
   expect(goKeyOf("/$org/$project/settings/general")).toBeUndefined();
   for (const letter of Object.keys(GO_TARGETS)) {
