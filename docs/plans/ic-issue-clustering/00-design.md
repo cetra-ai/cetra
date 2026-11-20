@@ -205,7 +205,7 @@ States: `open`, `resolved`, `ignored`, `merged`.
 - **Regression.** A new occurrence on a `resolved` issue sets it back to `open`, marks it `regressed`, and records a `regressed` event. Only occurrences whose trace started after `resolved_at` count.
 - **Ignored** issues keep counting occurrences but are hidden from the default list and never alert.
 - `merged` is final.
-- Every change is an `issue_events` row with an actor (a user, or `system` for created, regressed and merged-by-merge), kept for the issue's life.
+- Every change is an `issue_events` row with an actor (a user, or `system` for created and regressed; a merge records the user who merged), kept for the issue's life.
 
 ### D-IC-11 Occurrences are scores
 
@@ -226,7 +226,7 @@ This gives, with no new storage:
 
 **Units.** Occurrence scores are not billable units, and the units cap does not refuse them. They are derived by cetra from data already billed, like judge-trace spans (D-I-31). An error storm or a re-swept trace must not bill the customer. `scores::write` leaves rows of source `issue` out of `usage_daily.scores` and out of its cap check. This is open question 1, decided this way until the user says otherwise.
 
-**Hiding.** Issue scores never trigger a candidate. The `issue:` score names are left out of every list of score names: the score name picker and facets, the score columns of the lists, the dashboard score-name choices, the annotation form and the alert score picker. Each of those reads the names from one place, and that place filters `source <> 'issue'`; M1's plan lists them. The trace and session views show issue chips instead.
+**Hiding.** Issue scores never trigger a candidate. Source `issue` is left out of three reads, each of which filters `source <> 'issue'`: the latest-scores read, a user's score list and the dashboard scores source. `GET /scores` and the SQL `scores` view still return issue occurrences (source `issue`), and the web scores tab hides them. The trace and session views show issue chips instead.
 
 ### D-IC-12 Runs, jobs and limits
 
@@ -293,7 +293,7 @@ These are fixed here so the plans copy them, not choose them.
 ### D-IC-18 Occurrence ids, hiding and counts
 
 - **An occurrence score id is a UUIDv7** whose 48-bit millisecond timestamp is the occurrence time and whose other bits come from SHA-256(`cetra.issue-occurrence.v1` ‖ project id (16 bytes) ‖ trace id (16) ‖ issue id (16)), with the version and variant bits set. `scores::write` then takes `created_at` from the id (the D-G-26 path) and a rewrite of the same (trace, issue) replaces the same row.
-- **The occurrence time of an error issue is the `start_time` of the trace's earliest error span with that fingerprint**, clamped to `now`. It is stable across re-sweeps. When a late span of the same fingerprint starts earlier still, a second row is written for the trace, and the count is one too high (accepted, rare). Occurrences older than the project's retention are not written (`scores::write` refuses them).
+- **The occurrence time of an error issue is the `start_time` of the trace's earliest error span with that fingerprint**, clamped to `now`. It is stable across re-sweeps. When a late span of the same fingerprint starts earlier still, a second row is written for the trace, and the count is one too high (accepted, rare). Occurrences older than the project's retention are not written (`scores::write` refuses them). A span that starts in the future is clamped to the sweep time, so a re-sweep of it, or of a trace after a merge, can add a second occurrence; accepted.
 - **Occurrences carry the trace's user and session**: from the first error span of the group (in `(start_time, span_id)` order) with a non-null `user_id`, and likewise for `session_id`.
 - **`latest_scores` and the users' `scores_of` leave out source `issue`.** The list columns and briefs never see issue scores. The trace view gets its chips from `GET …/scores?trace_id=…&source=issue`, and the scores tab hides rows of source `issue`. The dashboard scores source leaves out source `issue` too.
 - **No `occurrence_count` column.** Counts come from storage (`score_name_counts`), so deletions are reflected.

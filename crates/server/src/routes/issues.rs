@@ -2,6 +2,7 @@
 //! issues they find with their counts, occurrences and history. Project members and above write
 //! the sources; every project reader lists and reads.
 
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 
 use axum::extract::{Extension, State};
@@ -48,7 +49,8 @@ const MAX_IDS: usize = 100;
 const MAX_OCCURRENCE_PERIOD_NS: i64 = 90 * DAY_NS;
 /// Days an occurrence read covers when `from` is absent.
 const OCCURRENCE_DEFAULT_PERIOD_NS: i64 = 14 * DAY_NS;
-/// Most names an occurrence read takes examples from: the issue, then its merged issues (D-IC-9).
+/// Most names an occurrence read takes examples from: the issue, then the seven merged issues with
+/// the most occurrences (D-IC-9).
 const MAX_EXAMPLE_NAMES: usize = 8;
 /// Examples read per name, and examples returned.
 const EXAMPLES_PER_NAME: usize = 20;
@@ -472,6 +474,18 @@ fn score_name(issue: Uuid) -> String {
     format!("issue:{issue}")
 }
 
+/// The occurrence count of an issue's own name in `counts`; 0 when it has none.
+fn issue_count(counts: &HashMap<String, Tally>, issue: Uuid) -> u64 {
+    counts
+        .get(&score_name(issue))
+        .map_or(0, |tally| tally.count)
+}
+
+/// Orders merged issues by their occurrence count, most first, then by id (D-IC-9).
+fn most_occurrences_first(merged: &mut [Uuid], counts: &HashMap<String, Tally>) {
+    merged.sort_by_key(|issue| (Reverse(issue_count(counts, *issue)), *issue));
+}
+
 /// The score names an issue counts: its own, then those of the issues merged into it (D-IC-9).
 fn names_of(issue: Uuid, merged: &[Uuid]) -> Vec<String> {
     std::iter::once(issue)
@@ -723,6 +737,9 @@ async fn list_issues(
         .flat_map(|(row, merged)| names_of(row.id, merged))
         .collect();
     let counts = tallies(&state, org, project, &names, window).await?;
+    for list in &mut merged {
+        most_occurrences_first(list, &counts);
+    }
 
     let mut data = Vec::with_capacity(rows.len());
     for (row, merged) in rows.iter().zip(merged) {
@@ -1101,10 +1118,11 @@ async fn read_issue(
     let source = store::get_source(state.meta.reader(), project, row.source_id)
         .await?
         .ok_or_else(missing_source)?;
-    let merged = store::merged_ids(state.meta.reader(), project, row.id).await?;
+    let mut merged = store::merged_ids(state.meta.reader(), project, row.id).await?;
     let names = names_of(row.id, &merged);
     let window = TimeWindow::new(now.saturating_sub(DAY_NS), now)?;
     let counts = tallies(state, org, project, &names, window).await?;
+    most_occurrences_first(&mut merged, &counts);
     Ok(issue_json(&row, &source, merged, total(&names, &counts)))
 }
 
@@ -1130,7 +1148,10 @@ async fn get_issue_occurrences(
 
     let counts = name_counts(&ctx, &names, window, true).await?;
     let mut by_day: BTreeMap<i64, Tally> = BTreeMap::new();
+    let mut by_name: HashMap<String, Tally> = HashMap::new();
     for row in counts {
+        let name = by_name.entry(row.name).or_default();
+        name.count = name.count.saturating_add(row.count);
         let day = by_day.entry(row.bucket_start).or_default();
         day.count = day.count.saturating_add(row.count);
         day.users = day.users.max(row.users);
@@ -1144,25 +1165,11 @@ async fn get_issue_occurrences(
         })
         .collect();
 
-    // The issue, then the merged issues by their latest occurrence (D-IC-9).
+    // The issue, then the merged issues with the most occurrences in the period (D-IC-9).
+    let mut by_count = merged.clone();
+    most_occurrences_first(&mut by_count, &by_name);
     let mut example_issues = vec![id];
-    if !merged.is_empty() {
-        let merged_rows = store::list_issues(
-            state.meta.reader(),
-            project,
-            &store::IssueListQuery {
-                states: &[],
-                source: None,
-                q: None,
-                ids: Some(merged.as_slice()),
-                sort: IssueSort::LastSeen,
-                cursor: None,
-                limit: u32::try_from(merged.len()).unwrap_or(u32::MAX),
-            },
-        )
-        .await?;
-        example_issues.extend(merged_rows.iter().map(|row| row.id));
-    }
+    example_issues.extend(by_count);
     example_issues.truncate(MAX_EXAMPLE_NAMES);
 
     let mut examples = Vec::new();
@@ -2719,5 +2726,101 @@ mod tests {
             .send()
             .await;
         assert_eq!(read.json::<Value>()["title"], "a");
+    }
+
+    #[tokio::test]
+    async fn merged_issues_are_ordered_by_occurrences_and_examples_follow_them() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let target = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, target, "Target", IssueState::Open, now),
+        )
+        .await;
+        occurrence(&app, &seeded, source, target, TRACE_A, 1, None).await;
+        // Seven merged issues with one occurrence each, and two with none that were seen last.
+        let mut busy = Vec::new();
+        for n in 0..7 {
+            let issue = Uuid::now_v7();
+            let mut row = issue_row(
+                project,
+                source,
+                issue,
+                "Busy",
+                IssueState::Merged,
+                now - 3 * HOUR_NS,
+            );
+            row.merged_into = Some(target);
+            put_issue(&app, row).await;
+            let trace = format!("{:032x}", 0x2000 + n);
+            occurrence(&app, &seeded, source, issue, &trace, 2, None).await;
+            busy.push(issue.to_string());
+        }
+        let mut quiet = Vec::new();
+        for _ in 0..2 {
+            let issue = Uuid::now_v7();
+            let mut row = issue_row(
+                project,
+                source,
+                issue,
+                "Quiet",
+                IssueState::Merged,
+                now - HOUR_NS,
+            );
+            row.merged_into = Some(target);
+            put_issue(&app, row).await;
+            quiet.push(issue.to_string());
+        }
+
+        let read = app
+            .request(Method::GET, &issue_url(project, target))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{}", text(&read));
+        let read: Value = read.json();
+        let merged_from: Vec<String> = read["merged_from"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect();
+        // The busy ones first, then the quiet ones; ties are in id order.
+        let mut head = merged_from[..7].to_vec();
+        head.sort();
+        busy.sort();
+        assert_eq!(head, busy);
+        let mut tail = merged_from[7..].to_vec();
+        tail.sort();
+        quiet.sort();
+        assert_eq!(tail, quiet);
+
+        // The examples are the issue and the seven merged issues with the most occurrences.
+        let occurrences = app
+            .request(
+                Method::GET,
+                &format!("{}/occurrences", issue_url(project, target)),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(occurrences.status, 200, "{}", text(&occurrences));
+        let occurrences: Value = occurrences.json();
+        let mut example_ids: Vec<String> = occurrences["examples"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|example| example["issue_id"].as_str().unwrap().to_owned())
+            .collect();
+        example_ids.sort();
+        example_ids.dedup();
+        let mut expected = busy.clone();
+        expected.push(target.to_string());
+        expected.sort();
+        assert_eq!(example_ids, expected);
     }
 }

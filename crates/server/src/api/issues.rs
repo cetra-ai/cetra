@@ -202,7 +202,8 @@ pub struct Issue {
     /// The issue this one was merged into. Omitted unless `state` is `merged`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_into: Option<Uuid>,
-    /// Issues merged into this one. Their occurrences count here.
+    /// Issues merged into this one. Their occurrences count here. Ordered by occurrence count
+    /// over the read's period, most first, then by id.
     pub merged_from: Vec<Uuid>,
     /// Start of the earliest occurrence. JSON is RFC 3339.
     #[serde(with = "cetra_core::time_serde")]
@@ -300,8 +301,8 @@ pub struct IssueOccurrences {
     /// is the largest user count of the issue's names that day, an approximation when merged
     /// issues share users.
     pub days: Vec<IssueDay>,
-    /// The newest occurrences of the issue and of the issues merged into it, at most 20. Not
-    /// limited to the period.
+    /// The newest occurrences of the issue and of its seven merged issues with the most
+    /// occurrences in the period (eight names in all), at most 20. Not limited to the period.
     pub examples: Vec<IssueExample>,
 }
 
