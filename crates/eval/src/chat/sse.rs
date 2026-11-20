@@ -18,6 +18,7 @@ pub(crate) struct SseDecoder {
     data: String,
     has_data: bool,
     max_event_bytes: usize,
+    pending_error: Option<ChatError>,
 }
 
 impl SseDecoder {
@@ -29,25 +30,37 @@ impl SseDecoder {
             data: String::new(),
             has_data: false,
             max_event_bytes,
+            pending_error: None,
         }
     }
 
-    /// Feeds `chunk`; returns the events it completed, in order.
+    /// Feeds `chunk`; returns the events completed before any error, in order.
+    ///
+    /// A failing line stops the chunk. Its error is kept for [`Self::take_error`], so the
+    /// events before it are not lost. Once an error is kept, this returns no events.
     ///
     /// # Errors
     ///
-    /// [`ChatError::Transport`] with [`EgressError::TooLarge`] when an event passes the
-    /// cap, and [`ChatError::BadStream`] for a line that is not UTF-8.
+    /// Never; the errors are reported by [`Self::take_error`]: [`ChatError::Transport`]
+    /// with [`EgressError::TooLarge`] when an event passes the cap, and
+    /// [`ChatError::BadStream`] for a line that is not UTF-8.
     pub(crate) fn push(&mut self, chunk: &[u8]) -> Result<Vec<SseEvent>, ChatError> {
         let mut out = Vec::new();
+        if self.pending_error.is_some() {
+            return Ok(out);
+        }
         for &byte in chunk {
             if byte == b'\n' {
                 let line = std::mem::take(&mut self.line);
-                self.line_done(&line, &mut out)?;
+                if let Err(error) = self.line_done(&line, &mut out) {
+                    self.pending_error = Some(error);
+                    break;
+                }
             } else {
                 self.line.push(byte);
                 if self.line.len() + self.data.len() > self.max_event_bytes {
-                    return Err(self.too_large());
+                    self.pending_error = Some(self.too_large());
+                    break;
                 }
             }
         }
@@ -55,20 +68,32 @@ impl SseDecoder {
     }
 
     /// End of stream: a last unterminated line is read, and pending data is dispatched.
+    /// Returns no events once an error is kept, as [`Self::push`] does.
     ///
     /// # Errors
     ///
-    /// The errors of [`Self::push`].
+    /// Never; see [`Self::push`] and [`Self::take_error`].
     pub(crate) fn finish(&mut self) -> Result<Vec<SseEvent>, ChatError> {
         let mut out = Vec::new();
+        if self.pending_error.is_some() {
+            return Ok(out);
+        }
         if !self.line.is_empty() {
             let line = std::mem::take(&mut self.line);
-            self.line_done(&line, &mut out)?;
+            if let Err(error) = self.line_done(&line, &mut out) {
+                self.pending_error = Some(error);
+                return Ok(out);
+            }
         }
         if self.has_data {
             out.push(self.dispatch());
         }
         Ok(out)
+    }
+
+    /// The error kept by [`Self::push`] or [`Self::finish`], if any. Taking it clears it.
+    pub(crate) fn take_error(&mut self) -> Option<ChatError> {
+        self.pending_error.take()
     }
 
     fn line_done(&mut self, raw: &[u8], out: &mut Vec<SseEvent>) -> Result<(), ChatError> {
@@ -177,9 +202,10 @@ mod tests {
     #[test]
     fn caps_an_event() {
         let mut decoder = SseDecoder::new(8);
-        let err = decoder.push(b"data: 0123456789\n\n").err();
+        let events = decoder.push(b"data: 0123456789\n\n").expect("push");
+        assert!(events.is_empty());
         assert_eq!(
-            err,
+            decoder.take_error(),
             Some(ChatError::Transport(EgressError::TooLarge { limit: 8 }))
         );
     }
@@ -187,9 +213,22 @@ mod tests {
     #[test]
     fn refuses_invalid_utf8() {
         let mut decoder = SseDecoder::new(MAX);
-        assert_eq!(
-            decoder.push(b"data: \xff\n\n").err(),
-            Some(ChatError::BadStream)
-        );
+        let events = decoder.push(b"data: \xff\n\n").expect("push");
+        assert!(events.is_empty());
+        assert_eq!(decoder.take_error(), Some(ChatError::BadStream));
+    }
+
+    #[test]
+    fn keeps_the_events_before_an_error_and_stops_there() {
+        let mut decoder = SseDecoder::new(MAX);
+        let events = decoder
+            .push(b"data: a\n\ndata: \xff\n\ndata: b\n\n")
+            .expect("push");
+        let got: Vec<String> = events.into_iter().map(|event| event.data).collect();
+        assert_eq!(got, vec!["a".to_owned()]);
+        assert!(decoder.push(b"data: c\n\n").expect("push").is_empty());
+        assert!(decoder.finish().expect("finish").is_empty());
+        assert_eq!(decoder.take_error(), Some(ChatError::BadStream));
+        assert_eq!(decoder.take_error(), None);
     }
 }

@@ -543,3 +543,37 @@ async fn request_errors_come_before_sending() {
     );
     assert!(server.requests().is_empty());
 }
+
+#[tokio::test]
+async fn events_before_an_sse_error_are_delivered() {
+    let server = StreamServer::start().await;
+    let mut chunk = openai_content("Hi");
+    chunk.extend_from_slice(b"data: \xff\n\n");
+    server.enqueue(ok_chunks(vec![chunk]));
+    let conn = connection(Adapter::OpenAi, server.base_v1());
+    let mut stream = stream_chat(&client(), &conn, &request("gpt-x"))
+        .await
+        .expect("stream");
+    assert_eq!(stream.next().await.expect("text"), Some(text("Hi")));
+    assert_eq!(next_error(&mut stream).await, ChatError::BadStream);
+}
+
+#[tokio::test]
+async fn empty_data_events_are_ignored() {
+    let server = StreamServer::start().await;
+    server.enqueue(ok_chunks(vec![
+        openai_content("Hel"),
+        sse(""),
+        openai_content("lo"),
+        sse("[DONE]"),
+    ]));
+    let conn = connection(Adapter::OpenAi, server.base_v1());
+    let mut stream = stream_chat(&client(), &conn, &request("gpt-x"))
+        .await
+        .expect("stream");
+    let events = collect(&mut stream).await.expect("events");
+    assert_eq!(
+        events,
+        vec![text("Hel"), text("lo"), done(None, None, None)]
+    );
+}

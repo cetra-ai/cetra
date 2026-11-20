@@ -167,9 +167,13 @@ async fn tool_turn_streams_a_complete_call(adapter: Adapter, api: &str, finish: 
         "chunk_delay_ms": 0
     }))])
     .await;
-    let mut stream = stream_chat(&client(), &connection(adapter, addr), &request(vec![weather()]))
-        .await
-        .expect("stream");
+    let mut stream = stream_chat(
+        &client(),
+        &connection(adapter, addr),
+        &request(vec![weather()]),
+    )
+    .await
+    .expect("stream");
     let events = collect(&mut stream).await;
     assert_eq!(
         events.first(),
@@ -218,12 +222,7 @@ async fn gemini_text_turn_streams_through_the_capture_mock() {
 
 #[tokio::test]
 async fn openai_tool_turn_streams_a_complete_call() {
-    tool_turn_streams_a_complete_call(
-        Adapter::OpenAi,
-        "openai.chat",
-        FinishReason::ToolCall,
-    )
-    .await;
+    tool_turn_streams_a_complete_call(Adapter::OpenAi, "openai.chat", FinishReason::ToolCall).await;
 }
 
 #[tokio::test]

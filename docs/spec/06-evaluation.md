@@ -207,8 +207,12 @@ Client-side execution with the SDK (10, D18); the server stores results. There a
   - `done`: the last event. It has the finish reason (`stop`, `length`, `tool_call`, `content_filter`, `refusal`, or a short provider token), the usage in OTel semantics (or none when the stream carried no usage) and the response model.
 
   Dropping the stream closes the provider connection.
-- **Limits (D-V-24, D-V-30).** A whole call takes at most its timeout. A stream that sends nothing for 60 s fails. The answer a stream assembles (text plus tool-call arguments) and any one SSE event are at most 4 MiB. The raw stream is at most 32 MiB. A non-200 body is read up to 4 MiB.
-- **Errors (D160).** A provider status or an error event maps to D160's classes: retryable, pause or permanent. An error event in a stream is a provider error with the status its type stands for. An event that is not JSON, or a stream whose body ends before the provider's end signal, is an invalid stream. A stream over a cap is a transport error. No error text or log line carries a prompt, an answer, a tool argument, a header value, a key or a URL path or query.
+
+  Each provider marks the end of its answer with an end signal. OpenAI sends a `finish_reason` or `[DONE]`. Anthropic sends `message_stop`. Gemini sends a `finishReason`, or a blocked prompt. A body that ends before its end signal is an invalid stream. Empty `data:` events are ignored.
+
+  A streamed Gemini call without `args` is a call with no arguments. The buffered decoding that judges use skips such a call.
+- **Limits (D-V-24, D-V-30).** A whole call takes at most its timeout. The idle timeout is a request field: a stream fails after a silence longer than it. The playground sets it to 60 s (D-V-24). The answer a stream assembles (text plus tool-call arguments, including partial arguments) and any one SSE event are at most 4 MiB. The raw stream is at most 32 MiB. A non-200 body is read up to 4 MiB.
+- **Errors (D160).** A provider status or an error event maps to D160's classes: retryable, pause or permanent. An error event in a stream is a provider error with the status its type stands for. An event that is not JSON, or a stream whose body ends before the provider's end signal, is an invalid stream. A stream over a cap is a transport error. Events read before an error are delivered first. No error text or log line carries a prompt, an answer, a tool argument, a header value, a key or a URL path or query.
 - **Egress (D166).** Every call goes through the SSRF guard. Redirects are not followed, and proxies are ignored.
 - **Edge cases the layer does not handle.** These are sent as they are:
   - The request bounds above also apply to judges. Their configuration already enforces the same bounds.

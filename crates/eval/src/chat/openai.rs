@@ -12,13 +12,13 @@ use serde_json::{Map, Value, json};
 use super::sse::SseEvent;
 use super::stream::{Flow, Sink};
 use super::{
-    ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall,
-    ToolChoice, ToolDefinition, arguments_text, check_request, endpoint, messages_to_send, number,
-    other_finish, request_headers, response_text, send_buffered, stream_arguments, stream_error,
-    text_content, texts, validate_model,
+    ANSWER_MAX_BYTES, ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent,
+    TokenUsage, ToolCall, ToolChoice, ToolDefinition, arguments_text, check_request, endpoint,
+    messages_to_send, number, other_finish, request_headers, response_text, send_buffered,
+    stream_arguments, stream_error, text_content, texts, validate_model,
 };
 use crate::egress::EgressClient;
-use crate::error::ChatError;
+use crate::error::{ChatError, EgressError};
 use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 use crate::secret::Secret;
 
@@ -463,6 +463,12 @@ impl StreamState {
             }
             if let Some(arguments) = entry.pointer("/function/arguments").and_then(Value::as_str) {
                 call.arguments.push_str(arguments);
+                // The partial arguments count toward the answer cap (D-V-30).
+                if call.arguments.len() > ANSWER_MAX_BYTES {
+                    return Err(ChatError::Transport(EgressError::TooLarge {
+                        limit: ANSWER_MAX_BYTES,
+                    }));
+                }
             }
         }
         Ok(())

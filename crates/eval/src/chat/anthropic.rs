@@ -14,13 +14,13 @@ use serde_json::{Map, Value, json};
 use super::sse::SseEvent;
 use super::stream::{Flow, Sink};
 use super::{
-    ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent, TokenUsage, ToolCall,
-    ToolChoice, ToolDefinition, arguments_object, check_request, endpoint, messages_to_send,
-    number, other_finish, request_headers, response_text, secret_header, send_buffered,
-    stream_arguments, stream_error, texts, validate_model,
+    ANSWER_MAX_BYTES, ChatDone, ChatReply, ChatRequest, FinishReason, Prepared, ReplyContent,
+    TokenUsage, ToolCall, ToolChoice, ToolDefinition, arguments_object, check_request, endpoint,
+    messages_to_send, number, other_finish, request_headers, response_text, secret_header,
+    send_buffered, stream_arguments, stream_error, texts, validate_model,
 };
 use crate::egress::EgressClient;
-use crate::error::ChatError;
+use crate::error::{ChatError, EgressError};
 use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 
 const DEFAULT_BASE: &str = "https://api.anthropic.com";
@@ -503,6 +503,12 @@ impl StreamState {
                     (self.blocks.get_mut(&index), part)
                 {
                     json.push_str(part);
+                    // The partial arguments count toward the answer cap (D-V-30).
+                    if json.len() > ANSWER_MAX_BYTES {
+                        return Err(ChatError::Transport(EgressError::TooLarge {
+                            limit: ANSWER_MAX_BYTES,
+                        }));
+                    }
                 }
             }
             _ => {}

@@ -69,6 +69,10 @@ pub(crate) enum Decoder {
 
 impl Decoder {
     fn on_event(&mut self, event: &SseEvent, sink: &mut Sink) -> Result<Flow, ChatError> {
+        // An empty `data:` event is a keep-alive. No provider sends one with content.
+        if event.data.trim().is_empty() {
+            return Ok(Flow::Continue);
+        }
         match self {
             Self::OpenAi(state) => state.on_event(event, sink),
             Self::Anthropic(state) => state.on_event(event, sink),
@@ -168,6 +172,9 @@ impl ChatStream {
         let Some(chunk) = self.body.next_chunk().await? else {
             let events = self.sse.finish()?;
             if !self.feed(&events)? {
+                if let Some(error) = self.sse.take_error() {
+                    return Err(error);
+                }
                 self.decoder.finish_at_eof(&mut self.sink)?;
             }
             self.finished = true;
@@ -175,9 +182,14 @@ impl ChatStream {
         };
         let events = self.sse.push(&chunk)?;
         if self.feed(&events)? {
+            // The answer ended before any SSE error in this chunk: the rest is not read.
             self.finished = true;
+            return Ok(());
         }
-        Ok(())
+        match self.sse.take_error() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Decodes `events` in order. Returns `true` when the decoder reached the answer's end,
