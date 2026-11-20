@@ -1,0 +1,41 @@
+{
+  "text": [
+    {"name": "plain-text", "template": "Hello", "values": {}, "expected": "Hello", "variables": []},
+    {"name": "one-variable", "template": "Hello {{name}}", "values": {"name": "Ada"}, "expected": "Hello Ada", "variables": ["name"]},
+    {"name": "spaces-and-tabs", "template": "Hi {{ name\t}}!", "values": {"name": "Ada"}, "expected": "Hi Ada!", "variables": ["name"]},
+    {"name": "repeated", "template": "{{a}}-{{b}}-{{a}}", "values": {"a": "1", "b": "2"}, "expected": "1-2-1", "variables": ["a", "b"]},
+    {"name": "order-of-first-use", "template": "{{b}} {{a}} {{b}}", "values": {"a": "x", "b": "y"}, "expected": "y x y", "variables": ["b", "a"]},
+    {"name": "extra-values-ignored", "template": "{{a}}", "values": {"a": "1", "z": "2"}, "expected": "1", "variables": ["a"]},
+    {"name": "value-not-rescanned", "template": "{{a}}", "values": {"a": "{{b}}"}, "expected": "{{b}}", "variables": ["a"]},
+    {"name": "unicode", "template": "Grüße {{ name }} 👋", "values": {"name": "Zoë"}, "expected": "Grüße Zoë 👋", "variables": ["name"]},
+    {"name": "lone-braces", "template": "{ a } } {", "values": {}, "expected": "{ a } } {", "variables": []},
+    {"name": "closing-without-opening", "template": "a }} b", "values": {}, "expected": "a }} b", "variables": []},
+    {"name": "underscore-name", "template": "{{_x1}}", "values": {"_x1": "v"}, "expected": "v", "variables": ["_x1"]},
+    {"name": "empty-value", "template": "[{{a}}]", "values": {"a": ""}, "expected": "[]", "variables": ["a"]},
+    {"name": "multiline-value", "template": "{{a}}", "values": {"a": "l1\nl2"}, "expected": "l1\nl2", "variables": ["a"]},
+    {"name": "missing", "template": "{{a}} {{b}}", "values": {"a": "1"}, "error": {"kind": "missing_variable", "name": "b"}, "variables": ["a", "b"]},
+    {"name": "missing-first-in-order", "template": "{{b}} {{a}}", "values": {}, "error": {"kind": "missing_variable", "name": "b"}, "variables": ["b", "a"]},
+    {"name": "block", "template": "x {% if a %}", "values": {}, "error": {"kind": "invalid", "reason": "block", "line": 1, "column": 3}, "variables": null},
+    {"name": "comment", "template": "{# note #}", "values": {}, "error": {"kind": "invalid", "reason": "block", "line": 1, "column": 1}, "variables": null},
+    {"name": "unclosed", "template": "Hi {{ name", "values": {}, "error": {"kind": "invalid", "reason": "unclosed", "line": 1, "column": 4}, "variables": null},
+    {"name": "filter", "template": "{{ name | upper }}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "dotted", "template": "{{ user.name }}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "digit-first", "template": "{{1a}}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "empty-tag", "template": "{{ }}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "whitespace-control", "template": "{{- a }}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "newline-in-tag", "template": "{{ a\n}}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 1, "column": 1}, "variables": null},
+    {"name": "reserved", "template": "{{ true }}", "values": {}, "error": {"kind": "invalid", "reason": "reserved", "line": 1, "column": 1}, "variables": null},
+    {"name": "reserved-not", "template": "{{ not }}", "values": {}, "error": {"kind": "invalid", "reason": "reserved", "line": 1, "column": 1}, "variables": null},
+    {"name": "reserved-if", "template": "x {{if}}", "values": {}, "error": {"kind": "invalid", "reason": "reserved", "line": 1, "column": 3}, "variables": null},
+    {"name": "trailing-newline", "template": "{{a}}\n", "values": {"a": "x"}, "expected": "x\n", "variables": ["a"]},
+    {"name": "position-second-line", "template": "ok\nab {{ x.y }}", "values": {}, "error": {"kind": "invalid", "reason": "not_a_name", "line": 2, "column": 4}, "variables": null},
+    {"name": "position-after-emoji", "template": "👋 {%", "values": {}, "error": {"kind": "invalid", "reason": "block", "line": 1, "column": 3}, "variables": null}
+  ],
+  "chat": [
+    {"name": "chat-basic", "template": [{"role": "system", "content": "You help with {{product}}."}, {"role": "user", "content": "{{q}}"}], "values": {"product": "cetra", "q": "Hi"}, "placeholders": {}, "expected": [{"role": "system", "content": "You help with cetra."}, {"role": "user", "content": "Hi"}], "variables": ["product", "q"], "placeholder_names": []},
+    {"name": "chat-placeholder", "template": [{"role": "system", "content": "S"}, {"type": "placeholder", "name": "history"}, {"role": "user", "content": "{{q}}"}], "values": {"q": "Next"}, "placeholders": {"history": [{"role": "user", "content": "{{not_rendered}}"}, {"role": "assistant", "content": "A"}]}, "expected": [{"role": "system", "content": "S"}, {"role": "user", "content": "{{not_rendered}}"}, {"role": "assistant", "content": "A"}, {"role": "user", "content": "Next"}], "variables": ["q"], "placeholder_names": ["history"]},
+    {"name": "chat-empty-placeholder", "template": [{"type": "placeholder", "name": "h"}, {"role": "user", "content": "x"}], "values": {}, "placeholders": {"h": []}, "expected": [{"role": "user", "content": "x"}], "variables": [], "placeholder_names": ["h"]},
+    {"name": "chat-missing-variable", "template": [{"role": "user", "content": "{{a}}"}, {"type": "placeholder", "name": "h"}], "values": {}, "placeholders": {}, "error": {"kind": "missing_variable", "name": "a"}, "variables": ["a"], "placeholder_names": ["h"]},
+    {"name": "chat-missing-placeholder", "template": [{"role": "user", "content": "x"}, {"type": "placeholder", "name": "h"}], "values": {}, "placeholders": {}, "error": {"kind": "missing_placeholder", "name": "h"}, "variables": [], "placeholder_names": ["h"]}
+  ]
+}

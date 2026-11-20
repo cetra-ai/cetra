@@ -22,6 +22,7 @@ mod egress;
 mod error;
 mod judge;
 mod mapping;
+pub mod plain_template;
 mod runner;
 mod secret;
 mod template;
