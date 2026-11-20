@@ -644,6 +644,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "post",
+        "/api/v1/projects/{project}/issues/{id}/dataset-items",
+        "post_issue_dataset_items",
+    ),
+    (
+        "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
     ),
@@ -1378,6 +1383,7 @@ fn document_lint() {
             || *id == "patch_issue_source"
             || *id == "patch_issue"
             || *id == "post_issue_merge"
+            || *id == "post_issue_dataset_items"
             || *id == "post_issue_source_refit"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);

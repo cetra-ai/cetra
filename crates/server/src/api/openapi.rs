@@ -67,8 +67,8 @@ use super::datasets::{
     ExperimentScoreMean, ExperimentTrend, ExperimentTrendParams, ExperimentTrends, ExportFormat,
     ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportColumn,
     ImportFormat, ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError,
-    ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams,
-    RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
+    IssueDatasetItemsRequest, ItemChange, ItemChangeKind, ItemChangeListParams, NewDatasetItem,
+    PreviewParams, RestoreRequest, SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
@@ -430,6 +430,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<RestoreRequest>();
     set.insert::<TraceRef>();
     set.insert::<FromTracesRequest>();
+    set.insert::<IssueDatasetItemsRequest>();
     set.insert::<SkippedTrace>();
     set.insert::<FromTracesResult>();
     set.insert::<ExperimentScoreMean>();
@@ -3108,6 +3109,22 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
             [] as [&str; 0],
         )]))
         .build();
+    let dataset_items = operation(
+        "post_issue_dataset_items",
+        "issues",
+        "Add an issue's occurrences to a dataset",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("IssueDatasetItemsRequest")))
+    .responses(responses(
+        "201",
+        json_of::<FromTracesResult>("The new version, the items added and the traces skipped."),
+        &[400, 401, 403, 404, 409, 429, 503],
+    ))
+    .build();
     let occurrences = operation(
         "get_issue_occurrences",
         "issues",
@@ -3153,6 +3170,10 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/issues/{{id}}/merge"),
             PathItem::new(HttpMethod::Post, merge),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/dataset-items"),
+            PathItem::new(HttpMethod::Post, dataset_items),
         )
         .path(
             format!("{PROJECT}/issues/{{id}}/occurrences"),

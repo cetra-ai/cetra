@@ -32,7 +32,7 @@ use crate::api::datasets::{
     ExportParams, FromTraceRequest, FromTracesRequest, FromTracesResult, ImportFormat,
     ImportMapping, ImportParams, ImportPreview, ImportResult, ImportRowError, ItemChange,
     ItemChangeKind, ItemChangeListParams, NewDatasetItem, PreviewParams, RestoreRequest,
-    SkippedTrace, UpdateDatasetRequest, UpdateItemRequest,
+    SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use crate::api::experiments::CLOCK_SKEW_NS;
 use crate::auth::principal::Principal;
@@ -2459,7 +2459,29 @@ async fn add_from_traces(
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
     error::Json(body): error::Json<FromTracesRequest>,
 ) -> Result<(StatusCode, error::Json<FromTracesResult>), ApiError> {
-    if !(1..=MAX_TRACE_BATCH).contains(&body.items.len()) {
+    let result = add_trace_refs(
+        &state,
+        &principal,
+        &access,
+        &dataset,
+        &body.items,
+        &Map::new(),
+    )
+    .await?;
+    Ok((StatusCode::CREATED, error::Json(result)))
+}
+
+/// The core of both bulk adds (D-J-25, D-IC-22): copies the traces of `items` into `dataset` as one
+/// new version, giving every item `metadata`. Writes the audit line.
+pub(crate) async fn add_trace_refs(
+    state: &AppState,
+    principal: &Principal,
+    access: &ProjectAccess,
+    dataset: &str,
+    items: &[TraceRef],
+    metadata: &Map<String, Value>,
+) -> Result<FromTracesResult, ApiError> {
+    if !(1..=MAX_TRACE_BATCH).contains(&items.len()) {
         return Err(bad_request(vec![field_error(
             "items",
             format!("must hold 1 to {MAX_TRACE_BATCH} items"),
@@ -2467,7 +2489,7 @@ async fn add_from_traces(
     }
     let mut refs = Vec::new();
     let mut errors = Vec::new();
-    for (index, item) in body.items.iter().enumerate() {
+    for (index, item) in items.iter().enumerate() {
         let trace = item.trace_id.parse::<TraceId>();
         let span = match item.span_id.as_deref() {
             Some(text) => text.parse::<SpanId>().map(Some),
@@ -2490,12 +2512,12 @@ async fn add_from_traces(
     }
 
     let project = access.project.id;
-    let used = find(&state, project, &dataset).await?;
+    let used = find(state, project, dataset).await?;
     let schemas = Schemas::of(&used)?;
     let mut copies: Vec<CopyPlan> = Vec::new();
     let mut skipped: Vec<(usize, String)> = Vec::new();
     for (index, trace_id, span_id) in refs {
-        let text = &body.items[index];
+        let text = &items[index];
         let loaded = match trace_load::load_trace(
             &state,
             project,
@@ -2524,7 +2546,7 @@ async fn add_from_traces(
             span_id: text.span_id.clone(),
             input: None,
             expected_output: None,
-            metadata: None,
+            metadata: (!metadata.is_empty()).then(|| metadata.clone()),
         };
         let (source, values) = match item_from(&loaded, span_id, &request) {
             Ok(copied) => copied,
@@ -2550,7 +2572,7 @@ async fn add_from_traces(
         return Err(refusals(&skipped));
     }
 
-    let actor = created_by(&principal);
+    let actor = created_by(principal);
     let created_by = actor.clone();
     let now = state.clock.now_ns();
     let key = DatasetKey::Id(used.id);
@@ -2656,12 +2678,12 @@ async fn add_from_traces(
             .map(|index| (index, "a deletion blocks this trace".to_owned())),
     );
     skipped.sort_by_key(|(index, _)| *index);
-    let mut items = Vec::with_capacity(item_ids.len());
+    let mut copied = Vec::with_capacity(item_ids.len());
     for item_id in &item_ids {
         let row = store::get_item(state.meta.reader(), used.id, *item_id, version.version)
             .await?
             .ok_or(ApiError::NotFound)?;
-        items.push(item_json(&row));
+        copied.push(item_json(&row));
     }
     tracing::info!(
         target: "audit",
@@ -2669,7 +2691,7 @@ async fn add_from_traces(
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
         version = version.version,
-        count = items.len(),
+        count = copied.len(),
         skipped = skipped.len(),
         "dataset items added from traces"
     );
@@ -2677,18 +2699,15 @@ async fn add_from_traces(
         .into_iter()
         .map(|(index, message)| SkippedTrace {
             index: i64::try_from(index).unwrap_or(i64::MAX),
-            trace_id: body.items[index].trace_id.clone(),
+            trace_id: items[index].trace_id.clone(),
             message,
         })
         .collect();
-    Ok((
-        StatusCode::CREATED,
-        error::Json(FromTracesResult {
-            version,
-            items,
-            skipped,
-        }),
-    ))
+    Ok(FromTracesResult {
+        version,
+        items: copied,
+        skipped,
+    })
 }
 
 /// The 400 of a bulk add that copied no trace: each refusal as an `items[i]` field error.
@@ -6243,6 +6262,20 @@ mod tests {
             .send()
             .await;
         assert_eq!(response.status, 403);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_j_route_is_unchanged() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        faq_with_traces(&app, &seeded).await;
+
+        let response = from_traces(&app, &seeded, json!({ "items": [ { "trace_id": T1 } ] })).await;
+
+        assert_eq!(response.status, 201);
+        let result: Value = response.json();
+        assert_eq!(result["items"][0]["source_trace_id"], T1);
+        assert_eq!(result["items"][0]["metadata"], json!({}));
     }
 
     /// `GET …/dataset-trends?ids=…`.
