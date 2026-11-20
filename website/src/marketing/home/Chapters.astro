@@ -1,0 +1,70 @@
+---
+import marketingAlerts from "../../assets/screenshots/marketing-alerts.png";
+import marketingEvaluators from "../../assets/screenshots/marketing-evaluators.png";
+import marketingSqlConsole from "../../assets/screenshots/marketing-sql-console.png";
+import marketingTraceList from "../../assets/screenshots/marketing-trace-list.png";
+import Chapter from "../components/Chapter.astro";
+import Frame from "../components/Frame.astro";
+import Section from "../components/Section.astro";
+---
+
+<Section tone="raised" id="product" labelledby="ch-trace">
+  <Chapter
+    bare
+    id="ch-trace"
+    eyebrow="Trace"
+    title="See every call your app makes."
+    lede="Send OpenTelemetry from any framework or SDK. Every LLM call, tool and retrieval lands in one tree, with tokens, cost and latency."
+    features={["Sessions and users", "Cost per call and per model", "Live view while traces arrive", "Images and files in the payload"]}
+  >
+    <Frame src={marketingTraceList} alt="The trace list: rows with name, input, output and duration, a filter sidebar, and a histogram of traces over time." label="Traces" fade />
+  </Chapter>
+</Section>
+
+<Section tone="ink" labelledby="ch-explore">
+  <Chapter
+    bare
+    id="ch-explore"
+    eyebrow="Explore"
+    title="Find what went wrong."
+    lede="Filter by anything, search the text of prompts and outputs, or ask your question in SQL."
+    features={["Errors, slow and expensive in one click", "Full-text search", "Saved views", "A SQL console over your traces"]}
+  >
+    <Frame src={marketingSqlConsole} alt="The SQL console with a query over the spans table, the table schema and the query result." label="SQL" fade />
+  </Chapter>
+</Section>
+
+<Section tone="teal" labelledby="ch-evaluate">
+  <Chapter
+    bare
+    id="ch-evaluate"
+    eyebrow="Evaluate"
+    title="Measure quality when you're ready."
+    lede="Score production traffic with LLM judges and checks, build datasets from real traces, and compare experiments."
+    features={["LLM judges with sampling and a cost cap", "Checks: JSON, regex, schema, contains", "Datasets from production traces", "Experiments from the Python and TypeScript SDKs"]}
+  >
+    <Frame src={marketingEvaluators} alt="The evaluators page: templates for LLM judges and checks, and a table of evaluators with their runs, errors and results." label="Evaluators" fade />
+  </Chapter>
+</Section>
+
+<Section tone="ink" labelledby="ch-alert">
+  <Chapter
+    bare
+    id="ch-alert"
+    eyebrow="Alert"
+    title="Know when it breaks."
+    lede="Get told when the error rate, the cost, the latency or a score crosses your line, in Slack, by email or on a webhook."
+    features={["Error rate", "Cost over a window", "p95 latency", "Judge score under a threshold"]}
+  >
+    <Frame src={marketingAlerts} alt="The alerts page with three alert rules, one of them firing, and the recent alert events." label="Alerts" fade />
+  </Chapter>
+</Section>
+
+<style>
+  /* Chapter has no column template, so its columns could grow past a phone's width. */
+  :global(.chapter),
+  :global(.text) {
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+</style>

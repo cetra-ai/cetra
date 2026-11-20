@@ -1,0 +1,37 @@
+---
+import Button from "../components/Button.astro";
+import CopyCommand from "../components/CopyCommand.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import { CLOUD, INSTALL_COMMANDS } from "../site";
+---
+
+<Section tone="raised" divider labelledby="cta-title">
+  <SectionHeading
+    align="center"
+    title="See it on real traces."
+    id="cta-title"
+    lede="Open the demo, or run cetra on your machine now."
+  />
+  <div class="actions">
+    <Button href={CLOUD.demo} size="lg" external srHint="(needs a free account)">Try the demo</Button>
+    <Button href="/docs/" size="lg" variant="secondary">Read the docs</Button>
+  </div>
+  <div class="install">
+    <CopyCommand id="cta-install" commands={INSTALL_COMMANDS} />
+  </div>
+</Section>
+
+<style>
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-3);
+    margin-top: var(--space-6);
+  }
+  .install {
+    max-width: 640px;
+    margin: var(--space-6) auto 0;
+  }
+</style>
