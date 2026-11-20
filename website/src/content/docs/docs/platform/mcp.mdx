@@ -1,6 +1,6 @@
 ---
 title: MCP server
-description: Connect a coding agent to your traces over MCP with a personal access token, using seven read-only tools.
+description: Connect a coding agent to your traces over MCP with a personal access token, using nine read-only tools.
 ---
 
 The cetra server speaks the Model Context Protocol, so a coding agent such as Claude Code or Cursor can list your projects, run SQL, search traces and read spans while it works on your code. Every tool is read-only.
@@ -68,6 +68,8 @@ In every tool, `project` is a project ID or `<org-slug>/<project-slug>`. Times (
 | `get_schema` | `project` | The views, columns, types and descriptions you can query. |
 | `query_sql` | `project`, `query`, `params`, `from`, `to`, `limit` (1 to 1,000, default 100), `max_chars` | Columns, rows, row count, a truncated flag and notes. `from` and `to` are required, at most 30 days apart. The call times out after 30 seconds. |
 | `list_saved_views` | `project`, `kind` | The saved views and SQL queries you can see. |
+| `list_prompts` | `project`, `q`, `label`, `limit` (1 to 200, default 50), `max_chars` | The prompts of the project, by name: type, description, tags, latest version and labels. `label` keeps the prompts that carry it. |
+| `get_prompt` | `project`, `name`, `label` (default `production`), `version` | One prompt version: its template, config, labels and variables. Give `label` or `version`, not both; `latest` is the latest version. |
 | `search_traces` | `project`, `from`, `to`, `view`, `filter`, `search`, `limit` (1 to 100, default 20), `include_eval`, `include_experiments`, `max_chars` | Compact trace summaries. `view` is a saved view ID or name, and explicit arguments override it. The time window is required. |
 | `get_trace` | `project`, `trace_id`, `around`, `include_payloads` (default false), `max_chars` | The span tree, with short input and output previews when `include_payloads` is true. |
 | `get_span` | `project`, `trace_id`, `span_id`, `around`, `max_chars` | One span with its full payloads, cut to fit `max_chars`. |

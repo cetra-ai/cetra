@@ -32,7 +32,7 @@ These are out of track V. Each is a possible later track, and the design does no
 - **Git sync and CLI commands** (`cetra prompts pull/push`), as in LangWatch.
 - **Server-side label routing.** No A/B splits of a label between versions, and no gateway (D4).
 - **Evaluators built from registry prompts.** The template syntax keeps this possible (D-V-3), but judges keep their own templates.
-- **MCP tools for prompts.** See open question Q2.
+- **MCP tools for prompts.** Added in M8 (D-V-39).
 - **Images, audio and files in the playground.** Only text and tool parts are sent (D-V-25).
 - **Running tools in the playground.** The model's tool calls are shown, and the user can type tool results (D-V-25).
 - **Saved playground sessions** shared between users. The draft stays in the browser, and the run history comes from the traces (D-V-28).
@@ -191,11 +191,15 @@ Options marked "(user)" were chosen by the user on 2026-11-20. The others are pr
 | D-V-36 | **Playground runs and connection status.** A run uses the connection whatever its `status` (as connection tests and test runs do) and never marks it `failing`: a pause-class error is reported to the user in the `error` event only. | Marking the connection failing: one bad run would stop the rules that share it. |
 | D-V-37 | **Playground request shape.** `messages` are canonical messages (spec 01) or `{type: "placeholder", name}` entries; a placeholder is replaced, in place, by the messages given under its name in `placeholders`; every `text` part of the resulting messages that came from `messages` (not from a placeholder) is rendered with `variables` (D-V-3); a missing variable or placeholder is a 400 before the stream starts. Trace ids are random. The run's trace is committed after the stream ends, also when the client cancelled (status error, message `cancelled`). Rendered text is at most 4 MiB. | — |
 | D-V-38 | **Playground precision.** Runs use raw `fetch` with same-origin credentials and a small SSE reader; openapi-react-query is not used for the stream. A message is edited as a role and its text, or as its parts' JSON when it holds non-text parts. Models are free text, defaulting to the connection's default model (there is no model list endpoint). The go-key is `l`. `render_variables` (default `true`; off for span and run sources) sends a request's messages as written, placeholders still expanded (amends D-V-37). The source search keys are removed from the URL after loading; the draft keeps the source (amends D-V-28). | — |
+| D-V-39 | **MCP prompt tools.** The MCP server gains read-only `list_prompts` and `get_prompt` (the answer of the resolve fetch), with the same auth, limits and `max_chars` cap as the other tools. Answers Q2 (user, 2026-11-20: yes). | M8 |
+| D-V-40 | **No server-side dataset runs yet.** The playground does not run over dataset items and there is no server-side prompt experiment; D18 stays. Phoenix and Opik run prompts over datasets from the playground and Langfuse has prompt experiments: to revisit after launch. Answers Q1 (user, 2026-11-20: later). | — |
 
 ## Open questions for the user
 
 - **Q1. Datasets in the playground.** Phoenix and Opik run the playground over a dataset as a server-side job that outlives the page. Doing that in cetra means a server-side experiment run, which D18 (experiments are client-side only) rules out. Should V add it (amending D18, probably as an eighth milestone), or leave it for later and keep D18 as it is? This design does neither.
+  **Answered 2026-11-20: later.** D18 stays; D-V-40.
 - **Q2. MCP tools for prompts.** Should H's read-only MCP server (S10) gain `list_prompts` and `get_prompt`, so coding agents can read the team's prompts? It would be a small addition to M1. The design leaves it out until you say so.
+  **Answered 2026-11-20: yes.** Added in M8 (D-V-39).
 
 ## Milestones
 
