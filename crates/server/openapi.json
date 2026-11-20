@@ -32721,6 +32721,10 @@
             "type": "object",
             "description": "Messages that replace the placeholder entries of `messages`, by name. Default: none."
           },
+          "render_variables": {
+            "type": "boolean",
+            "description": "When false, the messages are sent as written; placeholders are still expanded (D-V-38).\nDefault: true."
+          },
           "response_format": {
             "$ref": "#/components/schemas/PlaygroundResponseFormat",
             "description": "The schema the answer must match. The answer is streamed as `text` events."

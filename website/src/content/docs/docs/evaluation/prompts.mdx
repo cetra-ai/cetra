@@ -3,6 +3,10 @@ title: Prompts
 description: Keep versioned prompts in cetra, fetch them by label with a cache and a fallback, and link their versions to your spans.
 ---
 
+import { Image } from "astro:assets";
+import promptsPage from "../../../../assets/screenshots/prompts.png";
+import promptPage from "../../../../assets/screenshots/prompt.png";
+
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 A prompt is a named, versioned template in the project's registry. Your code fetches a version by label, fills its variables, and links the spans it writes to the version that ran.
@@ -18,6 +22,16 @@ A prompt is a `text` template, a single string, or a `chat` template, a list of 
 - Protected labels cannot be moved by an ordinary member. By default `production` is protected. A project admin, or an API key with the `write` scope, moves a protected label. Other requests get `403 forbidden`.
 
 A template is at most 256 KiB. A version can have a commit message of up to 500 characters and a config, which is a JSON object of up to 64 KiB that cetra stores as you send it.
+
+## In the UI
+
+The **Prompts** page in the Evaluate group lists the project's prompts. Search by name, filter by label or tag, and select **New prompt** to create one. Members and above create prompts and move labels. Labels that a project admin protects, `production` by default, can be moved by admins only; the other users see them with a lock. Admins also open **Protected labels** to change the list.
+
+<Image src={promptsPage} alt="The prompts page: the list of prompts with their types, latest versions and label chips." />
+
+Select a prompt to open its page. The **Template** tab shows the version you choose, and members edit it there: **Save as new version** writes the next version, with a commit message. The **Versions** tab lists every version with its labels. Use **Set label…** on a row to move a label to that version, and the remove button on a chip to take it off. A version's diff compares it with the version before it, line by line. The **Labels** tab shows the history of every label move. The **Metrics** tab compares the versions over the last 24 hours, 7 days or 30 days, with their spans, errors, cost, latency and scores; each version links to its traces. To run a version against one to four models, select **Open in playground** on the prompt page. See the [playground](/docs/evaluation/playground/).
+
+<Image src={promptPage} alt="The prompt page of support-reply: its template, with the tabs Template, Versions, Labels and Metrics above it." />
 
 ## Template syntax
 

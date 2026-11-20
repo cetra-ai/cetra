@@ -51,6 +51,18 @@ pub struct PlaygroundRunRequest {
     /// Where the messages came from: a prompt version or a span. Recorded on the run's trace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<PlaygroundSource>,
+    /// When false, the messages are sent as written; placeholders are still expanded (D-V-38).
+    /// Default: true.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub render_variables: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 /// Sampling parameters and the completion cap. A provider without a field does not get it.

@@ -338,7 +338,7 @@ These are fixed here so the plans copy them, not choose them.
 - The rule form's metric picker gets "Issue occurrences" with an issue-or-source scope picker.
 
 ### D-IC-24 MCP list_issues
-- An eighth read-only tool `list_issues` (amends D-H-11 "seven"). Arguments: `project` (required), `state` (`open` default, `resolved`, `ignored`, `all`), `source` (id, optional), `limit` (1–100, default 20), `max_chars`. Output `{issues: [{id, title, kind, state, regressed, source_id, first_seen, last_seen, count_7d, users_7d, url}], truncated, notes}`, sorted by last_seen desc. Counts over the last 7 days through the same tally helper as `GET /issues` (moved from `routes/issues.rs` to `issues/` as `pub(crate)`). `ProjectPerm::View`.
+- A tenth read-only tool `list_issues` (amends D-H-11, after the prompt tools of D-V-39). Arguments: `project` (required), `state` (`open` default, `resolved`, `ignored`, `all`), `source` (id, optional), `limit` (1–100, default 20), `max_chars`. Output `{issues: [{id, title, kind, state, regressed, source_id, first_seen, last_seen, count_7d, users_7d, url}], truncated, notes}`, sorted by last_seen desc. Counts over the last 7 days through the same tally helper as `GET /issues` (moved from `routes/issues.rs` to `issues/` as `pub(crate)`). `ProjectPerm::View`.
 
 ### D-IC-25 End-to-end coverage
 - The CLI e2e (`crates/cli/tests/e2e.rs`) covers error issues with the real binary: an error trace creates an open issue with the trace as an example, resolve, a second trace regresses it, then "add examples to dataset" copies it. It does not wait for alerts (60 s tick).

@@ -3,6 +3,7 @@ import {
   Clock,
   Coins,
   DollarSign,
+  FileText,
   Gauge,
   Layers,
   ListTree,
@@ -33,7 +34,14 @@ import { TRACE_COLUMN_IDS, type TraceColumnId } from "@/lib/search/traces";
 
 const TAGS_SHOWN = 2;
 
-const HIDDEN = new Set<TraceColumnId>(["release", "spans", "errors", "llm_calls", "trace_id"]);
+const HIDDEN = new Set<TraceColumnId>([
+  "prompts",
+  "release",
+  "spans",
+  "errors",
+  "llm_calls",
+  "trace_id",
+]);
 const LOCKED = new Set<TraceColumnId>(["status", "name"]);
 
 const LABELS: Record<TraceColumnId, string> = {
@@ -46,6 +54,7 @@ const LABELS: Record<TraceColumnId, string> = {
   tokens: "Tokens",
   cost: "Cost",
   models: "Models",
+  prompts: "Prompts",
   session: "Session",
   user: "User",
   tags: "Tags",
@@ -246,6 +255,31 @@ function traceColumnDefs(
       },
     },
     {
+      id: "prompts",
+      size: 140,
+      header: "Prompts",
+      meta: { icon: FileText },
+      cell: ({ row }) => {
+        const prompts = row.original.prompts ?? [];
+        const first = prompts[0];
+        const label = promptsLabel(prompts);
+        if (!first) {
+          return label;
+        }
+        return (
+          <FilterHit
+            label={`Filter by prompts ${first}`}
+            field={{ column: "prompts" }}
+            value={first}
+            list
+            onFilter={onFilter}
+          >
+            <span className="truncate">{label}</span>
+          </FilterHit>
+        );
+      },
+    },
+    {
       id: "session",
       size: 120,
       header: "Session",
@@ -411,6 +445,18 @@ function modelsLabel(models: string[]): string {
     return first;
   }
   return `${first} +${models.length - 1}`;
+}
+
+/** The first `name@version` of a trace's prompts, with `+N` for the rest. */
+function promptsLabel(prompts: string[]): string {
+  const first = prompts[0];
+  if (!first) {
+    return "—";
+  }
+  if (prompts.length === 1) {
+    return first;
+  }
+  return `${first} +${prompts.length - 1}`;
 }
 
 function Tags({ tags, onFilter }: { tags: string[]; onFilter?: (conjunct: string) => void }) {

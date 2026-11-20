@@ -42,6 +42,7 @@ export const TRACE_COLUMN_IDS = [
   "tokens",
   "cost",
   "models",
+  "prompts",
   "session",
   "user",
   "tags",

@@ -97,6 +97,7 @@ export default defineConfig({
                     { label: "Issues", link: "/docs/evaluation/issues/" },
                     { label: "Datasets", link: "/docs/evaluation/datasets/" },
                     { label: "Prompts", link: "/docs/evaluation/prompts/" },
+                    { label: "Playground", link: "/docs/evaluation/playground/" },
                     { label: "Experiments", link: "/docs/evaluation/experiments/" },
                   ],
                 },

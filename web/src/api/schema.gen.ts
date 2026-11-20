@@ -7933,6 +7933,11 @@ export interface components {
             params?: components["schemas"]["PlaygroundParams"];
             /** @description Messages that replace the placeholder entries of `messages`, by name. Default: none. */
             placeholders?: Record<string, never>;
+            /**
+             * @description When false, the messages are sent as written; placeholders are still expanded (D-V-38).
+             *     Default: true.
+             */
+            render_variables?: boolean;
             /** @description The schema the answer must match. The answer is streamed as `text` events. */
             response_format?: components["schemas"]["PlaygroundResponseFormat"];
             /** @description Where the messages came from: a prompt version or a span. Recorded on the run's trace. */
