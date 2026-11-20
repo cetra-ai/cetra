@@ -1032,6 +1032,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
         entitlements: EntitlementsConfig {
@@ -1585,6 +1586,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
