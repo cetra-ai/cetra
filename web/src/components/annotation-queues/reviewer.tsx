@@ -21,7 +21,7 @@ import { useProject } from "@/components/shell/project-context";
 import { SplitPane } from "@/components/trace/split-pane";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { type AnnotationSaveHandle, type AnnotationTarget } from "@/lib/annotation";
+import type { AnnotationSaveHandle, AnnotationTarget } from "@/lib/annotation";
 import { QUEUE_POLL_MS } from "@/lib/annotation-queues";
 import { canManageQueues, canReview } from "@/lib/roles";
 import { useGoToNext } from "./next-item";
@@ -220,7 +220,7 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
     return () => {
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [itemId]);
+  }, []);
 
   if (queue.isError || item.isError) {
     const error = queue.isError ? queue.error : item.error;
@@ -301,10 +301,7 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
   }
 
   const panel = (
-    <section
-      aria-label="Review"
-      className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3"
-    >
+    <section aria-label="Review" className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto p-3">
       <QueueProgress counts={q.counts} />
       {q.instructions ? (
         <details open>
@@ -368,12 +365,7 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
         ) : null}
       </div>
       {member ? (
-        <SkipDialog
-          open={skipOpen}
-          onOpenChange={setSkipOpen}
-          queueId={queueId}
-          itemId={itemId}
-        />
+        <SkipDialog open={skipOpen} onOpenChange={setSkipOpen} queueId={queueId} itemId={itemId} />
       ) : null}
       <ConfirmDialog
         open={discardOpen}

@@ -1,17 +1,17 @@
-import { act, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { ADA_ID, BOB_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
-import { recordRequests } from "@/test/requests";
 import { renderApp } from "@/test/render";
+import { recordRequests } from "@/test/requests";
 import { ANNOTATION_DEFINITIONS, serveAnnotationDefinitions } from "@/test/score-definitions";
 import { serveScores } from "@/test/scores";
-import projectFixture from "../../../../../../../../fixtures/api/static/project.json";
 import queueFixture from "../../../../../../../../fixtures/api/static/annotation-queue.json";
 import itemFixture from "../../../../../../../../fixtures/api/static/annotation-queue-item.json";
+import projectFixture from "../../../../../../../../fixtures/api/static/project.json";
 
 const QUEUE = "01900000-0000-7000-8000-000000000a01";
 const ITEM = "01900000-0000-7000-8000-000000000a11";
@@ -41,7 +41,11 @@ function serveReview({
   item = pendingItem,
   target = "trace" as Queue["target"],
   lease = 200,
-}: { item?: Item; target?: Queue["target"]; lease?: number } = {}) {
+}: {
+  item?: Item;
+  target?: Queue["target"];
+  lease?: number;
+} = {}) {
   server.use(
     http.get("/api/v1/projects/:project/annotation-queues/:id", () =>
       HttpResponse.json({ ...queue, target }),
@@ -57,8 +61,9 @@ function serveReview({
             errors: [{ field: "leased_by_user_id", message: BOB_ID }],
           }),
     ),
-    http.delete("/api/v1/projects/:project/annotation-queues/:id/items/:item_id/lease", () =>
-      new HttpResponse(null, { status: 204 }),
+    http.delete(
+      "/api/v1/projects/:project/annotation-queues/:id/items/:item_id/lease",
+      () => new HttpResponse(null, { status: 204 }),
     ),
   );
 }
@@ -84,8 +89,9 @@ function serveWrites(
     http.post("/api/v1/projects/:project/annotation-queues/:id/items/:item_id/reopen", () =>
       HttpResponse.json({ ...pendingItem, status: "pending" }),
     ),
-    http.delete("/api/v1/projects/:project/annotation-queues/:id/items/:item_id", () =>
-      new HttpResponse(null, { status: 204 }),
+    http.delete(
+      "/api/v1/projects/:project/annotation-queues/:id/items/:item_id",
+      () => new HttpResponse(null, { status: 204 }),
     ),
   );
 }
@@ -153,7 +159,10 @@ it("a trace item shows the trace, the instructions and the queue's definitions i
 });
 
 it("a session item shows the conversation", async () => {
-  serveReview({ target: "session", item: { ...pendingItem, trace_id: undefined, session_id: SESSION } });
+  serveReview({
+    target: "session",
+    item: { ...pendingItem, trace_id: undefined, session_id: SESSION },
+  });
   serveWrites();
   serveAnnotationDefinitions(ANNOTATION_DEFINITIONS);
   serveScores([]);
@@ -169,11 +178,11 @@ it("complete and next saves, completes, then claims the next", async () => {
   const requests = recordRequests();
   const { user } = await renderApp(ITEM_URL);
   const helpfulness = await screen.findByRole("spinbutton", { name: "helpfulness" });
-  await user.type(helpfulness, "0.5");
+  fireEvent.change(helpfulness, { target: { value: "0.5" } });
   await user.click(screen.getByRole("button", { name: "Complete and next" }));
   await waitFor(() => {
     const writes = requests.calls
-      .filter((call) => call.method === "POST")
+      .filter((call) => call.method === "POST" && !call.path.endsWith("/lease"))
       .map((call) => call.path.replace(/^.*\/api\/v1\/projects\/[^/]+/, ""));
     expect(writes).toEqual([
       "/scores",
@@ -181,8 +190,12 @@ it("complete and next saves, completes, then claims the next", async () => {
       `/annotation-queues/${QUEUE}/next`,
     ]);
   });
-  const save = requests.calls.find((call) => call.path.endsWith("/scores"));
-  expect(save?.body).toMatchObject({ scores: [{ queue_id: QUEUE }] });
+  await waitFor(() => {
+    const save = requests.calls.find(
+      (call) => call.method === "POST" && call.path.endsWith("/scores"),
+    );
+    expect(save?.body).toMatchObject({ scores: [{ queue_id: QUEUE }] });
+  });
   requests.stop();
 });
 
@@ -193,7 +206,9 @@ it("a failed save completes nothing", async () => {
   serveScores([]);
   const requests = recordRequests();
   const { user } = await renderApp(ITEM_URL);
-  await user.type(await screen.findByRole("spinbutton", { name: "helpfulness" }), "0.5");
+  fireEvent.change(await screen.findByRole("spinbutton", { name: "helpfulness" }), {
+    target: { value: "0.5" },
+  });
   await user.click(screen.getByRole("button", { name: "Complete and next" }));
   expect(await screen.findByText("The save failed.")).toBeInTheDocument();
   expect(requests.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);

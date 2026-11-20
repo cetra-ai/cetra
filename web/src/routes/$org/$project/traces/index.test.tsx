@@ -17,8 +17,8 @@ import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
-import projectFixture from "../../../../../../fixtures/api/static/project.json";
 import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
+import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const FIRST = "a1000000000000000000000000000006";
 

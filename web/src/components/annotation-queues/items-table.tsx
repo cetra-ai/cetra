@@ -28,7 +28,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { QUEUE_POLL_MS, parseQueueSearch } from "@/lib/annotation-queues";
+import { parseQueueSearch, QUEUE_POLL_MS } from "@/lib/annotation-queues";
 import { canManageQueues, canReview } from "@/lib/roles";
 
 type Item = Schema<"AnnotationQueueItem">;
@@ -357,13 +357,7 @@ function ItemActions({
         </DisabledReason>
       )}
       <DisabledReason reason={manageReason}>
-        <Button
-          type="button"
-          variant="ghost"
-          size="xs"
-          disabled={!manageable}
-          onClick={onRemove}
-        >
+        <Button type="button" variant="ghost" size="xs" disabled={!manageable} onClick={onRemove}>
           Remove
         </Button>
       </DisabledReason>

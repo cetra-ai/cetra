@@ -273,9 +273,7 @@ export function TraceView({
             {selectedRow !== undefined && !selectedIsRoot ? (
               <AddToQueueButton
                 target="span"
-                items={[
-                  { trace_id: loaded.trace.trace_id, span_id: selectedRow.span.span_id },
-                ]}
+                items={[{ trace_id: loaded.trace.trace_id, span_id: selectedRow.span.span_id }]}
               />
             ) : (
               <AddToQueueButton target="trace" items={[{ trace_id: loaded.trace.trace_id }]} />

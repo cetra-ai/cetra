@@ -7,8 +7,8 @@ import { addToQueueReason } from "@/components/annotation-queues/add-to-queue-di
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
-import projectFixture from "../../../../fixtures/api/static/project.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
+import projectFixture from "../../../../fixtures/api/static/project.json";
 
 const TRACE = "a1000000000000000000000000000001";
 const SPAN = "b100000000000014";

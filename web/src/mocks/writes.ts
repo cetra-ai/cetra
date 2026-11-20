@@ -6,8 +6,8 @@ import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
-import annotationQueueItemDocument from "../../../fixtures/api/static/annotation-queue-item.json";
 import annotationQueueDocument from "../../../fixtures/api/static/annotation-queue.json";
+import annotationQueueItemDocument from "../../../fixtures/api/static/annotation-queue-item.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import backfillDocument from "../../../fixtures/api/static/backfill.json";
 import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
@@ -817,7 +817,10 @@ const RESPONSES: Record<string, Respond> = {
   post_experiment_finish: ({ params }) =>
     HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
   create_annotation_queue: ({ body }) =>
-    HttpResponse.json({ ...annotationQueueDocument, ...named(body) }, { status: 201 }),
+    HttpResponse.json(
+      { ...annotationQueueDocument, name: trimmed(body.name) ?? annotationQueueDocument.name },
+      { status: 201 },
+    ),
   update_annotation_queue: ({ body }) =>
     HttpResponse.json({
       ...annotationQueueDocument,

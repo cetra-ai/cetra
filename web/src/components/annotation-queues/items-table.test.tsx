@@ -3,9 +3,9 @@ import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import queueFixture from "../../../../fixtures/api/static/annotation-queue.json";
 import itemsFixture from "../../../../fixtures/api/static/annotation-queue-items.json";
 import projectFixture from "../../../../fixtures/api/static/project.json";
-import queueFixture from "../../../../fixtures/api/static/annotation-queue.json";
 
 const QUEUE_URL = `/acme/support-bot/annotation-queues/${queueFixture.id}`;
 

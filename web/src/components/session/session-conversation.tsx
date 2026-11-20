@@ -23,7 +23,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { formatCost, formatDuration } from "@/lib/format";
 
-
 const TURN_ESTIMATE = 96;
 const OVERSCAN = 6;
 /** Characters of a turn's text shown in its bubble. The details view keeps the full content. */

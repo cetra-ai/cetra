@@ -11,8 +11,8 @@ import {
 import { ProjectProvider } from "@/components/shell/project-context";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
-import projectFixture from "../../../../fixtures/api/static/project.json";
 import queuesFixture from "../../../../fixtures/api/static/annotation-queues.json";
+import projectFixture from "../../../../fixtures/api/static/project.json";
 
 type Queue = Schema<"AnnotationQueue">;
 const QUEUE: Queue = queuesFixture.data[0] as Queue;
@@ -120,9 +120,7 @@ describe("add matching to queue", () => {
 
   it("says that only the first 10 000 are added when the matches are capped", async () => {
     serve([QUEUE]);
-    server.use(
-      http.post(PREVIEW, () => HttpResponse.json({ matched: 10_000, capped: true })),
-    );
+    server.use(http.post(PREVIEW, () => HttpResponse.json({ matched: 10_000, capped: true })));
     const { user } = renderDialog();
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
@@ -137,9 +135,7 @@ describe("add matching to queue", () => {
 
   it("explains an invalid filter", async () => {
     serve([QUEUE]);
-    server.use(
-      http.post(PREVIEW, () => problemResponse(400, "invalid_filter")),
-    );
+    server.use(http.post(PREVIEW, () => problemResponse(400, "invalid_filter")));
     const { user } = renderDialog();
     const dialog = await screen.findByRole("dialog");
     await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));

@@ -33,11 +33,7 @@ export function QueuesChip(props: QueuesChipProps) {
           {text}
         </Link>
       ) : (
-        <Link
-          to="/$org/$project/annotation-queues"
-          params={{ org, project }}
-          className={className}
-        >
+        <Link to="/$org/$project/annotation-queues" params={{ org, project }} className={className}>
           {text}
         </Link>
       )}

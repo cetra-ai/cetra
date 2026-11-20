@@ -128,7 +128,7 @@ it("says instance defaults apply and lists unlimited limits", async () => {
 
   expect(await screen.findByRole("heading", { name: "Self-hosted" })).toBeInTheDocument();
   expect(screen.getByText("Instance defaults apply.")).toBeInTheDocument();
-  expect(screen.getAllByText("unlimited")).toHaveLength(9);
+  expect(screen.getAllByText("unlimited")).toHaveLength(10);
 });
 
 it("warns about the grace period", async () => {

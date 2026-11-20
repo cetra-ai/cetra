@@ -6,9 +6,7 @@ import { Reviewer } from "@/components/annotation-queues/reviewer";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { parseReviewSearch } from "@/lib/annotation-queues";
 
-export const Route = createFileRoute(
-  "/$org/$project/annotation-queues/$queueId/review/$itemId",
-)({
+export const Route = createFileRoute("/$org/$project/annotation-queues/$queueId/review/$itemId")({
   validateSearch: (search) => parseReviewSearch(search),
   loader: async ({ context, params }) => {
     try {

@@ -30,9 +30,10 @@ function captureScores(answer: () => Response = () => HttpResponse.json({ score_
   return bodies;
 }
 
-function renderForm(
-  props: Partial<Parameters<typeof AnnotationForm>[0]> = {},
-): { saveRef: { current: AnnotationSaveHandle | null }; onReady: ReturnType<typeof vi.fn> } {
+function renderForm(props: Partial<Parameters<typeof AnnotationForm>[0]> = {}): {
+  saveRef: { current: AnnotationSaveHandle | null };
+  onReady: ReturnType<typeof vi.fn>;
+} {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });

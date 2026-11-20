@@ -575,7 +575,9 @@ function TracesPage() {
                             size="sm"
                             disabled={queueReason !== undefined}
                             onClick={() => {
-                              setQueueItems([...checkedIds].map((traceId) => ({ trace_id: traceId })));
+                              setQueueItems(
+                                [...checkedIds].map((traceId) => ({ trace_id: traceId })),
+                              );
                               setQueueOpen(true);
                             }}
                           >

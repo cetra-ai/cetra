@@ -304,7 +304,9 @@ function SessionsPage() {
                     size="sm"
                     disabled={queueReason !== undefined}
                     onClick={() => {
-                      setQueueItems([...checkedIds].map((sessionId) => ({ session_id: sessionId })));
+                      setQueueItems(
+                        [...checkedIds].map((sessionId) => ({ session_id: sessionId })),
+                      );
                       setQueueOpen(true);
                     }}
                   >

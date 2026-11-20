@@ -1,21 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { cn } from "cn";
-import {
-  ChevronLeft,
-  Clock,
-  Coins,
-  DollarSign,
-  MessagesSquare,
-  TriangleAlert,
-} from "lucide-react";
+import { ChevronLeft, Clock, Coins, DollarSign, MessagesSquare, TriangleAlert } from "lucide-react";
 import { useState } from "react";
 import { problemOf } from "@/api/problem";
 import { sessionQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AnnotationForm } from "@/components/annotation/annotation-form";
 import { AddToQueueButton } from "@/components/annotation-queues/add-to-queue-dialog";
 import { QueuesChip } from "@/components/annotation-queues/queues-chip";
-import { AnnotationForm } from "@/components/annotation/annotation-form";
 import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { CopyButton } from "@/components/copy-button";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -274,4 +267,3 @@ function SessionHeader({
     </header>
   );
 }
-
