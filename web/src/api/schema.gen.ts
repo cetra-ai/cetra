@@ -2132,6 +2132,162 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/issue-sources": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List issue sources
+         * @description Any project member can read. `org_active_sources` counts the enabled sources of the whole org for the plan's active-source limit (D-IC-13).
+         */
+        get: operations["list_issue_sources"];
+        put?: never;
+        /**
+         * Create an issue source
+         * @description Project members and above. API keys cannot call it. 403 `plan_limit` when the org is at its active-source limit.
+         */
+        post: operations["post_issue_source"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issue-sources/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an issue source
+         * @description Any project member can read.
+         */
+        get: operations["get_issue_source"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an issue source
+         * @description Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).
+         */
+        delete: operations["delete_issue_source"];
+        options?: never;
+        head?: never;
+        /**
+         * Update an issue source
+         * @description Project members and above. API keys cannot call it. `kind` cannot change. Enabling a source checks the active-source limit.
+         */
+        patch: operations["patch_issue_source"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issues": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List issues
+         * @description Any project member can read. `count` and `users` cover the period `[from, to)` (default the last 24 hours). Merged issues are listed only when `state` names `merged`. Blank `ids` means no filter.
+         */
+        get: operations["list_issues"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issues/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an issue
+         * @description Any project member can read. `count` and `users` cover the last 24 hours. `merged_from` lists the issues merged into this one.
+         */
+        get: operations["get_issue"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update an issue
+         * @description Project members and above. `title` renames the issue and records a `renamed` event. `description` records no event; `null` clears it. `state` resolves, ignores or reopens the issue and records a `state_changed` event; a resolved issue that recurs is reopened as regressed. `merged` is refused: merge with the merge operation. Setting a value it already has changes nothing. A merged issue cannot change (409).
+         */
+        patch: operations["patch_issue"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issues/{id}/events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the events of an issue
+         * @description Any project member can read. The newest 100 events of the issue, newest first.
+         */
+        get: operations["get_issue_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issues/{id}/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge an issue into another
+         * @description Project members and above. Folds the issue into `into`, an issue of the same source that is not merged. The issues merged into it move to `into` too, so chains stay one level deep. Its occurrences count on `into`. Answers the target issue. 409 when both are the same issue, the issues are in different sources, this issue is already merged, or the target is merged.
+         */
+        post: operations["post_issue_merge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issues/{id}/occurrences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get the occurrences of an issue
+         * @description Any project member can read. `days` has one entry per UTC day of `[from, to)` (default the last 14 days, at most 90) with an occurrence. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period.
+         */
+        get: operations["get_issue_occurrences"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -3751,6 +3907,21 @@ export interface components {
             email: string;
             /** @description Role granted on accept. Not above the caller's role. */
             role: components["schemas"]["OrgRole"];
+        };
+        /**
+         * @description `POST /api/v1/projects/{project}/issue-sources` body. Absent optional fields take their defaults.
+         *
+         *     Optional fields refuse `null` (spec 09 § Conventions).
+         */
+        CreateIssueSourceRequest: {
+            /** @description Whether the source runs. Default true. */
+            enabled?: boolean;
+            /** @description Spans filter. Absent means no filter. */
+            filter?: string;
+            /** @description What the source reads. */
+            kind: components["schemas"]["IssueSourceKind"];
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name: string;
         };
         /** @description `POST /api/v1/orgs/{org}/llm-connections` body. */
         CreateLlmConnectionRequest: {
@@ -5495,6 +5666,236 @@ export interface components {
             /** @description Role granted on accept. */
             role: components["schemas"]["OrgRole"];
         };
+        /** @description An issue: one distinct error of an error source (spec 09 § Issues, D-IC-10). */
+        Issue: {
+            /**
+             * Format: int64
+             * @description Occurrences in the period: the last 24 hours on `get`, or the `from`/`to` period on
+             *     `list`. Counts the issue's own occurrences and those of the issues merged into it.
+             */
+            count: number;
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description Description written by a member. `null` when there is none. */
+            description?: string;
+            /**
+             * Format: date-time
+             * @description Start of the earliest occurrence. JSON is RFC 3339.
+             */
+            first_seen: string;
+            /**
+             * Format: uuid
+             * @description Issue id.
+             */
+            id: string;
+            /** @description Kind of that source. */
+            kind: components["schemas"]["IssueSourceKind"];
+            /**
+             * Format: date-time
+             * @description Start of the latest occurrence. JSON is RFC 3339.
+             */
+            last_seen: string;
+            /** @description Issues merged into this one. Their occurrences count here. */
+            merged_from: string[];
+            /**
+             * Format: uuid
+             * @description The issue this one was merged into. `null` unless `state` is `merged`.
+             */
+            merged_into?: string;
+            /**
+             * Format: uuid
+             * @description The project the issue belongs to.
+             */
+            project_id: string;
+            /** @description `true` when a resolved issue recurred and was reopened. */
+            regressed: boolean;
+            /**
+             * Format: date-time
+             * @description When it was resolved. Omitted unless the issue is resolved.
+             */
+            resolved_at?: string;
+            /**
+             * Format: uuid
+             * @description Who resolved it. `null` when nobody did or the user is unknown.
+             */
+            resolved_by?: string;
+            /** @description Name of the occurrence scores of this issue: `issue:<id>`. */
+            score_name: string;
+            /**
+             * Format: uuid
+             * @description The source the issue belongs to.
+             */
+            source_id: string;
+            /** @description Name of that source. */
+            source_name: string;
+            /** @description Lifecycle state. */
+            state: components["schemas"]["IssueState"];
+            /** @description Title, from the error. */
+            title: string;
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description Distinct users in the same period: the largest user count of the issue's names, so an
+             *     approximation when merged issues share users.
+             */
+            users: number;
+        };
+        /** @description One UTC day of an issue's occurrences. */
+        IssueDay: {
+            /**
+             * Format: int64
+             * @description Occurrences that day.
+             */
+            count: number;
+            /**
+             * Format: date-time
+             * @description Start of the UTC day. JSON is RFC 3339.
+             */
+            day: string;
+            /**
+             * Format: int64
+             * @description Largest user count of the issue's names that day.
+             */
+            users: number;
+        };
+        /** @description One entry of an issue's history (D-IC-10). */
+        IssueEvent: {
+            /**
+             * Format: uuid
+             * @description The user who acted. `null` for the system or an unknown user.
+             */
+            actor_user_id?: string;
+            /**
+             * Format: date-time
+             * @description When it happened. JSON is RFC 3339.
+             */
+            at: string;
+            /** @description The value before the change, when there is one. */
+            from_value?: string;
+            /**
+             * Format: uuid
+             * @description Event id.
+             */
+            id: string;
+            /** @description `created`, `state_changed`, `renamed`, `merged` or `regressed`. */
+            kind: string;
+            /** @description The value after the change, when there is one. */
+            to_value?: string;
+        };
+        /** @description `GET …/issues/{id}/events` answer: the newest 100 events, newest first. */
+        IssueEventPage: {
+            /** @description The events, newest first. */
+            data: components["schemas"]["IssueEvent"][];
+        };
+        /** @description One occurrence of an issue, with the trace it is on. */
+        IssueExample: {
+            /**
+             * Format: date-time
+             * @description When the occurrence happened (the trace's start). JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description The issue the occurrence belongs to: the issue itself or one merged into it.
+             */
+            issue_id: string;
+            /** @description Reason stored with the occurrence. `null` when there is none. */
+            reason?: string;
+            /** @description The error span the occurrence came from, 16 lowercase hex digits. `null` when unknown. */
+            span_id?: string;
+            /** @description Trace id, 32 lowercase hex digits. */
+            trace_id: string;
+        };
+        /** @description Occurrences of an issue (spec 09 § Issues). */
+        IssueOccurrences: {
+            /**
+             * @description One entry per UTC day of the period with at least one occurrence, oldest first. `users`
+             *     is the largest user count of the issue's names that day, an approximation when merged
+             *     issues share users.
+             */
+            days: components["schemas"]["IssueDay"][];
+            /**
+             * @description The newest occurrences of the issue and of the issues merged into it, at most 20. Not
+             *     limited to the period.
+             */
+            examples: components["schemas"]["IssueExample"][];
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        IssuePage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Issue"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description An issue source. Spec 09 § Issues. */
+        IssueSource: {
+            /**
+             * Format: date-time
+             * @description Creation time. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description User who created the source. `null` when that user is unknown.
+             */
+            created_by?: string;
+            /** @description Whether the source runs. A disabled source counts for no plan limit. */
+            enabled: boolean;
+            /** @description Spans filter for `error` sources. `null` when there is none. */
+            filter?: string;
+            /**
+             * Format: uuid
+             * @description Source id.
+             */
+            id: string;
+            /** @description What the source reads. Immutable. */
+            kind: components["schemas"]["IssueSourceKind"];
+            /** @description Display name, unique in the project. 1 to 128 characters. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Issues of this source that are open now.
+             */
+            open_issues: number;
+            /** @description Why the sweeper skips the source. `null` when it runs. */
+            paused_reason?: string;
+            /**
+             * Format: uuid
+             * @description The project the source belongs to.
+             */
+            project_id: string;
+            /**
+             * Format: date-time
+             * @description Last change time. JSON is RFC 3339.
+             */
+            updated_at: string;
+        };
+        /**
+         * @description What an issue source reads. M3 adds kinds (D-IC-1).
+         * @enum {string}
+         */
+        IssueSourceKind: "error";
+        /** @description One page of issue sources. `next_cursor` is null when there is no next page. */
+        IssueSourcePage: {
+            /** @description Sources in this page. */
+            data: components["schemas"]["IssueSource"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+            /** @description Enabled sources of the whole org, counted for the plan's active-source limit. */
+            org_active_sources: number;
+        };
+        /**
+         * @description The state of an issue (D-IC-10). `merged` issues point at their target.
+         * @enum {string}
+         */
+        IssueState: "open" | "resolved" | "ignored" | "merged";
         /**
          * @description One item that changed in a version (D-J-24). `before` is the revision the version closed,
          *     `after` the one it started; each is absent when the version did not make it.
@@ -5768,6 +6169,14 @@ export interface components {
             role: components["schemas"]["OrgRole"];
             /** @description The org slug. */
             slug: string;
+        };
+        /** @description `POST …/issues/{id}/merge` body (spec 09 § Issues). */
+        MergeIssueRequest: {
+            /**
+             * Format: uuid
+             * @description The issue to merge into. It must be an issue of the same source that is not merged.
+             */
+            into: string;
         };
         /** @description One message in a conversation. Spec 01 § Canonical message format. */
         Message: {
@@ -6188,6 +6597,11 @@ export interface components {
              * @description Sustained ingest rate, spans per second.
              */
             ingest_spans_per_sec?: number;
+            /**
+             * Format: int64
+             * @description Enabled issue sources of active projects.
+             */
+            max_active_issue_sources?: number;
             /**
              * Format: int64
              * @description Active online evaluation rules.
@@ -8221,6 +8635,33 @@ export interface components {
              *     `config`, so a saved secret never signs requests to a new URL. An empty string is refused.
              */
             webhook_secret?: string;
+        };
+        /**
+         * @description `PATCH …/issues/{id}` body. Absent means unchanged (spec 09 § Issues).
+         *
+         *     Optional fields refuse `null`, except `description`, where `null` clears it.
+         */
+        UpdateIssueRequest: {
+            /** @description New description, at most 2000 characters. `null` or `""` clears it. Records no event. */
+            description?: string | null;
+            /** @description `open`, `resolved` or `ignored`. `merged` is refused: merge with the merge operation. */
+            state?: components["schemas"]["IssueState"];
+            /** @description New title, 1 to 200 characters after trimming. A change records a `renamed` event. */
+            title?: string;
+        };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/issue-sources/{id}` body. Absent means unchanged.
+         *
+         *     There is no `kind`: sending it is a 400 (unknown field). Optional fields refuse `null`,
+         *     except `filter`, where `null` clears it.
+         */
+        UpdateIssueSourceRequest: {
+            /** @description Turns the source on or off. */
+            enabled?: boolean;
+            /** @description Spans filter. `null` or `""` clears it. */
+            filter?: string | null;
+            /** @description Display name, 1 to 128 characters after trimming. */
+            name?: string;
         };
         /**
          * @description `PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears
@@ -19102,6 +19543,918 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FacetsResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_issue_sources: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of issue sources. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueSourcePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_issue_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateIssueSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description The created source. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueSource"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_issue_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The source. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueSource"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_issue_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_issue_source: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateIssueSourceRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated source. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueSource"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_issues: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Comma-separated states: `open`, `resolved`, `ignored`, `merged`, or `all` (every state
+                 *     but `merged`). Default `open`.
+                 */
+                state?: string;
+                /** @description Issues of this source only. */
+                source_id?: string;
+                /** @description Keeps issues whose title contains this text, ignoring case. */
+                q?: string;
+                /** @description `last_seen` (default) or `first_seen`, newest first. */
+                sort?: string;
+                /**
+                 * @description Start of the period for `count` and `users`, inclusive. RFC 3339 or epoch milliseconds.
+                 *     Default 24 hours before `to`.
+                 */
+                from?: components["schemas"]["TimeParam"];
+                /**
+                 * @description End of the period for `count` and `users`, exclusive. RFC 3339 or epoch milliseconds.
+                 *     Default now.
+                 */
+                to?: components["schemas"]["TimeParam"];
+                /**
+                 * @description Comma-separated issue ids, at most 100. Only these issues are listed. Blank means no
+                 *     filter.
+                 */
+                ids?: string;
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of issues. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuePage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_issue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The issue. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Issue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_issue: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateIssueRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated issue, with its counts over the last 24 hours. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Issue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_issue_events: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The events. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_issue_merge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeIssueRequest"];
+            };
+        };
+        responses: {
+            /** @description The target issue, with its counts over the last 24 hours. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Issue"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_issue_occurrences: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Start of the days, inclusive. RFC 3339 or epoch milliseconds. Default 14 days before
+                 *     `to`; the period is at most 90 days.
+                 */
+                from?: components["schemas"]["TimeParam"];
+                /** @description End of the days, exclusive. RFC 3339 or epoch milliseconds. Default now. */
+                to?: components["schemas"]["TimeParam"];
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The occurrences. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueOccurrences"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */
