@@ -16,7 +16,6 @@ use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use minijinja::{AutoEscape, Environment, Value, context};
 use prometheus_client::metrics::counter::Counter;
 use prometheus_client::metrics::family::Family;
-use serde::Serialize;
 
 use crate::api::account::OrgRole;
 use crate::config::{ServerConfig, SmtpUrl, Tls};
@@ -134,7 +133,7 @@ pub(crate) enum Email {
 }
 
 /// One line of an issue notification email.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct IssueLine {
     /// `new` or `regressed`.
     pub(crate) kind: &'static str,
@@ -412,22 +411,22 @@ impl Mailer {
                 items,
                 more,
                 issues_url,
-            } => {
-                let items_values: Vec<Value> = items.iter().map(Value::from_serialize).collect();
-                (
-                    "issue_notification.txt",
-                    "issue_notification.html",
-                    context! {
-                        source_name => source_name,
-                        project_name => project_name,
-                        total => *total,
-                        noun => issues_noun(*total),
-                        items => items_values,
-                        more => *more,
-                        issues_url => issues_url,
-                    },
-                )
-            }
+            } => (
+                "issue_notification.txt",
+                "issue_notification.html",
+                context! {
+                    source_name => source_name,
+                    project_name => project_name,
+                    total => *total,
+                    noun => issues_noun(*total),
+                    items => items
+                        .iter()
+                        .map(|line| context! { kind => line.kind, title => line.title.as_str(), url => line.url.as_str() })
+                        .collect::<Vec<Value>>(),
+                    more => *more,
+                    issues_url => issues_url,
+                },
+            ),
         };
         Ok(Rendered {
             subject,

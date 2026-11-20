@@ -2519,9 +2519,9 @@ pub(crate) async fn add_trace_refs(
     for (index, trace_id, span_id) in refs {
         let text = &items[index];
         let loaded = match trace_load::load_trace(
-            &state,
+            state,
             project,
-            Visibility::window(&state, access.project.org_id),
+            Visibility::window(state, access.project.org_id),
             trace_id,
             span_id,
             None,

@@ -285,7 +285,6 @@ pub(crate) fn email(notice: &Notice) -> Email {
 
 /// Everything an issue notification shows (D-IC-21). Never log it: it holds titles and names.
 #[derive(Clone, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct IssuesNotice {
     pub(crate) notification_id: Uuid,
     pub(crate) source_id: Uuid,
@@ -313,7 +312,6 @@ impl fmt::Debug for IssuesNotice {
 }
 
 /// `<public_url>/<org_slug>/<project_slug>/issues/<issue_id>`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn issue_url(
     public_url: &PublicUrl,
     org_slug: &str,
@@ -324,7 +322,6 @@ pub(crate) fn issue_url(
 }
 
 /// `<public_url>/<org_slug>/<project_slug>/issues?source=<source_id>`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn issues_url(
     public_url: &PublicUrl,
     org_slug: &str,
@@ -337,7 +334,6 @@ pub(crate) fn issues_url(
 }
 
 /// `new` for a created issue, `regressed` for a regressed one.
-#[cfg_attr(not(test), allow(dead_code))]
 fn kind_word(kind: DigestKind) -> &'static str {
     match kind {
         DigestKind::Created => "new",
@@ -346,13 +342,11 @@ fn kind_word(kind: DigestKind) -> &'static str {
 }
 
 /// An issue title cut to 100 characters (Q7).
-#[cfg_attr(not(test), allow(dead_code))]
 fn cut_title(title: &str) -> String {
     title.chars().take(100).collect()
 }
 
 /// `items.len() + more`: the number of new or regressed issues in the notification.
-#[cfg_attr(not(test), allow(dead_code))]
 fn total(notice: &IssuesNotice) -> u64 {
     u64::try_from(notice.items.len())
         .unwrap_or(u64::MAX)
@@ -361,7 +355,6 @@ fn total(notice: &IssuesNotice) -> u64 {
 
 /// The Slack Block Kit body of an issue notification. The sender serializes it. `issue_urls`
 /// is read in step with `items`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn issues_slack_body(notice: &IssuesNotice) -> serde_json::Value {
     let total = total(notice);
     // Slack limits a header to 150 characters. The header is plain text: it is not escaped.
@@ -399,7 +392,6 @@ pub(crate) fn issues_slack_body(notice: &IssuesNotice) -> serde_json::Value {
 /// The `issues.detected` webhook body (D-IC-21, Q1). Its items hold `issue_id`, `kind` and the
 /// whole `title`, and no URL.
 #[derive(Debug, Serialize)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct IssuesPayload<'a> {
     #[serde(rename = "type")]
     pub(crate) kind: &'static str,
@@ -416,7 +408,6 @@ pub(crate) struct IssuesPayload<'a> {
 
 /// The signed `issues.detected` webhook body. The payload holds strings, numbers and UUIDs
 /// only, so serializing it cannot fail.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn issues_webhook_body(notice: &IssuesNotice) -> Vec<u8> {
     let payload = IssuesPayload {
         kind: "issues.detected",
@@ -437,7 +428,6 @@ pub(crate) fn issues_webhook_body(notice: &IssuesNotice) -> Vec<u8> {
 
 /// The email for an issue notification. Titles are cut to 100 characters; at most
 /// [`DIGEST_ITEMS`] lines.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn issues_email(notice: &IssuesNotice) -> Email {
     let items = notice
         .items

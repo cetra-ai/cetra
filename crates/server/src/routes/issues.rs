@@ -3657,9 +3657,9 @@ mod tests {
             .state
             .meta
             .write(move |conn| {
-                Box::pin(
-                    async move { update_checked(conn, project, org, paused, renamed, None).await },
-                )
+                Box::pin(async move {
+                    update_checked(conn, project, org, paused, renamed, None, None, now + 1).await
+                })
             })
             .await
             .unwrap();
@@ -3682,9 +3682,9 @@ mod tests {
             .state
             .meta
             .write(move |conn| {
-                Box::pin(
-                    async move { update_checked(conn, project, org, stored, raised, None).await },
-                )
+                Box::pin(async move {
+                    update_checked(conn, project, org, stored, raised, None, None, now + 2).await
+                })
             })
             .await
             .unwrap();

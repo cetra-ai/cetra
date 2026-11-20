@@ -24,8 +24,6 @@ const NOTIFICATIONS: &str = "issue_notifications";
 pub(crate) const DIGEST_ITEMS: usize = 20;
 /// Minimum time between two notifications of one source: 10 minutes (D-IC-21).
 pub(crate) const THROTTLE_NS: i64 = 600_000_000_000;
-/// Most channels one source notifies (D-IC-21).
-pub(crate) const MAX_SOURCE_CHANNELS: usize = 10;
 /// A tick collects only events at least this old: 60 seconds. An event's `at` is the time its
 /// writer read the clock, and its transaction can commit a little later; without the margin a tick
 /// between the two would advance `last_notified_at` past an event it never saw, and the event
@@ -149,7 +147,7 @@ pub(crate) async fn source_scope_ids(
     .bind(source.to_string())
     .fetch_all(pool)
     .await?;
-    parse_uuids(ids, ISSUES, "id").map(Some)
+    parse_uuids(&ids, ISSUES, "id").map(Some)
 }
 
 /// The channels of `source`, ordered by id.
@@ -163,7 +161,7 @@ pub(crate) async fn source_channel_ids(
     .bind(source.to_string())
     .fetch_all(pool)
     .await?;
-    parse_uuids(ids, CHANNEL_LINKS, "channel_id")
+    parse_uuids(&ids, CHANNEL_LINKS, "channel_id")
 }
 
 /// The channels of every source of `project` that has any, ordered by id.
@@ -351,7 +349,7 @@ pub(crate) async fn notify_source(
     if channels.is_empty() {
         return Ok(Notified::Changed);
     }
-    let channels = parse_uuids(channels, CHANNEL_LINKS, "channel_id")?;
+    let channels = parse_uuids(&channels, CHANNEL_LINKS, "channel_id")?;
 
     let advanced = sqlx::query(
         "UPDATE issue_sources SET last_notified_at = ?1 WHERE id = ?2 AND last_notified_at = ?3",
@@ -426,7 +424,7 @@ fn parse_uuid(value: &str, table: &'static str, column: &'static str) -> Result<
 }
 
 fn parse_uuids(
-    values: Vec<String>,
+    values: &[String],
     table: &'static str,
     column: &'static str,
 ) -> Result<Vec<Uuid>, MetaError> {
@@ -454,7 +452,7 @@ mod tests {
     }
 
     async fn count(app: &TestApp, sql: &str) -> i64 {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(app.state.meta.reader())
             .await
             .unwrap()
@@ -642,13 +640,17 @@ mod tests {
         let other_source = source_row(other.id, "other", SourceKind::Error, true, now);
         let other_source_id = other_source.id;
         put_source(&app, other_source).await;
-        let foreign = issue(
+        let foreign = Uuid::now_v7();
+        put_issue(
             &app,
-            &seeded,
-            other_source_id,
-            "foreign",
-            IssueState::Open,
-            now,
+            issue_row(
+                other.id,
+                other_source_id,
+                foreign,
+                "foreign",
+                IssueState::Open,
+                now,
+            ),
         )
         .await;
         assert_eq!(

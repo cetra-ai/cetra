@@ -278,7 +278,7 @@ async fn measure_rule(
     };
     Box::pin(alert_value(&ctx, request))
         .await
-        .map_err(run_reason)
+        .map_err(|error| run_reason(&error))
 }
 
 /// Opens the project's storage for a measurement, as the rule's org sees it (D-P-21). The error
@@ -303,7 +303,7 @@ async fn open_ctx(
 }
 
 /// The fixed reason of a failed measurement.
-fn run_reason(error: RunError) -> &'static str {
+fn run_reason(error: &RunError) -> &'static str {
     match error {
         RunError::Timeout => "query timed out",
         RunError::TooLarge => "query needed more memory or temporary disk space than allowed",
@@ -354,7 +354,7 @@ async fn measure_issue_rule(
         };
         let value = Box::pin(alert_value(&ctx, request))
             .await
-            .map_err(run_reason)?;
+            .map_err(|error| run_reason(&error))?;
         total = total.saturating_add(value.count);
     }
     Ok(AlertValue {
