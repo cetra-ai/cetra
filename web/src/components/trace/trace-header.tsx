@@ -23,6 +23,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
 import { DisabledReason } from "@/components/disabled-reason";
 import { IdText } from "@/components/id-text";
+import { IssueChips } from "@/components/issues/issue-chips";
 import { ScoreBadge } from "@/components/score-badge";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
@@ -288,6 +289,7 @@ export function TraceHeader({
               <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
           ))}
+          <IssueChips traceId={trace.trace_id} />
         </div>
       </section>
       <ConfirmDialog

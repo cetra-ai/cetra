@@ -1,8 +1,11 @@
-import { useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQueryClient } from "@tanstack/react-query";
 import type { IssueSort, IssueStateTab } from "@/lib/search/issues";
 import { $api, api } from "./client";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
+
+/** Prefix of the score name an issue occurrence is written under (D-IC-18). */
+const ISSUE_SCORE_PREFIX = "issue:";
 
 /** The filters of the Issues list. `from` and `to` fix the window of `count` and `users`. */
 export type IssueListFilters = {
@@ -57,6 +60,66 @@ export function issuesInfiniteQuery(org: string, project: string, filters: Issue
     },
     getNextPageParam: (page: Schema<"IssuePage">) => page.next_cursor ?? undefined,
   };
+}
+
+/** The score name an issue occurrence is written under (D-IC-18): `issue:<issue id>`. */
+export function issueScoreName(issueId: string): string {
+  return `${ISSUE_SCORE_PREFIX}${issueId}`;
+}
+
+/** The issue id of an issue score's name, or undefined for any other score. */
+export function issueIdFromScoreName(name: string): string | undefined {
+  return name.startsWith(ISSUE_SCORE_PREFIX) ? name.slice(ISSUE_SCORE_PREFIX.length) : undefined;
+}
+
+/** The most recent open issues, for the "Has issue" menu of the trace filter. */
+export function openIssuesQuery(org: string, project: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/issues", {
+    params: { path: { project: projectRef(org, project) }, query: { state: "open", limit: 20 } },
+  });
+}
+
+/**
+ * The issues a trace has occurrences of: its `issue` scores, then the issues they name, in one
+ * list. Merged issues are included, so their chip can show the merge.
+ */
+export function traceIssuesQuery(org: string, project: string, traceId: string) {
+  const path = { project: projectRef(org, project) };
+  return queryOptions({
+    queryKey: ["trace-issues", org, project, traceId],
+    queryFn: async ({ signal }): Promise<Schema<"Issue">[]> => {
+      const scores = await api.GET("/api/v1/projects/{project}/scores", {
+        params: { path, query: { trace_id: traceId, source: "issue", limit: 100 } },
+        signal,
+      });
+      if (scores.error) {
+        throw scores.error;
+      }
+      if (!scores.data) {
+        throw new Error("Empty score list response");
+      }
+      const ids = scores.data.data
+        .map((score) => issueIdFromScoreName(score.name))
+        .filter((id): id is string => id !== undefined);
+      if (ids.length === 0) {
+        return [];
+      }
+      const issues = await api.GET("/api/v1/projects/{project}/issues", {
+        params: {
+          path,
+          query: { state: "open,resolved,ignored,merged", ids: ids.join(","), limit: 100 },
+        },
+        signal,
+      });
+      if (issues.error) {
+        throw issues.error;
+      }
+      if (!issues.data) {
+        throw new Error("Empty issue list response");
+      }
+      return issues.data.data;
+    },
+  });
 }
 
 export function issueInit(org: string, project: string, issueId: string) {
