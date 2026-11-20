@@ -3,12 +3,15 @@
 use std::time::Duration;
 
 use cetra_core::ids::{OrgId, ProjectId};
-use cetra_storage::{AlertValue, AlertValueRequest, RunError, TimeWindow, alert_value};
+use cetra_storage::{
+    AlertMeasure, AlertValue, AlertValueRequest, MAX_COUNT_NAMES, QueryContext, RunError,
+    TimeWindow, alert_value,
+};
 use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::alerts::condition::measure;
-use crate::api::alerts::{AlertCondition, AlertEventKind, AlertState};
+use crate::api::alerts::{AlertCondition, AlertEventKind, AlertMetric, AlertState};
 use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::http::error::ApiError;
@@ -16,6 +19,7 @@ use crate::meta::MetaError;
 use crate::meta::alerts::{
     Evaluation, EventDetails, Recorded, RuleRow, due_rules, record_evaluation,
 };
+use crate::meta::issue_links::{issue_scope_ids, source_scope_ids};
 
 /// Rules evaluated at once (D-K-3).
 pub(crate) const CONCURRENCY: usize = 4;
@@ -54,7 +58,9 @@ pub(crate) enum Reading {
     Clear,
 }
 
-/// Classifies a measurement against `condition`.
+/// Classifies a measurement against `condition`. `issue_occurrences` has no `min_count` (its
+/// normalization clears it), so its reading is `Breaching` or `Clear`, never `Insufficient`; zero
+/// occurrences is a value and can breach (D-IC-20).
 pub(crate) fn reading(condition: &AlertCondition, count: i64, value: Option<f64>) -> Reading {
     if condition.min_count.is_some_and(|min| count < min) {
         Reading::Insufficient
@@ -256,19 +262,11 @@ async fn measure_rule(
     to: i64,
 ) -> Result<AlertValue, &'static str> {
     let window = TimeWindow::new(from, to).map_err(|_| "invalid window")?;
-    let ctx = crate::routes::read::open_query_on(
-        &state.storage,
-        project,
-        Visibility::window(state, org),
-        None,
-        None,
-    )
-    .await
-    .map_err(|error| match error {
-        ApiError::Unavailable { .. } => "storage is busy",
-        _ => "query failed",
-    })?;
-    // Only `issue_occurrences` has no storage measure; M4.5 measures it before this point.
+    if condition.metric == AlertMetric::IssueOccurrences {
+        return measure_issue_rule(state, org, project, condition, window).await;
+    }
+    let ctx = open_ctx(state, org, project).await?;
+    // Every other metric has a storage measure, so a stored rule never takes this `None` branch.
     let Some(measure) = measure(condition) else {
         return Err("query failed");
     };
@@ -280,12 +278,89 @@ async fn measure_rule(
     };
     Box::pin(alert_value(&ctx, request))
         .await
-        .map_err(|error| match error {
-            RunError::Timeout => "query timed out",
-            RunError::TooLarge => "query needed more memory or temporary disk space than allowed",
-            RunError::Invalid(_) => "the filter is no longer valid",
-            _ => "query failed",
-        })
+        .map_err(run_reason)
+}
+
+/// Opens the project's storage for a measurement, as the rule's org sees it (D-P-21). The error
+/// is a fixed reason.
+async fn open_ctx(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+) -> Result<QueryContext, &'static str> {
+    crate::routes::read::open_query_on(
+        &state.storage,
+        project,
+        Visibility::window(state, org),
+        None,
+        None,
+    )
+    .await
+    .map_err(|error| match error {
+        ApiError::Unavailable { .. } => "storage is busy",
+        _ => "query failed",
+    })
+}
+
+/// The fixed reason of a failed measurement.
+fn run_reason(error: RunError) -> &'static str {
+    match error {
+        RunError::Timeout => "query timed out",
+        RunError::TooLarge => "query needed more memory or temporary disk space than allowed",
+        RunError::Invalid(_) => "the filter is no longer valid",
+        _ => "query failed",
+    }
+}
+
+/// Counts the occurrence scores of the rule's issue or source over `window` (D-IC-20): the
+/// names are resolved from `meta.db` now, split in chunks of `MAX_COUNT_NAMES`, one
+/// `alert_value` each, and the counts are summed.
+async fn measure_issue_rule(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+    condition: &AlertCondition,
+    window: TimeWindow,
+) -> Result<AlertValue, &'static str> {
+    let ids = match (condition.issue_id, condition.source_id) {
+        (Some(issue), None) => issue_scope_ids(state.meta.reader(), project, issue)
+            .await
+            .map_err(|_| "query failed")?
+            .ok_or("issue not found")?,
+        (None, Some(source)) => source_scope_ids(state.meta.reader(), project, source)
+            .await
+            .map_err(|_| "query failed")?
+            .ok_or("issue source not found")?,
+        // The API refuses this shape, so a stored row is never both or neither.
+        _ => return Err("query failed"),
+    };
+    let names: Vec<String> = ids.iter().map(|id| format!("issue:{id}")).collect();
+    if names.is_empty() {
+        return Ok(AlertValue {
+            count: 0,
+            value: Some(0.0),
+        });
+    }
+    let ctx = open_ctx(state, org, project).await?;
+    let mut total: i64 = 0;
+    for chunk in names.chunks(MAX_COUNT_NAMES) {
+        let request = AlertValueRequest {
+            window,
+            filter: None,
+            measure: AlertMeasure::ScoreCount {
+                names: chunk.to_vec(),
+            },
+            timeout: QUERY_TIMEOUT,
+        };
+        let value = Box::pin(alert_value(&ctx, request))
+            .await
+            .map_err(run_reason)?;
+        total = total.saturating_add(value.count);
+    }
+    Ok(AlertValue {
+        count: total,
+        value: Some(total as f64),
+    })
 }
 
 #[cfg(test)]
@@ -306,7 +381,9 @@ mod tests {
         NewChannel, NewRule, RulePatch, deliveries_for_events, insert_channel, insert_rule,
         list_events, rule_by_id, update_rule,
     };
+    use crate::meta::issues::{IssueRow, IssueState, SourceKind, insert_issue};
     use crate::test_support::hook_receiver::HookReceiver;
+    use crate::test_support::issues::{issue_row, occurrence, put_issue, put_source, source_row};
     use crate::test_support::{TestApp, assert_logs_clean, dataset_span, set_limits};
 
     const MINUTE: Duration = Duration::from_secs(60);
@@ -1064,5 +1141,712 @@ mod tests {
         .await
         .expect("the rule measures");
         assert_eq!(measured.count, 1);
+    }
+
+    /// An `issue_occurrences` condition; `min_count` is `None`, as normalization leaves it.
+    fn issue_condition(
+        window: AlertWindow,
+        comparator: Comparator,
+        threshold: f64,
+        issue_id: Option<Uuid>,
+        source_id: Option<Uuid>,
+    ) -> AlertCondition {
+        AlertCondition {
+            metric: AlertMetric::IssueOccurrences,
+            window,
+            filter: None,
+            comparator,
+            threshold,
+            min_count: None,
+            target: None,
+            score_name: None,
+            aggregation: None,
+            issue_id,
+            source_id,
+        }
+    }
+
+    /// A distinct 32-hex trace id per `index`.
+    fn trace_hex(index: usize) -> String {
+        format!("{index:032x}")
+    }
+
+    /// Stores an issue of `state` in `source`, merged into `into` when given.
+    async fn put_merged_or_plain(
+        app: &TestApp,
+        project: ProjectId,
+        source: Uuid,
+        id: Uuid,
+        state: IssueState,
+        into: Option<Uuid>,
+        now: i64,
+    ) {
+        let mut row: IssueRow = issue_row(project, source, id, "issue", state, now);
+        row.merged_into = into;
+        put_issue(app, row).await;
+    }
+
+    #[tokio::test]
+    async fn issue_rule_counts_occurrences_in_the_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let issue = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source_id, issue, "boom", IssueState::Open, now),
+        )
+        .await;
+        // Three occurrences inside the 15 minute window, two before it.
+        for (index, minutes) in [2_i64, 3, 4, 20, 30].into_iter().enumerate() {
+            occurrence(
+                &app,
+                &seeded,
+                source_id,
+                issue,
+                &trace_hex(index + 1),
+                now - minutes * MINUTE_NS,
+                None,
+                None,
+            )
+            .await;
+        }
+
+        let condition = issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 3);
+        assert_eq!(measured.value, Some(3.0));
+    }
+
+    #[tokio::test]
+    async fn issue_rule_counts_merged_issues_with_their_target() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let target = Uuid::now_v7();
+        let merged = Uuid::now_v7();
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            target,
+            IssueState::Open,
+            None,
+            now,
+        )
+        .await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            merged,
+            IssueState::Merged,
+            Some(target),
+            now,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            target,
+            &trace_hex(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            merged,
+            &trace_hex(2),
+            now - 2 * MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let condition = issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(target), None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 2);
+    }
+
+    #[tokio::test]
+    async fn issue_rule_on_a_merged_issue_follows_its_target() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let target = Uuid::now_v7();
+        let issue = Uuid::now_v7();
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            target,
+            IssueState::Open,
+            None,
+            now,
+        )
+        .await;
+        put_merged_or_plain(&app, project, source_id, issue, IssueState::Open, None, now).await;
+        // The rule is made on `issue`, which is merged into `target` afterwards.
+        let condition = issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None);
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            issue,
+            &trace_hex(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            target,
+            &trace_hex(2),
+            now - 2 * MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE issues SET state = 'merged', merged_into = ? WHERE id = ?")
+                        .bind(target.to_string())
+                        .bind(issue.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(
+            measured.count, 2,
+            "the target's whole group counts (D-IC-20)"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_rule_counts_an_ignored_issue() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let ignored = Uuid::now_v7();
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            ignored,
+            IssueState::Ignored,
+            None,
+            now,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            ignored,
+            &trace_hex(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let condition = issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(ignored), None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 1);
+    }
+
+    #[tokio::test]
+    async fn source_rule_skips_ignored_and_merged_issues() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let open = Uuid::now_v7();
+        let resolved = Uuid::now_v7();
+        let target = Uuid::now_v7();
+        let merged_into_open = Uuid::now_v7();
+        let ignored = Uuid::now_v7();
+        let merged_into_ignored = Uuid::now_v7();
+        put_merged_or_plain(&app, project, source_id, open, IssueState::Open, None, now).await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            resolved,
+            IssueState::Resolved,
+            None,
+            now,
+        )
+        .await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            target,
+            IssueState::Open,
+            None,
+            now,
+        )
+        .await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            merged_into_open,
+            IssueState::Merged,
+            Some(target),
+            now,
+        )
+        .await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            ignored,
+            IssueState::Ignored,
+            None,
+            now,
+        )
+        .await;
+        put_merged_or_plain(
+            &app,
+            project,
+            source_id,
+            merged_into_ignored,
+            IssueState::Merged,
+            Some(ignored),
+            now,
+        )
+        .await;
+        for (index, issue) in [
+            open,
+            resolved,
+            target,
+            merged_into_open,
+            ignored,
+            merged_into_ignored,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            occurrence(
+                &app,
+                &seeded,
+                source_id,
+                issue,
+                &trace_hex(index + 1),
+                now - MINUTE_NS,
+                None,
+                None,
+            )
+            .await;
+        }
+
+        let condition =
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, None, Some(source_id));
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        // Open, resolved, and the target with its merged issue; not the ignored group.
+        assert_eq!(measured.count, 4);
+    }
+
+    #[tokio::test]
+    async fn source_rule_with_no_issues_is_zero() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "empty", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+
+        let condition =
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, None, Some(source_id));
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(
+            measured,
+            AlertValue {
+                count: 0,
+                value: Some(0.0),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_occurrences_is_a_value_and_can_breach() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let issue = Uuid::now_v7();
+        put_merged_or_plain(&app, project, source_id, issue, IssueState::Open, None, now).await;
+
+        // "Fewer than one occurrence in 15 minutes" over an empty window breaches.
+        let condition = issue_condition(AlertWindow::M15, Comparator::Lt, 1.0, Some(issue), None);
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 0);
+        assert_eq!(measured.value, Some(0.0));
+        assert_eq!(
+            reading(&condition, measured.count, measured.value),
+            Reading::Breaching
+        );
+    }
+
+    #[tokio::test]
+    async fn names_over_the_cap_are_chunked() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "bulk", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        // One more issue than a single read may name.
+        let ids: Vec<Uuid> = (0..=MAX_COUNT_NAMES).map(|_| Uuid::now_v7()).collect();
+        let rows: Vec<IssueRow> = ids
+            .iter()
+            .map(|id| issue_row(project, source_id, *id, "bulk", IssueState::Open, now))
+            .collect();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    for row in &rows {
+                        insert_issue(conn, row).await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let first = ids[0];
+        let last = ids[MAX_COUNT_NAMES];
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            first,
+            &trace_hex(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            last,
+            &trace_hex(2),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let condition =
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, None, Some(source_id));
+        let measured = measure_rule(
+            &app.state,
+            seeded.org_id,
+            project,
+            &condition,
+            now - 15 * MINUTE_NS,
+            now,
+        )
+        .await
+        .expect("the rule measures");
+        assert_eq!(measured.count, 2);
+    }
+
+    #[tokio::test]
+    async fn missing_issue_fails_with_a_fixed_reason() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let issue = Uuid::now_v7();
+        put_merged_or_plain(&app, project, source_id, issue, IssueState::Open, None, now).await;
+        let rule = add_rule(
+            &app,
+            project,
+            "issue",
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None),
+            Vec::new(),
+        )
+        .await;
+        // The schema cascade removes the issues with their source.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("DELETE FROM issue_sources WHERE id = ?")
+                        .bind(source_id.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let from = now - 15 * MINUTE_NS;
+        let issue_condition_now =
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None);
+        assert_eq!(
+            measure_rule(
+                &app.state,
+                seeded.org_id,
+                project,
+                &issue_condition_now,
+                from,
+                now
+            )
+            .await,
+            Err("issue not found")
+        );
+        let source_condition =
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, None, Some(source_id));
+        assert_eq!(
+            measure_rule(
+                &app.state,
+                seeded.org_id,
+                project,
+                &source_condition,
+                from,
+                now
+            )
+            .await,
+            Err("issue source not found")
+        );
+
+        let report = evaluate_once(&app.state, now).await.unwrap();
+        assert_eq!(
+            report,
+            EvaluateReport {
+                evaluated: 1,
+                failed: 1,
+                ..EvaluateReport::default()
+            }
+        );
+        let row = read_rule(&app, project, rule.id).await;
+        assert_eq!(row.last_error.as_deref(), Some("issue not found"));
+        assert_eq!(row.state, AlertState::Ok);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_source_leaves_its_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let issue = Uuid::now_v7();
+        put_merged_or_plain(&app, project, source_id, issue, IssueState::Open, None, now).await;
+        let rule = add_rule(
+            &app,
+            project,
+            "issue",
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None),
+            Vec::new(),
+        )
+        .await;
+
+        let path = format!("/api/v1/projects/{project}/issue-sources/{source_id}");
+        let deleted = app
+            .request(Method::DELETE, &path)
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, 204, "{:?}", deleted.body);
+
+        let kept = rule_by_id(app.state.meta.reader(), project, rule.id)
+            .await
+            .expect("query")
+            .expect("the rule is kept");
+        assert_eq!(kept.id, rule.id);
+        let report = evaluate_once(&app.state, now).await.unwrap();
+        assert_eq!(report.failed, 1);
+        let row = read_rule(&app, project, rule.id).await;
+        assert_eq!(row.last_error.as_deref(), Some("issue not found"));
+    }
+
+    #[tokio::test]
+    async fn issue_rule_fires_and_resolves() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = source_row(project, "errors", SourceKind::Error, true, now);
+        let source_id = source.id;
+        put_source(&app, source).await;
+        let issue = Uuid::now_v7();
+        put_merged_or_plain(&app, project, source_id, issue, IssueState::Open, None, now).await;
+        let rule = add_rule(
+            &app,
+            project,
+            "issue",
+            issue_condition(AlertWindow::M15, Comparator::Gt, 0.0, Some(issue), None),
+            Vec::new(),
+        )
+        .await;
+        occurrence(
+            &app,
+            &seeded,
+            source_id,
+            issue,
+            &trace_hex(1),
+            now - MINUTE_NS,
+            None,
+            None,
+        )
+        .await;
+
+        let report = evaluate_once(&app.state, now).await.unwrap();
+        assert_eq!(
+            report,
+            EvaluateReport {
+                evaluated: 1,
+                events: 1,
+                ..EvaluateReport::default()
+            }
+        );
+        assert_eq!(
+            read_rule(&app, project, rule.id).await.state,
+            AlertState::Firing
+        );
+
+        // The occurrence leaves the window: the first clear reading. Two are needed to resolve.
+        app.state.clock.advance(Duration::from_secs(16 * 60));
+        let now = app.state.clock.now_ns();
+        assert_eq!(
+            evaluate_once(&app.state, now).await.unwrap(),
+            EvaluateReport {
+                evaluated: 1,
+                ..EvaluateReport::default()
+            }
+        );
+        let row = read_rule(&app, project, rule.id).await;
+        assert_eq!(row.state, AlertState::Firing);
+        assert_eq!(row.clear_streak, 1);
+
+        app.state.clock.advance(Duration::from_secs(60));
+        let now = app.state.clock.now_ns();
+        assert_eq!(
+            evaluate_once(&app.state, now).await.unwrap(),
+            EvaluateReport {
+                evaluated: 1,
+                events: 1,
+                ..EvaluateReport::default()
+            }
+        );
+        assert_eq!(
+            read_rule(&app, project, rule.id).await.state,
+            AlertState::Ok
+        );
     }
 }
