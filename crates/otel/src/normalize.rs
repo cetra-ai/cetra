@@ -19,7 +19,7 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 use opentelemetry_proto::tonic::trace::v1::span::Link;
 use serde_json::{Map, Value as Json};
 
-use crate::agents::AgentContexts;
+use crate::agents::{self, AgentContexts};
 use crate::bag::AttrBag;
 use crate::context::fill;
 use crate::detect::detect;
@@ -187,7 +187,6 @@ fn non_empty(text: &str) -> Option<String> {
 struct Batch<'a> {
     ctx: &'a IngestContext,
     prices: &'a crate::cost::PriceTable,
-    #[expect(dead_code, reason = "read by the coding-agent rules from N2 on")]
     agents: &'a AgentContexts,
 }
 
@@ -201,6 +200,12 @@ fn accept_span(
     media: &mut crate::media::MediaSink<'_>,
 ) -> Option<Span> {
     media.clear_refs();
+    let agent = agents::detect_agent(
+        resource.service_name.as_deref(),
+        scope_name.as_deref(),
+        &span.name,
+        &span.attributes,
+    );
     let trace_id = match TraceId::from_slice(&span.trace_id) {
         Ok(id) => id,
         Err(_) => {
@@ -236,15 +241,25 @@ fn accept_span(
     let mut bag = AttrBag::new(&span.attributes, &mut warnings);
     crate::conventions::apply_status(&mut bag, &mut status, &mut status_message);
     let conventions = detect(&bag, &span.events);
-    let span_kind = span_kind(&mut bag);
+    let span_kind = match agents::kind(agent, &span.name) {
+        Some(kind) => kind,
+        None => span_kind(&mut bag),
+    };
     let mut fields = fill(&mut bag, &resource.view, &mut warnings);
-    let counted = usage(
-        &mut bag,
-        span_kind,
-        fields.provider.as_deref(),
-        &mut warnings,
-    );
-    let ttft_ns = ttft(&mut bag, &span.events, start_time, &mut warnings);
+    agents::context(agent, &mut bag, &mut fields, batch.agents);
+    let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
+        Some(counted) => counted,
+        None => usage(
+            &mut bag,
+            span_kind,
+            fields.provider.as_deref(),
+            &mut warnings,
+        ),
+    };
+    let ttft_ns = match ttft(&mut bag, &span.events, start_time, &mut warnings) {
+        Some(nanos) => Some(nanos),
+        None => agents::ttft(agent, &mut bag, &mut warnings),
+    };
     let priced = crate::cost::apply(
         &mut bag,
         &crate::cost::Charge {
@@ -271,6 +286,14 @@ fn accept_span(
         crate::conventions::READERS,
         crate::conventions::REGISTRIES,
     );
+    agents::payload(
+        agent,
+        &span.name,
+        &mut bag,
+        &span.events,
+        &mut assembled,
+        &mut warnings,
+    );
     crate::media::extract_io(&mut assembled.io, media);
     let media_refs = media.media_refs();
     crate::truncate::truncate_payloads(
@@ -279,6 +302,7 @@ fn accept_span(
         &mut truncated,
     );
     let normalize_error = payload::error_attribute(&assembled.io.errors);
+    let finish_inputs = agents::finish_inputs(agent, &bag);
     let mut attributes = bag.into_attributes(&mut warnings, &mut truncated);
     let events = encode_events(
         &span.events,
@@ -350,6 +374,7 @@ fn accept_span(
         schema_version: SCHEMA_VERSION,
     };
     payload::write(&mut built, assembled.io);
+    agents::finish(agent, &span.name, &finish_inputs, &mut built);
     crate::truncate::truncate_columns(&mut built, batch.ctx.limits.max_attribute_bytes);
     Some(built)
 }
