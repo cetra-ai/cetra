@@ -547,6 +547,7 @@ pub struct EntitlementDefaults {
     pub max_projects: Option<u64>,
     pub max_alert_rules: Option<u64>,
     pub max_active_online_rules: Option<u64>,
+    pub max_active_issue_sources: Option<u64>,
 }
 
 impl Default for EntitlementDefaults {
@@ -563,6 +564,7 @@ impl Default for EntitlementDefaults {
             max_projects: None,
             max_alert_rules: None,
             max_active_online_rules: None,
+            max_active_issue_sources: None,
         }
     }
 }
@@ -2585,6 +2587,7 @@ mod tests {
         assert_eq!(defaults.max_projects, None);
         assert_eq!(defaults.max_alert_rules, None);
         assert_eq!(defaults.max_active_online_rules, None);
+        assert_eq!(defaults.max_active_issue_sources, None);
     }
 
     #[test]

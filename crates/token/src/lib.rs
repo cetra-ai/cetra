@@ -197,6 +197,13 @@ pub struct LimitsClaim {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_active_online_rules: Option<Option<u64>>,
+    /// Enabled issue sources of active projects (D-IC-13).
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_active_issue_sources: Option<Option<u64>>,
 }
 
 /// `kind: "control_plane"` (D-P-24, D-P-28).
@@ -671,6 +678,7 @@ mod tests {
                 max_projects: Some(None),
                 max_alert_rules: Some(None),
                 max_active_online_rules: Some(None),
+                max_active_issue_sources: Some(None),
             },
         });
         let token = sign(&dev_key(), "dev-1", &claims).unwrap();

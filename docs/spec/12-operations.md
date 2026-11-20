@@ -25,7 +25,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `license_key` | `CETRA_LICENSE_KEY` | unset: no licence, enterprise features locked (D172, D-P-7) |
 | `entitlements.defaults.plan_name` | | `"Self-hosted"`: the plan name shown for orgs without a token (D-P-10) |
 | `entitlements.defaults.features` | | unset: every core feature (`retention_management`); a list grants only those; `ee` names are refused (D-P-10) |
-| `entitlements.defaults.<limit>` | | unset = unlimited, for each of `units_included`, `units_cap`, `ingest_spans_per_sec`, `ingest_burst`, `data_access_days`, `max_seats`, `max_projects`, `max_alert_rules`, `max_active_online_rules` (D-P-13) |
+| `entitlements.defaults.<limit>` | | unset = unlimited, for each of `units_included`, `units_cap`, `ingest_spans_per_sec`, `ingest_burst`, `data_access_days`, `max_seats`, `max_projects`, `max_alert_rules`, `max_active_online_rules`, `max_active_issue_sources` (D-P-13, D-IC-13) |
 | `orgs.user_create` | | `true`; `false` on a cloud cell: users cannot create orgs, the control plane does (D-P-31) |
 | `orgs.create_url` | | unset: where "New organization" links when `orgs.user_create` is false (D-P-31) |
 | `demo.org` | `CETRA_DEMO__ORG` | unset (no demo org). An org id: every signed-in user who is not an instance admin reads that org as an implicit viewer (08 § Demo org, D187). The org must exist and be active at startup, or startup fails |
@@ -111,7 +111,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 - Ingest rate: a per-org token bucket over accepted spans; `429 rate_limited` with `Retry-After`, gRPC `UNAVAILABLE` (D-P-19, D-P-35).
 - Seats (owner, admin and member memberships plus pending invites with those roles) and active projects: `403 plan_limit` on invite, role change, accept and project create (D-P-20).
 - Data older than `data_access_days` is hidden from every read by `QueryOptions::visible_from`, applied in the base query views (media blobs too); deletion reads are exempt; retention uses the largest window of the last 30 days plus 30 days, and the ingest age check the current window plus 30 days (D175, D-P-21, D-P-22, D-P-45, D-P-47).
-- Feature gates answer `403 plan_required`; count limits (alert rules, active online rules) answer `403 plan_limit` (D-P-14, D-P-23).
+- Feature gates answer `403 plan_required`; count limits (alert rules, active online rules, active issue sources) answer `403 plan_limit` (D-P-14, D-P-23).
 
 **Metering.** `usage_daily` (spans, bytes, scores, judge tokens and cost) per org, project and day is the billing source. It is exposed on the org's Plan page (track P's M3), through `GET /api/v1/orgs/{org}/usage`, and to the control plane through `GET /api/internal/v1/usage` with a `kind: "control_plane"` bearer token (D-P-24).
 

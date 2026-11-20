@@ -26,6 +26,7 @@ pub(crate) mod eval;
 pub(crate) mod experiments;
 pub(crate) mod http;
 pub(crate) mod ingest;
+pub(crate) mod issues;
 pub(crate) mod live;
 pub(crate) mod mcp;
 pub(crate) mod meta;
