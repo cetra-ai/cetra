@@ -5,8 +5,8 @@ import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
-import connectionsFixture from "../../../../fixtures/api/static/llm-connections.json";
 import sourcesFixture from "../../../../fixtures/api/static/issue-sources.json";
+import connectionsFixture from "../../../../fixtures/api/static/llm-connections.json";
 
 const NEW_URL = "/acme/support-bot/issue-sources/new";
 const TOPIC = sourcesFixture.data[1] as (typeof sourcesFixture.data)[number];

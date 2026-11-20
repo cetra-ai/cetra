@@ -4,8 +4,8 @@ import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
-import listFixture from "../../../../../../../fixtures/api/static/issue-sources.json";
 import refitsFixture from "../../../../../../../fixtures/api/static/issue-refits.json";
+import listFixture from "../../../../../../../fixtures/api/static/issue-sources.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
 const TOPIC = listFixture.data[1] as (typeof listFixture.data)[number];

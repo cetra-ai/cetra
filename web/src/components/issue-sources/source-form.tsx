@@ -566,11 +566,7 @@ export function SourceForm({
         </div>
 
         {values.kind === "score" || values.kind === "feedback" ? (
-          <div
-            role="group"
-            aria-labelledby="source-score-names-label"
-            className="flex flex-col gap-2"
-          >
+          <fieldset aria-labelledby="source-score-names-label" className="flex flex-col gap-2">
             <span id="source-score-names-label" className="text-body leading-none font-medium">
               Score names
             </span>
@@ -613,11 +609,11 @@ export function SourceForm({
               </Button>
             </div>
             <SectionError message={errors.score_names} />
-          </div>
+          </fieldset>
         ) : null}
 
         {values.kind === "feedback" ? (
-          <div role="group" aria-labelledby="source-feedback-label" className="flex flex-col gap-2">
+          <fieldset aria-labelledby="source-feedback-label" className="flex flex-col gap-2">
             <span id="source-feedback-label" className="text-body leading-none font-medium">
               Feedback sources
             </span>
@@ -642,7 +638,7 @@ export function SourceForm({
               ))}
             </div>
             <SectionError message={errors.feedback_sources} />
-          </div>
+          </fieldset>
         ) : null}
 
         {llm ? (

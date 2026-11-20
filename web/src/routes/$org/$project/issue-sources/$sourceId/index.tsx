@@ -12,6 +12,7 @@ import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { KIND_LABELS } from "@/components/issue-sources/source-list";
 import { useProject } from "@/components/shell/project-context";
+import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
 import {
   Table,
@@ -21,7 +22,6 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { TimeText } from "@/components/time-text";
 import { formatCost, formatDuration, nsBetween } from "@/lib/format";
 import { canManageEvaluation } from "@/lib/roles";
 
