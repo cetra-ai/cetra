@@ -152,18 +152,28 @@ pub struct AlertsConfig {
 
 1. `routes/channels.rs`, `member_scope`: replace the condition `state.config.auth.signup != SignupPolicy::Open` with `state.config.email_recipients() != EmailRecipients::Members` (import `crate::config::EmailRecipients`). Change its doc comment to: "The verified member emails that the recipients of a `kind` channel must stay within, when `alerts.email_recipients` is `members` (D-K-19, D-K-21). `None` when any address is allowed." Change `check_members`'s first doc line from "Under open signup" to "When the policy is `members`," and cite `(D-K-19, D-K-21)`. Remove the non-test `use crate::api::account::SignupPolicy;` if nothing else uses it (keep the test module's import only if a test still uses it).
 2. `alerts/deliver.rs`, `send_email`: replace `if state.config.auth.signup == SignupPolicy::Open {` with `if state.config.email_recipients() == EmailRecipients::Members {`; import `crate::config::EmailRecipients`; remove the `SignupPolicy` import if unused. Change the doc paragraph "Under open signup only verified members of the org get mail (D-K-19)" to "When `alerts.email_recipients` is `members`, only verified members of the org get mail (D-K-19, D-K-21)". The skip logic, the messages and the cap stay as they are. `test_channel` already sends through `send_one` → `send_email`, so "Send test" follows the same policy with no change of its own.
-3. `api/openapi.rs`: in both channel descriptions replace "Under open signup every email recipient must be a verified member of the org (400 on recipients)." with "When `alerts.email_recipients` is `members` (the default under open signup), every email recipient must be a verified member of the org (400 on recipients)."
-4. Run `just openapi` to regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts`.
-5. `grep -rn "SignupPolicy" crates/server/src/routes/channels.rs crates/server/src/alerts/` must show no non-test use.
+3. `api/openapi.rs`: in both channel descriptions (the create one is a `\`-continued string literal; keep that layout and wrap at the same width) replace "Under open signup every email recipient must be a verified member of the org (400 on recipients)." with "When `alerts.email_recipients` is `members` (the default under open signup), every email recipient must be a verified member of the org (400 on recipients)."
+4. Run `just openapi` to regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts`; both change (the description text is in them). Commit both.
+5. After the change, `SignupPolicy` appears in `routes/channels.rs` only inside `mod tests`, and in `alerts/` only in `deliver/tests.rs`: delete the non-test imports at the top of `channels.rs` and `deliver.rs` (their only uses were the two conditions replaced in steps 1–2).
 
 **Tests:**
+
+Helpers that exist (use them as they are): `TestApp::with_mailer_config(|config| …)`, `app.seed()` → `Seeded` (user `ada@example.com`, `.org_id`, `.user_id`, `.cookie`), `app.verify_email(user_id)`, `app.add_member(&seeded, email, OrgRole::Member)` → `Member { id, cookie }`, `app.sent()` → `Vec<SentMail>` (field `.to`). In `routes/channels.rs` tests: `channels(&seeded)` (the list path), `email_body(name, &[…])`, `create_ok(&app, &seeded, body)` → `NotificationChannel`, `send(&app, Method, &path, &cookie, Option<Value>)` → `TestResponse`, `problem_of(&response)`, `pairs(&[(field, message)])`, `test_send(&app, id, &seeded, &seeded.cookie)`; copy the PATCH call of `open_signup_limits_recipients_to_verified_members`. In `deliver/tests.rs`: `email(&[…])`, `send_one(&app.state, org_id, &config, &sample_notice(MessageKind::Fired, NOW), Uuid::now_v7(), NOW)`, `permanent(text)`. Add `use crate::config::EmailRecipients;` to both test modules (and `use crate::meta::members::remove_org_member;` to the channels tests).
 
 In `routes/channels.rs` `mod tests`:
 - Keep `open_signup_limits_recipients_to_verified_members` unchanged (it proves the unset default under `open`).
 - Keep `invite_only_allows_any_recipient` unchanged (the unset default under `invite_only`).
 - `members_policy_limits_recipients_under_invite_only`: `TestApp::with_mailer_config(|c| c.alerts.email_recipients = Some(EmailRecipients::Members))` (signup stays `invite_only`). Seed, `verify_email(seeded.user_id)`. POST `email_body("Mail", &["eve@example.com"])` → `400` with `pairs(&[("recipients", "must be verified members of this organization")])`. `create_ok` with `["ada@example.com"]` succeeds; PATCH it with `{"recipients": ["eve@example.com"]}` → the same `400`.
 - `any_policy_allows_any_recipient_under_open_signup`: config `auth.signup = Open` and `alerts.email_recipients = Some(Any)`; `create_ok` with `["eve@example.com"]` succeeds and lists it.
-- `members_policy_test_send_skips_a_recipient_who_left`: config `alerts.email_recipients = Some(Members)`. Seed, verify the seeded user, add member `ben@example.com` and verify him; `create_ok` with `["ada@example.com", "ben@example.com"]`. Remove ben from the org with a direct write: `app.state.meta.write(move |conn| Box::pin(async move { sqlx::query("DELETE FROM org_members WHERE user_id = ?").bind(ben.id.to_string()).execute(&mut *conn).await.map(|_| ()) })).await.unwrap()` — copy the error mapping of the existing `meta.write` calls in the test module or `test_support` if this exact form does not compile; this is the stored-channel case of D-K-21. Then `test_send` → `200` with `{"ok": false, "error": "1 recipient(s) skipped: not verified members of the organization"}`, and `app.sent()` has exactly one mail, to `ada@example.com`.
+- `members_policy_test_send_skips_a_recipient_who_left`: config `alerts.email_recipients = Some(Members)`. Seed, verify the seeded user, add member `ben@example.com` and verify him; `create_ok` with `["ada@example.com", "ben@example.com"]`. Remove ben from the org (the stored-channel case of D-K-21) with the existing `crate::meta::members::remove_org_member` (members.rs, `pub(crate)`, returns `Result<(), MetaError>`), in the form of `TestApp::verify_email`:
+  ```rust
+  let (org_id, ben_id) = (seeded.org_id, ben.id);
+  app.state
+      .meta
+      .write(move |conn| Box::pin(async move { remove_org_member(conn, org_id, ben_id).await }))
+      .await
+      .unwrap();
+  ``` Then `test_send` → `200` with `{"ok": false, "error": "1 recipient(s) skipped: not verified members of the organization"}`, and `app.sent()` has exactly one mail, to `ada@example.com`.
 
 In `alerts/deliver/tests.rs`:
 - Keep `open_signup_skips_recipients_that_are_not_verified_members` unchanged.
