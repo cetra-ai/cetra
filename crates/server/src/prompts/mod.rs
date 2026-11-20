@@ -1,6 +1,5 @@
 //! Prompt validation: names, labels, tags, templates and configs (D-V-2 to D-V-8).
 //! No database access.
-#![allow(dead_code)] // V1.5 removes this line. Unconditional: the test build warns too.
 
 use std::collections::BTreeSet;
 use std::fmt;

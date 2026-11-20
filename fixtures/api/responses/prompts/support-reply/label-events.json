@@ -1,0 +1,15 @@
+{
+  "data": [
+    {
+      "label": "staging",
+      "to_version": 2,
+      "at": "2026-01-01T00:00:02.000000000Z"
+    },
+    {
+      "label": "production",
+      "to_version": 1,
+      "at": "2026-01-01T00:00:01.000000000Z"
+    }
+  ],
+  "next_cursor": null
+}

@@ -113,8 +113,9 @@ use super::org_sso::{
     PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
 };
 use super::prompts::{
-    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptListParams,
-    PromptVersion, ResolveParams, UpdatePromptRequest,
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
+    PromptListParams, PromptSettings, PromptVersion, ResolveParams, SetLabelRequest,
+    UpdatePromptRequest,
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
@@ -364,8 +365,12 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreatePromptRequest>();
     set.insert::<CreateVersionRequest>();
     set.insert::<UpdatePromptRequest>();
+    set.insert::<SetLabelRequest>();
+    set.insert::<PromptLabelEvent>();
+    set.insert::<PromptSettings>();
     set.insert_page::<Prompt>("PromptPage");
     set.insert_page::<PromptVersion>("PromptVersionPage");
+    set.insert_page::<PromptLabelEvent>("PromptLabelEventPage");
     set.insert::<DatasetVersion>();
     set.insert::<DatasetItem>();
     set.insert::<NewDatasetItem>();
@@ -3659,11 +3664,73 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let version_get = operation("get_prompt_version", "prompts", "Get a version")
         .description(Some(PROMPT_READ))
-        .parameters(Some(vec![project_param(), prompt, version]))
+        .parameters(Some(vec![project_param(), prompt.clone(), version]))
         .responses(responses(
             "200",
             json_of::<PromptVersion>("The version."),
             &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let label = path_string("label", "Label name.");
+    let label_set = operation("put_prompt_label", "prompts", "Move a label")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Points the label at the version, creating it when it is new; a protected label needs a project admin or a `write` key (D-V-10). `latest` is computed and cannot be set.",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone(), label.clone()]))
+        .request_body(Some(json_body("SetLabelRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The prompt, with its labels."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let label_delete = operation("delete_prompt_label", "prompts", "Remove a label")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). The versions stay; a protected label needs a project admin or a `write` key (D-V-10).",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone(), label]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Removed.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let label_events = operation(
+        "list_prompt_label_events",
+        "prompts",
+        "List the label history of a prompt",
+    )
+    .description(Some(PROMPT_READ))
+    .parameters(Some(with_query::<PageParams>(vec![
+        project_param(),
+        prompt,
+    ])))
+    .responses(responses(
+        "200",
+        json_named(
+            "PromptLabelEventPage",
+            "One page of label moves, newest first.",
+        ),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let settings_get = operation("get_prompt_settings", "prompts", "Get the prompt settings")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_of::<PromptSettings>("The project's protected labels."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let settings_put = operation("put_prompt_settings", "prompts", "Set the prompt settings")
+        .description(Some("Project admins (D-V-10)."))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("PromptSettings")))
+        .responses(responses(
+            "200",
+            json_of::<PromptSettings>("The stored protected labels."),
+            &[400, 401, 403, 404, 413, 429],
         ))
         .build();
     paths
@@ -3702,6 +3769,26 @@ fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/prompts/{{prompt}}/versions/{{version}}"),
             PathItem::new(HttpMethod::Get, version_get),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/labels/{{label}}"),
+            PathItem::new(HttpMethod::Put, label_set),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/labels/{{label}}"),
+            PathItem::new(HttpMethod::Delete, label_delete),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/label-events"),
+            PathItem::new(HttpMethod::Get, label_events),
+        )
+        .path(
+            format!("{PROJECT}/prompt-settings"),
+            PathItem::new(HttpMethod::Get, settings_get),
+        )
+        .path(
+            format!("{PROJECT}/prompt-settings"),
+            PathItem::new(HttpMethod::Put, settings_put),
         )
 }
 

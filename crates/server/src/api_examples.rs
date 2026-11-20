@@ -15,7 +15,7 @@ use crate::api::common::Page;
 use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::facets::FacetsResponse;
-use crate::api::prompts::{Prompt, PromptVersion};
+use crate::api::prompts::{Prompt, PromptLabelEvent, PromptSettings, PromptVersion};
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
@@ -470,6 +470,27 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             &version,
         );
     }
+    let events: Page<PromptLabelEvent> = fetch(
+        &app,
+        cookie,
+        &format!("/prompts/{EXAMPLE_PROMPT}/label-events"),
+    )
+    .await;
+    out.add(
+        "list_prompt_label_events",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/label-events.json"),
+        &events,
+    );
+    let settings: PromptSettings = fetch(&app, cookie, "/prompt-settings").await;
+    out.add(
+        "get_prompt_settings",
+        &[],
+        &[],
+        "responses/prompt-settings.json",
+        &settings,
+    );
 
     // Every facet the web shows open by default, and every preset field, has an answer here.
     const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
@@ -590,6 +611,21 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "post_prompt_version",
             params(&[("prompt", EXAMPLE_PROMPT)]),
             &format!("responses/prompts/{EXAMPLE_PROMPT}/versions/2.json"),
+        ),
+        // The label answer is the prompt, as the read serves it: `staging` already points at 2.
+        example(
+            "put_prompt_label",
+            params(&[("prompt", EXAMPLE_PROMPT), ("label", "staging")]),
+            BTreeMap::new(),
+            &format!("responses/prompts/{EXAMPLE_PROMPT}.json"),
+            "application/json",
+        ),
+        example(
+            "put_prompt_settings",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "responses/prompt-settings.json",
+            "application/json",
         ),
         // The create answer has the shape of the read, so the read's file serves it too.
         example_created(

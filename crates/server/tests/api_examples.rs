@@ -51,7 +51,8 @@ use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
 use cetra_server::api::prompts::{
-    CreatePromptRequest, CreateVersionRequest, Prompt, PromptVersion,
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptSettings,
+    PromptVersion, SetLabelRequest,
 };
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
@@ -477,6 +478,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<CreatePromptRequest>("requests/prompt-create.json");
     roundtrip::<CreateVersionRequest>("requests/prompt-version-create.json");
+    roundtrip::<SetLabelRequest>("requests/prompt-label-set.json");
+    roundtrip::<PromptSettings>("requests/prompt-settings.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
@@ -565,6 +568,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
         ("post_prompt", "requests/prompt-create.json"),
         ("post_prompt_version", "requests/prompt-version-create.json"),
+        ("put_prompt_label", "requests/prompt-label-set.json"),
+        ("put_prompt_settings", "requests/prompt-settings.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -724,6 +729,11 @@ fn generated_files_roundtrip() {
                 roundtrip::<PromptVersion>(&example.file);
             }
             "list_prompt_versions" => roundtrip::<Page<PromptVersion>>(&example.file),
+            "put_prompt_label" => roundtrip::<Prompt>(&example.file),
+            "list_prompt_label_events" => roundtrip::<Page<PromptLabelEvent>>(&example.file),
+            "get_prompt_settings" | "put_prompt_settings" => {
+                roundtrip::<PromptSettings>(&example.file);
+            }
             other => panic!("{other} has no round-trip"),
         }
     }

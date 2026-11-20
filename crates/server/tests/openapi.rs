@@ -787,6 +787,31 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}",
         "get_prompt_version",
     ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "put_prompt_label",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "delete_prompt_label",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/label-events",
+        "list_prompt_label_events",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompt-settings",
+        "get_prompt_settings",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompt-settings",
+        "put_prompt_settings",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -832,6 +857,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_prompts",
     "get_prompt_resolve",
     "list_prompt_versions",
+    "list_prompt_label_events",
     "list_dataset_items",
     "list_dataset_version_changes",
     "list_experiment_trends",
@@ -1168,6 +1194,7 @@ fn document_lint() {
         } else if *id == "get_evaluator"
             || *id == "delete_score_definition"
             || *id == "get_prompt_version"
+            || *id == "delete_prompt_label"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_evaluator_test" {
@@ -1189,9 +1216,13 @@ fn document_lint() {
             || *id == "post_dataset_items"
             || *id == "post_prompt"
             || *id == "post_prompt_version"
+            || *id == "put_prompt_label"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
-        } else if *id == "patch_dataset_item" || *id == "patch_prompt" {
+        } else if *id == "patch_dataset_item"
+            || *id == "patch_prompt"
+            || *id == "put_prompt_settings"
+        {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1309,6 +1340,7 @@ fn document_lint() {
         ("DatasetItemPage", "DatasetItem"),
         ("PromptPage", "Prompt"),
         ("PromptVersionPage", "PromptVersion"),
+        ("PromptLabelEventPage", "PromptLabelEvent"),
         ("ExperimentPage", "Experiment"),
         ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
@@ -1597,6 +1629,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "ItemChangePage",
         "PromptPage",
         "PromptVersionPage",
+        "PromptLabelEventPage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",

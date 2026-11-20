@@ -4,7 +4,7 @@
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use cetra_core::ids::ProjectId;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -14,8 +14,9 @@ use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::api::prompts::{
-    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptListParams,
-    PromptVersion, ResolveParams, UpdatePromptRequest,
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
+    PromptListParams, PromptSettings, PromptVersion, ResolveParams, SetLabelRequest,
+    UpdatePromptRequest,
 };
 use crate::auth::principal::Principal;
 use crate::auth::roles::{ProjectPerm, Role};
@@ -27,8 +28,8 @@ use crate::meta::prompts::{
     self as store, NewPrompt, NewVersion, PromptFilter, PromptRow, PromptType, VersionRow,
 };
 use crate::prompts::{
-    DEFAULT_LABEL, LATEST, MAX_LABELS_PER_REQUEST, check_commit_message, check_config,
-    check_description, check_label, check_labels, check_name, check_tags, parse_body,
+    DEFAULT_LABEL, LATEST, MAX_LABELS_PER_REQUEST, MAX_PROTECTED, check_commit_message,
+    check_config, check_description, check_label, check_labels, check_name, check_tags, parse_body,
 };
 
 use super::datasets::created_by;
@@ -132,6 +133,56 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: get(get_version),
         },
+        RouteDef {
+            method: Method::PUT,
+            path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+            access: Access::Project {
+                perm: ProjectPerm::ManagePrompts,
+                session_only: false,
+            },
+            documented: true,
+            handler: put(set_label),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+            access: Access::Project {
+                perm: ProjectPerm::ManagePrompts,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(remove_label),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/prompts/{prompt}/label-events",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_label_events),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/prompt-settings",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_settings),
+        },
+        RouteDef {
+            method: Method::PUT,
+            path: "/api/v1/projects/{project}/prompt-settings",
+            access: Access::Project {
+                perm: ProjectPerm::ManageSettings,
+                session_only: false,
+            },
+            documented: true,
+            handler: put(put_settings),
+        },
     ]
 }
 
@@ -146,6 +197,13 @@ pub(crate) struct PromptPath {
 pub(crate) struct PromptVersionPath {
     pub(crate) prompt: String,
     pub(crate) version: i64,
+}
+
+/// The `{prompt}` and `{label}` segments of a label route.
+#[derive(Debug, Deserialize)]
+pub(crate) struct PromptLabelPath {
+    pub(crate) prompt: String,
+    pub(crate) label: String,
 }
 
 /// What a write did. A protected label refused (D-V-10) and a missing prompt are answers, not
@@ -665,6 +723,17 @@ async fn resolve_prompt(
         .into_response())
 }
 
+/// A page cursor: a positive decimal number (a version or a label event id), or none.
+fn positive_cursor(cursor: Option<&str>) -> Result<Option<i64>, ApiError> {
+    match cursor {
+        None => Ok(None),
+        Some(text) => match text.parse::<i64>() {
+            Ok(value) if value > 0 => Ok(Some(value)),
+            _ => Err(bad_request(vec![field_error("cursor", "invalid cursor")])),
+        },
+    }
+}
+
 /// `GET …/prompts/{prompt}/versions`: newest first; the cursor is the last version of a page.
 async fn list_versions(
     State(state): State<AppState>,
@@ -673,13 +742,7 @@ async fn list_versions(
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<PromptVersion>>, ApiError> {
     let row = find(&state, access.project.id, &prompt).await?;
-    let before = match params.cursor.as_deref() {
-        None => None,
-        Some(cursor) => match cursor.parse::<i64>() {
-            Ok(version) if version > 0 => Some(version),
-            _ => return Err(bad_request(vec![field_error("cursor", "invalid cursor")])),
-        },
-    };
+    let before = positive_cursor(params.cursor.as_deref())?;
     let limit = params.limit.get();
     let keep = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut rows = store::list_versions(state.meta.reader(), row.id, before, limit).await?;
@@ -776,6 +839,224 @@ async fn get_version(
         .await?
         .ok_or(ApiError::NotFound)?;
     Ok(error::Json(version_json(&row, &found)?))
+}
+
+/// The label move's write (D-V-8, D-V-10): the prompt, the protected check for the label, then
+/// the move. A version that does not exist is `Missing`.
+async fn set_label_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    name: &str,
+    target: (&str, i64),
+    actor: Option<&str>,
+    may: bool,
+    now: i64,
+) -> Result<Written<PromptRow>, MetaError> {
+    let (label, version) = target;
+    let Some(prompt) = store::get_prompt_tx(conn, project, name).await? else {
+        return Ok(Written::Missing);
+    };
+    if refused_by_protection(conn, project, &[label.to_owned()], may).await? {
+        return Ok(Written::Protected);
+    }
+    if store::set_label(conn, prompt.id, label, version, actor, now)
+        .await?
+        .is_none()
+    {
+        return Ok(Written::Missing);
+    }
+    let prompt = store::get_prompt_tx(conn, project, name)
+        .await?
+        .ok_or(MetaError::Corrupt {
+            table: "prompts",
+            column: "id",
+        })?;
+    Ok(Written::Done(prompt))
+}
+
+/// `PUT …/prompts/{prompt}/labels/{label}` (D-V-8): points the label at a version, creating the
+/// label when it is new. Answers the prompt.
+async fn set_label(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(PromptLabelPath { prompt, label }): error::Path<PromptLabelPath>,
+    error::Json(body): error::Json<SetLabelRequest>,
+) -> Result<error::Json<Prompt>, ApiError> {
+    check_label("label", &label).map_err(|error| bad_request(vec![error]))?;
+    let version = body.version;
+    if version < 1 {
+        return Err(bad_request(vec![field_error(
+            "version",
+            "must be a positive version",
+        )]));
+    }
+    let project = access.project.id;
+    let now = state.clock.now_ns();
+    let may = may_touch_protected(&principal, &access);
+    let actor = created_by(&principal);
+    let name = prompt;
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                set_label_tx(
+                    conn,
+                    project,
+                    &name,
+                    (&label, version),
+                    actor.as_deref(),
+                    may,
+                    now,
+                )
+                .await
+            })
+        })
+        .await?;
+    let prompt = settle(outcome)?;
+    let actor = created_by(&principal);
+    tracing::info!(
+        target: "audit",
+        prompt_id = %prompt.id,
+        project_id = %project,
+        version,
+        actor = %actor.as_deref().unwrap_or("-"),
+        "prompt label set"
+    );
+    Ok(error::Json(prompt_json(&prompt)))
+}
+
+/// The label removal's write (D-V-10): the prompt, the protected check, then the removal. A
+/// label that is not set is `Missing`.
+async fn remove_label_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    name: &str,
+    label: &str,
+    actor: Option<&str>,
+    may: bool,
+    now: i64,
+) -> Result<Written<Uuid>, MetaError> {
+    let Some(prompt) = store::get_prompt_tx(conn, project, name).await? else {
+        return Ok(Written::Missing);
+    };
+    if refused_by_protection(conn, project, &[label.to_owned()], may).await? {
+        return Ok(Written::Protected);
+    }
+    if !store::remove_label(conn, prompt.id, label, actor, now).await? {
+        return Ok(Written::Missing);
+    }
+    Ok(Written::Done(prompt.id))
+}
+
+/// `DELETE …/prompts/{prompt}/labels/{label}` (D-V-8): removes the label; the versions stay.
+async fn remove_label(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(PromptLabelPath { prompt, label }): error::Path<PromptLabelPath>,
+) -> Result<StatusCode, ApiError> {
+    check_label("label", &label).map_err(|error| bad_request(vec![error]))?;
+    let project = access.project.id;
+    let now = state.clock.now_ns();
+    let may = may_touch_protected(&principal, &access);
+    let actor = created_by(&principal);
+    let name = prompt;
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                remove_label_tx(conn, project, &name, &label, actor.as_deref(), may, now).await
+            })
+        })
+        .await?;
+    let id = settle(outcome)?;
+    let actor = created_by(&principal);
+    tracing::info!(
+        target: "audit",
+        prompt_id = %id,
+        project_id = %project,
+        actor = %actor.as_deref().unwrap_or("-"),
+        "prompt label removed"
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET …/prompts/{prompt}/label-events` (D-V-8): the label history, newest first; the cursor is
+/// the id of the last event of a page.
+async fn list_label_events(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(PromptPath { prompt }): error::Path<PromptPath>,
+    error::Query(params): error::Query<PageParams>,
+) -> Result<error::Json<Page<PromptLabelEvent>>, ApiError> {
+    let row = find(&state, access.project.id, &prompt).await?;
+    let before = positive_cursor(params.cursor.as_deref())?;
+    let limit = params.limit.get();
+    let keep = usize::try_from(limit).unwrap_or(usize::MAX);
+    let mut rows = store::list_label_events(state.meta.reader(), row.id, before, limit).await?;
+    let more = rows.len() > keep;
+    rows.truncate(keep);
+    let next_cursor = if more {
+        rows.last().map(|event| event.id.to_string())
+    } else {
+        None
+    };
+    let data = rows
+        .into_iter()
+        .map(|event| PromptLabelEvent {
+            label: event.label,
+            from_version: event.from_version,
+            to_version: event.to_version,
+            actor: event.actor,
+            at: event.at,
+        })
+        .collect();
+    Ok(error::Json(Page { data, next_cursor }))
+}
+
+/// `GET /prompt-settings` (D-V-10): the project's protected labels, `["production"]` until set.
+async fn get_settings(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<PromptSettings>, ApiError> {
+    let protected_labels = store::protected_labels(state.meta.reader(), access.project.id).await?;
+    Ok(error::Json(PromptSettings { protected_labels }))
+}
+
+/// `PUT /prompt-settings` (D-V-10): replaces the protected labels. Project admins only, since
+/// the route needs `ManageSettings`.
+async fn put_settings(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Json(body): error::Json<PromptSettings>,
+) -> Result<error::Json<PromptSettings>, ApiError> {
+    let labels = check_labels("protected_labels", &body.protected_labels, MAX_PROTECTED)
+        .map_err(bad_request)?;
+    let project = access.project.id;
+    let now = state.clock.now_ns();
+    let actor = created_by(&principal);
+    let stored = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                store::set_protected_labels(conn, project, &labels, actor.as_deref(), now).await?;
+                store::protected_labels_tx(conn, project).await
+            })
+        })
+        .await?;
+    let actor = created_by(&principal);
+    tracing::info!(
+        target: "audit",
+        project_id = %project,
+        labels = stored.len(),
+        actor = %actor.as_deref().unwrap_or("-"),
+        "prompt settings updated"
+    );
+    Ok(error::Json(PromptSettings {
+        protected_labels: stored,
+    }))
 }
 
 #[cfg(test)]
@@ -1471,5 +1752,357 @@ mod tests {
         ] {
             assert!(!logs.contains(canary), "{canary} in the logs");
         }
+    }
+
+    /// The label `label` points at in a prompt's answer, if set.
+    fn label_version(prompt: &Prompt, label: &str) -> Option<i64> {
+        prompt
+            .labels
+            .iter()
+            .find(|item| item.label == label)
+            .map(|item| item.version)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn labels_move_and_history() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let lh = format!("{list}/lh");
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            auth,
+            Some(text_body("lh", &["production"])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let version_two = call(
+            &app,
+            Method::POST,
+            &format!("{lh}/versions"),
+            auth,
+            Some(json!({"template": "Hi {{ name }}, again", "labels": []})),
+        )
+        .await;
+        assert_eq!(version_two.status, StatusCode::CREATED);
+
+        let staging = call(
+            &app,
+            Method::PUT,
+            &format!("{lh}/labels/staging"),
+            auth,
+            Some(json!({"version": 2})),
+        )
+        .await;
+        assert_eq!(staging.status, StatusCode::OK);
+        let answer: Prompt = staging.json();
+        assert_eq!(label_version(&answer, "staging"), Some(2));
+        let production = call(
+            &app,
+            Method::PUT,
+            &format!("{lh}/labels/production"),
+            auth,
+            Some(json!({"version": 2})),
+        )
+        .await;
+        assert_eq!(production.status, StatusCode::OK);
+        assert_eq!(label_version(&production.json(), "production"), Some(2));
+
+        let removed = call(
+            &app,
+            Method::DELETE,
+            &format!("{lh}/labels/staging"),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+        let again = call(
+            &app,
+            Method::DELETE,
+            &format!("{lh}/labels/staging"),
+            auth,
+            None,
+        )
+        .await;
+        assert_eq!(again.status, StatusCode::NOT_FOUND);
+        let missing_version = call(
+            &app,
+            Method::PUT,
+            &format!("{lh}/labels/production"),
+            auth,
+            Some(json!({"version": 9})),
+        )
+        .await;
+        assert_eq!(missing_version.status, StatusCode::NOT_FOUND);
+        let computed = call(
+            &app,
+            Method::PUT,
+            &format!("{lh}/labels/latest"),
+            auth,
+            Some(json!({"version": 2})),
+        )
+        .await;
+        assert_eq!(field_names(&computed), vec!["label".to_owned()]);
+        let zero = call(
+            &app,
+            Method::PUT,
+            &format!("{lh}/labels/staging"),
+            auth,
+            Some(json!({"version": 0})),
+        )
+        .await;
+        assert_eq!(field_names(&zero), vec!["version".to_owned()]);
+
+        // Newest first: the removal, the move of production, the new staging, the first production.
+        let events_path = format!("{lh}/label-events");
+        let first: Page<PromptLabelEvent> = call(&app, Method::GET, &events_path, auth, None)
+            .await
+            .json();
+        let shape: Vec<(&str, Option<i64>, Option<i64>)> = first
+            .data
+            .iter()
+            .map(|event| (event.label.as_str(), event.from_version, event.to_version))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("staging", Some(2), None),
+                ("production", Some(1), Some(2)),
+                ("staging", None, Some(2)),
+                ("production", None, Some(1)),
+            ]
+        );
+        assert_eq!(first.next_cursor, None);
+
+        let page_one: Page<PromptLabelEvent> = call(
+            &app,
+            Method::GET,
+            &format!("{events_path}?limit=2"),
+            auth,
+            None,
+        )
+        .await
+        .json();
+        assert_eq!(page_one.data.len(), 2);
+        let cursor = page_one.next_cursor.expect("a second page");
+        let page_two: Page<PromptLabelEvent> = call(
+            &app,
+            Method::GET,
+            &format!("{events_path}?limit=2&cursor={cursor}"),
+            auth,
+            None,
+        )
+        .await
+        .json();
+        assert_eq!(page_two.data.len(), 2);
+        assert_eq!(page_two.data[1].label, "production");
+        assert_eq!(page_two.next_cursor, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn label_protection() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let member_auth = ("cookie", member.cookie.as_str());
+        let admin_auth = ("cookie", seeded.cookie.as_str());
+        let write_key = bearer(&app.write_key(&seeded).await);
+        let list = base(&seeded);
+        let lp = format!("{list}/lp");
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            admin_auth,
+            Some(text_body("lp", &["production"])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+
+        let refused = call(
+            &app,
+            Method::PUT,
+            &format!("{lp}/labels/production"),
+            member_auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        let refused_delete = call(
+            &app,
+            Method::DELETE,
+            &format!("{lp}/labels/production"),
+            member_auth,
+            None,
+        )
+        .await;
+        assert_eq!(refused_delete.status, StatusCode::FORBIDDEN);
+
+        let staging = call(
+            &app,
+            Method::PUT,
+            &format!("{lp}/labels/staging"),
+            member_auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(staging.status, StatusCode::OK);
+        let by_key = call(
+            &app,
+            Method::PUT,
+            &format!("{lp}/labels/production"),
+            ("authorization", write_key.as_str()),
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(by_key.status, StatusCode::OK);
+        let removed = call(
+            &app,
+            Method::DELETE,
+            &format!("{lp}/labels/staging"),
+            member_auth,
+            None,
+        )
+        .await;
+        assert_eq!(removed.status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn settings() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let member_auth = ("cookie", member.cookie.as_str());
+        let admin_auth = ("cookie", seeded.cookie.as_str());
+        let write_key = bearer(&app.write_key(&seeded).await);
+        let settings = format!("/api/v1/projects/{}/prompt-settings", seeded.project.id);
+        let list = base(&seeded);
+
+        let default: PromptSettings = call(&app, Method::GET, &settings, admin_auth, None)
+            .await
+            .json();
+        assert_eq!(default.protected_labels, vec!["production".to_owned()]);
+
+        let member_put = call(
+            &app,
+            Method::PUT,
+            &settings,
+            member_auth,
+            Some(json!({"protected_labels": ["prod"]})),
+        )
+        .await;
+        assert_eq!(member_put.status, StatusCode::FORBIDDEN);
+        let key_put = call(
+            &app,
+            Method::PUT,
+            &settings,
+            ("authorization", write_key.as_str()),
+            Some(json!({"protected_labels": ["prod"]})),
+        )
+        .await;
+        assert_eq!(key_put.status, StatusCode::FORBIDDEN);
+
+        let stored = call(
+            &app,
+            Method::PUT,
+            &settings,
+            admin_auth,
+            Some(json!({"protected_labels": ["prod"]})),
+        )
+        .await;
+        assert_eq!(stored.status, StatusCode::OK);
+        let answer: PromptSettings = stored.json();
+        assert_eq!(answer.protected_labels, vec!["prod".to_owned()]);
+
+        let st = format!("{list}/st");
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            member_auth,
+            Some(text_body("st", &[])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let production = call(
+            &app,
+            Method::PUT,
+            &format!("{st}/labels/production"),
+            member_auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(production.status, StatusCode::OK);
+        let prod = call(
+            &app,
+            Method::PUT,
+            &format!("{st}/labels/prod"),
+            member_auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(prod.status, StatusCode::FORBIDDEN);
+
+        let computed = call(
+            &app,
+            Method::PUT,
+            &settings,
+            admin_auth,
+            Some(json!({"protected_labels": ["latest"]})),
+        )
+        .await;
+        assert_eq!(
+            field_names(&computed),
+            vec!["protected_labels[0]".to_owned()]
+        );
+        let many: Vec<String> = (0..21).map(|index| format!("l{index:02}")).collect();
+        let too_many = call(
+            &app,
+            Method::PUT,
+            &settings,
+            admin_auth,
+            Some(json!({"protected_labels": many})),
+        )
+        .await;
+        assert_eq!(field_names(&too_many), vec!["protected_labels".to_owned()]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn label_cap_conflict() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let cap = format!("{list}/cap");
+        let created = call(&app, Method::POST, &list, auth, Some(text_body("cap", &[]))).await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        for index in 0..50 {
+            let response = call(
+                &app,
+                Method::PUT,
+                &format!("{cap}/labels/l{index:02}"),
+                auth,
+                Some(json!({"version": 1})),
+            )
+            .await;
+            assert_eq!(response.status, StatusCode::OK, "label l{index:02}");
+        }
+        let fifty_first = call(
+            &app,
+            Method::PUT,
+            &format!("{cap}/labels/l50"),
+            auth,
+            Some(json!({"version": 1})),
+        )
+        .await;
+        assert_eq!(fifty_first.status, StatusCode::CONFLICT);
     }
 }

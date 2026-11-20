@@ -99,15 +99,19 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 
 | Action | viewer | member | admin | owner |
 |---|:-:|:-:|:-:|:-:|
-| View traces, sessions, dashboards, datasets, experiments, SQL console | ✓ | ✓ | ✓ | ✓ |
+| View traces, sessions, dashboards, datasets, prompts, experiments, SQL console | ✓ | ✓ | ✓ | ✓ |
 | Annotate (human scores), add to dataset, edit datasets, run SQL exports (an `sk` key with `read` may export, D-H-5), share saved views (D-H-6) | | ✓ | ✓ | ✓ |
 | Manage evaluators, online rules, alert rules, channels, score definitions, dashboards (D-C-16) | | ✓ | ✓ | ✓ |
+| Create prompt versions, move unprotected prompt labels (D-V-13) | | ✓ | ✓ | ✓ |
+| Move protected prompt labels, edit the protected list (D-V-10) | | | ✓ | ✓ |
 | Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
 | Instance settings (instance admins only) | — | — | — | — |
 
 Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24). Dashboards: project `member` and above through a session or a read-write PAT; a `read` key and a read-only PAT read them and run their queries (D-C-16).
+
+Prompts: every project member and a `read` key read them; members and above, read-write PATs and `write` keys create versions and move labels (`ProjectPerm::ManagePrompts`); protected labels need a project admin or a `write` key; project admins edit the protected list (D-V-10, D-V-13).
 
 Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
 

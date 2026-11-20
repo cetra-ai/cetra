@@ -132,6 +132,23 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET /experiments/compare?ids=a,b[,c[,d]]&threshold=` | 2–4 experiments of one dataset, the first is the baseline; deltas over the items both ran without error, one cell per experiment that ran the item (matched by id; the cell's output is its lowest repetition's), regressions and improvements, `only=regressed|improved|changed`, improved and regressed counts per score and per experiment (D-J-21); a page holds at most 16 MiB of text (D-J-13) |
 | `GET /experiments/summaries?ids=a,b,…` | 1–25 distinct experiments, answered in request order: the summaries the list page shows (score badges, cost, latency, errors, trend); unknown or hidden ids are left out; an experiment too large to summarize is listed in `skipped` (D-J-20) |
 
+### Prompts
+
+Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md) § API has the types). Reads need project view; writes need `ManagePrompts` (member, key scope `write`, read-write PATs), and protected labels need a project admin or a `write` key. Settings writes need `ManageSettings` (D-V-10, D-V-13). Errors use the existing codes: `400` for validation, `403 forbidden` for a protected label refused, `404 not_found` for a missing prompt, version or label, `409` at a cap.
+
+| Method & path | Notes |
+|---|---|
+| `GET/POST /prompts` | list `?q=&label=&tag=` (keyset-paged by name); create makes the prompt with version 1 (D-V-2, D-V-7) |
+| `GET/PATCH/DELETE /prompts/{prompt}` | `{prompt}` = name; PATCH changes the description and tags only; delete removes the versions, labels and history; a protected label on the prompt refuses it (D-V-2, D-V-10) |
+| `GET /prompts/{prompt}/resolve?label=&version=` | the version a label (default `production`), `latest` or `version` points at; a strong `ETag`, and `304` when `If-None-Match` matches (D-V-9, D-V-12) |
+| `GET/POST /prompts/{prompt}/versions` | list newest first (`cursor` = last version of a page); create appends version *n + 1*, optionally with labels (D-V-7) |
+| `GET /prompts/{prompt}/versions/{version}` | one version with its labels, variables and placeholders |
+| `PUT /prompts/{prompt}/labels/{label}` | `{version}`; points the label at the version, creating the label when new; `200` with the prompt; `latest` is 400 (D-V-8, D-V-10) |
+| `DELETE /prompts/{prompt}/labels/{label}` | removes the label and keeps the versions; `204`; a label that is not set is 404 (D-V-8, D-V-10) |
+| `GET /prompts/{prompt}/label-events` | label history newest first (`cursor` = id of the last event of a page) (D-V-8) |
+| `GET /prompt-settings` | the project's protected labels, `["production"]` until set (D-V-10) |
+| `PUT /prompt-settings` | `{protected_labels}`, at most 20 valid labels; project admins only (D-V-10) |
+
 ### Evaluation & alerts
 
 | Method & path | Notes |
