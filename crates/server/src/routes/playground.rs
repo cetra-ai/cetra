@@ -45,6 +45,7 @@ use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::http::restore::refuse_outbound;
+use crate::ingest::CommitGuard;
 use crate::live::{StreamTiming, shut};
 use crate::meta::connections;
 use crate::meta::projects::ProjectRow;
@@ -166,6 +167,8 @@ async fn run_playground(
     let trace_id = new_trace_id()?;
     let (source, prompt) = source_of(body.source.as_ref());
     let (tx, rx) = mpsc::channel(CLIENT_BUFFER);
+    // Held until the run task ends, so shutdown waits for the run's trace commit (D-G-38).
+    let commits = state.ingest.hold_commits();
     tokio::spawn(run_task(RunTask {
         state: state.clone(),
         project: access.project.clone(),
@@ -179,6 +182,7 @@ async fn run_playground(
         tx,
         _guard: guard,
         _permit: permit,
+        _commits: commits,
     }));
     Ok(sse_response(rx))
 }
@@ -201,6 +205,8 @@ struct RunTask {
     _guard: PlaygroundGuard,
     /// The connection's concurrency slot.
     _permit: InteractivePermit,
+    /// The ingest commits guard: shutdown waits for the run's trace commit until the task ends.
+    _commits: CommitGuard,
 }
 
 /// What the stream read gathered.
@@ -267,6 +273,7 @@ async fn run_task(task: RunTask) {
         tx,
         _guard,
         _permit,
+        _commits,
     } = task;
     let started_ns = state.clock.now_ns();
     let started = Instant::now();
@@ -1543,5 +1550,30 @@ mod tests {
             started.elapsed() >= RUN_IDLE,
             "the run ended before the idle timeout"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_waits_for_a_running_runs_trace() {
+        let (_mock, base) = provider(vec![slow_turn()]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut stream = stream_run(&app, &seeded, &run_body(connection)).await;
+        let start = stream
+            .next_event(Duration::from_secs(5))
+            .await
+            .expect("the start event");
+        let started: Value = serde_json::from_str(&start.data).expect("json");
+        let trace_id = started["trace_id"].as_str().expect("trace id").to_owned();
+        // The shutdown signal ends the run while the provider is still waiting. The run task
+        // holds the commits guard, so the wait returns only after its trace is committed.
+        app.state.live.close();
+        tokio::time::timeout(Duration::from_secs(10), app.state.ingest.wait_for_commits())
+            .await
+            .expect("the run's commit finishes");
+        let detail = trace_detail(&app, &seeded, &trace_id)
+            .await
+            .expect("the run's trace is committed before shutdown returns");
+        assert_eq!(detail["trace"]["status"], "error");
+        drop(stream);
     }
 }

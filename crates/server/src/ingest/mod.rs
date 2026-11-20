@@ -64,7 +64,7 @@ struct Commits {
 }
 
 /// One running commit. Dropping it wakes [`Ingest::wait_for_commits`] when it was the last.
-struct CommitGuard(Arc<Commits>);
+pub(crate) struct CommitGuard(Arc<Commits>);
 
 impl Commits {
     fn enter(self: &Arc<Self>) -> CommitGuard {
@@ -450,6 +450,12 @@ impl Ingest {
     /// Waits until no commit started by [`commit_in_task`] is running (D-G-38).
     pub(crate) async fn wait_for_commits(&self) {
         self.commits.idle().await;
+    }
+
+    /// Holds the commits guard until the returned guard drops, so shutdown waits for work that
+    /// the caller runs in its own task (D-G-38).
+    pub(crate) fn hold_commits(&self) -> CommitGuard {
+        self.commits.enter()
     }
 }
 
