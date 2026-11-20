@@ -2,9 +2,10 @@
 //! Gemini APIs (D21, D-V-19). Judges send it without streaming (D-V-29); the
 //! playground streams it.
 
-pub(crate) mod anthropic;
+mod anthropic;
+mod gemini;
 mod http;
-pub(crate) mod openai;
+mod openai;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -20,7 +21,7 @@ pub(crate) use http::provider_error;
 
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::ChatError;
-use crate::judge::{JudgeConnection, StructuredOutput};
+use crate::judge::{Adapter, JudgeConnection, StructuredOutput};
 use crate::secret::Secret;
 
 /// Largest provider response body, in bytes (D159).
@@ -585,6 +586,19 @@ pub(crate) async fn send_buffered(
         ));
     }
     Ok(response.body)
+}
+
+/// Sends `request` without streaming (judges, D-V-29).
+pub(crate) async fn complete_chat(
+    client: &EgressClient,
+    conn: &JudgeConnection,
+    request: &ChatRequest,
+) -> Result<ChatReply, ChatError> {
+    match conn.adapter {
+        Adapter::OpenAi => openai::complete(client, conn, request).await,
+        Adapter::Anthropic => anthropic::complete(client, conn, request).await,
+        Adapter::Gemini => gemini::complete(client, conn, request).await,
+    }
 }
 
 /// A decoded non-streamed answer. Decoders never fail: every shape maps to a field.

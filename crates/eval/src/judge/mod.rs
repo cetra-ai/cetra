@@ -3,7 +3,6 @@
 //! E11 is the OpenAI-compatible adapter, E12 is Anthropic, and E13 is Gemini.
 
 mod answer;
-mod gemini;
 
 use std::time::Duration;
 
@@ -17,8 +16,7 @@ use cetra_core::message::{Message, Part, Role};
 use serde_json::Map;
 
 use crate::chat::{
-    CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, PROMPT_INSTRUCTION,
-    ResponseFormat, TokenUsage,
+    CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, ResponseFormat, TokenUsage,
 };
 use crate::config::JudgeOutput;
 use crate::egress::EgressClient;
@@ -193,30 +191,6 @@ impl std::fmt::Debug for JudgeCall<'_> {
     }
 }
 
-/// The user message for this mode.
-///
-/// Prompt mode appends [`PROMPT_INSTRUCTION`] after a blank line, then the
-/// pretty-printed answer schema. Native and tool modes send the prompt as is.
-pub(crate) fn user_message(
-    mode: StructuredOutput,
-    call: &JudgeCall<'_>,
-) -> Result<String, JudgeError> {
-    match mode {
-        StructuredOutput::Native | StructuredOutput::Tool => Ok(call.prompt.to_owned()),
-        StructuredOutput::Prompt => {
-            let schema = serde_json::to_string_pretty(&answer::answer_schema(
-                call.output,
-                call.include_reason,
-            ))
-            .map_err(|_| JudgeError::InvalidRequest)?;
-            Ok(format!(
-                "{prompt}\n\n{PROMPT_INSTRUCTION}\n{schema}",
-                prompt = call.prompt
-            ))
-        }
-    }
-}
-
 /// What the provider returned, before the answer parser runs.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct JudgeReply {
@@ -314,15 +288,7 @@ pub(crate) async fn call(
     conn: &JudgeConnection,
     call: &JudgeCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
-    match conn.adapter {
-        Adapter::OpenAi => {
-            judge_reply(crate::chat::openai::complete(client, conn, &chat_request(call)).await?)
-        }
-        Adapter::Anthropic => {
-            judge_reply(crate::chat::anthropic::complete(client, conn, &chat_request(call)).await?)
-        }
-        Adapter::Gemini => gemini::complete(client, conn, call).await,
-    }
+    judge_reply(crate::chat::complete_chat(client, conn, &chat_request(call)).await?)
 }
 
 #[cfg(test)]
@@ -390,33 +356,6 @@ mod tests {
         );
         assert_eq!(StructuredOutput::Prompt.as_str(), "prompt");
         assert!(StructuredOutput::from_name("Tool").is_err());
-    }
-
-    #[test]
-    fn prompt_mode_appends_the_schema_after_a_blank_line() {
-        let output = crate::config::JudgeOutput::Boolean;
-        let call = super::JudgeCall {
-            model: "m",
-            prompt: "Grade.",
-            output: &output,
-            include_reason: false,
-            temperature: None,
-            max_output_tokens: 1,
-            timeout: std::time::Duration::from_secs(1),
-        };
-        let text = super::user_message(StructuredOutput::Prompt, &call).expect("prompt");
-        assert_eq!(
-            text,
-            "Grade.\n\nReply with one JSON object and nothing else. It must match this JSON Schema:\n{\n  \"type\": \"object\",\n  \"properties\": {\n    \"value\": {\n      \"type\": \"boolean\"\n    }\n  },\n  \"required\": [\n    \"value\"\n  ],\n  \"additionalProperties\": false\n}"
-        );
-        assert_eq!(
-            super::user_message(StructuredOutput::Native, &call).expect("native"),
-            "Grade."
-        );
-        assert_eq!(
-            super::user_message(StructuredOutput::Tool, &call).expect("tool"),
-            "Grade."
-        );
     }
 
     #[test]
