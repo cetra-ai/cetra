@@ -1,5 +1,4 @@
 //! The assistant's tools (track AS M2, D-AS-5, D-AS-6).
-#![cfg_attr(not(test), allow(dead_code))] // used by the turn loop (M3); M3 removes this line
 
 mod drafts;
 mod reads;

@@ -1,11 +1,16 @@
 //! The in-app assistant (track AS). M1: conversation expiry and tool-result stubbing (D-AS-10, D-AS-12).
-//! M2: the tool registry (`tools`, D-AS-5, D-AS-6).
+//! M2: the tool registry (`tools`, D-AS-5, D-AS-6). M3: the turn engine (`turn`, D-AS-8).
 
 pub(crate) mod history;
 pub(crate) mod settings;
 pub(crate) mod tools;
+pub(crate) mod turn;
 
 use std::time::Duration;
+
+/// The system prompt (D-AS-13) and its version, recorded on every turn trace.
+pub(crate) const SYSTEM_PROMPT: &str = include_str!("prompt.md");
+pub(crate) const PROMPT_VERSION: &str = "1";
 
 use tokio::task::JoinHandle;
 
