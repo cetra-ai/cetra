@@ -493,6 +493,21 @@ impl Default for EvalConfig {
     }
 }
 
+/// `[issues]` (track IC, D-IC-12).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IssuesConfig {
+    /// Workers that summarize and embed issue candidates. They share each connection's limits
+    /// with judges. Default 4, 1 to 64.
+    pub workers: u32,
+}
+
+impl Default for IssuesConfig {
+    fn default() -> Self {
+        Self { workers: 4 }
+    }
+}
+
 /// `[security]` (spec 12, D166).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -675,6 +690,9 @@ pub struct ServerConfig {
     /// `[eval]` worker settings.
     #[serde(default)]
     pub eval: EvalConfig,
+    /// `[issues]` worker settings (track IC).
+    #[serde(default)]
+    pub issues: IssuesConfig,
     /// `[security]` settings.
     #[serde(default)]
     pub security: SecurityConfig,
@@ -1056,6 +1074,12 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid {
             key: "eval.workers",
             reason: "must be between 1 and 256",
+        });
+    }
+    if !(1..=64).contains(&config.issues.workers) {
+        return Err(ConfigError::Invalid {
+            key: "issues.workers",
+            reason: "must be between 1 and 64",
         });
     }
     Ok(())
@@ -2284,6 +2308,40 @@ mod tests {
                 "{toml}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn issues_workers_default_is_four() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.issues.workers, 4);
+    }
+
+    #[test]
+    fn issues_workers_bounds_are_one_to_sixty_four() {
+        for workers in [1, 64] {
+            let toml = format!("[issues]\nworkers = {workers}\n");
+            let config = load_from(Some(toml.as_str()), &[]).unwrap();
+            assert_eq!(config.issues.workers, workers);
+        }
+        for toml in ["[issues]\nworkers = 0\n", "[issues]\nworkers = 65\n"] {
+            let error = load_from(Some(toml), &[]).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Invalid {
+                        key: "issues.workers",
+                        ..
+                    }
+                ),
+                "{toml}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn issues_workers_comes_from_the_environment() {
+        let config = load_from(None, &[("CETRA_ISSUES__WORKERS", "8")]).unwrap();
+        assert_eq!(config.issues.workers, 8);
     }
 
     #[test]

@@ -175,15 +175,62 @@ pub(crate) async fn dispatch_once(
     Ok(started)
 }
 
+/// The limit of connection `id` built for `limits`, created when missing. A limit built for other
+/// `limits` is replaced; running jobs keep the old permits until they finish (D-I-6).
+fn limit_for(
+    map: &mut HashMap<Uuid, Arc<ConnectionLimit>>,
+    id: Uuid,
+    limits: (u32, u32),
+    now: i64,
+) -> Arc<ConnectionLimit> {
+    match map.get(&id) {
+        Some(existing) if existing.limits == limits => Arc::clone(existing),
+        _ => {
+            let fresh = Arc::new(ConnectionLimit::new(limits, now));
+            map.insert(id, Arc::clone(&fresh));
+            fresh
+        }
+    }
+}
+
+impl crate::eval::EvalQueue {
+    /// A slot and a token of connection `id` for an IC call (D-IC-12), sharing the judges' limits.
+    /// `None` when no slot or no token is free now; the slot is taken before the token, as `admit`
+    /// does, so a token is never spent without a slot.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn try_connection_permit(
+        &self,
+        id: Uuid,
+        limits: (u32, u32),
+        now: i64,
+    ) -> Option<OwnedSemaphorePermit> {
+        let limit = {
+            let mut map = lock(&self.connections);
+            limit_for(&mut map, id, limits, now)
+        };
+        let slot = Arc::clone(&limit.slots).try_acquire_owned().ok()?;
+        if lock(&limit.bucket).try_take(now) {
+            Some(slot)
+        } else {
+            None
+        }
+    }
+
+    /// Connections with no free slot or token now (what `saturated_ids` lists, without webhooks).
+    pub(crate) fn saturated_connections(&self, now: i64) -> Vec<Uuid> {
+        lock(&self.connections)
+            .iter()
+            .filter(|(_, limit)| {
+                limit.slots.available_permits() == 0 || !lock(&limit.bucket).has_token(now)
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+}
+
 /// Connections whose slots or bucket are used up, and webhook evaluators at their slots.
 fn saturated_ids(state: &AppState, now: i64) -> Vec<Uuid> {
-    let mut ids: Vec<Uuid> = lock(&state.eval.connections)
-        .iter()
-        .filter(|(_, limit)| {
-            limit.slots.available_permits() == 0 || !lock(&limit.bucket).has_token(now)
-        })
-        .map(|(id, _)| *id)
-        .collect();
+    let mut ids: Vec<Uuid> = state.eval.saturated_connections(now);
     ids.extend(
         lock(&state.eval.webhooks)
             .iter()
@@ -207,15 +254,7 @@ fn pick_limits(state: &AppState, candidates: &[Candidate], now: i64) -> PickLimi
             else {
                 continue;
             };
-            let limits = (max_concurrency, requests_per_minute);
-            let limit = match map.get(&id) {
-                Some(existing) if existing.limits == limits => Arc::clone(existing),
-                _ => {
-                    let fresh = Arc::new(ConnectionLimit::new(limits, now));
-                    map.insert(id, Arc::clone(&fresh));
-                    fresh
-                }
-            };
+            let limit = limit_for(&mut map, id, (max_concurrency, requests_per_minute), now);
             connections.insert(id, limit);
         }
     }
@@ -855,6 +894,47 @@ mod tests {
         let mut slow = TokenBucket::new(3, 0);
         assert!(slow.try_take(0));
         assert!(!slow.try_take(0), "3 rpm has a capacity of 1");
+    }
+
+    #[test]
+    fn try_connection_permit_shares_judge_slots() {
+        let queue = crate::eval::EvalQueue::new(4);
+        let id = Uuid::from_u128(7);
+        let first = queue.try_connection_permit(id, (1, 600), 0);
+        assert!(first.is_some(), "a free slot and a token");
+        assert!(
+            queue.try_connection_permit(id, (1, 600), 0).is_none(),
+            "one slot, held by the first permit"
+        );
+        assert!(queue.saturated_connections(0).contains(&id));
+        drop(first);
+        assert!(
+            !queue.saturated_connections(0).contains(&id),
+            "the slot is free once the permit drops"
+        );
+        assert!(queue.try_connection_permit(id, (1, 600), 0).is_some());
+    }
+
+    #[test]
+    fn try_connection_permit_respects_the_bucket() {
+        let queue = crate::eval::EvalQueue::new(4);
+        let id = Uuid::from_u128(8);
+        let first = queue.try_connection_permit(id, (4, 1), 0);
+        assert!(first.is_some(), "one token at 1 rpm");
+        drop(first);
+        assert!(
+            queue.try_connection_permit(id, (4, 1), 0).is_none(),
+            "no token left at 1 rpm"
+        );
+        assert!(queue.saturated_connections(0).contains(&id));
+        let free_slots = lock(&queue.connections)[&id].slots.available_permits();
+        assert_eq!(free_slots, 4, "a refused permit takes no slot");
+        assert!(
+            queue
+                .try_connection_permit(id, (4, 1), 60_000_000_000)
+                .is_some(),
+            "one token refilled after 60 s at 1 rpm"
+        );
     }
 
     #[test]

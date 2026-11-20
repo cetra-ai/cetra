@@ -91,6 +91,12 @@ Object storage credentials are not settings: cetra reads the standard `AWS_ACCES
 |---|---|---|---|---|
 | `eval.workers` | | integer | `16` | Evaluation jobs this process runs at once, 1 to 256. |
 
+## `[issues]`
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `issues.workers` | | integer | `4` | Workers that summarize and embed issue candidates (1–64). They share each connection's limits with judges. |
+
 ## `[security]`
 
 | Key | Environment | Type | Default | Description |
