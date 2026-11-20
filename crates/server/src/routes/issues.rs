@@ -10,7 +10,10 @@ use axum::routing::{delete, get, patch, post};
 use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::score::{Score, ScoreTarget};
-use cetra_storage::{ScoreListRequest, ScoreNameCountsRequest, TimeWindow, ViewName};
+use cetra_storage::{
+    MAX_COUNT_NAMES, QueryContext, ScoreListRequest, ScoreNameCount, ScoreNameCountsRequest,
+    TimeWindow, ViewName,
+};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
@@ -485,6 +488,33 @@ fn total(names: &[String], tallies: &HashMap<String, Tally>) -> Tally {
         })
 }
 
+/// The count rows of `names` in `window`, read in chunks of at most [`MAX_COUNT_NAMES`] names:
+/// the storage read refuses more, and an issue can have more names than that once its merged
+/// issues are counted. A name is in one chunk only, so its rows are not split.
+async fn name_counts(
+    ctx: &QueryContext,
+    names: &[String],
+    window: TimeWindow,
+    by_day: bool,
+) -> Result<Vec<ScoreNameCount>, ApiError> {
+    let mut rows = Vec::new();
+    for chunk in names.chunks(MAX_COUNT_NAMES) {
+        rows.extend(
+            cetra_storage::score_name_counts(
+                ctx,
+                ScoreNameCountsRequest {
+                    names: chunk,
+                    window,
+                    by_day,
+                    timeout: READ_TIMEOUT,
+                },
+            )
+            .await?,
+        );
+    }
+    Ok(rows)
+}
+
 /// Live occurrences of each name in `window`, per name (D-IC-9).
 async fn tallies(
     state: &AppState,
@@ -497,16 +527,7 @@ async fn tallies(
         return Ok(HashMap::new());
     }
     let ctx = open_query(state, org, project, None).await?;
-    let counts = cetra_storage::score_name_counts(
-        &ctx,
-        ScoreNameCountsRequest {
-            names,
-            window,
-            by_day: false,
-            timeout: READ_TIMEOUT,
-        },
-    )
-    .await?;
+    let counts = name_counts(&ctx, names, window, false).await?;
     Ok(counts
         .into_iter()
         .map(|row| {
@@ -1059,16 +1080,7 @@ async fn get_issue_occurrences(
     let names = names_of(id, &merged);
     let ctx = open_query(&state, org, project, None).await?;
 
-    let counts = cetra_storage::score_name_counts(
-        &ctx,
-        ScoreNameCountsRequest {
-            names: &names,
-            window,
-            by_day: true,
-            timeout: READ_TIMEOUT,
-        },
-    )
-    .await?;
+    let counts = name_counts(&ctx, &names, window, true).await?;
     let mut by_day: BTreeMap<i64, Tally> = BTreeMap::new();
     for row in counts {
         let day = by_day.entry(row.bucket_start).or_default();
@@ -2495,5 +2507,80 @@ mod tests {
             .await;
         assert_eq!(read.status, 200, "{}", text(&read));
         assert_eq!(read.json::<Value>()["title"], "a");
+    }
+
+    #[tokio::test]
+    async fn an_issue_with_more_names_than_one_read_takes_counts_them_all() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let target = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, target, "Target", IssueState::Open, now),
+        )
+        .await;
+        // The target and 1 000 merged issues make 1 001 names, more than one score name read takes.
+        let merged: Vec<IssueRow> = (0..MAX_COUNT_NAMES)
+            .map(|_| {
+                let mut row = issue_row(
+                    project,
+                    source,
+                    Uuid::now_v7(),
+                    "Merged",
+                    IssueState::Merged,
+                    now,
+                );
+                row.merged_into = Some(target);
+                row
+            })
+            .collect();
+        let last = merged.last().unwrap().id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    for row in &merged {
+                        store::insert_issue(conn, row).await?;
+                    }
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+        occurrence(&app, &seeded, source, last, TRACE_A, 1, None).await;
+
+        let read = app
+            .request(Method::GET, &issue_url(project, target))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{}", text(&read));
+        let read: Value = read.json();
+        assert_eq!(
+            read["merged_from"].as_array().unwrap().len(),
+            MAX_COUNT_NAMES
+        );
+        assert_eq!(read["count"], 1);
+
+        let days = app
+            .request(
+                Method::GET,
+                &format!("{}/occurrences", issue_url(project, target)),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(days.status, 200, "{}", text(&days));
+        let days: Value = days.json();
+        let total: u64 = days["days"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|day| day["count"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 1);
     }
 }
