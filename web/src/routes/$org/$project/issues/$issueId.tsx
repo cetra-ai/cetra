@@ -24,7 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
-import { canAnnotate, canManageAlerts, canManageDatasets } from "@/lib/roles";
+import { canAnnotate, canManageAlerts, canManageDatasets, canManageQueues } from "@/lib/roles";
 
 /** Most examples the page lists: the API returns at most this many (D-IC-16). */
 const EXAMPLES_SHOWN = 20;
@@ -115,6 +115,7 @@ function IssuePage() {
           canEdit={canEdit}
           canCreateAlert={canManageAlerts(data.role)}
           canAddExamples={canManageDatasets(data.role)}
+          canSendToQueue={canManageQueues(data.role)}
         />
       </div>
 
