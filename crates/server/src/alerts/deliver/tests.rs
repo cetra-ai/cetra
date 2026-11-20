@@ -1073,11 +1073,11 @@ async fn members_policy_skips_non_members_under_invite_only() {
     let seeded = app.seed().await;
     app.verify_email(seeded.user_id).await;
     let config = email(&["ada@example.com", "eve@example.com"]);
-    let outcome = send_one(
+    let outcome = send_to_channel(
         &app.state,
         seeded.org_id,
         &config,
-        &sample_notice(MessageKind::Fired, NOW),
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
         Uuid::now_v7(),
         NOW,
     )
@@ -1101,11 +1101,11 @@ async fn members_policy_with_no_member_fails_without_sending() {
     let seeded = app.seed().await;
     app.verify_email(seeded.user_id).await;
     let config = email(&["eve@example.com"]);
-    let outcome = send_one(
+    let outcome = send_to_channel(
         &app.state,
         seeded.org_id,
         &config,
-        &sample_notice(MessageKind::Fired, NOW),
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
         Uuid::now_v7(),
         NOW,
     )
@@ -1128,11 +1128,11 @@ async fn any_policy_sends_to_everyone_under_open_signup() {
     .await;
     let seeded = app.seed().await;
     let config = email(&["eve@example.com"]);
-    let outcome = send_one(
+    let outcome = send_to_channel(
         &app.state,
         seeded.org_id,
         &config,
-        &sample_notice(MessageKind::Fired, NOW),
+        Outgoing::Alert(&sample_notice(MessageKind::Fired, NOW)),
         Uuid::now_v7(),
         NOW,
     )
