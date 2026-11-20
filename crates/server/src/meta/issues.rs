@@ -24,18 +24,36 @@ const FINGERPRINT_CONFLICT: &str = "an issue with this fingerprint already exist
 pub(crate) enum SourceKind {
     /// Error spans of completed traces, fingerprinted (D-IC-2).
     Error,
+    /// Bad scores of the source's score names become candidates (D-IC-1).
+    Score,
+    /// Feedback scores of the source's feedback sources become candidates (D-IC-1).
+    Feedback,
+    /// New production traces become candidates (D-IC-1).
+    Topic,
 }
 
 impl SourceKind {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Error => "error",
+            Self::Score => "score",
+            Self::Feedback => "feedback",
+            Self::Topic => "topic",
         }
+    }
+
+    /// Whether the kind is an LLM kind (`score`, `feedback` or `topic`, D-IC-1).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_llm(self) -> bool {
+        !matches!(self, Self::Error)
     }
 
     fn from_db(value: &str) -> Option<Self> {
         match value {
             "error" => Some(Self::Error),
+            "score" => Some(Self::Score),
+            "feedback" => Some(Self::Feedback),
+            "topic" => Some(Self::Topic),
             _ => None,
         }
     }
@@ -125,6 +143,36 @@ pub(crate) struct SourceRow {
     pub(crate) created_at: i64,
     /// Nanoseconds.
     pub(crate) updated_at: i64,
+    /// Share of the matching traces or scores that become candidates, in `(0, 1]` (LLM kinds).
+    pub(crate) sample_rate: Option<f64>,
+    /// Most candidates admitted per UTC day (LLM kinds).
+    pub(crate) daily_cap: Option<u32>,
+    /// Score names read by a `score` source. Empty is stored as NULL.
+    pub(crate) score_names: Vec<String>,
+    /// `end_user` and/or `human`, read by a `feedback` source. Empty is stored as NULL.
+    pub(crate) feedback_sources: Vec<String>,
+    /// Connection of the chat model that summarizes and names (LLM kinds).
+    pub(crate) chat_connection_id: Option<Uuid>,
+    /// Chat model of that connection.
+    pub(crate) chat_model: Option<String>,
+    /// Connection of the embedding model. Fixed for the source's life (D-IC-5).
+    pub(crate) embed_connection_id: Option<Uuid>,
+    /// Embedding model of that connection. Fixed for the source's life (D-IC-5).
+    pub(crate) embed_model: Option<String>,
+    /// Vector dimension of the embedding model, set once (D-IC-5).
+    pub(crate) embed_dimension: Option<u32>,
+    /// Cosine similarity at which a candidate joins an issue (D-IC-7).
+    pub(crate) floor: Option<f64>,
+    /// Smallest group a refit turns into a new issue (D-IC-8).
+    pub(crate) min_issue_size: Option<u32>,
+    /// Spend limit per `budget_period`, in USD. Absent means no budget.
+    pub(crate) budget_usd: Option<f64>,
+    /// `day` or `month`.
+    pub(crate) budget_period: Option<String>,
+    /// The provider's error text for a connection pause, shown on the source page.
+    pub(crate) paused_detail: Option<String>,
+    /// When the next scheduled refit is due, nanoseconds.
+    pub(crate) next_refit_at: Option<i64>,
 }
 
 /// One stored issue. `first_seen` and `last_seen` are trace start times, nanoseconds.
@@ -150,6 +198,10 @@ pub(crate) struct IssueRow {
     pub(crate) created_at: i64,
     /// Nanoseconds.
     pub(crate) updated_at: i64,
+    /// Mean of the member vectors, for an LLM source's issue (D-IC-7). `None` for error issues.
+    pub(crate) centroid: Option<Vec<f32>>,
+    /// Members counted in the centroid, at most 500 (D-IC-7).
+    pub(crate) member_count: u64,
 }
 
 /// One stored issue event. `actor_user_id` `None` means the system.
@@ -218,7 +270,9 @@ pub(crate) async fn list_sources(
 ) -> Result<Vec<SourceRow>, MetaError> {
     let records: Vec<SourceRecord> = sqlx::query_as(
         "SELECT id, project_id, name, kind, filter, enabled, paused_reason, paused_at, \
-         created_by, created_at, updated_at \
+         created_by, created_at, updated_at, sample_rate, daily_cap, score_names, feedback_sources, \
+         chat_connection_id, chat_model, embed_connection_id, embed_model, embed_dimension, floor, \
+         min_issue_size, budget_usd, budget_period, paused_detail, next_refit_at \
          FROM issue_sources WHERE project_id = ? ORDER BY name, id",
     )
     .bind(project.to_string())
@@ -239,7 +293,9 @@ pub(crate) async fn get_source(
 ) -> Result<Option<SourceRow>, MetaError> {
     let record: Option<SourceRecord> = sqlx::query_as(
         "SELECT id, project_id, name, kind, filter, enabled, paused_reason, paused_at, \
-         created_by, created_at, updated_at \
+         created_by, created_at, updated_at, sample_rate, daily_cap, score_names, feedback_sources, \
+         chat_connection_id, chat_model, embed_connection_id, embed_model, embed_dimension, floor, \
+         min_issue_size, budget_usd, budget_period, paused_detail, next_refit_at \
          FROM issue_sources WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
@@ -261,7 +317,9 @@ pub(crate) async fn get_source_tx(
 ) -> Result<Option<SourceRow>, MetaError> {
     let record: Option<SourceRecord> = sqlx::query_as(
         "SELECT id, project_id, name, kind, filter, enabled, paused_reason, paused_at, \
-         created_by, created_at, updated_at \
+         created_by, created_at, updated_at, sample_rate, daily_cap, score_names, feedback_sources, \
+         chat_connection_id, chat_model, embed_connection_id, embed_model, embed_dimension, floor, \
+         min_issue_size, budget_usd, budget_period, paused_detail, next_refit_at \
          FROM issue_sources WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
@@ -280,10 +338,15 @@ pub(crate) async fn insert_source(
     conn: &mut SqliteConnection,
     row: &SourceRow,
 ) -> Result<(), MetaError> {
+    let score_names = list_json(&row.score_names, "score_names")?;
+    let feedback_sources = list_json(&row.feedback_sources, "feedback_sources")?;
     sqlx::query(
         "INSERT INTO issue_sources (id, project_id, name, kind, filter, enabled, paused_reason, \
-         paused_at, created_by, created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         paused_at, created_by, created_at, updated_at, sample_rate, daily_cap, score_names, \
+         feedback_sources, chat_connection_id, chat_model, embed_connection_id, embed_model, \
+         embed_dimension, floor, min_issue_size, budget_usd, budget_period, paused_detail, \
+         next_refit_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(row.id.to_string())
     .bind(row.project_id.to_string())
@@ -296,15 +359,31 @@ pub(crate) async fn insert_source(
     .bind(row.created_by.map(|user| user.to_string()))
     .bind(row.created_at)
     .bind(row.updated_at)
+    .bind(row.sample_rate)
+    .bind(row.daily_cap.map(i64::from))
+    .bind(score_names)
+    .bind(feedback_sources)
+    .bind(row.chat_connection_id.map(|id| id.to_string()))
+    .bind(&row.chat_model)
+    .bind(row.embed_connection_id.map(|id| id.to_string()))
+    .bind(&row.embed_model)
+    .bind(row.embed_dimension.map(i64::from))
+    .bind(row.floor)
+    .bind(row.min_issue_size.map(i64::from))
+    .bind(row.budget_usd)
+    .bind(&row.budget_period)
+    .bind(&row.paused_detail)
+    .bind(row.next_refit_at)
     .execute(&mut *conn)
     .await
     .map_err(|error| unique_or(error, SOURCE_CONFLICT))?;
     Ok(())
 }
 
-/// Replaces the name, filter, enabled flag and pause of the source in `row`, and bumps
-/// `updated_at`. The project, kind and author stay. `false` means the source is missing or
-/// belongs to another project.
+/// Replaces every editable column of the source in `row` and bumps `updated_at`: the name,
+/// filter, enabled flag, pause, and the LLM settings except the embedding connection, model
+/// and dimension, which change only through `set_embed_dimension` (D-IC-5). The project, kind
+/// and author stay. `false` means the source is missing or belongs to another project.
 ///
 /// # Errors
 ///
@@ -314,9 +393,14 @@ pub(crate) async fn update_source(
     conn: &mut SqliteConnection,
     row: &SourceRow,
 ) -> Result<bool, MetaError> {
+    let score_names = list_json(&row.score_names, "score_names")?;
+    let feedback_sources = list_json(&row.feedback_sources, "feedback_sources")?;
     let result = sqlx::query(
         "UPDATE issue_sources SET name = ?, filter = ?, enabled = ?, paused_reason = ?, \
-         paused_at = ?, updated_at = ? WHERE project_id = ? AND id = ?",
+         paused_at = ?, updated_at = ?, sample_rate = ?, daily_cap = ?, score_names = ?, \
+         feedback_sources = ?, chat_connection_id = ?, chat_model = ?, floor = ?, \
+         min_issue_size = ?, budget_usd = ?, budget_period = ?, paused_detail = ?, \
+         next_refit_at = ? WHERE project_id = ? AND id = ?",
     )
     .bind(&row.name)
     .bind(&row.filter)
@@ -324,6 +408,18 @@ pub(crate) async fn update_source(
     .bind(&row.paused_reason)
     .bind(row.paused_at)
     .bind(row.updated_at)
+    .bind(row.sample_rate)
+    .bind(row.daily_cap.map(i64::from))
+    .bind(score_names)
+    .bind(feedback_sources)
+    .bind(row.chat_connection_id.map(|id| id.to_string()))
+    .bind(&row.chat_model)
+    .bind(row.floor)
+    .bind(row.min_issue_size.map(i64::from))
+    .bind(row.budget_usd)
+    .bind(&row.budget_period)
+    .bind(&row.paused_detail)
+    .bind(row.next_refit_at)
     .bind(row.project_id.to_string())
     .bind(row.id.to_string())
     .execute(&mut *conn)
@@ -423,8 +519,8 @@ pub(crate) async fn issue_by_fingerprint(
 ) -> Result<Option<IssueRow>, MetaError> {
     let record: Option<IssueRecord> = sqlx::query_as(
         "SELECT id, project_id, source_id, fingerprint, title, description, state, regressed, \
-         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at \
-         FROM issues WHERE source_id = ? AND fingerprint = ?",
+         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at, \
+         centroid, member_count FROM issues WHERE source_id = ? AND fingerprint = ?",
     )
     .bind(source.to_string())
     .bind(fingerprint)
@@ -443,10 +539,12 @@ pub(crate) async fn insert_issue(
     conn: &mut SqliteConnection,
     row: &IssueRow,
 ) -> Result<(), MetaError> {
+    let member_count =
+        i64::try_from(row.member_count).map_err(|_| corrupt(ISSUES, "member_count"))?;
     sqlx::query(
         "INSERT INTO issues (id, project_id, source_id, fingerprint, title, description, state, \
          regressed, merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, \
-         updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         updated_at, centroid, member_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(row.id.to_string())
     .bind(row.project_id.to_string())
@@ -463,6 +561,8 @@ pub(crate) async fn insert_issue(
     .bind(row.resolved_by.map(|user| user.to_string()))
     .bind(row.created_at)
     .bind(row.updated_at)
+    .bind(row.centroid.as_deref().map(encode_vector))
+    .bind(member_count)
     .execute(&mut *conn)
     .await
     .map_err(|error| unique_or(error, FINGERPRINT_CONFLICT))?;
@@ -481,8 +581,8 @@ pub(crate) async fn get_issue(
 ) -> Result<Option<IssueRow>, MetaError> {
     let record: Option<IssueRecord> = sqlx::query_as(
         "SELECT id, project_id, source_id, fingerprint, title, description, state, regressed, \
-         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at \
-         FROM issues WHERE project_id = ? AND id = ?",
+         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at, \
+         centroid, member_count FROM issues WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
     .bind(id.to_string())
@@ -503,8 +603,8 @@ pub(crate) async fn get_issue_tx(
 ) -> Result<Option<IssueRow>, MetaError> {
     let record: Option<IssueRecord> = sqlx::query_as(
         "SELECT id, project_id, source_id, fingerprint, title, description, state, regressed, \
-         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at \
-         FROM issues WHERE project_id = ? AND id = ?",
+         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at, \
+         centroid, member_count FROM issues WHERE project_id = ? AND id = ?",
     )
     .bind(project.to_string())
     .bind(id.to_string())
@@ -514,8 +614,9 @@ pub(crate) async fn get_issue_tx(
 }
 
 /// Replaces the mutable columns of the issue in `row`: title, description, state, regressed,
-/// merged_into, first_seen, last_seen, resolved_at, resolved_by and updated_at. The id, project,
-/// source, fingerprint and created_at stay. A missing row changes nothing.
+/// merged_into, first_seen, last_seen, resolved_at, resolved_by, centroid, member_count and
+/// updated_at. The id, project, source, fingerprint and created_at stay. A missing row changes
+/// nothing.
 ///
 /// # Errors
 ///
@@ -524,10 +625,12 @@ pub(crate) async fn update_issue(
     conn: &mut SqliteConnection,
     row: &IssueRow,
 ) -> Result<(), MetaError> {
+    let member_count =
+        i64::try_from(row.member_count).map_err(|_| corrupt(ISSUES, "member_count"))?;
     sqlx::query(
         "UPDATE issues SET title = ?, description = ?, state = ?, regressed = ?, merged_into = ?, \
-         first_seen = ?, last_seen = ?, resolved_at = ?, resolved_by = ?, updated_at = ? \
-         WHERE project_id = ? AND id = ?",
+         first_seen = ?, last_seen = ?, resolved_at = ?, resolved_by = ?, centroid = ?, \
+         member_count = ?, updated_at = ? WHERE project_id = ? AND id = ?",
     )
     .bind(&row.title)
     .bind(&row.description)
@@ -538,6 +641,8 @@ pub(crate) async fn update_issue(
     .bind(row.last_seen)
     .bind(row.resolved_at)
     .bind(row.resolved_by.map(|user| user.to_string()))
+    .bind(row.centroid.as_deref().map(encode_vector))
+    .bind(member_count)
     .bind(row.updated_at)
     .bind(row.project_id.to_string())
     .bind(row.id.to_string())
@@ -631,8 +736,8 @@ pub(crate) async fn list_issues(
     };
     let mut builder = QueryBuilder::<Sqlite>::new(
         "SELECT id, project_id, source_id, fingerprint, title, description, state, regressed, \
-         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at \
-         FROM issues WHERE project_id = ",
+         merged_into, first_seen, last_seen, resolved_at, resolved_by, created_at, updated_at, \
+         centroid, member_count FROM issues WHERE project_id = ",
     );
     builder.push_bind(project.to_string());
     if !query.states.is_empty() {
@@ -749,6 +854,21 @@ struct SourceRecord {
     created_by: Option<String>,
     created_at: i64,
     updated_at: i64,
+    sample_rate: Option<f64>,
+    daily_cap: Option<i64>,
+    score_names: Option<String>,
+    feedback_sources: Option<String>,
+    chat_connection_id: Option<String>,
+    chat_model: Option<String>,
+    embed_connection_id: Option<String>,
+    embed_model: Option<String>,
+    embed_dimension: Option<i64>,
+    floor: Option<f64>,
+    min_issue_size: Option<i64>,
+    budget_usd: Option<f64>,
+    budget_period: Option<String>,
+    paused_detail: Option<String>,
+    next_refit_at: Option<i64>,
 }
 
 fn source_from(record: SourceRecord) -> Result<SourceRow, MetaError> {
@@ -764,6 +884,29 @@ fn source_from(record: SourceRecord) -> Result<SourceRow, MetaError> {
         created_by: optional_uuid(record.created_by, SOURCES, "created_by")?,
         created_at: record.created_at,
         updated_at: record.updated_at,
+        sample_rate: record.sample_rate,
+        daily_cap: optional_u32(record.daily_cap, SOURCES, "daily_cap")?,
+        score_names: list_from(record.score_names, "score_names")?,
+        feedback_sources: list_from(record.feedback_sources, "feedback_sources")?,
+        chat_connection_id: optional_uuid(
+            record.chat_connection_id,
+            SOURCES,
+            "chat_connection_id",
+        )?,
+        chat_model: record.chat_model,
+        embed_connection_id: optional_uuid(
+            record.embed_connection_id,
+            SOURCES,
+            "embed_connection_id",
+        )?,
+        embed_model: record.embed_model,
+        embed_dimension: optional_u32(record.embed_dimension, SOURCES, "embed_dimension")?,
+        floor: record.floor,
+        min_issue_size: optional_u32(record.min_issue_size, SOURCES, "min_issue_size")?,
+        budget_usd: record.budget_usd,
+        budget_period: record.budget_period,
+        paused_detail: record.paused_detail,
+        next_refit_at: record.next_refit_at,
     })
 }
 
@@ -784,6 +927,8 @@ struct IssueRecord {
     resolved_by: Option<String>,
     created_at: i64,
     updated_at: i64,
+    centroid: Option<Vec<u8>>,
+    member_count: i64,
 }
 
 fn issue_from(record: IssueRecord) -> Result<IssueRow, MetaError> {
@@ -803,6 +948,9 @@ fn issue_from(record: IssueRecord) -> Result<IssueRow, MetaError> {
         resolved_by: optional_uuid(record.resolved_by, ISSUES, "resolved_by")?,
         created_at: record.created_at,
         updated_at: record.updated_at,
+        centroid: record.centroid.as_deref().map(decode_vector).transpose()?,
+        member_count: u64::try_from(record.member_count)
+            .map_err(|_| corrupt(ISSUES, "member_count"))?,
     })
 }
 
@@ -827,6 +975,60 @@ fn event_from(record: EventRecord) -> Result<EventRow, MetaError> {
         to_value: record.to_value,
         at: record.at,
     })
+}
+
+/// A vector as f32 little-endian bytes: the BLOB form of a centroid or a candidate vector.
+pub(crate) fn encode_vector(vector: &[f32]) -> Vec<u8> {
+    vector
+        .iter()
+        .flat_map(|value| value.to_le_bytes())
+        .collect()
+}
+
+/// The vector [`encode_vector`] wrote. A length that is not a multiple of four is corrupt.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when the length is not a multiple of four.
+pub(crate) fn decode_vector(bytes: &[u8]) -> Result<Vec<f32>, MetaError> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(corrupt(ISSUES, "centroid"));
+    }
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| -> Result<f32, MetaError> {
+            let array: [u8; 4] = chunk.try_into().map_err(|_| corrupt(ISSUES, "centroid"))?;
+            Ok(f32::from_le_bytes(array))
+        })
+        .collect()
+}
+
+/// A list as a JSON array of strings, or NULL when it is empty.
+fn list_json(values: &[String], column: &'static str) -> Result<Option<String>, MetaError> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(values)
+        .map(Some)
+        .map_err(|_| corrupt(SOURCES, column))
+}
+
+/// The list [`list_json`] wrote. NULL reads as an empty list.
+fn list_from(value: Option<String>, column: &'static str) -> Result<Vec<String>, MetaError> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(text) => serde_json::from_str(&text).map_err(|_| corrupt(SOURCES, column)),
+    }
+}
+
+fn optional_u32(
+    value: Option<i64>,
+    table: &'static str,
+    column: &'static str,
+) -> Result<Option<u32>, MetaError> {
+    value
+        .map(|number| u32::try_from(number).map_err(|_| corrupt(table, column)))
+        .transpose()
 }
 
 /// `text` with the LIKE wildcards and the escape character escaped (`ESCAPE '\'`).
@@ -866,10 +1068,10 @@ mod tests {
 
     use super::{
         EventKind, EventRow, IssueListQuery, IssueRow, IssueSort, IssueState, SourceKind,
-        SourceRow, count_enabled_sources, delete_source, get_issue, get_issue_tx, get_source,
-        insert_event, insert_issue, insert_source, issue_by_fingerprint, list_events, list_issues,
-        list_sources, merged_ids, open_counts, retarget_merged, sweep_sources, update_issue,
-        update_source,
+        SourceRow, count_enabled_sources, decode_vector, delete_source, encode_vector, get_issue,
+        get_issue_tx, get_source, insert_event, insert_issue, insert_source, issue_by_fingerprint,
+        list_events, list_issues, list_sources, merged_ids, open_counts, retarget_merged,
+        sweep_sources, update_issue, update_source,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{delete_project, insert_project, mark_project_deleting};
@@ -908,6 +1110,21 @@ mod tests {
             created_by: None,
             created_at: NOW,
             updated_at: NOW,
+            sample_rate: None,
+            daily_cap: None,
+            score_names: Vec::new(),
+            feedback_sources: Vec::new(),
+            chat_connection_id: None,
+            chat_model: None,
+            embed_connection_id: None,
+            embed_model: None,
+            embed_dimension: None,
+            floor: None,
+            min_issue_size: None,
+            budget_usd: None,
+            budget_period: None,
+            paused_detail: None,
+            next_refit_at: None,
         }
     }
 
@@ -935,6 +1152,8 @@ mod tests {
             resolved_by: None,
             created_at: NOW,
             updated_at: NOW,
+            centroid: None,
+            member_count: 0,
         }
     }
 
@@ -1451,6 +1670,203 @@ mod tests {
         assert_eq!(
             list_sources(db.reader(), project).await.unwrap(),
             vec![kept]
+        );
+    }
+
+    /// Inserts an LLM connection of `org` with `id`, so a source can point at it.
+    async fn insert_connection(
+        conn: &mut sqlx::SqliteConnection,
+        org: OrgId,
+        id: Uuid,
+    ) -> Result<(), MetaError> {
+        sqlx::query(
+            "INSERT INTO llm_connections (id, org_id, name, adapter, secret_enc, \
+             api_key_hint, created_at, updated_at) \
+             VALUES (?, ?, ?, 'openai', ?, 'hint', ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(org.to_string())
+        .bind(format!("connection {id}"))
+        .bind(Vec::<u8>::new())
+        .bind(NOW)
+        .bind(NOW)
+        .execute(&mut *conn)
+        .await?;
+        Ok(())
+    }
+
+    async fn connection(db: &MetaDb, org: OrgId, id: Uuid) {
+        db.write(move |conn| Box::pin(async move { insert_connection(conn, org, id).await }))
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn the_llm_kinds_are_named_and_only_they_are_llm() {
+        for (kind, name, llm) in [
+            (SourceKind::Error, "error", false),
+            (SourceKind::Score, "score", true),
+            (SourceKind::Feedback, "feedback", true),
+            (SourceKind::Topic, "topic", true),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(kind.is_llm(), llm);
+            assert_eq!(SourceKind::from_db(name), Some(kind));
+        }
+        assert_eq!(SourceKind::from_db("unknown"), None);
+    }
+
+    #[tokio::test]
+    async fn an_llm_source_round_trips_and_empty_lists_are_stored_as_null() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let chat = Uuid::from_u128(11);
+        let embed = Uuid::from_u128(12);
+        connection(&db, org, chat).await;
+        connection(&db, org, embed).await;
+        let mut row = source(project, "scores", true);
+        row.kind = SourceKind::Score;
+        row.sample_rate = Some(0.5);
+        row.daily_cap = Some(40);
+        row.score_names = vec!["quality".to_owned(), "helpful".to_owned()];
+        row.chat_connection_id = Some(chat);
+        row.chat_model = Some("chat-model".to_owned());
+        row.embed_connection_id = Some(embed);
+        row.embed_model = Some("embed-model".to_owned());
+        row.embed_dimension = Some(512);
+        row.floor = Some(0.8);
+        row.min_issue_size = Some(5);
+        row.budget_usd = Some(12.5);
+        row.budget_period = Some("month".to_owned());
+        row.paused_reason = Some("connection".to_owned());
+        row.paused_at = Some(NOW);
+        row.paused_detail = Some("rate limited".to_owned());
+        row.next_refit_at = Some(NOW + 1);
+        put_source(&db, row.clone()).await;
+        assert_eq!(
+            get_source(db.reader(), project, row.id).await.unwrap(),
+            Some(row.clone())
+        );
+
+        let plain = source(project, "plain", true);
+        put_source(&db, plain.clone()).await;
+        let stored: (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT score_names, feedback_sources FROM issue_sources WHERE id = ?")
+                .bind(plain.id.to_string())
+                .fetch_one(db.reader())
+                .await
+                .unwrap();
+        assert_eq!(stored, (None, None));
+        let read = get_source(db.reader(), project, plain.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(read.score_names.is_empty());
+        assert!(read.feedback_sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_source_changes_the_llm_settings_but_not_the_embedding() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let chat = Uuid::from_u128(11);
+        let embed = Uuid::from_u128(12);
+        connection(&db, org, chat).await;
+        connection(&db, org, embed).await;
+        let mut row = source(project, "feedback", true);
+        row.kind = SourceKind::Feedback;
+        row.feedback_sources = vec!["end_user".to_owned()];
+        row.chat_connection_id = Some(chat);
+        row.chat_model = Some("chat-model".to_owned());
+        row.embed_connection_id = Some(embed);
+        row.embed_model = Some("embed-model".to_owned());
+        row.embed_dimension = Some(512);
+        put_source(&db, row.clone()).await;
+
+        let mut changed = row.clone();
+        changed.chat_model = Some("other-chat".to_owned());
+        changed.feedback_sources = vec!["human".to_owned()];
+        changed.daily_cap = Some(7);
+        changed.embed_model = Some("other-embed".to_owned());
+        changed.embed_dimension = Some(256);
+        changed.embed_connection_id = None;
+        changed.next_refit_at = Some(NOW + 5);
+        changed.updated_at = 2_000;
+        let writer = changed.clone();
+        let updated = db
+            .write(move |conn| Box::pin(async move { update_source(conn, &writer).await }))
+            .await
+            .unwrap();
+        assert!(updated);
+
+        let stored = get_source(db.reader(), project, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.chat_model.as_deref(), Some("other-chat"));
+        assert_eq!(stored.feedback_sources, vec!["human".to_owned()]);
+        assert_eq!(stored.daily_cap, Some(7));
+        assert_eq!(stored.next_refit_at, Some(NOW + 5));
+        assert_eq!(stored.updated_at, 2_000);
+        // The embedding fields change only through set_embed_dimension (D-IC-5).
+        assert_eq!(stored.embed_connection_id, Some(embed));
+        assert_eq!(stored.embed_model.as_deref(), Some("embed-model"));
+        assert_eq!(stored.embed_dimension, Some(512));
+    }
+
+    #[tokio::test]
+    async fn an_issue_centroid_and_member_count_round_trip() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let src = source(project, "scores", true);
+        put_source(&db, src.clone()).await;
+        let mut row = issue(1, src.id, project, "group", IssueState::Open, 10);
+        row.centroid = Some(vec![0.5, -1.25, 3.0]);
+        row.member_count = 7;
+        put_issue(&db, row.clone()).await;
+        assert_eq!(
+            get_issue(db.reader(), project, row.id).await.unwrap(),
+            Some(row.clone())
+        );
+
+        let mut changed = row.clone();
+        changed.centroid = Some(vec![1.0, 2.0]);
+        changed.member_count = 9;
+        changed.updated_at = 2_000;
+        let writer = changed.clone();
+        db.write(move |conn| Box::pin(async move { update_issue(conn, &writer).await }))
+            .await
+            .unwrap();
+        assert_eq!(
+            get_issue(db.reader(), project, row.id).await.unwrap(),
+            Some(changed)
+        );
+    }
+
+    #[test]
+    fn a_vector_round_trips_through_its_bytes_and_a_bad_length_is_corrupt() {
+        let vector = vec![1.0_f32, -0.5, f32::MIN_POSITIVE, 0.0];
+        let bytes = encode_vector(&vector);
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(&bytes[..4], &1.0_f32.to_le_bytes()[..]);
+        assert_eq!(decode_vector(&bytes).unwrap(), vector);
+        assert_eq!(
+            decode_vector(&encode_vector(&[])).unwrap(),
+            Vec::<f32>::new()
+        );
+        let error = decode_vector(&bytes[..15]).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                MetaError::Corrupt {
+                    table: "issues",
+                    column: "centroid"
+                }
+            ),
+            "{error:?}"
         );
     }
 }

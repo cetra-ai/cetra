@@ -258,6 +258,21 @@ async fn create_issue_source(
         created_by: Some(user.id),
         created_at: now,
         updated_at: now,
+        sample_rate: None,
+        daily_cap: None,
+        score_names: Vec::new(),
+        feedback_sources: Vec::new(),
+        chat_connection_id: None,
+        chat_model: None,
+        embed_connection_id: None,
+        embed_model: None,
+        embed_dimension: None,
+        floor: None,
+        min_issue_size: None,
+        budget_usd: None,
+        budget_period: None,
+        paused_detail: None,
+        next_refit_at: None,
     };
     let limit = source_limit::limit(&state, org);
     let outcome = state
@@ -1260,12 +1275,18 @@ fn source_json(row: &SourceRow, open_issues: u64) -> IssueSource {
 fn kind_of(kind: SourceKind) -> IssueSourceKind {
     match kind {
         SourceKind::Error => IssueSourceKind::Error,
+        SourceKind::Score => IssueSourceKind::Score,
+        SourceKind::Feedback => IssueSourceKind::Feedback,
+        SourceKind::Topic => IssueSourceKind::Topic,
     }
 }
 
 fn source_kind(kind: IssueSourceKind) -> SourceKind {
     match kind {
         IssueSourceKind::Error => SourceKind::Error,
+        IssueSourceKind::Score => SourceKind::Score,
+        IssueSourceKind::Feedback => SourceKind::Feedback,
+        IssueSourceKind::Topic => SourceKind::Topic,
     }
 }
 
@@ -1503,6 +1524,8 @@ mod tests {
                             resolved_by: None,
                             created_at: now,
                             updated_at: now,
+                            centroid: None,
+                            member_count: 0,
                         },
                     )
                     .await
@@ -1590,6 +1613,8 @@ mod tests {
             resolved_by: None,
             created_at: seen,
             updated_at: seen,
+            centroid: None,
+            member_count: 0,
         }
     }
 

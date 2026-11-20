@@ -17,6 +17,12 @@ use super::online_rules::present;
 pub enum IssueSourceKind {
     /// Error spans of completed traces, fingerprinted into issues (D-IC-2).
     Error,
+    /// Bad scores of the source's score names, summarized and clustered into issues (D-IC-1).
+    Score,
+    /// Feedback scores of the source's feedback sources (D-IC-1).
+    Feedback,
+    /// New production traces, summarized and clustered into issues (D-IC-1).
+    Topic,
 }
 
 /// An issue source. Spec 09 § Issues.

@@ -670,6 +670,8 @@ async fn write_groups(
                                 resolved_by: None,
                                 created_at: now,
                                 updated_at: now,
+                                centroid: None,
+                                member_count: 0,
                             };
                             issues::insert_issue(conn, &issue).await?;
                             issues::insert_event(

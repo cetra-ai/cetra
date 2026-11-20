@@ -299,6 +299,15 @@ These are fixed here so the plans copy them, not choose them.
 - **`issue_sources.kind` has no SQL CHECK**, so M3 adds kinds without rebuilding the table. The Rust enum is the only gate.
 - **Regression compares trace times.** A trace that started before `resolved_at` but completes after it does not reopen the issue.
 
+### D-IC-19 M3 build decisions
+
+- **Prompt inputs.** The summary prompt uses the root span's full `input` and `output`, rendered to text and cut to 4 000 characters each (the `*_preview` columns hold only 512). The topic prompt uses the first user message: when the root input is in `messages` format, the text parts of its first `role: "user"` message, joined with a newline; otherwise the root input text; cut to 4 000 characters.
+- **The summary is kept across retries.** A candidate's summary is stored as soon as it is made, so a failed embedding retries without a second summary call.
+- **Paused detail.** `issue_sources.paused_detail` holds the provider's error text for a connection pause, shown on the source page like a rule's.
+- **Refit schedule.** `issue_sources.next_refit_at` (ns) is creation + 1 h, then the end of each refit + 6 h. "Refit now" sets it to now and is refused with 409 when a refit started less than 10 minutes ago.
+- **Naming waits for a slot.** A refit takes a chat-connection slot for each naming call, retrying every second for up to 2 minutes. If none comes, the refit stops with error class `busy`, and the issues it already created stay.
+- **Embedding connection test.** `POST …/llm-connections/{id}/test` takes an optional `embedding_model`. When it is set, the test embeds `"ping"` instead of asking for a judgement. A success resumes the sources paused for that connection.
+
 ## Architecture
 
 ```
@@ -319,7 +328,7 @@ issue events (created, regressed) ─► K channels       occurrence scores ─�
 | `issue_sources` | id, project, name, kind, filter, sample_rate, daily_cap, score_names, feedback_sources, chat connection and model, embedding connection, model and dimension, floor, min_issue_size, budget, enabled, paused and reason, notification channel ids, last_notified_at, created_by, timestamps |
 | `issues` | id (UUIDv7), project, source, fingerprint (error kind, unique per source), title, description, state, regressed, merged_into, centroid BLOB, member_count, first_seen, last_seen, occurrence_count, resolved_at and by, timestamps |
 | `issue_source_days` | source, UTC day, candidates accepted, USD spent (the daily cap and the budget, as `rule_spend`) |
-| `issue_candidates` | id, project, source, trace_id, span_id, session_id, user_id, trace_start, score_id, status (`queued`, `running`, `pending`, `assigned`, `outlier`, `dropped`, `failed`, `skipped`), the queue columns of D-IC-12, issue, summary, summary_prompt_version, vector BLOB, model, dimension, call trace id, cost, error class, timestamps; unique on (source, target) |
+| `issue_candidates` | id, project, source, trace_id, span_id, session_id, user_id, trace_start, score_id, status (`queued`, `running`, `pending`, `assigned`, `outlier`, `dropped`, `failed`, `skipped`), the queue columns of D-IC-12, issue, summary, summary_prompt_version, vector BLOB, model, dimension, call trace id, cost, error class, timestamps; unique on `dedup_key` (`<source>:<trace>`, `:<span>` or `:session:<id>`) |
 | `issue_events` | id, issue, kind (`created`, `state_changed`, `renamed`, `merged`, `regressed`), actor, from and to, at |
 | `issue_refits` | id, source, started and finished, counts, cost, error class |
 

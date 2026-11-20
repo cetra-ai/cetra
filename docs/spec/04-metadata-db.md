@@ -519,24 +519,47 @@ Every create, and every update that changes `version`, writes one `evaluator_ver
 
 ## Issues
 
-Track IC (D-IC-1, D-IC-3, D-IC-10; design in `docs/plans/ic-issue-clustering/00-design.md`). `issue_sources` holds the sources of a project; `kind` is `error` in M1 and has no SQL CHECK, so later kinds need no table rebuild (the Rust enum is the only gate). `enabled` is the switch and `paused_reason` the sweeper's own pause; the sweeper reads only enabled, unpaused sources. Deleting a source deletes its issues and their events (D-IC-3).
+Track IC (D-IC-1, D-IC-3, D-IC-10; design in `docs/plans/ic-issue-clustering/00-design.md`). `issue_sources` holds the sources of a project. `kind` is `error`, `score`, `feedback` or `topic` (D-IC-1) and has no SQL CHECK, so kinds are added without a table rebuild (the Rust enum is the only gate). `enabled` is the switch and `paused_reason` the pause of the sweeper or of the connection; the sweeper and the LLM workers read only enabled, unpaused sources. Deleting a source deletes its issues and their events (D-IC-3), and its candidates and refits.
 
-`issues` holds one error group per row. `fingerprint` is the hex fingerprint of the group (D-IC-17); it is unique per source where set. `state` is `open`, `resolved`, `ignored` or `merged`; `regressed` is set when a resolved issue recurs. `merged_into` names the issue this one was merged into; a merge chain is one level deep (D-IC-9). `first_seen` and `last_seen` are trace start times, not ingest times. `resolved_at` and `resolved_by` record the last resolution.
+The LLM kinds carry a chat connection and model (candidate summaries, naming), an embedding connection, model and dimension (D-IC-5; fixed at create, changed only through the embedding dimension setter), a `sample_rate` and `daily_cap` (D-IC-1), an optional `budget_usd` per `budget_period` (`day` or `month`, D-IC-12), a `floor` (the join threshold, D-IC-7) and a `min_issue_size` (D-IC-8). `score_names` and `feedback_sources` are JSON arrays of strings, NULL when empty. `paused_detail` holds the provider's error text for a connection pause. `next_refit_at` is when the next refit is due, nanoseconds (D-IC-8).
+
+`issues` holds one error group per row. `fingerprint` is the hex fingerprint of the group (D-IC-17); it is unique per source where set. `state` is `open`, `resolved`, `ignored` or `merged`; `regressed` is set when a resolved issue recurs. `merged_into` names the issue this one was merged into; a merge chain is one level deep (D-IC-9). `first_seen` and `last_seen` are trace start times, not ingest times. `resolved_at` and `resolved_by` record the last resolution. For an LLM source's issue, `centroid` is the mean of the member vectors and `member_count` the members in it (at most 500, D-IC-7); both are NULL or zero for error issues.
 
 `issue_events` is the audit trail of an issue (D-IC-10): `kind` is `created`, `state_changed`, `renamed`, `merged` or `regressed`; `from_value` and `to_value` hold the old and new value as text. `actor_user_id` NULL means the system. Events go with their issue.
+
+`issue_candidates` is the queue of an LLM source's work (D-IC-4, D-IC-12): one row per accepted target, deduplicated by `dedup_key`. `dedup_key` is `<source id>:<trace hex>` for a trace target, `<source id>:<trace hex>:<span hex>` for a span and `<source id>:session:<session id>` for a session. `status` is `queued`, `running`, `pending` (waiting for a refit), `assigned`, `outlier`, `dropped`, `failed` or `skipped`. `attempts`, `claims`, `interruptions` and `load_retries` count the queue's tries; `not_before` is when the row may be claimed (ns). `summary` and `summary_prompt_version` hold the one summary; `vector` and `embed_model`/`dimension` hold the embedding, a f32 little-endian BLOB. `call_trace_id` names the call trace of the last LLM call, and `cost_usd` sums the spend of its calls. Candidates keep their vector 7 days unassigned and 30 days assigned (D-IC-6).
+
+`issue_source_days` counts, per source and UTC day (`day` is the day start, ns), the candidates admitted and the USD spent: the daily cap and the budget read it, as `rule_spend` does for online rules (D-IC-1).
+
+`issue_refits` is the history of a source's refits (D-IC-8, D-IC-12): `trigger` is `schedule` or `manual`; the counts are the pending candidates read, the clusters found, the issues created, the candidates joined and the outliers; `error_class` is set when the refit stopped early. The last 50 refits of a source are kept.
 
 ```sql
 CREATE TABLE issue_sources (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  kind TEXT NOT NULL,                 -- 'error' in M1; no CHECK (D-IC-1)
-  filter TEXT,                        -- span filter DSL, when set
+  kind TEXT NOT NULL,                 -- 'error', 'score', 'feedback' or 'topic'; no CHECK (D-IC-1)
+  filter TEXT,                        -- span filter DSL (error) or trace filter DSL (LLM kinds), when set
   enabled INTEGER NOT NULL DEFAULT 1,
-  paused_reason TEXT,                 -- set by the sweeper; NULL when not paused
+  paused_reason TEXT,                 -- set by the sweeper or a connection pause; NULL when not paused
   paused_at INTEGER,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  sample_rate REAL,                   -- LLM kinds, (0, 1]
+  daily_cap INTEGER,                  -- LLM kinds, candidates per UTC day
+  score_names TEXT,                   -- JSON array of strings; NULL when empty
+  feedback_sources TEXT,              -- JSON array of strings; NULL when empty
+  chat_connection_id TEXT REFERENCES llm_connections(id),
+  chat_model TEXT,
+  embed_connection_id TEXT REFERENCES llm_connections(id),
+  embed_model TEXT,
+  embed_dimension INTEGER,            -- set once, at create or on the first embedding
+  floor REAL,                         -- join threshold, cosine
+  min_issue_size INTEGER,
+  budget_usd REAL,
+  budget_period TEXT,                 -- 'day' or 'month'
+  paused_detail TEXT,                 -- the provider's error text for a connection pause
+  next_refit_at INTEGER,              -- ns
   UNIQUE (project_id, name)
 );
 
@@ -554,7 +577,9 @@ CREATE TABLE issues (
   last_seen INTEGER NOT NULL,         -- trace start, ns
   resolved_at INTEGER,
   resolved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  centroid BLOB,                      -- f32 little-endian; NULL for error issues
+  member_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
     WHERE fingerprint IS NOT NULL;
@@ -571,6 +596,63 @@ CREATE TABLE issue_events (
   at INTEGER NOT NULL                 -- ns
 );
 CREATE INDEX issue_events_issue ON issue_events (issue_id, at, id);
+
+CREATE TABLE issue_candidates (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  target TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+  trace_id BLOB,
+  span_id BLOB,
+  session_id TEXT,
+  user_id TEXT,
+  trace_start INTEGER,                -- ns
+  score_id TEXT,                      -- the score that made the candidate, when a score source
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL CHECK (status IN ('queued', 'running', 'pending', 'assigned', 'outlier', 'dropped', 'failed', 'skipped')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claims INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,        -- ns
+  error_class TEXT,
+  issue_id TEXT REFERENCES issues(id) ON DELETE SET NULL,
+  summary TEXT,
+  summary_prompt_version INTEGER,
+  vector BLOB,                        -- f32 little-endian
+  embed_model TEXT,
+  dimension INTEGER,
+  call_trace_id BLOB,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE INDEX issue_candidates_ready ON issue_candidates (not_before) WHERE status = 'queued';
+CREATE INDEX issue_candidates_source ON issue_candidates (source_id, status, created_at);
+CREATE INDEX issue_candidates_trace ON issue_candidates (project_id, trace_id);
+
+CREATE TABLE issue_source_days (
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  day INTEGER NOT NULL,               -- UTC day start, ns
+  candidates INTEGER NOT NULL DEFAULT 0,
+  spent_usd REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (source_id, day)
+);
+
+CREATE TABLE issue_refits (
+  id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  trigger TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+  started_at INTEGER NOT NULL,        -- ns
+  finished_at INTEGER,                -- ns; NULL while running
+  pending INTEGER NOT NULL DEFAULT 0,
+  clusters INTEGER NOT NULL DEFAULT 0,
+  created INTEGER NOT NULL DEFAULT 0,
+  joined INTEGER NOT NULL DEFAULT 0,
+  outliers INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL NOT NULL DEFAULT 0,
+  error_class TEXT
+);
+CREATE INDEX issue_refits_source ON issue_refits (source_id, started_at DESC);
 ```
 
 ## Alerts

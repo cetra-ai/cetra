@@ -1022,6 +1022,21 @@ mod tests {
                 created_by: None,
                 created_at: now,
                 updated_at: now,
+                sample_rate: None,
+                daily_cap: None,
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
             };
             let stored = row.clone();
             app.state
@@ -2059,6 +2074,21 @@ mod tests {
                 created_by: None,
                 created_at: now,
                 updated_at: now,
+                sample_rate: None,
+                daily_cap: None,
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: None,
+                chat_model: None,
+                embed_connection_id: None,
+                embed_model: None,
+                embed_dimension: None,
+                floor: None,
+                min_issue_size: None,
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
             };
             let id = row.id;
             app.state
