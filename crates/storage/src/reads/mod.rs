@@ -10,6 +10,7 @@ mod cursor;
 mod deletions;
 mod experiments;
 mod facets;
+mod prompts;
 mod scores;
 mod sessions;
 mod traces;
@@ -38,6 +39,10 @@ pub use experiments::{
 pub use facets::{
     FacetData, FacetKind, FacetRequest, FacetValue, FacetView, HISTOGRAM_BUCKETS, Histogram,
     HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
+};
+pub use prompts::{
+    MAX_PROMPT_VERSIONS, PromptMetricsRequest, PromptScoreMean, PromptVersionMetrics,
+    prompt_metrics,
 };
 pub use scores::{
     LATEST_SCORE_COLUMNS, ScoreListRequest, ScoreTargets, latest_scores, score_list, scores_by_id,

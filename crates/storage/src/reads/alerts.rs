@@ -28,7 +28,7 @@ const ERRORS: &str = "alert_errors";
 const VALUE: &str = "alert_value";
 const DURATION_NS: &str = "duration_ns";
 const NS_PER_MS: f64 = 1_000_000.0;
-const DAY_NS: i64 = 86_400_000_000_000;
+pub(super) const DAY_NS: i64 = 86_400_000_000_000;
 /// How long before the window a trace may have started and still have its scores
 /// counted (D-K-17). Span measures look back one day (D-K-3).
 const SCORE_TRACE_LOOKBACK: i64 = 7 * DAY_NS;
@@ -251,7 +251,7 @@ async fn trace_batches(
 /// The trace ids a span or score measure keeps: traces that start in
 /// `[from − lookback, to)` and pass the filter, with the default exclusions applied.
 /// With `ends_after_from`, also traces that end at or after the window start.
-async fn trace_id_plan(
+pub(super) async fn trace_id_plan(
     ctx: &QueryContext,
     window: TimeWindow,
     lookback: i64,
