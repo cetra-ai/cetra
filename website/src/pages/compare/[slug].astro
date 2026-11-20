@@ -1,0 +1,133 @@
+---
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import FactTable from "../../marketing/compare/FactTable.astro";
+import Button from "../../marketing/components/Button.astro";
+import Section from "../../marketing/components/Section.astro";
+import SectionHeading from "../../marketing/components/SectionHeading.astro";
+import { COMPETITORS, formatDate, loadProduct } from "../../marketing/data/compare.mjs";
+import MarketingLayout from "../../marketing/layouts/MarketingLayout.astro";
+import { CLOUD, CONTACT_EMAIL } from "../../marketing/site";
+
+export function getStaticPaths() {
+  return COMPETITORS.map((slug) => ({
+    params: { slug },
+    props: { slug, them: loadProduct(slug) },
+  }));
+}
+
+const { slug, them } = Astro.props;
+const cetra = loadProduct("cetra");
+// Only some competitors have a migration guide. The path is relative to website/, the build's cwd.
+const hasGuide = ["mdx", "md"].some((ext) =>
+  existsSync(join(process.cwd(), `src/content/docs/docs/integrations/from-${slug}.${ext}`)),
+);
+---
+
+<MarketingLayout
+  title={`cetra vs ${them.name}`}
+  description={`How cetra and ${them.name} compare on self-hosting, pricing, OpenTelemetry, SQL, evaluations and alerts. Checked on ${them.checkedOn}.`}
+  route={`/compare/${slug}/`}
+>
+  <Section tone="ink" pad="md" labelledby="compare-title">
+    <SectionHeading
+      level={1}
+      eyebrow="Compare"
+      title={`cetra vs ${them.name}`}
+      id="compare-title"
+      lede={them.oneLine}
+    />
+    <p class="checked muted">
+      Checked on {formatDate(them.checkedOn)} against {them.name}'s own documentation, pricing and source.
+      Spotted an error? Write to <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
+    </p>
+  </Section>
+
+  <Section tone="raised" divider labelledby="side-title">
+    <SectionHeading title="Side by side" id="side-title" />
+    <FactTable them={them} cetra={cetra} />
+  </Section>
+
+  <Section tone="ink" divider>
+    <div class="choose">
+      <div>
+        <h2>When to choose {them.name}</h2>
+        {
+          them.chooseThem.length > 0 ? (
+            <ul class="bullets">
+              {them.chooseThem.map((item) => (
+                <li>{item}</li>
+              ))}
+            </ul>
+          ) : (
+            <p class="muted">See the table for where {them.name} fits.</p>
+          )
+        }
+      </div>
+      <div>
+        <h2>When to choose cetra</h2>
+        <ul class="bullets">
+          {them.chooseUs.map((item) => (
+            <li>{item}</li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  </Section>
+
+  <Section tone="teal" divider labelledby="switch-title">
+    <SectionHeading title="Switching to cetra" id="switch-title" />
+    {
+      hasGuide ? (
+        <p class="switch">
+          Point the {them.name} Python SDK's export at cetra. The guide covers what carries over
+          and what changes.
+        </p>
+      ) : (
+        <p class="switch">
+          cetra reads OpenTelemetry. If your app already sends OTLP, point the exporter at cetra.
+        </p>
+      )
+    }
+    <div class="actions">
+      {
+        hasGuide ? (
+          <Button href={`/docs/integrations/from-${slug}/`}>Migration guide</Button>
+        ) : (
+          <Button href="/docs/get-started/opentelemetry/">Send OpenTelemetry</Button>
+        )
+      }
+      <Button href={CLOUD.demo} variant="secondary" external srHint="(needs a free account)">
+        Try the demo
+      </Button>
+    </div>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .checked {
+    font-size: var(--text-sm);
+    margin-top: var(--space-5);
+  }
+  .choose {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-7);
+  }
+  .choose h2 {
+    font-size: var(--text-xl);
+    margin-bottom: var(--space-5);
+  }
+  .switch {
+    max-width: 46rem;
+    margin-top: var(--space-5);
+  }
+  .actions {
+    margin-top: var(--space-6);
+  }
+  @media (max-width: 860px) {
+    .choose {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

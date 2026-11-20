@@ -1,0 +1,80 @@
+---
+import Button from "../components/Button.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import { AREAS, COMPETITORS, displayValue, isUnknown, loadProduct } from "../data/compare.mjs";
+
+const SHORT_ROWS = ["selfHostStack", "selfHostLicence", "otel", "sql"];
+const rows = AREAS.filter(([key]) => SHORT_ROWS.includes(key));
+const cetra = loadProduct("cetra");
+const others = ["langfuse", "phoenix", "langsmith"].map((slug) => loadProduct(slug));
+---
+
+<Section tone="paper" divider labelledby="compare-title">
+  <SectionHeading
+    eyebrow="Compare"
+    title="How cetra compares."
+    id="compare-title"
+    lede={`Four facts that matter when you run it yourself. Full comparisons, with sources, for ${COMPETITORS.length} products.`}
+  />
+  <div class="table-wrap" tabindex="0">
+    <table class="fact-table">
+      <thead>
+        <tr>
+          <th scope="col">Area</th>
+          <th scope="col">cetra</th>
+          {
+            others.map((product) => (
+              <th scope="col">
+                <a href={`/compare/${product.slug}/`}>{product.name}</a>
+              </th>
+            ))
+          }
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rows.map(([key, label]) => (
+            <tr>
+              <th scope="row">{label}</th>
+              <td class:list={[isUnknown(cetra.facts[key]) && "muted"]}>
+                {displayValue(cetra.facts[key])}
+              </td>
+              {others.map((product) => (
+                <td class:list={[isUnknown(product.facts[key]) && "muted"]}>
+                  {displayValue(product.facts[key])}
+                </td>
+              ))}
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+  <div class="more">
+    <Button href="/compare/" variant="secondary">All comparisons</Button>
+  </div>
+</Section>
+
+<style>
+  .table-wrap {
+    overflow-x: auto;
+    margin-top: var(--space-7);
+  }
+  table {
+    min-width: 760px;
+  }
+  thead th {
+    width: 21%;
+  }
+  thead th:first-child,
+  tbody th {
+    width: 16%;
+  }
+  td {
+    width: 21%;
+  }
+  .more {
+    margin-top: var(--space-6);
+  }
+</style>

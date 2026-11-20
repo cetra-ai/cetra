@@ -1,0 +1,153 @@
+---
+import { AREAS, displayValue, isUnknown, type loadProduct } from "../data/compare.mjs";
+
+type Product = ReturnType<typeof loadProduct>;
+interface Props {
+  them: Product;
+  cetra: Product;
+}
+const { them, cetra } = Astro.props;
+
+// One number per distinct source URL, in document order: row by row, cetra's sources before theirs.
+const numbers = new Map<string, number>();
+function numberOf(source: string): number {
+  const known = numbers.get(source);
+  if (known !== undefined) return known;
+  const n = numbers.size + 1;
+  numbers.set(source, n);
+  return n;
+}
+
+type Fact = Product["facts"][string];
+function cell(fact: Fact) {
+  const seen = new Set<string>();
+  const links: { n: number; href: string }[] = [];
+  for (const source of fact.sources) {
+    if (seen.has(source)) continue;
+    seen.add(source);
+    links.push({ n: numberOf(source), href: source });
+  }
+  return { text: displayValue(fact), unknown: isUnknown(fact), links };
+}
+
+const rows = AREAS.map(([key, label]) => {
+  const ours = cell(cetra.facts[key]);
+  const theirs = cell(them.facts[key]);
+  return { label, cells: [ours, theirs] };
+});
+
+const sources = [...numbers].map(([href, n]) => ({
+  n,
+  href,
+  label: href.startsWith("/") ? `cetra.sh${href}` : href,
+}));
+---
+
+<div
+  class="table-wrap"
+  role="region"
+  aria-label={`cetra and ${them.name} compared, scrolls sideways on small screens`}
+  tabindex="0"
+>
+  <table class="fact-table">
+    <caption class="visually-hidden">cetra and {them.name} compared</caption>
+    <thead>
+      <tr>
+        <th scope="col">Area</th>
+        <th scope="col">cetra</th>
+        <th scope="col">{them.name}</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        rows.map((row) => (
+          <tr>
+            <th scope="row">{row.label}</th>
+            {row.cells.map((c) => (
+              <td class:list={[c.unknown && "muted"]}>
+                {c.text}
+                {c.links.map((link) => (
+                  <sup>
+                    <a
+                      href={link.href}
+                      aria-label={`Source ${link.n}`}
+                      rel={link.href.startsWith("https://") ? "noopener" : undefined}
+                    >
+                      [{link.n}]
+                    </a>
+                  </sup>
+                ))}
+              </td>
+            ))}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</div>
+
+<p class="muted note">
+  Cloud tiers are not like for like: units and currency are as each vendor lists them.
+</p>
+
+<h3 class="eyebrow sources-title">Sources</h3>
+<ol class="sources">
+  {
+    sources.map((source) => (
+      <li>
+        <a
+          href={source.href}
+          rel={source.href.startsWith("https://") ? "noopener" : undefined}
+        >
+          {source.label}
+        </a>
+      </li>
+    ))
+  }
+</ol>
+
+<style>
+  .table-wrap {
+    overflow-x: auto;
+    margin-top: var(--space-7);
+  }
+  tbody th {
+    width: 22%;
+  }
+  td {
+    width: 39%;
+  }
+  sup {
+    margin-left: 0.15em;
+    font-size: 0.7em;
+  }
+  sup a {
+    display: inline-block;
+    padding: 0 0.3em;
+    min-height: 1.5em;
+    text-decoration: none;
+  }
+  @media (max-width: 720px) {
+    table {
+      min-width: 640px;
+    }
+  }
+  .note {
+    font-size: var(--text-sm);
+    margin-top: var(--space-5);
+  }
+  .sources-title {
+    margin-top: var(--space-7);
+  }
+  .sources {
+    margin: var(--space-3) 0 0;
+    padding-left: var(--space-6);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    overflow-wrap: anywhere;
+    color: var(--fg-muted);
+  }
+  .sources li + li {
+    margin-top: var(--space-1);
+  }
+</style>

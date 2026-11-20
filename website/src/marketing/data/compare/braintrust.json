@@ -1,0 +1,79 @@
+{
+  "slug": "braintrust",
+  "name": "Braintrust",
+  "url": "https://www.braintrust.dev",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Hosted platform for tracing, evaluating and monitoring LLM applications and agents, with a proprietary backend.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Self-hosted data plane: API, PostgreSQL, Redis, object storage, Brainstore; vendor hosts the control plane",
+      "sources": [
+        "https://docs.braintrust.dev/admin/self-hosting",
+        "https://www.braintrust.dev/pricing"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Platform is proprietary; the self-host Terraform and Helm repos are Apache-2.0; SDKs Apache-2.0, proxy MIT",
+      "sources": [
+        "https://github.com/braintrustdata",
+        "https://docs.braintrust.dev/admin/deployment/index"
+      ]
+    },
+    "cloudFree": {
+      "value": "Starter $0: 1 GB processed data, 10k scores, 14-day retention, unlimited users",
+      "sources": ["https://www.braintrust.dev/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Pro $249/month incl. 5 GB data, 50k scores, 30-day retention; then $3/GB, $1.50 per 1k scores",
+      "sources": ["https://www.braintrust.dev/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP at /otel/v1/traces; gen_ai.* and OpenInference attributes mapped; gRPC not mentioned",
+      "sources": [
+        "https://docs.braintrust.dev/integrations/sdk-integrations/opentelemetry",
+        "https://docs.braintrust.dev/integrations/sdk-integrations/opentelemetry/attributes"
+      ]
+    },
+    "sql": {
+      "value": "Yes: SQL on the Query page in the UI, POST to /btql endpoint, and bt sql CLI",
+      "sources": ["https://docs.braintrust.dev/reference/sql"]
+    },
+    "mcp": {
+      "value": "Hosted MCP server: query data with SQL, manage alerts, prompts, dashboards; run evals, edit datasets",
+      "sources": ["https://docs.braintrust.dev/integrations/developer-tools/mcp"]
+    },
+    "onlineEvals": {
+      "value": "Yes: online scoring rules run scorers, including LLM-as-a-judge, on production logs with sampling",
+      "sources": ["https://docs.braintrust.dev/evaluate/score-online"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: versioned datasets that experiments can pin to; experiments run on datasets",
+      "sources": [
+        "https://docs.braintrust.dev/annotate/datasets",
+        "https://docs.braintrust.dev/evaluate/run-evaluations"
+      ]
+    },
+    "promptManagement": {
+      "value": "Yes: prompts versioned, pinned or assigned to environments; UI edits apply without redeploy",
+      "sources": ["https://docs.braintrust.dev/deploy/prompts"]
+    },
+    "gateway": {
+      "value": "Yes: Braintrust Gateway, unified API with caching and provider failover; hosted gateway is public preview, no SLA",
+      "sources": ["https://docs.braintrust.dev/deploy/gateway"]
+    },
+    "alerts": {
+      "value": "Log, time-window and environment alerts to webhook, Slack or PagerDuty",
+      "sources": ["https://docs.braintrust.dev/admin/automations/alerts"]
+    }
+  },
+  "chooseThem": [
+    "Managed cloud with unlimited users on the Starter plan and no infrastructure to run",
+    "Online scoring, alerts, dashboards and a hosted MCP server, with LLM-as-judge scorers and prompt environments",
+    "Enterprise options: BYOC or self-hosted data plane, RBAC and premium support"
+  ],
+  "notes": "Pricing page does not itself say self-hosted data plane needs Enterprise; it lists 'on-prem or hosted deployment' under Enterprise. Docs deployment page states BYOC requires Enterprise and is silent on plan for self-hosted; a search summary of docs pages said both are Enterprise-only, treat 'Enterprise' for self-hosting as likely but only pricing-page wording is confirmed. Docs self-hosting page says new organisations are directed to BYOC. Control plane (UI, auth, metadata) stays hosted by Braintrust. Platform source is not public (GitHub org lists only data-plane infra, SDK, proxy repos); pricing may change. Autoevals repo licence not confirmed. OTLP: gRPC not mentioned in docs read; trace protocol not explicitly stated on page (logs endpoint accepts JSON or protobuf). SQL feature is called BTQL/SQL in docs. Verified 2026-11-20: selfHostStack 'Enterprise only' unsupported (self-hosting page states no plan; BYOC needs Enterprise per deployment page; pricing lists on-prem under Enterprise) so removed; Pro 30-day retention added from pricing; otel conventions now confirmed (gen_ai, OpenInference), protocol for traces not stated; 'experiments immutable snapshots' unsupported, removed; chooseThem: 'unlimited users on every plan' narrowed to Starter, vague 'large teams' item dropped. Others (licences, SQL, MCP, alerts, gateway preview, online scoring, prompts) confirmed.",
+  "chooseUs": [
+    "You want to self-host the whole product, with no vendor-hosted control plane",
+    "You want an open-source core you can read and run"
+  ]
+}
