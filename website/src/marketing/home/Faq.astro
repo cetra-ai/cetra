@@ -1,0 +1,68 @@
+---
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+---
+
+<Section tone="ink" width="narrow" labelledby="faq-title">
+  <SectionHeading eyebrow="Questions" title="Before you try it" id="faq-title" />
+  <div class="faq">
+    <details>
+      <summary><span class="question">Will one machine handle my traffic?</span></summary>
+      <p class="muted">cetra is built for analytical queries over many spans. Recent spans stay in memory; older ones go to compressed columnar files that queries scan in parallel, on local disk or in S3. We will publish benchmarks with their method.</p>
+    </details>
+    <details>
+      <summary><span class="question">Is one binary a toy?</span></summary>
+      <p class="muted">No. cetra has organizations and projects, roles, OpenID Connect sign-in, API keys, LLM judges, datasets, experiments, alerts, a SQL console and an MCP server. One binary is how it is packaged, not a limit on what it does.</p>
+    </details>
+    <details>
+      <summary><span class="question">What if the project stops?</span></summary>
+      <p class="muted">The core is MIT-licensed, and your traces are Parquet files on your disk that you can read without cetra.</p>
+    </details>
+    <details>
+      <summary><span class="question">Cloud or self-hosted?</span></summary>
+      <p class="muted">Self-host when traces must stay in your infrastructure, or when you don't want a usage bill. Use cetra Cloud when you don't want to run anything. The software is the same.</p>
+    </details>
+    <details>
+      <summary><span class="question">Which frameworks work?</span></summary>
+      <p class="muted">Anything that sends OpenTelemetry, with helpers for OpenAI, Anthropic, LangChain, LlamaIndex, the Vercel AI SDK, the OpenAI Agents SDK and more. <a href="/docs/integrations/">See the integrations</a></p>
+    </details>
+  </div>
+</Section>
+
+<style>
+  .faq {
+    margin-top: var(--space-7);
+  }
+  details {
+    border-bottom: 1px solid var(--line);
+    padding-block: var(--space-4);
+  }
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    list-style: none;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  .question {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+    cursor: pointer;
+  }
+  summary::after {
+    content: "+";
+    flex: none;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    color: var(--accent);
+  }
+  details[open] summary::after {
+    content: "−";
+  }
+  details p {
+    margin-top: var(--space-3);
+  }
+</style>

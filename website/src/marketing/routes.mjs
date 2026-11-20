@@ -5,10 +5,10 @@
 export const LAUNCHED = false;
 
 /** Routes that always carry `noindex`, launched or not. */
-export const ALWAYS_NOINDEX = ["/styleguide/"];
+export const ALWAYS_NOINDEX = ["/styleguide/", "/home/"];
 
 /** Every marketing route, with a trailing slash. `/docs/` pages are not listed: Starlight owns them. */
-export const MARKETING_ROUTES = ["/styleguide/"];
+export const MARKETING_ROUTES = ["/styleguide/", "/home/"];
 
 /** @param {string} route */
 export function isNoindex(route) {

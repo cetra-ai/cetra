@@ -1,0 +1,81 @@
+---
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import { CLOUD, CONTACT_EMAIL } from "../site";
+---
+
+<Section tone="teal" divider labelledby="deploy-title">
+  <SectionHeading
+    eyebrow="Two ways to run it"
+    title="Our cloud, or your server."
+    id="deploy-title"
+    lede="The same software either way. Move between them when your needs change."
+  />
+  <div class="cards">
+    <Card title="cetra Cloud">
+      <ul class="points">
+        <li>Free up to 100,000 spans and scores a month</li>
+        <li>Paid plans from $30 a month</li>
+        <li>Hosted in the EU</li>
+      </ul>
+      <div class="actions">
+        <Button href={CLOUD.signup} external>Start free</Button>
+        <Button href={CLOUD.demo} variant="secondary" external srHint="(needs a free account)">Try the demo</Button>
+      </div>
+    </Card>
+    <Card title="Self-hosted">
+      <ul class="points">
+        <li>Free, with no limits on volume, seats or retention</li>
+        <li>One binary, Docker or Helm</li>
+        <li>A licence key adds single sign-on and project roles</li>
+      </ul>
+      <div class="actions">
+        <Button href="/docs/self-hosting/install/">Install</Button>
+        <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+      </div>
+    </Card>
+  </div>
+</Section>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+  .points {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+  .points li {
+    position: relative;
+    padding-left: var(--space-4);
+  }
+  .points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-5);
+  }
+  @media (max-width: 860px) {
+    .cards {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

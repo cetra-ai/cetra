@@ -1,0 +1,86 @@
+---
+import Button from "../components/Button.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import Terminal from "../components/Terminal.astro";
+---
+
+<Section tone="raised" divider labelledby="agents-title">
+  <div class="agents">
+    <div class="text">
+      <SectionHeading
+        eyebrow="MCP and SQL"
+        title="Your agents can read it too."
+        id="agents-title"
+        lede="cetra has an MCP server. Point Claude Code, Cursor or another MCP client at your traces and ask what went wrong, from your editor."
+      />
+      <ul class="features">
+        <li>Search traces and open a whole trace</li>
+        <li>Run read-only SQL over your project</li>
+        <li>Works with MCP clients that support streamable HTTP</li>
+      </ul>
+      <div class="docs-link">
+        <Button href="/docs/platform/mcp/" variant="ghost">Read the MCP docs →</Button>
+      </div>
+    </div>
+    <Terminal
+      title="claude · support-bot"
+      lines={[
+        { kind: "user", text: "Which traces failed most in the last day?" },
+        { kind: "tool", text: "cetra · query_sql" },
+        { kind: "out", text: "SELECT name, count(*) AS failed FROM traces WHERE status = 'error' AND start_time > now() - INTERVAL '1 day' GROUP BY name ORDER BY failed DESC LIMIT 3" },
+        { kind: "out", text: "refund-agent 14 · billing-lookup 9 · handoff 4" },
+        { kind: "tool", text: "cetra · get_trace" },
+        { kind: "out", text: "refund-agent · tool \"issue_refund\" returned 422: amount above the limit" },
+        { kind: "agent", text: "refund-agent fails when the refund is above the limit. The tool returns 422 and the agent retries with the same amount. I can add a check before the call." },
+      ]}
+    />
+  </div>
+</Section>
+
+<style>
+  .agents {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+  }
+  .text {
+    display: grid;
+    gap: var(--space-5);
+    align-content: start;
+    min-width: 0;
+  }
+  .features {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: grid;
+    gap: var(--space-2);
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .features li {
+    position: relative;
+    padding-left: var(--space-4);
+  }
+  .features li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .docs-link {
+    margin-left: -0.4rem;
+  }
+  @media (min-width: 960px) {
+    .agents {
+      grid-template-columns: 1fr 1fr;
+      align-items: center;
+      gap: var(--space-8);
+    }
+  }
+</style>
