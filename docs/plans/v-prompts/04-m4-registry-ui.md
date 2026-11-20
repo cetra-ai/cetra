@@ -108,6 +108,17 @@ export function promptWriteKeys(org: string, project: string, prompt: string): Q
 16. **Screenshots** `waitFor` is a plain string.
 17. **Dotted names.** Add a V4.2 test: `renderApp("/acme/support-bot/prompts/v1.2")` with `server.use` answering the prompt `v1.2` renders its page (the `$prompt` param matches names with dots).
 
+### Second review (these override everything above)
+
+18. **Checks run once, at the milestone's end** (the user's rule): no phase runs `just check-web`, vitest, tsc or a build. Each phase writes code and tests and commits; the "Done when" lines of the phases become the milestone's checks, run after V4.5 (`pnpm --dir web gen:routes`, then `just check`), and failures are fixed then. So V4.1 may link to `/$org/$project/prompts/$prompt`, which V4.2 creates.
+19. **Navigation after create** uses the response: `navigate({ to: "/$org/$project/prompts/$prompt", params: { org, project, prompt: data.name } })`; V4.1 test 4 answers the POST with `{ ...v1Fixture, name: "faq-bot" }` and a GET of `faq-bot`.
+20. **Missing version**: render `<div className="flex flex-col items-center gap-3"><EmptyState … /><Button …>Go to latest</Button></div>`; `EmptyState` has no action prop and is not edited.
+21. **Edit lists**: `web/src/components/prompts/label-chip.tsx`, `web/src/test/problem.ts` (and its test if one exists) are in V4.1's Edit list; V4.2 extends `label-chip.tsx` (remove button and confirm) rather than creating it.
+22. **No stub tab**: V4.2 renders three tabs (Template, Versions, Labels); V4.3 adds the Metrics tab trigger and content.
+23. **`?create=1` for viewers**: the dialog's `open` is `create && canManagePrompts(data.role)`.
+24. **Dev mocks**: the metrics example only matches its exact `from`/`to`, so the dev server answers 404 on the Metrics tab; do not screenshot it. A new facet on the large dev mocks answers 400 (`field cannot be faceted`); this is a known dev-mock gap, not to fix here (V4.4 step 5).
+25. **Small points**: `UnsavedChangesGuard` is `web/src/components/settings/unsaved-changes.tsx`; list-to-page links pass `state={useBackState("Prompts")}` as other lists do; V4.3 test 3 reads the link's search with `new URL(href, "http://x").searchParams`.
+
 ---
 
 ## V4.1 — Queries, sidebar, prompts list, create and settings dialogs
