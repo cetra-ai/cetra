@@ -109,8 +109,33 @@ pub mod environment {
     pub const EVAL: &str = crate::cetra_name!("-eval");
     /// What external data that claimed [`EVAL`] is rewritten to. Spec 06.
     pub const EVAL_EXTERNAL: &str = crate::cetra_name!("-eval-external");
+    /// Reserved for playground runs (D-V-22, D-V-33).
+    pub const PLAYGROUND: &str = crate::cetra_name!("-playground");
+    /// What external data that claimed [`PLAYGROUND`] is rewritten to (D-V-33).
+    pub const PLAYGROUND_EXTERNAL: &str = crate::cetra_name!("-playground-external");
+    /// Environments only the server writes. Their traces are hidden by default, excluded from
+    /// online rules, refused as evaluation targets, rewritten when received over OTLP, and not
+    /// billed (D-V-33, D-V-34). A new reserved environment is added here.
+    pub const RESERVED: &[&str] = &[EVAL, PLAYGROUND];
     /// Default environment for experiment runs. Spec 01 `environment`.
     pub const EXPERIMENT: &str = "experiment";
+
+    /// Whether `environment` is reserved (D-V-33).
+    #[must_use]
+    pub fn is_reserved(environment: &str) -> bool {
+        RESERVED.contains(&environment)
+    }
+
+    /// The name that external data claiming a reserved `environment` is rewritten to (D-V-33).
+    /// `None` when `environment` is not reserved.
+    #[must_use]
+    pub fn external_alias(environment: &str) -> Option<&'static str> {
+        match environment {
+            e if e == EVAL => Some(EVAL_EXTERNAL),
+            e if e == PLAYGROUND => Some(PLAYGROUND_EXTERNAL),
+            _ => None,
+        }
+    }
 }
 
 /// Media references stored in payloads.
@@ -229,6 +254,12 @@ mod tests {
             ),
             ("environment", "EVAL", environment::EVAL),
             ("environment", "EVAL_EXTERNAL", environment::EVAL_EXTERNAL),
+            ("environment", "PLAYGROUND", environment::PLAYGROUND),
+            (
+                "environment",
+                "PLAYGROUND_EXTERNAL",
+                environment::PLAYGROUND_EXTERNAL,
+            ),
             ("environment", "EXPERIMENT", environment::EXPERIMENT),
             ("media", "URI_SCHEME", media::URI_SCHEME),
             ("media", "DROPPED_URI", media::DROPPED_URI),
@@ -248,6 +279,40 @@ mod tests {
             .map(|(module, name, value)| format!("{module}::{name} = \"{value}\""))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn reserved_environments() {
+        assert!(environment::is_reserved(environment::EVAL));
+        assert!(environment::is_reserved("cetra-playground"));
+        assert!(!environment::is_reserved("production"));
+        assert!(!environment::is_reserved("cetra-eval-external"));
+        assert!(!environment::is_reserved("cetra-playground-external"));
+        assert!(!environment::is_reserved(""));
+
+        assert_eq!(
+            environment::external_alias(environment::EVAL),
+            Some(environment::EVAL_EXTERNAL)
+        );
+        assert_eq!(
+            environment::external_alias(environment::PLAYGROUND),
+            Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(environment::external_alias("production"), None);
+        assert_eq!(
+            environment::external_alias(environment::EVAL_EXTERNAL),
+            None
+        );
+        for reserved in environment::RESERVED {
+            assert!(
+                environment::is_reserved(reserved),
+                "{reserved} is not reserved"
+            );
+            assert!(
+                environment::external_alias(reserved).is_some(),
+                "{reserved} has no external alias"
+            );
+        }
     }
 
     #[test]
@@ -291,6 +356,8 @@ mod tests {
             metadata_key::NORMALIZE_WARNING,
             environment::EVAL,
             environment::EVAL_EXTERNAL,
+            environment::PLAYGROUND,
+            environment::PLAYGROUND_EXTERNAL,
             media::DROPPED_URI,
         ];
         for value in branded {

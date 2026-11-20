@@ -383,13 +383,13 @@ struct Group {
     root: bool,
 }
 
-/// Folds a batch into one [`Group`] per trace, in first-seen order. Evaluation and experiment spans
-/// are left out (D-I-17).
+/// Folds a batch into one [`Group`] per trace, in first-seen order. Spans in a reserved environment
+/// (evaluation and playground runs) and experiment spans are left out (D-I-17, D-V-33).
 fn group_by_trace(spans: &[Span]) -> Vec<(TraceId, Group)> {
     let mut index: HashMap<TraceId, usize> = HashMap::new();
     let mut groups: Vec<(TraceId, Group)> = Vec::new();
     for span in spans {
-        if span.environment.as_deref() == Some(environment::EVAL)
+        if span.environment.as_deref().is_some_and(environment::is_reserved)
             || span.metadata.contains_key(metadata_key::EXPERIMENT_ID)
         {
             continue;
@@ -494,6 +494,17 @@ mod tests {
             .metadata
             .insert(metadata_key::EXPERIMENT_ID.to_owned(), "exp-1".to_owned());
         pending.observe(project, &[judge, experiment], 10);
+        assert_eq!(pending.len(), 0);
+    }
+
+    #[test]
+    fn playground_spans_are_ignored() {
+        let pending = PendingTraces::new(10);
+        let project = project_id();
+        track(&pending, project);
+        let mut run = span(1, true, 100);
+        run.environment = Some(environment::PLAYGROUND.to_owned());
+        pending.observe(project, &[run], 10);
         assert_eq!(pending.len(), 0);
     }
 

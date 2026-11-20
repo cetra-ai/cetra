@@ -148,7 +148,7 @@ mod tests {
 
     use cetra_core::enums::{SpanKind, SpanStatus};
     use cetra_core::ids::{SpanId, TraceId};
-    use cetra_core::names::metadata_key;
+    use cetra_core::names::{environment, metadata_key};
     use cetra_core::score::{Score, ScoreTarget};
     use cetra_core::span::Span;
     use datafusion::arrow::array::{Array, AsArray, RecordBatch};
@@ -163,7 +163,7 @@ mod tests {
     use crate::views::{ProjectQuery, QueryContext, TimeWindow};
 
     use super::FilterView;
-    use super::scope::{exclusions, search, time_window};
+    use super::scope::{exclusions, search, strict_exclusions, time_window};
 
     fn context() -> QueryContext {
         QueryContext::new(example_query(), None).expect("example project")
@@ -1100,6 +1100,59 @@ mod tests {
         assert_eq!(
             matching_expr(&ctx, FilterView::Traces, experiments, "trace_id").await,
             with_experiment
+        );
+    }
+
+    #[tokio::test]
+    async fn playground_traces_follow_the_reserved_rule() {
+        let mut spans = dataset_spans();
+        let mut playground = spans[0].clone();
+        playground.trace_id = TraceId::from_str("a1000000000000000000000000000009").expect("trace");
+        playground.span_id = SpanId::from_str("b100000000000091").expect("span");
+        playground.parent_span_id = None;
+        playground.environment = Some(environment::PLAYGROUND.to_owned());
+        spans.push(playground);
+        let ctx = context_with_spans(&spans);
+        let listed = listed_trace_ids();
+        let playground_id = "a1000000000000000000000000000009";
+
+        let hidden = exclusions(&ctx, FilterView::Traces, false, false, false)
+            .expect("default")
+            .expect("clauses");
+        assert_eq!(
+            matching_expr(&ctx, FilterView::Traces, hidden, "trace_id").await,
+            listed
+        );
+
+        let all_off = exclusions(&ctx, FilterView::Traces, true, true, false).expect("all off");
+        assert!(all_off.is_none());
+        let shown = exclusions(&ctx, FilterView::Traces, true, false, false)
+            .expect("include eval")
+            .expect("experiment clause");
+        let mut expected = listed.clone();
+        expected.insert(playground_id.to_owned());
+        assert_eq!(
+            matching_expr(&ctx, FilterView::Traces, shown, "trace_id").await,
+            expected
+        );
+
+        let by_filter = exclusions(&ctx, FilterView::Traces, false, true, true)
+            .expect("environment reference and experiments");
+        assert!(by_filter.is_none());
+        let by_filter = exclusions(&ctx, FilterView::Traces, false, false, true)
+            .expect("environment reference")
+            .expect("experiment clause");
+        assert_eq!(
+            matching_expr(&ctx, FilterView::Traces, by_filter, "trace_id").await,
+            expected
+        );
+
+        let strict = strict_exclusions(&ctx, FilterView::Traces, None)
+            .await
+            .expect("strict");
+        assert_eq!(
+            matching_expr(&ctx, FilterView::Traces, strict, "trace_id").await,
+            listed
         );
     }
 

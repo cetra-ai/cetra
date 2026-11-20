@@ -334,7 +334,7 @@ const SPANS: &[ColumnInfo] = &[
         "environment",
         ColumnKind::String,
         true,
-        "Deployment environment. cetra-eval is reserved for evaluator runs.",
+        "Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs.",
     ),
     col(
         "release",

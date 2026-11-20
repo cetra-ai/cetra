@@ -59,7 +59,7 @@ Do not edit `responses/`, `manifest.json` or `static/sql-result.json` by hand. R
 | Missing parent of trace 6 | `b1000000000000ff` |
 | PNG | `497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581` |
 
-Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists.
+Session and user ids match `[a-z0-9-]+` so they can be file names. Trace 5 uses environment `cetra-eval` and is left out of the default lists, as is any trace in `cetra-playground`.
 
 ## Manifest
 
