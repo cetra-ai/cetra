@@ -17,10 +17,10 @@ export const MAX_TRACE_ISSUES = 8;
  * filter leaves some out. `has_score` names are the occurrence score names (`issue:<id>`).
  */
 export function groupTraceFilter(issue: Schema<"Issue">): { filter: string; note?: string } {
-  const names = [
-    issue.score_name,
-    ...issue.merged_from.map((id) => `issue:${id}`),
-  ].slice(0, MAX_TRACE_ISSUES);
+  const names = [issue.score_name, ...issue.merged_from.map((id) => `issue:${id}`)].slice(
+    0,
+    MAX_TRACE_ISSUES,
+  );
   const filter = names
     .map((name) => serializeChip({ kind: "has_score", name, negated: false }))
     .join(" OR ");

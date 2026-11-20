@@ -13,9 +13,7 @@ const LIST_URL = "/acme/support-bot/issue-sources";
 /** Serves the fixture source on its detail route. */
 function found() {
   server.use(
-    http.get("/api/v1/projects/:project/issue-sources/:id", () =>
-      HttpResponse.json(sourceFixture),
-    ),
+    http.get("/api/v1/projects/:project/issue-sources/:id", () => HttpResponse.json(sourceFixture)),
   );
 }
 

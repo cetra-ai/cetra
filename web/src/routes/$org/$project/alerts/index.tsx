@@ -346,6 +346,7 @@ function AlertsPage() {
                                       )}
                                     >
                                       <Link
+                                        from="/$org/$project/alerts/"
                                         to="/$org/$project/alerts"
                                         params={{ org, project }}
                                         search={(prev) => withRule(prev, rule.id)}
@@ -537,6 +538,7 @@ function RecentEvents({
                     <TableCell>
                       {rule ? (
                         <Link
+                          from="/$org/$project/alerts/"
                           to="/$org/$project/alerts"
                           params={{ org, project }}
                           search={(prev) => withRule(prev, rule.id)}

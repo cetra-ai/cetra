@@ -95,7 +95,7 @@ it("disables New source and the switch for a viewer", async () => {
 
   expect(await screen.findByRole("button", { name: "New source" })).toBeDisabled();
   expect(screen.queryByRole("link", { name: "New source" })).toBeNull();
-  expect(screen.getByRole("switch", { name: "Enable Errors" })).toBeDisabled();
+  expect(await screen.findByRole("switch", { name: "Enable Errors" })).toBeDisabled();
 });
 
 it("shows the empty state when the project has no sources", async () => {

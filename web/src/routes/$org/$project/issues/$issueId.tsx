@@ -139,9 +139,9 @@ function IssuePage() {
           <p className="text-body text-muted-foreground">No examples yet.</p>
         ) : (
           <ul className="flex flex-col divide-y rounded-md border">
-            {examples.map((example, index) => (
+            {examples.map((example) => (
               <li
-                key={`${index}-${example.trace_id}-${example.span_id ?? ""}`}
+                key={`${example.issue_id}-${example.trace_id}-${example.created_at}`}
                 className="flex min-w-0 flex-wrap items-baseline gap-x-3 px-3 py-2"
               >
                 <Link

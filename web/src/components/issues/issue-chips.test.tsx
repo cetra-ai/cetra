@@ -77,10 +77,7 @@ describe("issue chips on a trace", () => {
   it("shows one chip per issue of the trace, linked to the issue page", async () => {
     serveTraceIssues(
       [OPEN, RESOLVED],
-      [
-        issue(OPEN, "Tool timeout", "open"),
-        issue(RESOLVED, "Bad JSON from the model", "resolved"),
-      ],
+      [issue(OPEN, "Tool timeout", "open"), issue(RESOLVED, "Bad JSON from the model", "resolved")],
     );
     await renderApp(`/acme/support-bot/traces/${TRACE}`);
     const header = await screen.findByRole("region", { name: "Trace" });

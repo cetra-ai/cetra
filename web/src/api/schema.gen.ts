@@ -5679,7 +5679,7 @@ export interface components {
              * @description Creation time. JSON is RFC 3339.
              */
             created_at: string;
-            /** @description Description written by a member. `null` when there is none. */
+            /** @description Description written by a member. Omitted when there is none. */
             description?: string;
             /**
              * Format: date-time
@@ -5702,7 +5702,7 @@ export interface components {
             merged_from: string[];
             /**
              * Format: uuid
-             * @description The issue this one was merged into. `null` unless `state` is `merged`.
+             * @description The issue this one was merged into. Omitted unless `state` is `merged`.
              */
             merged_into?: string;
             /**
@@ -5719,7 +5719,7 @@ export interface components {
             resolved_at?: string;
             /**
              * Format: uuid
-             * @description Who resolved it. `null` when nobody did or the user is unknown.
+             * @description Who resolved it. Omitted when nobody did or the user is unknown.
              */
             resolved_by?: string;
             /** @description Name of the occurrence scores of this issue: `issue:<id>`. */
@@ -5769,7 +5769,7 @@ export interface components {
         IssueEvent: {
             /**
              * Format: uuid
-             * @description The user who acted. `null` for the system or an unknown user.
+             * @description The user who acted. Omitted for the system or an unknown user.
              */
             actor_user_id?: string;
             /**
@@ -5806,9 +5806,9 @@ export interface components {
              * @description The issue the occurrence belongs to: the issue itself or one merged into it.
              */
             issue_id: string;
-            /** @description Reason stored with the occurrence. `null` when there is none. */
+            /** @description Reason stored with the occurrence. Omitted when there is none. */
             reason?: string;
-            /** @description The error span the occurrence came from, 16 lowercase hex digits. `null` when unknown. */
+            /** @description The error span the occurrence came from, 16 lowercase hex digits. Omitted when unknown. */
             span_id?: string;
             /** @description Trace id, 32 lowercase hex digits. */
             trace_id: string;
@@ -5843,12 +5843,12 @@ export interface components {
             created_at: string;
             /**
              * Format: uuid
-             * @description User who created the source. `null` when that user is unknown.
+             * @description User who created the source. Omitted when that user is unknown.
              */
             created_by?: string;
             /** @description Whether the source runs. A disabled source counts for no plan limit. */
             enabled: boolean;
-            /** @description Spans filter for `error` sources. `null` when there is none. */
+            /** @description Spans filter for `error` sources. Omitted when there is none. */
             filter?: string;
             /**
              * Format: uuid
@@ -5864,7 +5864,7 @@ export interface components {
              * @description Issues of this source that are open now.
              */
             open_issues: number;
-            /** @description Why the sweeper skips the source. `null` when it runs. */
+            /** @description Why the sweeper skips the source. Omitted when it runs. */
             paused_reason?: string;
             /**
              * Format: uuid

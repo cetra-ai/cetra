@@ -59,18 +59,17 @@ export function IssueHistory({
   return (
     <ol className="flex flex-col divide-y rounded-md border">
       {events.map((event) => {
-        const user =
-          event.actor_user_id === null
-            ? undefined
-            : people.find((member) => member.user.id === event.actor_user_id)?.user;
+        const user = !event.actor_user_id
+          ? undefined
+          : people.find((member) => member.user.id === event.actor_user_id)?.user;
         return (
           <li key={event.id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2">
             <span className="text-body">{eventText(event)}</span>
             <span className="text-caption text-muted-foreground">
-              {event.actor_user_id === null ? (
+              {!event.actor_user_id ? (
                 "System"
               ) : user ? (
-                (user.name || user.email)
+                user.name || user.email
               ) : (
                 <IdText value={event.actor_user_id} kind="user" />
               )}

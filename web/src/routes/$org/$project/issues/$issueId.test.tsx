@@ -1,14 +1,13 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
+import { HttpResponse, http, type JsonBodyType } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import issueFixture from "../../../../../../fixtures/api/static/issue.json";
 import eventsFixture from "../../../../../../fixtures/api/static/issue-events.json";
 import occurrencesFixture from "../../../../../../fixtures/api/static/issue-occurrences.json";
-import issueFixture from "../../../../../../fixtures/api/static/issue.json";
-import issuesFixture from "../../../../../../fixtures/api/static/issues.json";
-import membersFixture from "../../../../../../fixtures/api/static/project-members.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
+import membersFixture from "../../../../../../fixtures/api/static/project-members.json";
 
 const ISSUE_ID = "01900000-0000-7000-8000-000000001c01";
 const MERGED_ID = "01900000-0000-7000-8000-000000001c02";
@@ -19,7 +18,7 @@ const PAGE = `/acme/support-bot/issues/${ISSUE_ID}`;
 const OTHER = { ...issueFixture, id: OTHER_ID, title: OTHER_TITLE, merged_from: [] };
 
 /** Serves the issue (`body` for the page's issue, `OTHER` for the other one), its occurrences, history and members. */
-function serveIssue(body: unknown = issueFixture) {
+function serveIssue(body: JsonBodyType = issueFixture) {
   server.use(
     http.get("/api/v1/projects/:project/issues/:id", ({ params }) =>
       HttpResponse.json(params.id === OTHER_ID ? OTHER : body),
@@ -27,9 +26,7 @@ function serveIssue(body: unknown = issueFixture) {
     http.get("/api/v1/projects/:project/issues/:id/occurrences", () =>
       HttpResponse.json(occurrencesFixture),
     ),
-    http.get("/api/v1/projects/:project/issues/:id/events", () =>
-      HttpResponse.json(eventsFixture),
-    ),
+    http.get("/api/v1/projects/:project/issues/:id/events", () => HttpResponse.json(eventsFixture)),
     http.get("/api/v1/projects/:project/members", () => HttpResponse.json(membersFixture)),
   );
 }
@@ -59,15 +56,21 @@ it("shows the title, the state, the source, the chart, the examples and the hist
   expect(await screen.findByRole("heading", { name: TITLE })).toBeInTheDocument();
   expect(screen.getByText("Open")).toBeInTheDocument();
   expect(screen.getByText("Errors")).toBeInTheDocument();
-  expect(screen.getByRole("img", { name: "Occurrences per day" })).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "ValueError raised by the parser" })).toHaveAttribute(
+  expect(await screen.findByRole("img", { name: "Occurrences per day" })).toBeInTheDocument();
+  expect(
+    await screen.findByRole("link", { name: "ValueError raised by the parser" }),
+  ).toHaveAttribute(
     "href",
     "/acme/support-bot/traces/a1000000000000000000000000000001?span=b100000000000012",
   );
-  expect(screen.getByRole("link", { name: "Trace a1000000" })).toBeInTheDocument();
-  expect(screen.getByText("Another issue was merged into this one")).toBeInTheDocument();
-  expect(screen.getByText("Created")).toBeInTheDocument();
-  expect(screen.getByText("Ada Example")).toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "Trace a1000000" })).toBeInTheDocument();
+  expect(await screen.findByText("Another issue was merged into this one")).toBeInTheDocument();
+  const created = (await screen.findByText("Created")).closest("li") as HTMLElement;
+  expect(within(created).getByText("System")).toBeInTheDocument();
+  const merged = (await screen.findByText("Another issue was merged into this one")).closest(
+    "li",
+  ) as HTMLElement;
+  expect(await within(merged).findByText("Ada Example")).toBeInTheDocument();
 });
 
 it("Resolve sends the state change", async () => {

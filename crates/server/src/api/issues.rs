@@ -30,13 +30,16 @@ pub struct IssueSource {
     pub name: String,
     /// What the source reads. Immutable.
     pub kind: IssueSourceKind,
-    /// Spans filter for `error` sources. `null` when there is none.
+    /// Spans filter for `error` sources. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub filter: Option<String>,
     /// Whether the source runs. A disabled source counts for no plan limit.
     pub enabled: bool,
-    /// Why the sweeper skips the source. `null` when it runs.
+    /// Why the sweeper skips the source. Omitted when it runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
-    /// User who created the source. `null` when that user is unknown.
+    /// User who created the source. Omitted when that user is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,
     /// Creation time. JSON is RFC 3339.
     #[serde(with = "cetra_core::time_serde")]
@@ -183,13 +186,15 @@ pub struct Issue {
     pub score_name: String,
     /// Title, from the error.
     pub title: String,
-    /// Description written by a member. `null` when there is none.
+    /// Description written by a member. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Lifecycle state.
     pub state: IssueState,
     /// `true` when a resolved issue recurred and was reopened.
     pub regressed: bool,
-    /// The issue this one was merged into. `null` unless `state` is `merged`.
+    /// The issue this one was merged into. Omitted unless `state` is `merged`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_into: Option<Uuid>,
     /// Issues merged into this one. Their occurrences count here.
     pub merged_from: Vec<Uuid>,
@@ -209,7 +214,8 @@ pub struct Issue {
     )]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub resolved_at: Option<i64>,
-    /// Who resolved it. `null` when nobody did or the user is unknown.
+    /// Who resolved it. Omitted when nobody did or the user is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_by: Option<Uuid>,
     /// Creation time. JSON is RFC 3339.
     #[serde(with = "cetra_core::time_serde")]
@@ -311,13 +317,15 @@ pub struct IssueDay {
 pub struct IssueExample {
     /// Trace id, 32 lowercase hex digits.
     pub trace_id: String,
-    /// The error span the occurrence came from, 16 lowercase hex digits. `null` when unknown.
+    /// The error span the occurrence came from, 16 lowercase hex digits. Omitted when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub span_id: Option<String>,
     /// When the occurrence happened (the trace's start). JSON is RFC 3339.
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
-    /// Reason stored with the occurrence. `null` when there is none.
+    /// Reason stored with the occurrence. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// The issue the occurrence belongs to: the issue itself or one merged into it.
     pub issue_id: Uuid,
@@ -330,11 +338,14 @@ pub struct IssueEvent {
     pub id: Uuid,
     /// `created`, `state_changed`, `renamed`, `merged` or `regressed`.
     pub kind: String,
-    /// The user who acted. `null` for the system or an unknown user.
+    /// The user who acted. Omitted for the system or an unknown user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor_user_id: Option<Uuid>,
     /// The value before the change, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from_value: Option<String>,
     /// The value after the change, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to_value: Option<String>,
     /// When it happened. JSON is RFC 3339.
     #[serde(with = "cetra_core::time_serde")]

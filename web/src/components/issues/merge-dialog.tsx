@@ -119,7 +119,7 @@ export function MergeDialog({
         ) : rows.length === 0 ? (
           <p className="text-body text-muted-foreground">No other open issues match.</p>
         ) : (
-          <ul
+          <div
             aria-label="Issues to merge into"
             role="listbox"
             className="flex max-h-72 flex-col overflow-auto rounded-md border"
@@ -127,7 +127,7 @@ export function MergeDialog({
             {rows.map((row) => {
               const selected = target === row.id;
               return (
-                <li key={row.id} role="none">
+                <div key={row.id} role="none">
                   <button
                     type="button"
                     role="option"
@@ -145,10 +145,10 @@ export function MergeDialog({
                       {row.count} {row.count === 1 ? "occurrence" : "occurrences"}
                     </span>
                   </button>
-                </li>
+                </div>
               );
             })}
-          </ul>
+          </div>
         )}
         {candidates.hasNextPage ? (
           <Button

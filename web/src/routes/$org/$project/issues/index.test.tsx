@@ -1,11 +1,11 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
-import { HttpResponse, http } from "msw";
+import { HttpResponse, http, type JsonBodyType } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
-import issuesFixture from "../../../../../../fixtures/api/static/issues.json";
 import issueSourcesFixture from "../../../../../../fixtures/api/static/issue-sources.json";
+import issuesFixture from "../../../../../../fixtures/api/static/issues.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const PAGE = "/acme/support-bot/issues";
@@ -14,7 +14,7 @@ const TITLE = "ValueError: could not parse the reply";
 const EMPTY = { data: [], next_cursor: null };
 
 /** Serves the issue and source fixtures, and records every issue list request's URL. */
-function serveIssues(body: unknown = issuesFixture): URL[] {
+function serveIssues(body: JsonBodyType = issuesFixture): URL[] {
   const seen: URL[] = [];
   server.use(
     http.get("/api/v1/projects/:project/issues", ({ request }) => {
@@ -120,9 +120,10 @@ it("shows the empty state with a link to Issue sources when the user can manage 
   serveIssues(EMPTY);
   await renderApp(PAGE);
 
-  expect(await screen.findByText("No issues yet")).toBeInTheDocument();
+  const empty = (await screen.findByText("No issues yet")).parentElement
+    ?.parentElement as HTMLElement;
   expect(screen.getByText("Add an error source to start finding issues.")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "Issue sources" })).toHaveAttribute(
+  expect(within(empty).getByRole("link", { name: "Issue sources" })).toHaveAttribute(
     "href",
     "/acme/support-bot/issue-sources",
   );
@@ -133,8 +134,9 @@ it("shows the empty state without the link for a viewer", async () => {
   serveIssues(EMPTY);
   await renderApp(PAGE);
 
-  expect(await screen.findByText("No issues yet")).toBeInTheDocument();
-  expect(screen.queryByRole("link", { name: "Issue sources" })).toBeNull();
+  const empty = (await screen.findByText("No issues yet")).parentElement
+    ?.parentElement as HTMLElement;
+  expect(within(empty).queryByRole("link", { name: "Issue sources" })).toBeNull();
 });
 
 it("says no issues match, not that there are none, when a filter leaves nothing", async () => {

@@ -1,5 +1,5 @@
 import { Link, useNavigate } from "@tanstack/react-router";
-import type { ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { usePatchIssueSource } from "@/api/queries-issues";
@@ -21,6 +21,11 @@ const KIND_LABELS: Record<Schema<"IssueSourceKind">, string> = { error: "Errors"
 /** "1 open issue" or "2 open issues". */
 export function openIssuesText(count: number): string {
   return `${count} open ${count === 1 ? "issue" : "issues"}`;
+}
+
+/** Clicks on a cell's own controls (switch, link) do not open the row's source. */
+function stopRowClick(event: { stopPropagation: () => void }) {
+  event.stopPropagation();
 }
 
 /** The source's enabled flag, saved as it is toggled. A plan-limit refusal shows the upgrade. */
@@ -46,6 +51,7 @@ function EnabledSourceSwitch({
           aria-label={`Enable ${source.name}`}
           checked={source.enabled}
           disabled={!canManage || update.isPending}
+          onClick={stopRowClick}
           onCheckedChange={(enabled) => {
             update.mutate({
               params: { path: { project: projectRef(org, project), id: source.id } },
@@ -122,6 +128,7 @@ function columnsOf(org: string, project: string, canManage: boolean): DataTableC
           params={{ org, project }}
           search={{ source: row.original.id }}
           className="underline tabular-nums"
+          onClick={stopRowClick}
         >
           {openIssuesText(row.original.open_issues)}
         </Link>
@@ -152,11 +159,12 @@ export function SourceList({
   emptyState: ReactNode;
 }) {
   const navigate = useNavigate();
+  const columns = useMemo(() => columnsOf(org, project, canManage), [org, project, canManage]);
   return (
     <DataTable
       tableId="issue-sources"
       ariaLabel="Issue sources"
-      columns={columnsOf(org, project, canManage)}
+      columns={columns}
       rows={rows}
       getRowId={(row) => row.id}
       onActivate={(row) => {
