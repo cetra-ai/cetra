@@ -6,6 +6,8 @@ import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
+import annotationQueueItemDocument from "../../../fixtures/api/static/annotation-queue-item.json";
+import annotationQueueDocument from "../../../fixtures/api/static/annotation-queue.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import backfillDocument from "../../../fixtures/api/static/backfill.json";
 import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
@@ -378,6 +380,71 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/projects/{project}/experiments/{id}/finish",
   },
+  {
+    operationId: "create_annotation_queue",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues",
+  },
+  {
+    operationId: "update_annotation_queue",
+    method: "patch",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}",
+  },
+  {
+    operationId: "delete_annotation_queue",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}",
+  },
+  {
+    operationId: "add_annotation_queue_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items",
+  },
+  {
+    operationId: "remove_annotation_queue_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+  },
+  {
+    operationId: "next_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/next",
+  },
+  {
+    operationId: "lease_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+  },
+  {
+    operationId: "release_annotation_queue_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+  },
+  {
+    operationId: "complete_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+  },
+  {
+    operationId: "skip_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+  },
+  {
+    operationId: "reopen_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+  },
+  {
+    operationId: "preview_annotation_queue_matching",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+  },
+  {
+    operationId: "add_annotation_queue_matching",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+  },
 ];
 
 type Respond = (input: {
@@ -749,6 +816,37 @@ const RESPONSES: Record<string, Respond> = {
     }),
   post_experiment_finish: ({ params }) =>
     HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
+  create_annotation_queue: ({ body }) =>
+    HttpResponse.json({ ...annotationQueueDocument, ...named(body) }, { status: 201 }),
+  update_annotation_queue: ({ body }) =>
+    HttpResponse.json({
+      ...annotationQueueDocument,
+      ...body,
+      version: annotationQueueDocument.version + 1,
+    }),
+  delete_annotation_queue: () => noContent(),
+  add_annotation_queue_items: ({ body }) =>
+    HttpResponse.json(
+      {
+        added: Array.isArray(body.items) ? body.items.length : 0,
+        existing: 0,
+        skipped: [],
+      },
+      { status: 201 },
+    ),
+  remove_annotation_queue_item: () => noContent(),
+  next_annotation_queue_item: () => HttpResponse.json(annotationQueueItemDocument),
+  lease_annotation_queue_item: () => HttpResponse.json(annotationQueueItemDocument),
+  release_annotation_queue_item: () => noContent(),
+  complete_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "completed" }),
+  skip_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "skipped" }),
+  reopen_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "pending" }),
+  preview_annotation_queue_matching: () => HttpResponse.json({ matched: 42, capped: false }),
+  add_annotation_queue_matching: () =>
+    HttpResponse.json({ added: 42, existing: 0, blocked: 0, capped: false }, { status: 201 }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
