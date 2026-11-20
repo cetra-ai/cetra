@@ -7,6 +7,8 @@ use std::collections::{BTreeMap, HashMap};
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::score::{Score, ScoreTarget};
@@ -14,6 +16,7 @@ use cetra_storage::{
     MAX_COUNT_NAMES, QueryContext, ScoreListRequest, ScoreNameCount, ScoreNameCountsRequest,
     TimeWindow, ViewName,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
@@ -35,7 +38,6 @@ use crate::http::error::{self, ApiError};
 use crate::issues::source_limit::{self, SourceLimitError};
 use crate::meta::MetaError;
 use crate::meta::issues::{self as store, IssueSort, SourceKind, SourceRow};
-use crate::routes::alert_rules::{decode_cursor, encode_cursor};
 
 use super::orgs::page_named;
 use super::read::{READ_TIMEOUT, open_query};
@@ -626,6 +628,47 @@ fn sort_value(row: &store::IssueRow, sort: IssueSort) -> i64 {
     }
 }
 
+/// The name of a sort, as a cursor records it.
+fn sort_name(sort: IssueSort) -> &'static str {
+    match sort {
+        IssueSort::LastSeen => "last_seen",
+        IssueSort::FirstSeen => "first_seen",
+    }
+}
+
+/// The cursor of an issue page: the sort the page was taken with, and the sort value and id of
+/// its last row. A cursor is only good for its own sort (D-IC-9).
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IssueCursor {
+    sort: String,
+    value: i64,
+    id: Uuid,
+}
+
+/// The opaque cursor of a page taken with `sort`, after the row `(value, id)`.
+fn encode_issue_cursor(sort: IssueSort, value: i64, id: Uuid) -> Result<String, ApiError> {
+    let cursor = IssueCursor {
+        sort: sort_name(sort).to_owned(),
+        value,
+        id,
+    };
+    let bytes = serde_json::to_vec(&cursor).map_err(|error| ApiError::Internal(Box::new(error)))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+/// The position of a cursor that was taken with `sort`. A cursor that does not decode, or that
+/// was taken with another sort, is a `400` on `cursor`.
+fn decode_issue_cursor(text: &str, sort: IssueSort) -> Result<(i64, Uuid), ApiError> {
+    let invalid = || bad_request_field("cursor", "invalid cursor");
+    let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| invalid())?;
+    let cursor: IssueCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.sort != sort_name(sort) {
+        return Err(invalid());
+    }
+    Ok((cursor.value, cursor.id))
+}
+
 /// `GET …/issues`: the issues of the project, with counts over the period.
 async fn list_issues(
     State(state): State<AppState>,
@@ -638,7 +681,11 @@ async fn list_issues(
     let states = parse_states(params.state.as_deref())?;
     let sort = parse_sort(params.sort.as_deref())?;
     let ids = parse_ids(params.ids.as_deref())?;
-    let cursor = params.cursor.as_deref().map(decode_cursor).transpose()?;
+    let cursor = params
+        .cursor
+        .as_deref()
+        .map(|text| decode_issue_cursor(text, sort))
+        .transpose()?;
     let window = period(params.from, params.to, now, DAY_NS)?;
     let q = params
         .q
@@ -661,7 +708,7 @@ async fn list_issues(
     let more = rows.len() > page_len;
     rows.truncate(page_len);
     let next_cursor = match rows.last() {
-        Some(row) if more => Some(encode_cursor(sort_value(row, sort), row.id)?),
+        Some(row) if more => Some(encode_issue_cursor(sort, sort_value(row, sort), row.id)?),
         _ => None,
     };
 
@@ -1883,6 +1930,51 @@ mod tests {
         let bad = get_issues(&app, &seeded, "?cursor=x").await;
         assert_eq!(bad.status, 400, "{}", text(&bad));
         assert_eq!(bad.problem().errors[0].field, "cursor");
+    }
+
+    #[tokio::test]
+    async fn a_cursor_is_good_for_its_own_sort_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let now = app.state.clock.now_ns();
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        // Oldest first seen, but newest last seen, so the two sorts order the rows differently.
+        for (title, first, last) in [
+            ("one", now - 3 * HOUR_NS, now - HOUR_NS),
+            ("two", now - 2 * HOUR_NS, now - 2 * HOUR_NS),
+            ("three", now - HOUR_NS, now - 3 * HOUR_NS),
+        ] {
+            let mut row = issue_row(
+                project,
+                source,
+                Uuid::now_v7(),
+                title,
+                IssueState::Open,
+                first,
+            );
+            row.last_seen = last;
+            put_issue(&app, row).await;
+        }
+
+        let first = get_issues(&app, &seeded, "?limit=2").await.json::<Value>();
+        let cursor = first["next_cursor"].as_str().expect("a next cursor");
+        let refused = get_issues(
+            &app,
+            &seeded,
+            &format!("?limit=2&sort=first_seen&cursor={cursor}"),
+        )
+        .await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+        assert_eq!(refused.problem().errors[0].field, "cursor");
+
+        let first_sort = get_issues(&app, &seeded, "?limit=1&sort=first_seen")
+            .await
+            .json::<Value>();
+        let cursor = first_sort["next_cursor"].as_str().expect("a next cursor");
+        let refused = get_issues(&app, &seeded, &format!("?limit=1&cursor={cursor}")).await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+        assert_eq!(refused.problem().errors[0].field, "cursor");
     }
 
     #[tokio::test]
