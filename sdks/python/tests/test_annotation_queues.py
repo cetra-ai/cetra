@@ -212,6 +212,12 @@ def test_add_items_checks_types_before_any_request(client: Client, http_recorder
     bad_pairs: Any = [("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"), ("t", 5)]
     with pytest.raises(TypeError, match=r"spans\[1\]"):
         client.annotation_queues.add_items(QUEUE_ID, spans=bad_pairs)
+    bad_trace_ids: Any = [None]
+    with pytest.raises(TypeError, match=r"trace_ids\[0\]"):
+        client.annotation_queues.add_items(QUEUE_ID, trace_ids=bad_trace_ids)
+    bad_session_ids: Any = [1]
+    with pytest.raises(TypeError, match=r"session_ids\[0\]"):
+        client.annotation_queues.add_items(QUEUE_ID, session_ids=bad_session_ids)
     assert http_recorder.requests == []
 
 

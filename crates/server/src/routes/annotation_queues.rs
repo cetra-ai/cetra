@@ -871,7 +871,8 @@ async fn matching_targets(
     let include_experiments = body.include_experiments;
     let matching = match target {
         Target::Trace => {
-            let ids = cetra_storage::filter_trace_ids(
+            let deadline = Deadline::start();
+            let scanned = cetra_storage::filter_trace_ids(
                 &ctx,
                 cetra_storage::FilterDeletionRequest {
                     filter,
@@ -880,26 +881,34 @@ async fn matching_targets(
                     include_eval: false,
                     include_experiments,
                     limit: cap.saturating_add(1),
-                    timeout: READ_TIMEOUT,
+                    timeout: deadline.remaining()?,
                 },
             )
             .await?;
-            let capped = ids.len() > cap;
-            let found = ids
+            let capped = scanned.len() > cap;
+            let ids: Vec<TraceId> = scanned
                 .into_iter()
                 .take(cap)
-                .map(|found| {
+                .map(|found| found.trace_id)
+                .collect();
+            // D-AQ-8: a filter that names `environment` lifts the scan's evaluation-trace
+            // exclusion, so the traces are looked up again: `trace_targets` leaves them out.
+            let mut found: Vec<(store::NewItem, Vec<TraceId>)> = Vec::new();
+            for chunk in ids.chunks(cetra_storage::MAX_TARGET_IDS) {
+                let traces =
+                    cetra_storage::trace_targets(&ctx, chunk, deadline.remaining()?).await?;
+                found.extend(traces.into_iter().map(|trace| {
                     (
                         store::NewItem {
-                            trace_id: Some(found.trace_id.to_hex()),
+                            trace_id: Some(trace.trace_id.to_hex()),
                             span_id: None,
                             session_id: None,
-                            target_time: found.start_time,
+                            target_time: trace.start_time,
                         },
-                        vec![found.trace_id],
+                        vec![trace.trace_id],
                     )
-                })
-                .collect();
+                }));
+            }
             Matching { found, capped }
         }
         Target::Span => {
@@ -3294,6 +3303,31 @@ mod tests {
         assert_eq!(answer.added, 1);
         let items = items_of(&app, &seeded, queue.id).await;
         assert_eq!(items[0].trace_id, Some(trace_id(6).to_hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_never_adds_evaluation_traces_even_with_an_environment_filter() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let traces = create(&app, &seeded, "Traces", definition).await;
+        let spans = create_of(&app, &seeded, "Spans", "span", definition).await;
+        let now = app.state.clock.now_ns();
+        commit_span(&app, &seeded, trace_id(5), 5, now, None, true).await;
+        app.commit_trace_at(&seeded.project, trace_id(6), 0, now)
+            .await;
+
+        // The filter names `environment`, which lifts the scan's evaluation exclusion.
+        let mut body = window(now);
+        body["filter"] = json!("environment = 'cetra-eval'");
+        for queue in [traces.id, spans.id] {
+            let added = matching(&app, &seeded, queue, "", body.clone()).await;
+            assert_eq!(added.status, StatusCode::CREATED, "queue {queue}");
+            let answer: QueueMatchingAdded = added.json();
+            assert_eq!(answer.added, 0, "queue {queue}");
+        }
+        assert!(items_of(&app, &seeded, traces.id).await.is_empty());
+        assert!(items_of(&app, &seeded, spans.id).await.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

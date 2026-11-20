@@ -257,18 +257,28 @@ def _target_rows(
             raise ValueError(_ONE_KIND)
         if isinstance(trace_ids, str):
             raise TypeError("trace_ids must be a sequence of ids, not a string")
-        return [{"trace_id": trace_id} for trace_id in trace_ids]
+        return _id_rows("trace_ids", "trace_id", trace_ids)
     if session_ids is not None:
         if spans is not None:
             raise ValueError(_ONE_KIND)
         if isinstance(session_ids, str):
             raise TypeError("session_ids must be a sequence of ids, not a string")
-        return [{"session_id": session_id} for session_id in session_ids]
+        return _id_rows("session_ids", "session_id", session_ids)
     if spans is None:
         raise ValueError(_ONE_KIND)
     if isinstance(spans, str):
         raise TypeError("spans must be a sequence of (trace_id, span_id) pairs, not a string")
     return [_span_row(index, pair) for index, pair in enumerate(spans)]
+
+
+def _id_rows(name: str, key: str, ids: Sequence[object]) -> list[dict[str, str]]:
+    """One ``{key: id}`` row per id; every id must be a string. Errors never name the value."""
+    rows: list[dict[str, str]] = []
+    for index, value in enumerate(ids):
+        if not isinstance(value, str):
+            raise TypeError(f"{name}[{index}]: must be a string")
+        rows.append({key: value})
+    return rows
 
 
 def _span_row(index: int, pair: object) -> dict[str, str]:

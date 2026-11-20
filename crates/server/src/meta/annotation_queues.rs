@@ -400,6 +400,31 @@ async fn live_definitions_tx(
     Ok(missing)
 }
 
+/// The indexes of `ids` that are neither live definitions of `project` nor already on `queue`.
+/// D-AQ-7: an update may keep the archived definitions a queue holds, but adds none.
+async fn update_unknown_definitions_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    queue: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<usize>, MetaError> {
+    let mut unknown = Vec::new();
+    for index in live_definitions_tx(&mut *conn, project, ids).await? {
+        let on_queue: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM annotation_queue_definitions \
+             WHERE queue_id = ? AND definition_id = ?",
+        )
+        .bind(queue.to_string())
+        .bind(ids[index].to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+        if on_queue.is_none() {
+            unknown.push(index);
+        }
+    }
+    Ok(unknown)
+}
+
 /// Writes the definition rows of `queue` with positions 0..n.
 async fn insert_definition_rows(
     conn: &mut SqliteConnection,
@@ -707,7 +732,8 @@ pub(crate) async fn counts(
 
 /// Applies `changes` to the queue `id` of `project` when its stored version is `version`. The
 /// compare-and-set is one `UPDATE`: the version rises by one, and `updated_at` is set. A new
-/// `definition_ids` list replaces the old rows. Checked as [`insert_queue_tx`] checks them.
+/// `definition_ids` list replaces the old rows. The version is compared first; then each new id
+/// must be a live definition or already on the queue, so an update may keep archived ones.
 ///
 /// # Errors
 ///
@@ -720,10 +746,22 @@ pub(crate) async fn update_tx(
     changes: QueueChanges,
     now: i64,
 ) -> Result<QueueUpdate, MetaError> {
+    let current: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM annotation_queues WHERE project_id = ? AND id = ?")
+            .bind(project.to_string())
+            .bind(id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    match current {
+        None => return Ok(QueueUpdate::Missing),
+        Some(stored) if stored != version => return Ok(QueueUpdate::Stale(stored)),
+        Some(_) => {}
+    }
     if let Some(definition_ids) = &changes.definition_ids {
-        let missing = live_definitions_tx(&mut *conn, project, definition_ids).await?;
-        if !missing.is_empty() {
-            return Ok(QueueUpdate::UnknownDefinitions(missing));
+        let unknown =
+            update_unknown_definitions_tx(&mut *conn, project, id, definition_ids).await?;
+        if !unknown.is_empty() {
+            return Ok(QueueUpdate::UnknownDefinitions(unknown));
         }
     }
     let result = sqlx::query(
@@ -1491,6 +1529,22 @@ mod tests {
         }
     }
 
+    /// Archives the definition `id` after it was created.
+    async fn archive(db: &MetaDb, id: Uuid) {
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE score_definitions SET archived_at = ? WHERE id = ?")
+                    .bind(NOW)
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
     async fn update(
         db: &MetaDb,
         project: ProjectId,
@@ -1808,6 +1862,85 @@ mod tests {
         assert_eq!(row.version, 3);
         assert_eq!(row.description, None);
         assert_eq!(row.definition_ids, vec![d2, d1]);
+    }
+
+    #[tokio::test]
+    async fn update_keeps_an_archived_definition_already_on_the_queue() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let d1 = definition(&db, project, "tone", None).await;
+        let d2 = definition(&db, project, "accuracy", None).await;
+        let queue = created(
+            &db,
+            org,
+            project,
+            new_queue("review", Target::Trace, vec![d1, d2]),
+        )
+        .await;
+        archive(&db, d2).await;
+
+        let changes = QueueChanges {
+            name: Some("review again".to_owned()),
+            definition_ids: Some(vec![d1, d2]),
+            ..QueueChanges::default()
+        };
+        let QueueUpdate::Updated(row) = update(&db, project, queue.id, 1, changes).await else {
+            panic!("expected the update to keep the archived definition");
+        };
+        assert_eq!(row.version, 2);
+        assert_eq!(row.definition_ids, vec![d1, d2]);
+    }
+
+    #[tokio::test]
+    async fn update_refuses_a_new_archived_definition() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let d1 = definition(&db, project, "tone", None).await;
+        let d2 = definition(&db, project, "accuracy", None).await;
+        let queue = created(
+            &db,
+            org,
+            project,
+            new_queue("review", Target::Trace, vec![d1]),
+        )
+        .await;
+        archive(&db, d2).await;
+
+        let changes = QueueChanges {
+            definition_ids: Some(vec![d1, d2]),
+            ..QueueChanges::default()
+        };
+        assert_eq!(
+            update(&db, project, queue.id, 1, changes).await,
+            QueueUpdate::UnknownDefinitions(vec![1])
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_update_with_a_bad_definition_is_stale() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let d1 = definition(&db, project, "tone", None).await;
+        let queue = created(
+            &db,
+            org,
+            project,
+            new_queue("review", Target::Trace, vec![d1]),
+        )
+        .await;
+
+        let changes = QueueChanges {
+            definition_ids: Some(vec![Uuid::now_v7()]),
+            ..QueueChanges::default()
+        };
+        assert_eq!(
+            update(&db, project, queue.id, 7, changes.clone()).await,
+            QueueUpdate::Stale(1)
+        );
+        assert_eq!(
+            update(&db, project, Uuid::now_v7(), 1, changes).await,
+            QueueUpdate::Missing
+        );
     }
 
     #[tokio::test]

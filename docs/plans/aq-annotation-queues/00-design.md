@@ -72,7 +72,7 @@ Queues and items live in `meta.db`: they are few, mutable and need atomic claims
   - A queue never moves between projects. `DELETE` removes the row (no archive), so the plan limit counts live rows.
 - **`annotation_queue_definitions`**
   - Columns: (`queue_id` FK cascade, `definition_id` FK to `score_definitions`, `position`).
-  - Each queue has 1–50 definitions, in order, each at most once. They must be live when they are added.
+  - Each queue has 1–50 definitions, in order, each at most once. They must be live when they are added; an update may keep ids already on the queue even if archived since.
   - Score definitions are only ever archived (D-I-26), never removed, so the foreign key never breaks.
   - An archived definition stays on the queue, but the reviewer form leaves it out. A queue whose definitions are all archived shows a notice instead of the form.
 - **`annotation_queue_items`**
