@@ -3,7 +3,7 @@
   "name": "Arize Phoenix",
   "url": "https://phoenix.arize.com",
   "checkedOn": "2026-11-20",
-  "oneLine": "Open-source LLM tracing, evaluation and prompt tooling from Arize, built on OpenTelemetry and OpenInference.",
+  "oneLine": "Source-available LLM tracing, evaluation and prompt tooling from Arize, built on OpenTelemetry and OpenInference.",
   "facts": {
     "selfHostStack": {
       "value": "One Phoenix container (UI, API, OTLP collector) with SQLite by default; PostgreSQL 14+ recommended for production",

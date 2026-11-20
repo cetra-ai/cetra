@@ -19,8 +19,8 @@ export function getStaticPaths() {
 const { slug, them } = Astro.props;
 const cetra = loadProduct("cetra");
 // Only some competitors have a migration guide. The path is relative to website/, the build's cwd.
-const hasGuide = existsSync(
-  join(process.cwd(), `src/content/docs/docs/integrations/from-${slug}.mdx`),
+const hasGuide = ["mdx", "md"].some((ext) =>
+  existsSync(join(process.cwd(), `src/content/docs/docs/integrations/from-${slug}.${ext}`)),
 );
 ---
 
@@ -79,7 +79,10 @@ const hasGuide = existsSync(
     <SectionHeading title="Switching to cetra" id="switch-title" />
     {
       hasGuide ? (
-        <p class="switch">Keep the {them.name} SDK and send its spans to cetra as well.</p>
+        <p class="switch">
+          Point the {them.name} Python SDK's export at cetra. The guide covers what carries over
+          and what changes.
+        </p>
       ) : (
         <p class="switch">
           cetra reads OpenTelemetry. If your app already sends OTLP, point the exporter at cetra.

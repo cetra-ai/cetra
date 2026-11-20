@@ -6,11 +6,13 @@ import { COMPETITORS, formatDate, loadProduct } from "../../marketing/data/compa
 import MarketingLayout from "../../marketing/layouts/MarketingLayout.astro";
 
 const products = COMPETITORS.map((slug) => loadProduct(slug));
+const names = products.map((product) => product.name);
+const nameList = `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
 ---
 
 <MarketingLayout
   title="Compare"
-  description="How cetra compares with Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar and MLflow."
+  description={`How cetra compares with ${nameList}.`}
   route="/compare/"
 >
   <Section tone="ink" pad="md" labelledby="compare-title">
@@ -24,7 +26,7 @@ const products = COMPETITORS.map((slug) => loadProduct(slug));
   </Section>
 
   <Section tone="raised" divider labelledby="list-title">
-    <SectionHeading title="Nine comparisons" id="list-title" />
+    <SectionHeading title={`${COMPETITORS.length} comparisons`} id="list-title" />
     <div class="grid">
       {
         products.map((product) => (
@@ -41,9 +43,14 @@ const products = COMPETITORS.map((slug) => loadProduct(slug));
 <style>
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
     gap: var(--space-4);
     margin-top: var(--space-7);
+  }
+  @media (min-width: 1100px) {
+    .grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
   }
   .checked {
     font-size: var(--text-sm);

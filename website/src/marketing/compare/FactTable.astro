@@ -1,5 +1,5 @@
 ---
-import { AREAS, type loadProduct, UNKNOWN_TEXT } from "../data/compare.mjs";
+import { AREAS, displayValue, isUnknown, type loadProduct } from "../data/compare.mjs";
 
 type Product = ReturnType<typeof loadProduct>;
 interface Props {
@@ -27,8 +27,7 @@ function cell(fact: Fact) {
     seen.add(source);
     links.push({ n: numberOf(source), href: source });
   }
-  const unknown = fact.value === "Unknown";
-  return { text: unknown ? UNKNOWN_TEXT : fact.value, unknown, links };
+  return { text: displayValue(fact), unknown: isUnknown(fact), links };
 }
 
 const rows = AREAS.map(([key, label]) => {
@@ -44,8 +43,13 @@ const sources = [...numbers].map(([href, n]) => ({
 }));
 ---
 
-<div class="table-wrap" tabindex="0">
-  <table>
+<div
+  class="table-wrap"
+  role="region"
+  aria-label={`cetra and ${them.name} compared, scrolls sideways on small screens`}
+  tabindex="0"
+>
+  <table class="fact-table">
     <caption class="visually-hidden">cetra and {them.name} compared</caption>
     <thead>
       <tr>
@@ -82,6 +86,11 @@ const sources = [...numbers].map(([href, n]) => ({
   </table>
 </div>
 
+<p class="muted note">
+  Cloud tiers are not like for like: units and currency are as each vendor lists them.
+</p>
+
+<h3 class="eyebrow sources-title">Sources</h3>
 <ol class="sources">
   {
     sources.map((source) => (
@@ -102,27 +111,7 @@ const sources = [...numbers].map(([href, n]) => ({
     overflow-x: auto;
     margin-top: var(--space-7);
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--text-sm);
-  }
-  th,
-  td {
-    text-align: left;
-    vertical-align: top;
-    padding: var(--space-3) var(--space-4);
-    border-bottom: 1px solid var(--line);
-  }
-  thead th {
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    text-transform: uppercase;
-    letter-spacing: var(--tracking-label);
-    color: var(--fg-muted);
-  }
   tbody th {
-    font-weight: 600;
     width: 22%;
   }
   td {
@@ -133,6 +122,9 @@ const sources = [...numbers].map(([href, n]) => ({
     font-size: 0.7em;
   }
   sup a {
+    display: inline-block;
+    padding: 0 0.3em;
+    min-height: 1.5em;
     text-decoration: none;
   }
   @media (max-width: 720px) {
@@ -140,8 +132,15 @@ const sources = [...numbers].map(([href, n]) => ({
       min-width: 640px;
     }
   }
+  .note {
+    font-size: var(--text-sm);
+    margin-top: var(--space-5);
+  }
+  .sources-title {
+    margin-top: var(--space-7);
+  }
   .sources {
-    margin: var(--space-6) 0 0;
+    margin: var(--space-3) 0 0;
     padding-left: var(--space-6);
     font-family: var(--font-mono);
     font-size: var(--text-xs);

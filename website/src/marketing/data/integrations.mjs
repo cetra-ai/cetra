@@ -1,5 +1,14 @@
 import { readFileSync } from "node:fs";
 
+/** The `## ` group of the migration guides. The homepage leaves them out. */
+export const MIGRATING_GROUP = "Migrating";
+
+/**
+ * @typedef {object} Test
+ * @property {"recorded" | "sdk"} kind "recorded": spans captured from the real library; "sdk": an SDK test
+ * @property {"Python" | "TypeScript" | null} lang the language the test covers, or null for both
+ */
+
 /**
  * @typedef {object} Integration
  * @property {string} group     the `## ` heading it sits under, e.g. "Providers"
@@ -8,35 +17,53 @@ import { readFileSync } from "node:fs";
  * @property {string} href      the docs route, e.g. "/docs/integrations/openai/"
  * @property {boolean} python   ✓ in the Python column
  * @property {boolean} typescript ✓ in the TypeScript column
- * @property {string} tested    the "Tested against" cell, e.g. "captured"
+ * @property {Test[]} tests    the "Tested against" cell, parsed
  */
 
 const ROW =
-  /^\| \[([^\]]+)\]\((\/docs\/integrations\/[a-z0-9-]+\/)\) \| (✓|—) \| (✓|—) \| (.*?) \| (.*?) \|$/;
-const CARD = /<LinkCard title="([^"]+)" description="([^"]+)" href="([^"]+)" \/>/;
+  /^\| \[([^\]]+)\]\((\/docs\/integrations\/[a-z0-9-]+\/)\) \| (✓|—) \| (✓|—) \| (.*?) \| (.*?) \|\s*$/;
+const CARD = /<LinkCard title="([^"]+)" description="([^"]+)" href="([^"]+)" \/>\s*$/;
+const TEST = /^(captured|SDK test)(?: \((Python|TypeScript)\))?$/;
+
+/**
+ * @param {string} tested the "Tested against" cell without backticks, e.g. "captured (Python), SDK test (TypeScript)"
+ * @param {string} where  for the error message
+ * @returns {Test[]}
+ */
+function parseTested(tested, where) {
+  return tested.split(", ").map((part) => {
+    const match = TEST.exec(part);
+    if (!match) throw new Error(`integrations: unknown test wording "${part}" at ${where}`);
+    return { kind: match[1] === "captured" ? "recorded" : "sdk", lang: match[2] ?? null };
+  });
+}
 
 /**
  * @param {string} mdx
  * @returns {Integration[]}
  */
 export function parseIntegrations(mdx) {
-  /** @type {Map<string, {python: boolean, typescript: boolean, tested: string}>} */
+  /** @type {Map<string, {python: boolean, typescript: boolean, tests: Test[]}>} */
   const rows = new Map();
   /** @type {{group: string, title: string, description: string, href: string}[]} */
   const cards = [];
   let group = "";
 
-  mdx.split("\n").forEach((line, index) => {
+  mdx.split(/\r?\n/).forEach((line, index) => {
+    const where = `line ${index + 1}`;
     if (line.startsWith("| [")) {
       const match = ROW.exec(line);
       if (!match) {
-        throw new Error(`integrations: malformed table row at line ${index + 1}`);
+        throw new Error(`integrations: malformed table row at ${where}`);
       }
       const [, , href, python, typescript, , tested] = match;
+      if (rows.has(href)) {
+        throw new Error(`integrations: duplicate table row ${href} at ${where}`);
+      }
       rows.set(href, {
         python: python === "✓",
         typescript: typescript === "✓",
-        tested: tested.replaceAll("`", ""),
+        tests: parseTested(tested.replaceAll("`", ""), where),
       });
     } else if (line.startsWith("## ")) {
       group = line.slice(3).trim();
@@ -44,6 +71,9 @@ export function parseIntegrations(mdx) {
       const match = CARD.exec(line);
       if (match) {
         const [, title, description, href] = match;
+        if (cards.some((card) => card.href === href)) {
+          throw new Error(`integrations: duplicate card ${href} at ${where}`);
+        }
         cards.push({ group, title, description, href });
       }
     }

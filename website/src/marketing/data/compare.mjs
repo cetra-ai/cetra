@@ -39,11 +39,16 @@ export const MAX_AGE_DAYS = 183;
 const DIR = join(process.cwd(), "src/marketing/data/compare");
 
 /**
+ * Reads and validates one product file. Staleness is not checked here (`now` is the file's own
+ * date), so an old file never breaks the build; `validate` in the tests checks it against today.
  * @param {string} slug
  * @returns {Product}
  */
 export function loadProduct(slug) {
-  return JSON.parse(readFileSync(join(DIR, `${slug}.json`), "utf8"));
+  const p = JSON.parse(readFileSync(join(DIR, `${slug}.json`), "utf8"));
+  const problems = validate(p, slug, new Date(p?.checkedOn));
+  if (problems.length > 0) throw new Error(`${slug}.json: ${problems.join("; ")}`);
+  return p;
 }
 
 export function listFiles() {
@@ -87,6 +92,8 @@ export function validate(p, fileSlug, now) {
       checked.toISOString().slice(0, 10) === p.checkedOn;
     if (!isDate) {
       problems.push("checkedOn must be YYYY-MM-DD");
+    } else if (checked.getTime() - now.getTime() > 86_400_000) {
+      problems.push("checkedOn is in the future");
     } else if (now.getTime() - checked.getTime() > MAX_AGE_DAYS * 86_400_000) {
       problems.push(
         `checked on ${p.checkedOn}, more than ${MAX_AGE_DAYS} days ago: re-check the facts`,
@@ -104,6 +111,7 @@ export function validate(p, fileSlug, now) {
       continue;
     }
     const length = [...fact.value].length;
+    if (length === 0) problems.push(`${area}: empty value`);
     if (length > 120) problems.push(`${area}: value is ${length} characters, the limit is 120`);
     problems.push(...textProblems(area, fact.value));
     if (!Array.isArray(fact.sources) || fact.sources.length === 0) {
@@ -127,7 +135,13 @@ export function validate(p, fileSlug, now) {
   } else if (p.chooseThem.length > 4) {
     problems.push(`chooseThem has ${p.chooseThem.length} items, 0 to 4 allowed`);
   } else {
-    for (const item of p.chooseThem) problems.push(...textProblems("chooseThem", item));
+    for (const item of p.chooseThem) {
+      const length = [...item].length;
+      if (length > 120) {
+        problems.push(`chooseThem item is ${length} characters, the limit is 120`);
+      }
+      problems.push(...textProblems("chooseThem", item));
+    }
   }
 
   if (!isStringArray(p.chooseUs)) {
@@ -158,7 +172,17 @@ function textProblems(field, text) {
 }
 
 /** "Unknown" is rendered as this (its sources stay listed: they are where we looked). */
-export const UNKNOWN_TEXT = "Not found in their documentation";
+export const UNKNOWN_TEXT = "Not established from their documentation; see the sources";
+
+/** @param {Fact} fact */
+export function isUnknown(fact) {
+  return fact.value === "Unknown";
+}
+
+/** The text a fact cell shows: its value, or UNKNOWN_TEXT. @param {Fact} fact */
+export function displayValue(fact) {
+  return isUnknown(fact) ? UNKNOWN_TEXT : fact.value;
+}
 
 /** "2026-11-20" -> "20 November 2026". @param {string} iso */
 export function formatDate(iso) {

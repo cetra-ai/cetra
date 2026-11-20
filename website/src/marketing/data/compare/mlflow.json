@@ -21,7 +21,7 @@
       "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
     },
     "cloudPaidFrom": {
-      "value": "Unknown",
+      "value": "No managed price on mlflow.org; managed MLflow is sold by Databricks",
       "sources": ["https://mlflow.org/docs/latest/genai/getting-started/databricks-trial/"]
     },
     "otel": {
