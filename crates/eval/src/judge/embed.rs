@@ -15,6 +15,7 @@ use super::{
 };
 use crate::egress::{EgressClient, EgressRequest};
 use crate::error::JudgeError;
+use crate::issue::cluster::l2_normalize;
 use crate::runner::MAX_EMBEDDING_DIMENSIONS;
 
 /// One request to embed `text`.
@@ -198,22 +199,6 @@ fn vector_of(value: &Value) -> Result<Vec<f32>, JudgeError> {
             }
         })
         .collect()
-}
-
-/// Scales `vector` to unit length. Returns `false` for a zero or non-finite norm.
-fn l2_normalize(vector: &mut [f32]) -> bool {
-    let norm = vector
-        .iter()
-        .map(|value| f64::from(*value) * f64::from(*value))
-        .sum::<f64>()
-        .sqrt();
-    if !(norm.is_finite() && norm > 0.0) {
-        return false;
-    }
-    for value in vector.iter_mut() {
-        *value = (f64::from(*value) / norm) as f32;
-    }
-    true
 }
 
 #[cfg(test)]
