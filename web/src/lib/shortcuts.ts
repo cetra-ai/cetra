@@ -9,6 +9,7 @@ export const GO_TARGETS = {
   e: { id: "go-evaluators", to: "/$org/$project/evaluators" },
   o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
   y: { id: "go-issues", to: "/$org/$project/issues" },
+  n: { id: "go-issue-sources", to: "/$org/$project/issue-sources" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
 } as const;

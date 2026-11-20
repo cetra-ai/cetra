@@ -910,7 +910,7 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 - `web/src/components/shell/nav.ts`.
 
 **Steps:**
-1. `nav.ts`: `{ section: "Evaluate", to: "/$org/$project/issue-sources", label: "Issue sources", icon: Radar }`, after Online rules (lucide `Radar`). No shortcut.
+1. `nav.ts`: `{ section: "Evaluate", to: "/$org/$project/issue-sources", label: "Issue sources", icon: Radar }`, after Online rules (lucide `Radar`), with the go key `g n` (every nav entry needs one: `nav.test.ts`).
 2. List:
    - rows with name, kind ("Errors"), filter (monospace, truncated), Enabled switch (with `ManageEvaluation`), open issues (linking to Issues filtered by the source), and updated;
    - a "New source" button;

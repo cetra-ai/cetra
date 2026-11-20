@@ -70,6 +70,7 @@ it("gives every project page its go letter and back again", () => {
   expect(goKeyOf("/$org/$project/sessions")).toBe("s");
   expect(goKeyOf("/$org/$project/experiments")).toBe("x");
   expect(goKeyOf("/$org/$project/issues")).toBe("y");
+  expect(goKeyOf("/$org/$project/issue-sources")).toBe("n");
   expect(goKeyOf("/$org/$project/settings/general")).toBeUndefined();
   for (const letter of Object.keys(GO_TARGETS)) {
     const target = GO_TARGETS[letter as keyof typeof GO_TARGETS];

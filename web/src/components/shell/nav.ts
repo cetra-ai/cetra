@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   ListChecks,
   MessagesSquare,
+  Radar,
   Rows3,
   Table2,
   Users,
@@ -32,6 +33,12 @@ export const projectNav = [
     to: "/$org/$project/online-rules",
     label: "Online rules",
     icon: ListChecks,
+  },
+  {
+    section: "Evaluate",
+    to: "/$org/$project/issue-sources",
+    label: "Issue sources",
+    icon: Radar,
   },
   { section: "Evaluate", to: "/$org/$project/datasets", label: "Datasets", icon: Table2 },
   {
