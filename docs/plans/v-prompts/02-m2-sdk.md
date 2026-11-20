@@ -86,6 +86,13 @@ The Python pair (V2.1, V2.2) and the TypeScript pair (V2.3, V2.4) touch disjoint
 13. **TypeScript programming errors** reject the promise with `TypeError`; test with `await expect(…).rejects.toThrow(TypeError)`.
 14. **Python tests and mypy.** Narrow `compile()`'s `str | list` result with `isinstance` or `assert` in tests.
 15. **Docs page markers.** The untested marker is exactly `{/* untested: needs a running cetra server */}` on the line before each code fence; the page `description` is at most 160 characters. The page says that `get_prompt` before `init()`, or with the SDK disabled, behaves like a failed fetch (reason `sdk disabled`).
+17. **PUT in the Python recorder.** `sdks/python/tests/conftest.py` joins V2.2's Edit list: add `def do_PUT(self) -> None: self._handle()` to `_RecordingHandler` (next to `do_PATCH`; use the handler's real dispatch method name if it differs).
+18. **Quoted annotations.** `_context.py` has no `from __future__ import annotations`: write `prompt: "Prompt | None" = None` (quoted), and quote the `Client` annotation in `Prompts` as `_datasets.py` does.
+19. **Missing key.** A runtime whose `config.api_key` is `None` counts as `sdk disabled` (narrow it before building the `Authorization` header, in both SDKs).
+20. **No top-level use** of `runtime` in TypeScript `prompts.ts` (and of `prompts` in `runtime.ts`): only inside functions.
+21. **One body parser.** Python `_parse_prompt(body: object) -> Prompt | None` (TypeScript `parsePrompt(body: unknown): Prompt | undefined`) returns `None`/`undefined` on an invalid shape; `_fetch` maps that to `Failed("invalid response")`, and `client.prompts` raises `ApiError` with `detail="invalid response"` (status 200, code `invalid_response`) built the way `_client.py`/`client.ts` build other `ApiError`s.
+22. **TypeScript tests** include `setLabel` (V2.2 test 13's TypeScript twin).
+23. **Warning clock.** The once-a-minute warning uses the cache's injected `now` (seconds in Python, milliseconds in TypeScript), so test 8 advances the fake clock by 61 s.
 16. **Spec 10** (V2.5) also gains the resolve URL in the `### Names` table and a `### Language differences` line on number formatting (`str` vs `String`, exponent spellings; no shared fixture covers them).
 
 ---
