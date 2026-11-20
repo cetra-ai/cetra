@@ -1,14 +1,16 @@
 //! `POST /v1/traces`: OTLP/HTTP trace export (spec 02 § Endpoints, D-G-2 to D-G-9), and the
 //! `POST /v1/logs` and `POST /v1/metrics` routes that acknowledge and drop their data
-//! (D-G-40).
+//! (D-G-40), and the `POST /v1/agent-context` route that stores a coding agent's session context
+//! (D-CA-9).
 //!
-//! The routes are key-only (D-G-15) and undocumented (D-G-6). Their bodies are read under their
-//! own cap, so the router's JSON limit does not apply.
+//! The routes are key-only (D-G-15). The three OTLP routes are undocumented (D-G-6), and their
+//! bodies are read under their own cap, so the router's JSON limit does not apply.
+//! `/v1/agent-context` is documented and has its own body limit.
 
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::{Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -24,9 +26,11 @@ use crate::ingest::body::{BodyFormat, body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
 use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
+use crate::routes::agent_context::post_agent_context;
 use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
-/// The OTLP/HTTP route. Undocumented, so it stays out of `openapi.json` (D-G-6).
+/// The OTLP/HTTP routes and `POST /v1/agent-context`. The three OTLP routes are undocumented, so
+/// they stay out of `openapi.json` (D-G-6). `/v1/agent-context` is documented (D-CA-9).
 pub(crate) fn routes() -> Vec<RouteDef> {
     let route = |path, handler| RouteDef {
         method: Method::POST,
@@ -41,6 +45,15 @@ pub(crate) fn routes() -> Vec<RouteDef> {
         route("/v1/traces", post(export)),
         route("/v1/logs", post(export_logs)),
         route("/v1/metrics", post(export_metrics)),
+        RouteDef {
+            method: Method::POST,
+            path: "/v1/agent-context",
+            access: Access::Key {
+                scope: KeyScope::Ingest,
+            },
+            documented: true,
+            handler: post(post_agent_context).layer(DefaultBodyLimit::max(4096)),
+        },
     ]
 }
 
@@ -128,7 +141,10 @@ async fn export_metrics(
 }
 
 /// The org's units cap applies to every OTLP route, so a capped org is refused alike.
-async fn refuse_over_cap(state: &AppState, access: &ProjectAccess) -> Result<(), ApiError> {
+pub(crate) async fn refuse_over_cap(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<(), ApiError> {
     check_cap(state, access.project.org_id)
         .await
         .map_err(|cap| {

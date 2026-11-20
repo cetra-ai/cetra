@@ -1,8 +1,6 @@
 //! The in-memory session contexts of coding agents (D-CA-9). `normalize` reads one project's
 //! map; the route (S3) and the ingest stamp (S4) write it. Each change is written to `meta.db`
 //! first, then to the map, under `writes`.
-// Until S3 (the route) and S4 (the stamp) call these, only the tests do.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashMap;
 use std::sync::{Arc, PoisonError, RwLock};

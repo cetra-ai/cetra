@@ -283,6 +283,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("post", "/api/v1/scores", "create_key_scores"),
     ("post", "/api/public/feedback", "post_feedback"),
+    ("post", "/v1/agent-context", "post_agent_context"),
     ("get", "/api/v1/projects/{project}/schema", "get_schema"),
     (
         "get",
@@ -851,6 +852,7 @@ const TAGS: &[&str] = &[
     "internal",
     "deletions",
     "alerts",
+    "ingest",
 ];
 
 const METHODS: &[&str] = &[
@@ -914,6 +916,7 @@ fn document_lint() {
             *id,
             "create_key_scores"
                 | "post_feedback"
+                | "post_agent_context"
                 | "post_internal_org"
                 | "delete_internal_org"
                 | "list_internal_usage"
@@ -1085,6 +1088,8 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
+        } else if *id == "post_agent_context" {
+            expected_errors.extend(["400", "401", "402", "403", "413"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
         } else if *id == "post_llm_connection"
