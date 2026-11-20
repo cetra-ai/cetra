@@ -517,6 +517,62 @@ Every create, and every update that changes `version`, writes one `evaluator_ver
 
 `eval_jobs` is the durable queue (spec 06 § Online rules › Execution; D-I-11, D-I-12): `dedup_key` makes enqueues idempotent, `claims` fences a worker's finish, and there is no lease. Every hour, finished jobs older than 7 days are deleted, queued jobs older than 24 h (7 days for backfill) are skipped as `expired`, and jobs of inactive projects or orgs are deleted (D-I-28). `rule_spend` holds one row per rule and UTC day; a month is the sum of its days; rows older than 62 days are deleted.
 
+## Issues
+
+Track IC (D-IC-1, D-IC-3, D-IC-10; design in `docs/plans/ic-issue-clustering/00-design.md`). `issue_sources` holds the sources of a project; `kind` is `error` in M1 and has no SQL CHECK, so later kinds need no table rebuild (the Rust enum is the only gate). `enabled` is the switch and `paused_reason` the sweeper's own pause; the sweeper reads only enabled, unpaused sources. Deleting a source deletes its issues and their events (D-IC-3).
+
+`issues` holds one error group per row. `fingerprint` is the hex fingerprint of the group (D-IC-17); it is unique per source where set. `state` is `open`, `resolved`, `ignored` or `merged`; `regressed` is set when a resolved issue recurs. `merged_into` names the issue this one was merged into; a merge chain is one level deep (D-IC-9). `first_seen` and `last_seen` are trace start times, not ingest times. `resolved_at` and `resolved_by` record the last resolution.
+
+`issue_events` is the audit trail of an issue (D-IC-10): `kind` is `created`, `state_changed`, `renamed`, `merged` or `regressed`; `from_value` and `to_value` hold the old and new value as text. `actor_user_id` NULL means the system. Events go with their issue.
+
+```sql
+CREATE TABLE issue_sources (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,                 -- 'error' in M1; no CHECK (D-IC-1)
+  filter TEXT,                        -- span filter DSL, when set
+  enabled INTEGER NOT NULL DEFAULT 1,
+  paused_reason TEXT,                 -- set by the sweeper; NULL when not paused
+  paused_at INTEGER,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, name)
+);
+
+CREATE TABLE issues (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+  fingerprint TEXT,                   -- NULL for issues without one
+  title TEXT NOT NULL,
+  description TEXT,
+  state TEXT NOT NULL CHECK (state IN ('open', 'resolved', 'ignored', 'merged')),
+  regressed INTEGER NOT NULL DEFAULT 0,
+  merged_into TEXT REFERENCES issues(id) ON DELETE SET NULL,
+  first_seen INTEGER NOT NULL,        -- trace start, ns
+  last_seen INTEGER NOT NULL,         -- trace start, ns
+  resolved_at INTEGER,
+  resolved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
+    WHERE fingerprint IS NOT NULL;
+CREATE INDEX issues_project_last_seen ON issues (project_id, last_seen DESC, id);
+CREATE INDEX issues_merged_into ON issues (merged_into) WHERE merged_into IS NOT NULL;
+
+CREATE TABLE issue_events (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL CHECK (kind IN ('created', 'state_changed', 'renamed', 'merged', 'regressed')),
+  actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  from_value TEXT,
+  to_value TEXT,
+  at INTEGER NOT NULL                 -- ns
+);
+CREATE INDEX issue_events_issue ON issue_events (issue_id, at, id);
+```
+
 ## Alerts
 
 Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10).
