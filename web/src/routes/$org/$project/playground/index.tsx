@@ -1,6 +1,7 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { History, Play, Plus, Square } from "lucide-react";
+import { type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
@@ -42,6 +43,7 @@ import {
 import { VIEWER_REASON as PROMPT_EDIT_REASON } from "@/lib/prompts";
 import { canManagePrompts, canRunPlayground } from "@/lib/roles";
 import { hexId } from "@/lib/shortcuts";
+import { runShortcutLabel } from "@/lib/sql/format";
 import { uuidv7 } from "@/lib/uuid";
 
 type Connection = Schema<"LlmConnection">;
@@ -113,7 +115,7 @@ function PlaygroundPage() {
     return <FormError message="Could not load the LLM connections." />;
   }
   if (!connections.isSuccess) {
-    return <Skeleton className="h-64 w-full" />;
+    return <Skeleton className="m-3 h-64" />;
   }
   return (
     <PlaygroundWorkspace
@@ -575,6 +577,7 @@ function PlaygroundWorkspace({
   );
   const running = Object.values(runs).some((run) => run.status === "running");
   const runReason = runBlockReason(canRun, blocked, connections.length);
+  const shortcut = runShortcutLabel(navigator.userAgent);
 
   // The server indexes messages after its placeholders are expanded, so `messages[n]` is entry n
   // only when no placeholder comes at or before it. Other message errors go to the form.
@@ -814,6 +817,17 @@ function PlaygroundWorkspace({
     }
   }
 
+  // Ctrl/Cmd+Enter anywhere on the page runs every model, unless a run is going or Run is disabled.
+  function onShortcut(event: KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== "Enter" || !(event.metaKey || event.ctrlKey) || event.altKey) {
+      return;
+    }
+    event.preventDefault();
+    if (!running && runReason === undefined) {
+      runAll();
+    }
+  }
+
   function stopAll() {
     for (const controller of controllers.current.values()) {
       controller.abort();
@@ -821,21 +835,32 @@ function PlaygroundWorkspace({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3">
+    // biome-ignore lint/a11y/noStaticElementInteractions: the page-wide run shortcut listens on the page
+    <div className="flex h-full min-h-0 flex-col gap-3 p-3" onKeyDown={onShortcut}>
       <div className="flex flex-wrap items-center gap-2">
-        <h1 className="text-heading font-medium">Playground</h1>
+        {sourceText(draft.source) === undefined ? null : (
+          <p className="text-caption text-muted-foreground">{sourceText(draft.source)}</p>
+        )}
         <div className="ml-auto flex flex-wrap items-center gap-2">
-          {running ? (
-            <Button type="button" variant="outline" onClick={stopAll}>
-              Stop all
-            </Button>
-          ) : (
-            <DisabledReason reason={runReason}>
-              <Button type="button" disabled={runReason !== undefined} onClick={runAll}>
-                Run all
-              </Button>
-            </DisabledReason>
-          )}
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              setRecentOpen(true);
+            }}
+          >
+            <History aria-hidden="true" />
+            Recent runs
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            disabled={draft.columns.length >= COLUMN_LIMIT}
+            onClick={addColumn}
+          >
+            <Plus aria-hidden="true" />
+            Add model
+          </Button>
           <DisabledReason reason={canManage ? undefined : PROMPT_EDIT_REASON}>
             <Button
               type="button"
@@ -848,29 +873,27 @@ function PlaygroundWorkspace({
               Save as new version…
             </Button>
           </DisabledReason>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => {
-              setRecentOpen(true);
-            }}
-          >
-            Recent runs
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={draft.columns.length >= COLUMN_LIMIT}
-            onClick={addColumn}
-          >
-            Add model
-          </Button>
+          {running ? (
+            <Button type="button" variant="outline" onClick={stopAll}>
+              <Square aria-hidden="true" />
+              Stop all
+            </Button>
+          ) : (
+            <DisabledReason reason={runReason}>
+              <Button
+                type="button"
+                disabled={runReason !== undefined}
+                title={`Run every model (${shortcut})`}
+                onClick={runAll}
+              >
+                <Play aria-hidden="true" />
+                Run all
+              </Button>
+            </DisabledReason>
+          )}
         </div>
       </div>
       <FormError message={formError} />
-      {sourceText(draft.source) === undefined ? null : (
-        <p className="text-caption text-muted-foreground">{sourceText(draft.source)}</p>
-      )}
       {cut ? (
         <p className="border-b bg-muted px-3 py-1 text-caption">
           This span was cut at ingest; the playground shows what was stored.
@@ -900,7 +923,7 @@ function PlaygroundWorkspace({
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel id="playground-columns" minSize="30%" className="min-h-0">
-          <div className="flex h-full min-h-0 gap-3 overflow-x-auto pb-2">
+          <div className="flex h-full min-h-0 gap-3 overflow-x-auto pb-2 pl-3">
             {draft.columns.map((column, index) => (
               <RunColumn
                 key={column.id}
@@ -910,6 +933,7 @@ function PlaygroundWorkspace({
                 connections={connections}
                 errors={columnErrors[column.id] ?? NO_ERRORS}
                 runReason={runReason}
+                shortcut={shortcut}
                 canRemove={draft.columns.length > 1}
                 onChange={updateColumn}
                 onRun={startRun}
