@@ -15,7 +15,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `grpc_addr` | `CETRA_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `CETRA_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | unset (off). Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28) |
-| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, email and identity providers are off; for restore drills (D-N-25) |
+| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) |
 | `storage.object_store` | `CETRA_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
 | `storage.s3.region` | | unset: the `AWS_REGION` environment variable (not an alias; the loader has none) |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |
@@ -120,7 +120,7 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 > **Built in N M3 (D-N-28 to D-N-30, D-N-33):**
 > - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `website/src/content/docs/docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
 > - `/readyz` as § Process lifecycle describes it.
-> - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work.
+> - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work, so assistant turns and the assistant's setting test are refused with `503` (D-AS-16).
 >
 > OTel self-traces stay deferred (D38).
 

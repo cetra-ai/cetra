@@ -63,7 +63,7 @@ One row per span, including payload columns.
 | `service_name` | `string` | yes | Resource service.name. |
 | `session_id` | `string` | yes | Session id. |
 | `user_id` | `string` | yes | End-user id. |
-| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs and cetra-playground for playground runs. |
+| `environment` | `string` | yes | Deployment environment. cetra-eval is reserved for evaluator runs, cetra-playground for playground runs and cetra-assistant for assistant turns. |
 | `release` | `string` | yes | Git SHA or version string. |
 | `tags` | `string_list` | no | Tags. |
 | `metadata` | `string_map` | no | User metadata. Values are JSON-encoded scalars or strings. |

@@ -112,6 +112,30 @@ impl QueryContext {
         self.sql_json_within(request, SQL_MAX_RESULT_BYTES).await
     }
 
+    /// Plans `query` with `params` bound, without running it, and returns its output columns (AS M2, D-AS-6).
+    ///
+    /// # Errors
+    ///
+    /// [`RunError::Invalid`] when the statement does not parse, is not one read-only query, or names
+    /// an unknown table or column; [`RunError::InvalidRequest`] for a parameter value that does not fit
+    /// its placeholder.
+    pub async fn sql_check(
+        &self,
+        query: &str,
+        params: &Map<String, Value>,
+    ) -> Result<Vec<SqlColumn>, RunError> {
+        let plan = prepare_sql(self, query, params).await?;
+        Ok(plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| SqlColumn {
+                name: field.name().to_owned(),
+                data_type: field.data_type().to_string(),
+            })
+            .collect())
+    }
+
     /// [`Self::sql_json`] with the encoded-size cap as a parameter, so tests can
     /// use a small one.
     async fn sql_json_within(
@@ -957,6 +981,67 @@ mod tests {
             RunError::Invalid(error) => {
                 assert_eq!(error.message, "only SELECT queries are allowed");
                 assert_eq!(error.position.map(|position| position.column), Some(1));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_check_returns_columns_without_running() {
+        let columns = context()
+            .sql_check(
+                "SELECT name, count(*) AS n FROM traces GROUP BY name",
+                &empty_params(),
+            )
+            .await
+            .expect("check");
+        let types: Vec<_> = columns
+            .iter()
+            .map(|column| format!("{} {}", column.name, column.data_type))
+            .collect();
+        assert_eq!(types, ["name Utf8", "n Int64"]);
+    }
+
+    #[tokio::test]
+    async fn sql_check_rejects_a_bad_statement() {
+        let ctx = context();
+        for query in ["DELETE FROM traces", "SELECT nope FROM traces", "SELEC 1"] {
+            match ctx.sql_check(query, &empty_params()).await {
+                Err(RunError::Invalid(error)) => {
+                    if query != "DELETE FROM traces" {
+                        assert!(error.position.is_some(), "{query}");
+                    }
+                }
+                other => panic!("{query}: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sql_check_binds_parameters() {
+        let ctx = context();
+        let query = "SELECT {n:Int} AS x";
+        let mut params = Map::new();
+        params.insert("n".to_owned(), Value::from(3));
+        let columns = ctx.sql_check(query, &params).await.expect("bound");
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name, "x");
+
+        let mut bad = Map::new();
+        bad.insert("n".to_owned(), Value::from("abc"));
+        assert!(matches!(
+            ctx.sql_check(query, &bad).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+
+        let missing = ctx.sql_check(query, &empty_params()).await;
+        let from_run = ctx
+            .sql_json(request(query, &empty_params(), 10))
+            .await
+            .expect_err("missing");
+        match (missing, from_run) {
+            (Err(RunError::InvalidRequest(left)), RunError::InvalidRequest(right)) => {
+                assert_eq!(left, right);
             }
             other => panic!("{other:?}"),
         }

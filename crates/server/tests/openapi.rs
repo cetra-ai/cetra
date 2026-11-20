@@ -501,6 +501,53 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "list_assistant_conversations",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "post_assistant_conversation",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "get_assistant_conversation",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "patch_assistant_conversation",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "delete_assistant_conversation",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
+        "put_assistant_feedback",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/turns",
+        "post_assistant_turn",
+    ),
+    ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
+    ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/assistant/test",
+        "post_org_assistant_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant",
+        "get_project_assistant",
+    ),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -1018,6 +1065,7 @@ const TAGS: &[&str] = &[
     "internal",
     "deletions",
     "alerts",
+    "assistant",
     "ingest",
 ];
 
@@ -1149,6 +1197,16 @@ fn document_lint() {
                 | "delete_org_sso_domain"
                 | "delete_org"
                 | "delete_project"
+                | "list_assistant_conversations"
+                | "post_assistant_conversation"
+                | "get_assistant_conversation"
+                | "patch_assistant_conversation"
+                | "delete_assistant_conversation"
+                | "put_assistant_feedback"
+                | "post_assistant_turn"
+                | "put_org_assistant"
+                | "post_org_assistant_test"
+                | "get_project_assistant"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1220,6 +1278,10 @@ fn document_lint() {
             || *id == "test_channel"
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
+            || *id == "patch_assistant_conversation"
+            || *id == "put_assistant_feedback"
+            || *id == "put_org_assistant"
+            || *id == "post_org_assistant_test"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
@@ -1304,6 +1366,9 @@ fn document_lint() {
         } else if *id == "post_playground_run" {
             // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_assistant_turn" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1464,6 +1529,7 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("DashboardPage", "DashboardSummary"),
+        ("AssistantConversationPage", "AssistantConversation"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1645,7 +1711,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
@@ -1703,6 +1769,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     // `null` is a value here, not an absent field: a PATCH clears retention with it
     // (`api/openapi.rs` NULL_IS_A_VALUE).
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("AssistantFeedbackRequest", &["feedback"]),
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
         (
@@ -1753,6 +1820,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "DashboardPage",
+        "AssistantConversationPage",
         "AnnotationQueuePage",
         "AnnotationQueueItemPage",
         "LlmConnectionPage",

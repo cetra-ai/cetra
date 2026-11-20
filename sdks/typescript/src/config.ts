@@ -24,7 +24,7 @@ const ENV_SERVICE_NAME = "OTEL_SERVICE_NAME";
 
 const KEY_PREFIX = "sk-cetra-";
 // Reserved environments (the server's set is cetra_core::names::environment::RESERVED).
-const RESERVED_ENVIRONMENTS = new Set(["cetra-eval", "cetra-playground"]);
+const RESERVED_ENVIRONMENTS = new Set(["cetra-eval", "cetra-playground", "cetra-assistant"]);
 const DEFAULT_BASE_URL = "http://localhost:8080";
 const TRUE_WORDS = new Set(["true", "1", "yes", "on"]);
 const FALSE_WORDS = new Set(["false", "0", "no", "off"]);

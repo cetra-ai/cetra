@@ -25,11 +25,11 @@ Column reference for each view is generated from the Arrow schemas and served at
 
 ## Default exclusions
 
-Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM` each reserved environment (`'cetra-eval'` and `'cetra-playground'`, D-V-33) and exclude experiment traces (`metadata['cetra.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the reserved-environment exclusions are not added; the experiment exclusion still is.
+Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM` each reserved environment (`'cetra-eval'`, `'cetra-playground'` and `'cetra-assistant'`, D-V-33, D-AS-11) and exclude experiment traces (`metadata['cetra.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the reserved-environment exclusions are not added; the experiment exclusion still is.
 
 The exclusions apply to the view the request reads: `traces` and `spans` directly; session and user lists through the traces they aggregate; span-based and score-based metrics through a semi-join on the excluded traces.
 
-**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation, playground and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment IN ('cetra-eval', 'cetra-playground') OR metadata['cetra.experiment_id'] IS NOT NULL)`.
+**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation, playground, assistant and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment IN ('cetra-eval', 'cetra-playground', 'cetra-assistant') OR metadata['cetra.experiment_id'] IS NOT NULL)`.
 
 **Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show "10 000 or more" without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window. On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded. With strict exclusions, `trace_refresh` returns only `trace_id` and `start_time`, the two columns the trigger needs.
 
@@ -62,6 +62,8 @@ Parsed with `sqlparser::Parser::parse_expr` (DataFusion dialect), then validated
 - **Limits:** at most 4 KiB and 128 operator tokens (D95). An operator token is one of `=`, `==`, `<>`/`!=`, `<`, `>`, `<=`, `>=`, `<=>`, `+`, `-`, `*`, `/`, `%`, integer division, `||`, `@>`, `<@`, `->`, `->>`, `#>`, `#>>`, `@@`, `?`, `?&`, `?|`, `&`, `|`, `^`, `<<`, `>>`, `~`, `~*`, `!~`, `!~*`, `::`, or a word whose keyword is `AND`, `OR`, `NOT`, `IS`, `IN`, `BETWEEN`, `LIKE`, `ILIKE`, `SIMILAR`, `XOR` or `DIV`.
 - Anything else (subqueries, casts to other types, window functions, unknown identifiers/functions) → 400 `invalid_filter` with a 1-based character position when one is known.
 - `duration_ms` is available as a derived column (`duration_ns / 1e6`) on the `spans`, `traces` and `sessions` views.
+
+A filter can be checked without running for the traces, spans, sessions and scores views; the SQL console's statement can be planned without running (`sql_check`), which the assistant's drafts use (D-AS-6).
 
 ### UI builder
 

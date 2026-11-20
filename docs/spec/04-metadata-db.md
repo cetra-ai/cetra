@@ -354,6 +354,59 @@ CREATE INDEX annotation_queue_items_time ON annotation_queue_items(project_id, t
 
 One kind per queue (D-AQ-2). Items are unique per target within a queue. `target_time` drives retention and the data window (D-AQ-9). The lease is `leased_by_user_id` plus `lease_expires_at`: 5 minutes, claimed atomically on the writer (D-AQ-4). At most 100 queues per project, 100 000 items per queue, 50 definitions per queue.
 
+## Assistant
+
+Conversations of the in-app assistant (track AS, D-AS-10): private to their author in one project.
+
+```sql
+-- In-app assistant conversations (track AS, D-AS-10).
+CREATE TABLE assistant_conversations (
+  id TEXT PRIMARY KEY,                 -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',      -- '' until the first user message (M3) or a rename
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+);
+CREATE INDEX assistant_conversations_owner ON assistant_conversations(project_id, user_id, last_active_at);
+CREATE INDEX assistant_conversations_idle ON assistant_conversations(last_active_at);
+CREATE TABLE assistant_messages (
+  conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,                -- 1, 2, … within the conversation
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+  parts TEXT NOT NULL,                 -- JSON array of message parts (spec 04 § Assistant)
+  context TEXT,                        -- JSON page context of a user message (D-AS-14)
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'cancelled', 'failed')),
+  feedback TEXT CHECK (feedback IN ('up', 'down')),
+  turn_trace_id TEXT,                  -- 32 lowercase hex characters
+  stub_after INTEGER,                  -- tool messages: when their results become stubs; NULL once stubbed
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+);
+CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL;
+```
+
+The org's assistant setting (D-AS-3) is one row per org; an org with no row has the assistant off.
+
+```sql
+-- The org's in-app assistant setting (track AS, D-AS-3).
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+> Enabling needs a connection and a model; turning it on runs the tool-calling test (D-AS-24) and stores nothing when the test fails. The assistant never changes a connection's status. Deleting the connection leaves the setting with no connection, which reads as `no_connection`. A setting with `enabled` false, or with no row, reads as `disabled`.
+
+> `parts` is a JSON array of parts. The message parts of spec 01 are used where they fit: `{type: "text", content}` and `{type: "tool_call", id, name, arguments}`. Two parts are the assistant's own: `{type: "tool_result", id, name, ok, result, size_bytes, rows?, stubbed}` (the tool's JSON answer, `null` once stubbed) and `{type: "draft", id, kind, draft}` (`kind` is `filter`, `sql`, `dashboard`, `evaluator` or `online_rule`; D-AS-6). A user message holds text parts and its page context in `context`; an assistant message holds text and tool calls; a tool message holds tool results, each followed by the draft it produced (D-AS-21, draft id `draft_<tool call id>`).
+>
+> Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3); a turn starts only when 34 more messages fit (D-AS-25). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). The expiry and the stubbing run at startup, then hourly, so a result can stay whole for up to about 25 hours. Conversations are deleted with their project, org or author.
+
 ## Datasets & experiments
 
 Track J (D-J-1–D-J-19, [`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md)). Dataset versioning uses validity ranges: an item revision is visible in version *v* iff `valid_from_version ≤ v < coalesce(valid_to_version, ∞)`. Every mutating request makes version `current_version + 1` with one `dataset_versions` row; editing an item closes the old revision and inserts a new one in the new version; a new dataset is at version 0 with no items (D-J-3). An experiment pins a dataset version and snapshots each item's input and expected output into its results, so later edits, item deletions and dataset deletions leave it intact (D-J-10). Experiments have no server evaluators (D-J-11).

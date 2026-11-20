@@ -118,11 +118,20 @@ async fn list_rules(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
 ) -> Result<error::Json<Page<AlertRule>>, ApiError> {
+    Ok(error::Json(alert_rule_page(&state, &access).await?))
+}
+
+/// The project's alert rules: the body of `GET /alert-rules`. The assistant's `list_alert_rules` tool
+/// shares it (AS M2).
+pub(crate) async fn alert_rule_page(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<Page<AlertRule>, ApiError> {
     let rows = alerts::list_rules(state.meta.reader(), access.project.id).await?;
-    Ok(error::Json(Page {
+    Ok(Page {
         data: rows.iter().map(rule_json).collect(),
         next_cursor: None,
-    }))
+    })
 }
 
 async fn create_rule(

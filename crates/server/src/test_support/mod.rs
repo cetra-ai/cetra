@@ -52,6 +52,7 @@ use crate::config::{
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
 use crate::meta::api_keys::{self, NewApiKey};
+use crate::meta::assistant::{insert_conversation, insert_message_raw, rename_conversation};
 use crate::meta::datasets::{self as store, DatasetFields, NewRevision, VersionChange};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
@@ -683,6 +684,146 @@ impl TestApp {
             .await
             .unwrap();
         session_cookie_via(self, user_id, None).await
+    }
+}
+
+/// The example assistant conversation of `fixtures/api/README.md` § Fixed identifiers.
+pub(crate) const EXAMPLE_CONVERSATION: &str = "01900000-0000-7000-8000-000000001a01";
+
+impl TestApp {
+    /// The example conversation of `fixtures/api/README.md` § Fixed identifiers: four messages
+    /// (a question, a tool call, its result, and an answer with a draft) of `ada@example.com` in
+    /// the example project. Every time is fixed, so the examples do not change between runs. Call
+    /// after `seed_examples`.
+    pub(crate) async fn seed_example_conversation(&self) {
+        const TITLE: &str = "Why did checkout errors spike?";
+        const SECOND_NS: i64 = 1_000_000_000;
+        // The tool result becomes a stub a day after its message (D-AS-12); the example is not stubbed.
+        const TOOL_STUB_AFTER: i64 = MANUAL_NOW_NS + 3 * SECOND_NS + 86_400_000_000_000;
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let id: Uuid = EXAMPLE_CONVERSATION.parse().unwrap();
+        // (role, parts, context, stub_after) in sequence order.
+        let messages: [(&str, &str, Option<&str>, Option<i64>); 4] = [
+            (
+                "user",
+                r#"[{"type":"text","content":"Why did checkout errors spike yesterday?"}]"#,
+                Some(r#"{"page":"traces","filter":"status = 'error'","range":"24h"}"#),
+                None,
+            ),
+            (
+                "assistant",
+                r#"[{"type":"tool_call","id":"call_1","name":"query_sql","arguments":{"query":"SELECT name, count(*) AS errors FROM traces WHERE status = 'error' GROUP BY name ORDER BY errors DESC LIMIT 5","from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"}}]"#,
+                None,
+                None,
+            ),
+            (
+                "tool",
+                r#"[{"type":"tool_result","id":"call_1","name":"query_sql","ok":true,"result":{"columns":[{"name":"name","type":"VARCHAR"},{"name":"errors","type":"BIGINT"}],"rows":[{"name":"checkout","errors":3}]},"size_bytes":120,"rows":1,"stubbed":false}]"#,
+                None,
+                Some(TOOL_STUB_AFTER),
+            ),
+            (
+                "assistant",
+                r#"[{"type":"text","content":"Most errors come from the checkout trace (3 of them)."},{"type":"draft","id":"draft_1","kind":"filter","draft":{"view":"traces","filter":"name = 'checkout' AND status = 'error'","range":"24h"}}]"#,
+                None,
+                None,
+            ),
+        ];
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let user: String =
+                        sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::Db)?;
+                    let user: Uuid = user.parse().unwrap();
+                    insert_conversation(conn, id, project, user, MANUAL_NOW_NS).await?;
+                    rename_conversation(conn, project, user, id, TITLE).await?;
+                    for (seq, (role, parts, context, stub_after)) in (1_i64..).zip(messages) {
+                        let now = MANUAL_NOW_NS + seq * SECOND_NS;
+                        insert_message_raw(conn, id, seq, role, parts, context, stub_after, now)
+                            .await?;
+                    }
+                    sqlx::query(
+                        "UPDATE assistant_messages SET turn_trace_id = ? \
+                         WHERE conversation_id = ? AND seq = 4",
+                    )
+                    .bind("0af7651916cd43dd8448eb211c80319c")
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    sqlx::query(
+                        "UPDATE assistant_conversations \
+                         SET message_count = 4, last_active_at = ? WHERE id = ?",
+                    )
+                    .bind(MANUAL_NOW_NS + 4 * SECOND_NS)
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+}
+
+impl TestApp {
+    /// The example org's assistant setting of `fixtures/api/README.md` § Fixed identifiers: on,
+    /// with the example connection `…0400` (an OpenAI connection in `acme`, inserted here since
+    /// the examples only hold it as a static file) and `gpt-4o`. Call after `seed_examples`.
+    pub(crate) async fn seed_example_assistant_settings(&self) {
+        const CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
+        let connection: Uuid = CONNECTION.parse().unwrap();
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org: String = sqlx::query_scalar("SELECT id FROM orgs WHERE slug = 'acme'")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(MetaError::Db)?;
+                    let user: String =
+                        sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::Db)?;
+                    // The sealed key is never opened by the examples, so its column is empty.
+                    sqlx::query(
+                        "INSERT INTO llm_connections \
+                         (id, org_id, name, adapter, secret_enc, api_key_hint, default_model, \
+                          created_at, updated_at) \
+                         VALUES (?, ?, 'OpenAI', 'openai', ?, 'WXYZ', 'gpt-5-mini', ?, ?)",
+                    )
+                    .bind(connection.to_string())
+                    .bind(&org)
+                    .bind(Vec::<u8>::new())
+                    .bind(MANUAL_NOW_NS)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    sqlx::query(
+                        "INSERT INTO org_assistant_settings \
+                         (org_id, enabled, connection_id, model, updated_by, updated_at) \
+                         VALUES (?, 1, ?, 'gpt-4o', ?, ?)",
+                    )
+                    .bind(&org)
+                    .bind(connection.to_string())
+                    .bind(&user)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
     }
 }
 

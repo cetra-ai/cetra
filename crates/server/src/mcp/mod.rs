@@ -3,11 +3,11 @@
 //! Streamable HTTP through `rmcp`, stateless, with JSON responses: every POST is served on its
 //! own by a fresh [`McpServer`] that holds the caller. Only personal access tokens reach it.
 
-mod output;
+pub(crate) mod output;
 mod prompts;
-mod sql;
-mod tools;
-mod traces;
+pub(crate) mod sql;
+pub(crate) mod tools;
+pub(crate) mod traces;
 
 use std::sync::Arc;
 use std::time::Instant;

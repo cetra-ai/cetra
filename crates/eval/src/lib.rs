@@ -16,6 +16,7 @@
 //!
 //! [`EgressClient`] and [`sign_payload`] are public so the server's alert deliveries share the guard and the signature (D-K-11).
 
+pub mod assistant_trace;
 mod chat;
 mod check;
 mod config;

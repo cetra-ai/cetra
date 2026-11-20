@@ -168,11 +168,20 @@ async fn get_project(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
 ) -> Result<error::Json<Project>, ApiError> {
+    Ok(error::Json(project_detail(&state, &access).await?))
+}
+
+/// The project's settings: the body of `GET /projects/{project}`. The assistant's `get_project_settings`
+/// tool shares it (AS M2).
+pub(crate) async fn project_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<Project, ApiError> {
     let mut project = project_json(&access.project, access.role);
     project.genai_log_events =
         Some(genai_log_events(state.meta.reader(), access.project.id).await?);
     project.last_ingest_at = state.last_ingest.get(access.project.id);
-    Ok(error::Json(project))
+    Ok(project)
 }
 
 async fn update_project(

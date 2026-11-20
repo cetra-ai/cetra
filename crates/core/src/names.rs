@@ -85,6 +85,12 @@ pub mod metadata_key {
     pub const PLAYGROUND_RUN_BY: &str = crate::cetra_name!(".playground.run_by");
     /// `cetra.playground.source`: the prompt or span a playground run came from (D-V-22).
     pub const PLAYGROUND_SOURCE: &str = crate::cetra_name!(".playground.source");
+    /// `cetra.assistant.user`: the user whose turn a trace records (D-AS-11).
+    pub const ASSISTANT_USER: &str = crate::cetra_name!(".assistant.user");
+    /// `cetra.assistant.conversation_id` (D-AS-11).
+    pub const ASSISTANT_CONVERSATION_ID: &str = crate::cetra_name!(".assistant.conversation_id");
+    /// `cetra.assistant.prompt_version`: the built-in system prompt's version (D-AS-13).
+    pub const ASSISTANT_PROMPT_VERSION: &str = crate::cetra_name!(".assistant.prompt_version");
 }
 
 /// Keys written into score metadata by evaluators.
@@ -117,10 +123,14 @@ pub mod environment {
     pub const PLAYGROUND: &str = crate::cetra_name!("-playground");
     /// What external data that claimed [`PLAYGROUND`] is rewritten to (D-V-33).
     pub const PLAYGROUND_EXTERNAL: &str = crate::cetra_name!("-playground-external");
+    /// Reserved for the in-app assistant's turns (D-AS-11).
+    pub const ASSISTANT: &str = crate::cetra_name!("-assistant");
+    /// What external data that claimed [`ASSISTANT`] is rewritten to (D-V-33).
+    pub const ASSISTANT_EXTERNAL: &str = crate::cetra_name!("-assistant-external");
     /// Environments only the server writes. Their traces are hidden by default, excluded from
     /// online rules, refused as evaluation targets, rewritten when received over OTLP, and not
     /// billed (D-V-33, D-V-34). A new reserved environment is added here.
-    pub const RESERVED: &[&str] = &[EVAL, PLAYGROUND];
+    pub const RESERVED: &[&str] = &[EVAL, PLAYGROUND, ASSISTANT];
     /// Default environment for experiment runs. Spec 01 `environment`.
     pub const EXPERIMENT: &str = "experiment";
 
@@ -137,6 +147,7 @@ pub mod environment {
         match environment {
             e if e == EVAL => Some(EVAL_EXTERNAL),
             e if e == PLAYGROUND => Some(PLAYGROUND_EXTERNAL),
+            e if e == ASSISTANT => Some(ASSISTANT_EXTERNAL),
             _ => None,
         }
     }
@@ -274,6 +285,12 @@ mod tests {
                 "PLAYGROUND_EXTERNAL",
                 environment::PLAYGROUND_EXTERNAL,
             ),
+            ("environment", "ASSISTANT", environment::ASSISTANT),
+            (
+                "environment",
+                "ASSISTANT_EXTERNAL",
+                environment::ASSISTANT_EXTERNAL,
+            ),
             ("environment", "EXPERIMENT", environment::EXPERIMENT),
             ("media", "URI_SCHEME", media::URI_SCHEME),
             ("media", "DROPPED_URI", media::DROPPED_URI),
@@ -288,6 +305,21 @@ mod tests {
                 marker::TRUNCATED_MESSAGES_PREFIX,
             ),
             ("marker", "MAX_DEPTH", marker::MAX_DEPTH),
+            (
+                "metadata_key",
+                "ASSISTANT_USER",
+                metadata_key::ASSISTANT_USER,
+            ),
+            (
+                "metadata_key",
+                "ASSISTANT_CONVERSATION_ID",
+                metadata_key::ASSISTANT_CONVERSATION_ID,
+            ),
+            (
+                "metadata_key",
+                "ASSISTANT_PROMPT_VERSION",
+                metadata_key::ASSISTANT_PROMPT_VERSION,
+            ),
         ];
         rows.iter()
             .map(|(module, name, value)| format!("{module}::{name} = \"{value}\""))
@@ -299,9 +331,11 @@ mod tests {
     fn reserved_environments() {
         assert!(environment::is_reserved(environment::EVAL));
         assert!(environment::is_reserved("cetra-playground"));
+        assert!(environment::is_reserved("cetra-assistant"));
         assert!(!environment::is_reserved("production"));
         assert!(!environment::is_reserved("cetra-eval-external"));
         assert!(!environment::is_reserved("cetra-playground-external"));
+        assert!(!environment::is_reserved("cetra-assistant-external"));
         assert!(!environment::is_reserved(""));
 
         assert_eq!(
@@ -311,6 +345,14 @@ mod tests {
         assert_eq!(
             environment::external_alias(environment::PLAYGROUND),
             Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(
+            environment::external_alias("cetra-assistant"),
+            Some("cetra-assistant-external")
+        );
+        assert_eq!(
+            environment::external_alias(environment::ASSISTANT),
+            Some(environment::ASSISTANT_EXTERNAL)
         );
         assert_eq!(environment::external_alias("production"), None);
         assert_eq!(
@@ -374,6 +416,11 @@ mod tests {
             environment::EVAL_EXTERNAL,
             environment::PLAYGROUND,
             environment::PLAYGROUND_EXTERNAL,
+            environment::ASSISTANT,
+            environment::ASSISTANT_EXTERNAL,
+            metadata_key::ASSISTANT_USER,
+            metadata_key::ASSISTANT_CONVERSATION_ID,
+            metadata_key::ASSISTANT_PROMPT_VERSION,
             media::DROPPED_URI,
         ];
         for value in branded {
@@ -417,6 +464,9 @@ mod tests {
         metadata_key::NORMALIZE_WARNING,
         metadata_key::PLAYGROUND_RUN_BY,
         metadata_key::PLAYGROUND_SOURCE,
+        metadata_key::ASSISTANT_USER,
+        metadata_key::ASSISTANT_CONVERSATION_ID,
+        metadata_key::ASSISTANT_PROMPT_VERSION,
     ];
 
     #[test]

@@ -27,7 +27,7 @@ ENV_SOURCE_VERSION = "SOURCE_VERSION"
 
 _KEY_PREFIX = "sk-cetra-"
 # Reserved environments (the server's set is cetra_core::names::environment::RESERVED).
-_RESERVED_ENVIRONMENTS = frozenset({"cetra-eval", "cetra-playground"})
+_RESERVED_ENVIRONMENTS = frozenset({"cetra-eval", "cetra-playground", "cetra-assistant"})
 _DEFAULT_BASE_URL = "http://localhost:8080"
 _TRUE = frozenset({"true", "1", "yes", "on"})
 _FALSE = frozenset({"false", "0", "no", "off"})
