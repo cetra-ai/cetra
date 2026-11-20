@@ -566,7 +566,11 @@ export function SourceForm({
         </div>
 
         {values.kind === "score" || values.kind === "feedback" ? (
-          <div role="group" aria-labelledby="source-score-names-label" className="flex flex-col gap-2">
+          <div
+            role="group"
+            aria-labelledby="source-score-names-label"
+            className="flex flex-col gap-2"
+          >
             <span id="source-score-names-label" className="text-body leading-none font-medium">
               Score names
             </span>

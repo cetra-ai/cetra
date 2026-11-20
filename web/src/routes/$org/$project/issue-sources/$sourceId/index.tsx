@@ -270,7 +270,11 @@ function SourceDetails({ source, org }: { source: Source; org: string }) {
 /** Today's spend against the budget. A monthly budget is compared with today's spend too. */
 function SpendText({ source }: { source: Source }) {
   if (source.budget_usd === undefined || source.budget_period === undefined) {
-    return <span className="text-body text-muted-foreground">No budget. Spent today: {formatCost(source.spent_today_usd)}</span>;
+    return (
+      <span className="text-body text-muted-foreground">
+        No budget. Spent today: {formatCost(source.spent_today_usd)}
+      </span>
+    );
   }
   const period = source.budget_period === "day" ? "per day" : "per month";
   return (

@@ -8,7 +8,7 @@ import listFixture from "../../../../../../../fixtures/api/static/issue-sources.
 import refitsFixture from "../../../../../../../fixtures/api/static/issue-refits.json";
 import projectFixture from "../../../../../../../fixtures/api/static/project.json";
 
-const TOPIC = listFixture.data[1];
+const TOPIC = listFixture.data[1] as (typeof listFixture.data)[number];
 const PAGE_URL = `/acme/support-bot/issue-sources/${TOPIC.id}`;
 
 /** Serves the topic source and its refits. */
@@ -40,8 +40,8 @@ it("shows the refit history, newest first, with its counts and error", async () 
   const table = await screen.findByRole("table", { name: "Refit history" });
   const rows = within(table).getAllByRole("row");
   expect(rows).toHaveLength(3);
-  expect(within(rows[1]).getByText("25")).toBeInTheDocument();
-  expect(within(rows[2]).getByText("busy")).toBeInTheDocument();
+  expect(within(rows[1] as HTMLElement).getByText("25")).toBeInTheDocument();
+  expect(within(rows[2] as HTMLElement).getByText("busy")).toBeInTheDocument();
 });
 
 it("shows the candidate counts and today's spend against the budget", async () => {
@@ -71,9 +71,7 @@ it("shows the 409 when a refit started less than 10 minutes ago", async () => {
 
   await user.click(await screen.findByRole("button", { name: "Refit now" }));
 
-  expect(
-    await screen.findByText("A refit started less than 10 minutes ago."),
-  ).toBeInTheDocument();
+  expect(await screen.findByText("A refit started less than 10 minutes ago.")).toBeInTheDocument();
 });
 
 it("disables Refit now for a viewer", async () => {

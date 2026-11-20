@@ -9,9 +9,9 @@ import connectionsFixture from "../../../../fixtures/api/static/llm-connections.
 import sourcesFixture from "../../../../fixtures/api/static/issue-sources.json";
 
 const NEW_URL = "/acme/support-bot/issue-sources/new";
-const TOPIC = sourcesFixture.data[1];
+const TOPIC = sourcesFixture.data[1] as (typeof sourcesFixture.data)[number];
 const EDIT_URL = `/acme/support-bot/issue-sources/${TOPIC.id}/edit`;
-const OPENAI = connectionsFixture.data[0];
+const OPENAI = connectionsFixture.data[0] as (typeof connectionsFixture.data)[number];
 const ANTHROPIC = {
   ...OPENAI,
   id: "01900000-0000-7000-8000-000000000401",
@@ -31,7 +31,10 @@ function captureCreate(answer?: () => Response): { body: () => unknown; calls: (
       if (answer) {
         return answer();
       }
-      return HttpResponse.json({ ...TOPIC, id: "01900000-0000-7000-8000-000000001c21" }, { status: 201 });
+      return HttpResponse.json(
+        { ...TOPIC, id: "01900000-0000-7000-8000-000000001c21" },
+        { status: 201 },
+      );
     }),
   );
   return { body: () => body, calls: () => calls };
@@ -142,7 +145,9 @@ it("shows the embedding model read-only on edit, with its hint", async () => {
 
   const model = await screen.findByLabelText("Embedding model");
   expect(model).toHaveAttribute("readonly");
-  expect(model).toHaveAccessibleDescription("Fixed after create. Create a new source to change them.");
+  expect(model).toHaveAccessibleDescription(
+    "Fixed after create. Create a new source to change them.",
+  );
   expect(screen.queryByRole("combobox", { name: "Embedding connection" })).toBeNull();
 });
 
