@@ -268,10 +268,14 @@ async fn measure_rule(
         ApiError::Unavailable { .. } => "storage is busy",
         _ => "query failed",
     })?;
+    // Only `issue_occurrences` has no storage measure; M4.5 measures it before this point.
+    let Some(measure) = measure(condition) else {
+        return Err("query failed");
+    };
     let request = AlertValueRequest {
         window,
         filter: condition.filter.as_deref(),
-        measure: measure(condition),
+        measure,
         timeout: QUERY_TIMEOUT,
     };
     Box::pin(alert_value(&ctx, request))
@@ -348,6 +352,8 @@ mod tests {
             target: None,
             score_name: None,
             aggregation: None,
+            issue_id: None,
+            source_id: None,
         }
     }
 

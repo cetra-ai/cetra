@@ -87,7 +87,8 @@ fn rfc3339(ns: i64) -> String {
 }
 
 /// How a value reads in a message: `12.5%` for `error_rate`, `$3.75` (2 decimals) for `cost`,
-/// `820 ms` (0 decimals) for `latency_p95`, 3 decimals for `score` (`0.700`). `None` → `"no data"`.
+/// `820 ms` (0 decimals) for `latency_p95`, 3 decimals for `score` (`0.700`), a whole count for
+/// `issue_occurrences` (`12`). `None` → `"no data"`.
 pub(crate) fn value_text(metric: AlertMetric, value: Option<f64>) -> String {
     let Some(value) = value else {
         return "no data".to_owned();
@@ -97,6 +98,7 @@ pub(crate) fn value_text(metric: AlertMetric, value: Option<f64>) -> String {
         AlertMetric::Cost => format!("${value:.2}"),
         AlertMetric::LatencyP95 => format!("{value:.0} ms"),
         AlertMetric::Score => format!("{value:.3}"),
+        AlertMetric::IssueOccurrences => format!("{value:.0}"),
     }
 }
 
@@ -350,6 +352,9 @@ mod tests {
         assert_eq!(value_text(AlertMetric::LatencyP95, Some(820.4)), "820 ms");
         assert_eq!(value_text(AlertMetric::Score, Some(0.7)), "0.700");
         assert_eq!(value_text(AlertMetric::Score, None), "no data");
+        assert_eq!(value_text(AlertMetric::IssueOccurrences, Some(12.0)), "12");
+        assert_eq!(value_text(AlertMetric::IssueOccurrences, Some(0.0)), "0");
+        assert_eq!(value_text(AlertMetric::IssueOccurrences, None), "no data");
     }
 
     #[test]

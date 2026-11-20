@@ -1012,6 +1012,8 @@ mod tests {
             target: None,
             score_name: None,
             aggregation: None,
+            issue_id: None,
+            source_id: None,
         };
         let rule = alerts::NewRule {
             project_id: seeded.project.id,

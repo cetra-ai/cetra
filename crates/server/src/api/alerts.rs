@@ -21,10 +21,12 @@ pub enum AlertMetric {
     LatencyP95,
     /// Average of a score, or the pass rate of a boolean score.
     Score,
+    /// Occurrences of one issue or of one source's issues in the window (D-IC-20).
+    IssueOccurrences,
 }
 
 impl AlertMetric {
-    /// The stored spelling: `error_rate`, `cost`, `latency_p95`, `score`.
+    /// The stored spelling: `error_rate`, `cost`, `latency_p95`, `score`, `issue_occurrences`.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -32,6 +34,7 @@ impl AlertMetric {
             Self::Cost => "cost",
             Self::LatencyP95 => "latency_p95",
             Self::Score => "score",
+            Self::IssueOccurrences => "issue_occurrences",
         }
     }
 }
@@ -242,9 +245,10 @@ pub struct AlertCondition {
     /// How the value is compared with `threshold`.
     pub comparator: Comparator,
     /// Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
-    /// (below the window length for a `trace` target).
+    /// (below the window length for a `trace` target), occurrences for `issue_occurrences`.
     pub threshold: f64,
-    /// Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`.
+    /// Fewer samples than this gives `no_data`. Not for `cost` or `issue_occurrences`. Defaults:
+    /// 20, or 10 for `score`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_count: Option<i64>,
     /// `latency_p95` only. Default `trace`.
@@ -256,6 +260,14 @@ pub struct AlertCondition {
     /// `score` only. Default `avg`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aggregation: Option<ScoreAggregation>,
+    /// `issue_occurrences` only: count one issue and the issues merged into it. Exactly one of
+    /// `issue_id` and `source_id` is set for that metric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<Uuid>,
+    /// `issue_occurrences` only: count every issue of the source that is not ignored or merged,
+    /// and the issues merged into them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<Uuid>,
 }
 
 /// A delivery's status.
