@@ -151,7 +151,7 @@ run() {
   (cd "$root" && CETRA_CRASH_ITERATIONS=10 \
     CETRA_CRASH_DIR_ROOT="$work/mnt" \
     CETRA_CRASH_CLEAR_CACHE="$work/faults.fifo:$work/done.fifo" \
-    cargo test --workspace --all-features --test crash -- --exact crash_recovery)
+    cargo test --workspace --all-features --test it -- --exact crash::crash_recovery)
   echo "LazyFS cross-check passed at $LAZYFS_SHA"
 }
 

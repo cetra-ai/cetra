@@ -4,6 +4,7 @@
 //! own by a fresh [`McpServer`] that holds the caller. Only personal access tokens reach it.
 
 pub(crate) mod output;
+mod prompts;
 pub(crate) mod sql;
 pub(crate) mod tools;
 pub(crate) mod traces;
@@ -36,7 +37,7 @@ use crate::http::error::ApiError;
 const MCP_BODY_LIMIT: usize = 1024 * 1024;
 
 /// Instructions sent with `initialize`.
-const INSTRUCTIONS: &str = "Read-only access to LLM traces and spans. Call list_projects first: the other tools take a `project`. Each tool's description says what it needs. Results are compact JSON; when a result is cut, `truncated` is true and `notes` says what was left out.";
+const INSTRUCTIONS: &str = "Read-only access to LLM traces, spans and prompts. Call list_projects first: the other tools take a `project`. Each tool's description says what it needs. Results are compact JSON; when a result is cut, `truncated` is true and `notes` says what was left out.";
 
 /// `POST /mcp`. Not in the OpenAPI document.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -184,6 +185,14 @@ impl McpServer {
             sql::LIST_SAVED_VIEWS => (
                 sql::LIST_SAVED_VIEWS,
                 sql::list_saved_views(&self.state, &self.user, arguments).await,
+            ),
+            prompts::LIST_PROMPTS => (
+                prompts::LIST_PROMPTS,
+                prompts::list_prompts(&self.state, &self.user, arguments).await,
+            ),
+            prompts::GET_PROMPT => (
+                prompts::GET_PROMPT,
+                prompts::get_prompt(&self.state, &self.user, arguments).await,
             ),
             traces::SEARCH_TRACES => (
                 traces::SEARCH_TRACES,
@@ -342,15 +351,18 @@ mod tests {
     use crate::meta::orgs::insert_org;
     use crate::meta::personal_tokens::{self, NewToken};
     use crate::meta::projects::insert_project;
+    use crate::meta::prompts::{self as store, NewPrompt, NewVersion, PromptType};
     use crate::meta::users::{self, NewUser, insert_user};
     use crate::test_support::TestApp;
-    use cetra_core::ids::OrgId;
+    use cetra_core::ids::{OrgId, ProjectId};
 
-    const TOOLS: [&str; 7] = [
+    const TOOLS: [&str; 9] = [
         "list_projects",
         "get_schema",
         "query_sql",
         "list_saved_views",
+        "list_prompts",
+        "get_prompt",
         "search_traces",
         "get_trace",
         "get_span",
@@ -473,16 +485,21 @@ mod tests {
             json!(["project", "query", "from", "to"])
         );
         assert_eq!(tools[3]["inputSchema"]["required"], json!(["project"]));
-        assert_eq!(
-            tools[4]["inputSchema"]["required"],
-            json!(["project", "from", "to"])
-        );
+        assert_eq!(tools[4]["inputSchema"]["required"], json!(["project"]));
         assert_eq!(
             tools[5]["inputSchema"]["required"],
-            json!(["project", "trace_id"])
+            json!(["project", "name"])
         );
         assert_eq!(
             tools[6]["inputSchema"]["required"],
+            json!(["project", "from", "to"])
+        );
+        assert_eq!(
+            tools[7]["inputSchema"]["required"],
+            json!(["project", "trace_id"])
+        );
+        assert_eq!(
+            tools[8]["inputSchema"]["required"],
             json!(["project", "trace_id", "span_id"])
         );
         assert!(body["result"].get("resultType").is_none());
@@ -1285,6 +1302,231 @@ mod tests {
         assert!(!is_error);
         let expected = serde_json::to_value(convert::schema_response()).unwrap();
         assert_eq!(body, expected);
+    }
+
+    /// Creates prompt `name` (text prompts) in `project`: one version per entry of `versions`,
+    /// each labelled with the labels in its entry.
+    async fn create_prompt(
+        app: &TestApp,
+        project: ProjectId,
+        name: &str,
+        versions: Vec<Vec<&str>>,
+    ) {
+        let now = app.state.clock.now_ns();
+        let name = name.to_owned();
+        let versions: Vec<NewVersion> = versions
+            .into_iter()
+            .map(|labels| NewVersion {
+                template: "\"hello\"".to_owned(),
+                config: "{}".to_owned(),
+                commit_message: None,
+                labels: labels.into_iter().map(str::to_owned).collect(),
+                actor: None,
+            })
+            .collect();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let mut versions = versions.into_iter();
+                    let first = versions.next().expect("at least one version");
+                    let prompt = NewPrompt {
+                        id: Uuid::now_v7(),
+                        name,
+                        prompt_type: PromptType::Text,
+                        description: None,
+                        tags: Vec::new(),
+                    };
+                    let (row, _) = store::create_prompt(conn, project, prompt, first, now).await?;
+                    for version in versions {
+                        store::add_version(conn, row.id, version, now).await?;
+                    }
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_prompts_orders_filters_and_limits() {
+        let (app, seeded, tok) = app_with_token().await;
+        let project = seeded.project.id;
+        create_prompt(&app, project, "beta", vec![vec!["production"]]).await;
+        create_prompt(&app, project, "Alpha", vec![vec!["staging"]]).await;
+        let names = |body: &Value| -> Vec<String> {
+            body["prompts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|prompt| prompt["name"].as_str().unwrap().to_owned())
+                .collect()
+        };
+
+        let (is_error, body) = call(
+            &app,
+            &tok,
+            "list_prompts",
+            &json!({"project": project.to_string()}),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+        assert_eq!(names(&body), ["Alpha", "beta"]);
+        assert_eq!(body["truncated"], json!(false));
+        assert_eq!(body["notes"], json!([]));
+        assert_eq!(
+            body["prompts"][1],
+            json!({"name": "beta", "type": "text", "tags": [], "latest_version": 1,
+                   "labels": {"production": 1}})
+        );
+
+        let (_, body) = call(
+            &app,
+            &tok,
+            "list_prompts",
+            &json!({"project": project.to_string(), "q": "ALP"}),
+        )
+        .await;
+        assert_eq!(names(&body), ["Alpha"]);
+
+        let (_, body) = call(
+            &app,
+            &tok,
+            "list_prompts",
+            &json!({"project": project.to_string(), "label": "production"}),
+        )
+        .await;
+        assert_eq!(names(&body), ["beta"]);
+
+        let (_, body) = call(
+            &app,
+            &tok,
+            "list_prompts",
+            &json!({"project": project.to_string(), "limit": 1}),
+        )
+        .await;
+        assert_eq!(names(&body), ["Alpha"]);
+        assert_eq!(body["truncated"], json!(true));
+        assert_eq!(
+            body["notes"],
+            json!(["more prompts than limit; narrow with q or label"])
+        );
+
+        for limit in [0, 201] {
+            let (is_error, body) = call(
+                &app,
+                &tok,
+                "list_prompts",
+                &json!({"project": project.to_string(), "limit": limit}),
+            )
+            .await;
+            assert!(is_error, "{limit}");
+            assert_eq!(body["error"]["code"], json!("bad_request"));
+            assert_eq!(body["error"]["message"], json!("limit must be 1 to 200"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_prompt_resolves_labels_and_versions() {
+        let (app, seeded, tok) = app_with_token().await;
+        let project = seeded.project.id.to_string();
+        create_prompt(
+            &app,
+            seeded.project.id,
+            "support",
+            vec![vec!["production"], vec![]],
+        )
+        .await;
+
+        // The default is the version labelled production, here version 1.
+        let (is_error, body) = call(
+            &app,
+            &tok,
+            "get_prompt",
+            &json!({"project": project, "name": "support"}),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+        assert_eq!(body["name"], json!("support"));
+        assert_eq!(body["version"], json!(1));
+        assert_eq!(body["labels"], json!(["production"]));
+        assert_eq!(body["template"], json!("hello"));
+
+        // `version: 2` and `label: "latest"` are the latest version, which carries `latest`.
+        for arguments in [
+            json!({"project": project, "name": "support", "version": 2}),
+            json!({"project": project, "name": "support", "label": "latest"}),
+        ] {
+            let (is_error, body) = call(&app, &tok, "get_prompt", &arguments).await;
+            assert!(!is_error, "{body}");
+            assert_eq!(body["version"], json!(2));
+            assert_eq!(body["labels"], json!(["latest"]));
+        }
+
+        let (is_error, body) = call(
+            &app,
+            &tok,
+            "get_prompt",
+            &json!({"project": project, "name": "support", "label": "production", "version": 1}),
+        )
+        .await;
+        assert!(is_error);
+        assert_eq!(
+            body,
+            json!({"error": {"code": "bad_request",
+                             "message": "give label or version, not both"}})
+        );
+
+        let not_found = json!({"error": {"code": "not_found", "message": "Not Found"}});
+        for arguments in [
+            json!({"project": project, "name": "nope"}),
+            json!({"project": project, "name": "support", "label": "staging"}),
+            json!({"project": project, "name": "support", "version": 9}),
+        ] {
+            let (is_error, body) = call(&app, &tok, "get_prompt", &arguments).await;
+            assert!(is_error, "{arguments}");
+            assert_eq!(body, not_found, "{arguments}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn prompt_tools_need_view_access() {
+        let (app, seeded, _) = app_with_token().await;
+        create_prompt(&app, seeded.project.id, "support", vec![vec!["production"]]).await;
+        let stranger_id = app
+            .state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let user = insert_user(
+                        conn,
+                        NewUser {
+                            email: "stranger@example.com".to_owned(),
+                            name: None,
+                            password_hash: None,
+                            email_verified_at: None,
+                            email_verified_via: None,
+                            is_instance_admin: false,
+                        },
+                        0,
+                    )
+                    .await?;
+                    Ok(user.id)
+                })
+            })
+            .await
+            .unwrap();
+        let stranger_tok = app.personal_token(stranger_id, false).await;
+        let project = seeded.project.id.to_string();
+        let not_found = json!({"error": {"code": "not_found", "message": "Not Found"}});
+        for (tool, arguments) in [
+            ("list_prompts", json!({"project": project})),
+            ("get_prompt", json!({"project": project, "name": "support"})),
+        ] {
+            let (is_error, body) = call(&app, &stranger_tok, tool, &arguments).await;
+            assert!(is_error, "{tool}");
+            assert_eq!(body, not_found, "{tool}");
+        }
     }
 
     // Logs

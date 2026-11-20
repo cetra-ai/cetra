@@ -1,4 +1,4 @@
-Status: design doc in review (2026-11-20). No plan is written yet.
+Status: implemented (M1–M7).
 
 # V · Prompt registry and playground — design
 
@@ -32,7 +32,7 @@ These are out of track V. Each is a possible later track, and the design does no
 - **Git sync and CLI commands** (`cetra prompts pull/push`), as in LangWatch.
 - **Server-side label routing.** No A/B splits of a label between versions, and no gateway (D4).
 - **Evaluators built from registry prompts.** The template syntax keeps this possible (D-V-3), but judges keep their own templates.
-- **MCP tools for prompts.** See open question Q2.
+- **MCP tools for prompts.** Added in M8 (D-V-39).
 - **Images, audio and files in the playground.** Only text and tool parts are sent (D-V-25).
 - **Running tools in the playground.** The model's tool calls are shown, and the user can type tool results (D-V-25).
 - **Saved playground sessions** shared between users. The draft stays in the browser, and the run history comes from the traces (D-V-28).
@@ -120,7 +120,7 @@ TypeScript: `await cetra.getPrompt("support-bot", { label, version, fallback, ca
 
 ### UI
 
-- **Prompts** in the project sidebar: `/:org/:project/prompts` (list, filters), `/prompts/new`, and `/prompts/:name` with `?version=`. The prompt page has these parts:
+- **Prompts** in the project sidebar: `/:org/:project/prompts` (list with search and label and tag filters; `?create=1` opens the New prompt dialog; admins also get the Protected labels dialog), and `/:org/:project/prompts/:prompt` with the search `tab` (`template`, `versions`, `labels`, `metrics`) and `version` (absent means latest). Creation is a dialog, never a `/prompts/new` route (D-V-32). The prompt page has these parts:
   - the version list with labels;
   - the editor, where saving writes a new version;
   - a diff of two versions;
@@ -184,16 +184,22 @@ Options marked "(user)" were chosen by the user on 2026-11-20. The others are pr
 | D-V-29 | **Judges stay buffered.** Judges call the layer without streaming. The layer has a buffered call that sends the same request without `stream` and decodes one JSON body into the same reply shape; judges use it, the playground streams. A judge reads the whole answer before parsing it, so streaming gains it nothing, and a streamed judge would change every request body the judge tests pin. | — |
 | D-V-30 | **Stream size caps.** D159's 4 MiB applies to the answer a stream assembles (text plus tool-call arguments) and to any one SSE event; the raw stream is capped at 32 MiB. The SSE framing of a 65,536-token answer (D-V-24) is several times its text (OpenAI sends about 250 bytes per token chunk), so a 4 MiB raw cap would cut answers at about 16,000 tokens. A non-200 body is still read up to 4 MiB. | — |
 | D-V-31 | **Message and parameter mapping.** System messages become the provider's system field (Anthropic `system`, Gemini `systemInstruction`; OpenAI keeps them in place). `tool` messages become OpenAI `tool` messages, Anthropic `tool_result` blocks in a user turn, and Gemini `functionResponse` parts whose name comes from the earlier call with the same id. Consecutive messages that map to the same Anthropic or Gemini role are merged. Reasoning parts are not sent; media and unknown parts, unknown roles, and tool parts in the wrong role are refused with the message index. A parameter the provider has no field for is not sent: Anthropic gets `temperature`, `top_p` and `stop`; Gemini gets all but `reasoning_effort`; OpenAI gets all. A Gemini tool call without an id gets `call_<n>`. | — |
+| D-V-32 | **Registry UI.** Creation is a dialog on the list (`?create=1`), never a `/prompts/new` route, because `new` is a valid prompt name (D-V-2). The page is `/prompts/:prompt` with tabs `template`, `versions`, `labels` and `metrics` and a `version` search. Labels are set from a version row and removed from their chip (protected chips carry a lock). The diff compares a version with the previous one, line by line. Metrics windows are 24 hours, 7 days (default) and 30 days, the traces list's presets. |
 | D-V-33 | **Reserved environments, one test.** `cetra_core::names::environment` gains `PLAYGROUND = "cetra-playground"`, `PLAYGROUND_EXTERNAL = "cetra-playground-external"`, `RESERVED: &[&str] = &[EVAL, PLAYGROUND]`, `is_reserved(env) -> bool` and `external_alias(env) -> Option<&'static str>`. Every place that compared with `EVAL` to hide, skip, refuse or not bill a trace uses `is_reserved`; the OTLP handler rewrites any reserved name to its `-external` alias. The judge-trace builder and the GDPR judge cascade (which find judge traces by their target) stay `EVAL`-specific. A later track adds its environment to `RESERVED` and gets every rule. | Per-place comparisons with `EVAL`: each new reserved environment would have to find every one. |
 | D-V-34 | **The units rule is one function.** `crate::ingest::billable_spans(&[Span]) -> usize` counts the spans whose environment is not reserved, and `Ingest::commit` uses it. | A check in each caller: they would drift apart. |
 | D-V-35 | **Interactive connection permits.** `crate::eval::interactive::acquire(state, connection, wait)` waits up to `wait` for the connection's concurrency slot (tokio's FIFO semaphore puts the waiter ahead of the dispatcher's polling `try_acquire`), then for a rate token, and returns a permit that frees the slot on drop; it fails with `Busy` at the deadline. The dispatcher and the interactive path share one `ConnectionLimit` per connection. The playground passes 10 s. | A separate limit for the playground: it would not share the provider's limits (D-V-24). |
 | D-V-36 | **Playground runs and connection status.** A run uses the connection whatever its `status` (as connection tests and test runs do) and never marks it `failing`: a pause-class error is reported to the user in the `error` event only. | Marking the connection failing: one bad run would stop the rules that share it. |
-| D-V-37 | **Playground request shape.** `messages` are canonical messages (spec 01) or `{type: "placeholder", name}` entries; a placeholder is replaced, in place, by the messages given under its name in `placeholders`; every `text` part of the resulting messages that came from `messages` (not from a placeholder) is rendered with `variables` (D-V-3); a missing variable or placeholder is a 400 before the stream starts. Trace ids are random. The run's trace is committed after the stream ends, also when the client cancelled (status error, message `cancelled`). | — |
+| D-V-37 | **Playground request shape.** `messages` are canonical messages (spec 01) or `{type: "placeholder", name}` entries; a placeholder is replaced, in place, by the messages given under its name in `placeholders`; every `text` part of the resulting messages that came from `messages` (not from a placeholder) is rendered with `variables` (D-V-3); a missing variable or placeholder is a 400 before the stream starts. Trace ids are random. The run's trace is committed after the stream ends, also when the client cancelled (status error, message `cancelled`). Rendered text is at most 4 MiB. | — |
+| D-V-38 | **Playground precision.** Runs use raw `fetch` with same-origin credentials and a small SSE reader; openapi-react-query is not used for the stream. A message is edited as a role and its text, or as its parts' JSON when it holds non-text parts. Models are free text, defaulting to the connection's default model (there is no model list endpoint). The go-key is `l`. `render_variables` (default `true`; off for span and run sources) sends a request's messages as written, placeholders still expanded (amends D-V-37). The source search keys are removed from the URL after loading; the draft keeps the source (amends D-V-28). | — |
+| D-V-39 | **MCP prompt tools.** The MCP server gains read-only `list_prompts` and `get_prompt` (the answer of the resolve fetch), with the same auth, limits and `max_chars` cap as the other tools. Answers Q2 (user, 2026-11-20: yes). | M8 |
+| D-V-40 | **No server-side dataset runs yet.** The playground does not run over dataset items and there is no server-side prompt experiment; D18 stays. Phoenix and Opik run prompts over datasets from the playground and Langfuse has prompt experiments: to revisit after launch. Answers Q1 (user, 2026-11-20: later). | — |
 
 ## Open questions for the user
 
 - **Q1. Datasets in the playground.** Phoenix and Opik run the playground over a dataset as a server-side job that outlives the page. Doing that in cetra means a server-side experiment run, which D18 (experiments are client-side only) rules out. Should V add it (amending D18, probably as an eighth milestone), or leave it for later and keep D18 as it is? This design does neither.
+  **Answered 2026-11-20: later.** D18 stays; D-V-40.
 - **Q2. MCP tools for prompts.** Should H's read-only MCP server (S10) gain `list_prompts` and `get_prompt`, so coding agents can read the team's prompts? It would be a small addition to M1. The design leaves it out until you say so.
+  **Answered 2026-11-20: yes.** Added in M8 (D-V-39).
 
 ## Milestones
 

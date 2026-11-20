@@ -44,6 +44,26 @@
     "now": "2026-01-01T11:00:00Z"
   },
   {
+    "name": "prompts",
+    "path": "/acme/support-bot/prompts",
+    "waitFor": "support-reply",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "prompt",
+    "path": "/acme/support-bot/prompts/support-reply",
+    "waitFor": "Friendlier tone",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "playground",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
+    "waitFor": "Run all",
+    "now": "2026-01-01T11:00:00Z",
+    "actions": [{ "click": "button:has-text('Run all')" }],
+    "waitAfter": "Open trace"
+  },
+  {
     "name": "annotation-queues",
     "path": "/acme/support-bot/annotation-queues",
     "waitFor": "Relevance review",

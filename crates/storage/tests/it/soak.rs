@@ -1,4 +1,4 @@
-//! Storage soak (track R M7, D-R-11, `tests/soak.rs`, ignored).
+//! Storage soak (track R M7, D-R-11, `tests/it/soak.rs`, ignored).
 //!
 //! Drives `Storage` at a steady rate for hours: ingest, scores, deletions,
 //! retention and queries run at the same time, and background compaction stays
@@ -18,22 +18,12 @@
     clippy::print_stdout
 )]
 
-#[allow(dead_code)] // each test target uses part of the shared helpers
-mod common;
-
-#[path = "soak/config.rs"]
 mod config;
-#[path = "soak/driver.rs"]
 mod driver;
-#[path = "soak/failures.rs"]
 mod failures;
-#[path = "soak/redact.rs"]
 mod redact;
-#[path = "soak/registry.rs"]
 mod registry;
-#[path = "soak/rules.rs"]
 mod rules;
-#[path = "soak/sample.rs"]
 mod sample;
 
 use std::collections::{BTreeMap, HashSet};
@@ -41,14 +31,14 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::common::corpus::{CORPUS_FILE, CORPUS_SHA256, Corpus};
+use crate::common::machine::machine;
+use crate::common::payload::Payloads;
+use crate::common::payload::TraceSummary;
+use crate::common::rng::{Rng, mix};
+use crate::common::s3::S3Env;
 use cetra_core::ids::TraceId;
 use cetra_storage::Storage;
-use common::corpus::{CORPUS_FILE, CORPUS_SHA256, Corpus};
-use common::machine::machine;
-use common::payload::Payloads;
-use common::payload::TraceSummary;
-use common::rng::{Rng, mix};
-use common::s3::S3Env;
 use config::{QueryKind, SoakConfig, parse_mix, prepare_data_dir};
 use driver::{Shared, is_sampled};
 use failures::FailureKind;
@@ -65,7 +55,7 @@ const HOUR_NS: i64 = 3_600 * 1_000_000_000;
 struct RunInfo<'a> {
     label: &'a str,
     started_unix: i64,
-    machine: common::machine::Machine,
+    machine: crate::common::machine::Machine,
     config: &'a SoakConfig,
     store: serde_json::Value,
     corpus_file: &'static str,

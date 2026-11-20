@@ -9,7 +9,7 @@
 //! by a seeded choice. The model follows RocksDB's `FaultInjectionTestFS` and
 //! the ALICE rules (`docs/research/storage/hardening.md`, track R, M2).
 //!
-//! Only in-crate tests see this module. `tests/crash.rs` is an integration test
+//! Only in-crate tests see this module. `tests/it/crash.rs` is an integration test
 //! and runs without `cfg(test)`; LazyFS covers it (R2.12).
 //!
 //! Each root is leaked when it is enabled, so its state can be locked for the

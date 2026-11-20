@@ -96,6 +96,7 @@ export default defineConfig({
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },
                     { label: "Datasets", link: "/docs/evaluation/datasets/" },
                     { label: "Prompts", link: "/docs/evaluation/prompts/" },
+                    { label: "Playground", link: "/docs/evaluation/playground/" },
                     { label: "Experiments", link: "/docs/evaluation/experiments/" },
                   ],
                 },

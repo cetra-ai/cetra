@@ -10,7 +10,7 @@ import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
 import { ProjectProvider } from "@/components/shell/project-context";
-import { orderedSpanColumns } from "@/components/span-columns";
+import { orderedSpanColumns, spanColumnSpecs } from "@/components/span-columns";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import projectFixture from "../../../fixtures/api/static/project.json";
 
@@ -85,6 +85,21 @@ it("filters the status with equals from the right-click menu", async () => {
   fireEvent.contextMenu(screen.getByLabelText("Filter by status error"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Filter: status = 'error'" }));
   expect(onFilter).toHaveBeenCalledWith("status = 'error'");
+});
+
+it("hides the prompt column by default", () => {
+  expect(spanColumnSpecs().find((column) => column.id === "prompt")?.defaultVisible).toBe(
+    undefined,
+  );
+});
+
+it("shows the prompt name with its version", async () => {
+  await renderSpans(
+    [span({ prompt_name: "support-reply", prompt_version: 2 })],
+    ["prompt"],
+    vi.fn(),
+  );
+  expect(screen.getByText("support-reply@2")).toBeInTheDocument();
 });
 
 it("filters the provider with equals and excludes it from the menu", async () => {

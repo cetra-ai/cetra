@@ -61,6 +61,39 @@ pub(crate) fn tool_list() -> Vec<Tool> {
             list_saved_views_schema(),
         ),
         tool(
+            super::prompts::LIST_PROMPTS,
+            "List prompts",
+            "Prompts of the project's registry, with their latest version and labels (production, staging, …).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "q": {"type": "string", "description": "A case-insensitive part of the prompt's name."},
+                    "label": {"type": "string", "description": "Only prompts that carry this label. `latest` keeps every prompt."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "Most prompts to return."},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later prompts are left out beyond it."}
+                },
+                "required": ["project"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            super::prompts::GET_PROMPT,
+            "Get a prompt",
+            "One prompt version: its template ({{ name }} variables, chat messages and placeholders), config (model, params, tools) and labels. Defaults to the version labelled production; pass `label` or `version` for another.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "name": {"type": "string", "description": "The prompt's name, as list_prompts returns it."},
+                    "label": {"type": "string", "description": "A label such as production or staging; `latest` is the latest version. Defaults to production."},
+                    "version": {"type": "integer", "minimum": 1, "description": "A version number. Give label or version, not both."}
+                },
+                "required": ["project", "name"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
             super::traces::SEARCH_TRACES,
             "Search traces",
             SEARCH_TRACES_DESCRIPTION,

@@ -20,6 +20,13 @@ it("lists every go target in the sidebar", () => {
   }
 });
 
+it("lists the playground right after prompts", () => {
+  const routes = projectNav.map((item) => item.to as string);
+  expect(routes.indexOf("/$org/$project/playground")).toBe(
+    routes.indexOf("/$org/$project/prompts") + 1,
+  );
+});
+
 it("orders the sidebar by section, each section in one run", () => {
   const sections = projectNav.map((item) => item.section as string);
   const runs = sections.filter((section, index) => section !== sections[index - 1]);
