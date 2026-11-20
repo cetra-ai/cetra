@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
-use super::common::Limit;
+use super::common::{Limit, TimeParam};
 
 /// What a queue's items are (D-AQ-2). Fixed at creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -261,6 +261,49 @@ pub struct AddedQueueItems {
     pub existing: u64,
     /// Targets that were not added: unknown, hidden, evaluation or guarded.
     pub skipped: Vec<SkippedQueueItem>,
+}
+
+/// Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview` and
+/// `POST .../items/matching`: the queue kind's list filter over a window. `search` is not taken
+/// by a session queue.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueueMatchingRequest {
+    /// Filter text over the queue kind's list: `traces`, `spans` or `sessions`.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Full-text search over the traces or spans. Refused on a session queue.
+    #[serde(default)]
+    pub search: Option<String>,
+    /// Start of the window: the targets' own start, `[from, to)`.
+    pub from: TimeParam,
+    /// End of the window, exclusive.
+    pub to: TimeParam,
+    /// Keep the experiment traces, as the list does. Evaluation traces are never matched.
+    #[serde(default)]
+    pub include_experiments: bool,
+}
+
+/// How many targets a filter would add. `matched` is at most 10 000; `capped` says more matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct QueueMatchingPreview {
+    /// Targets the filter matches, at most 10 000.
+    pub matched: u64,
+    /// More than 10 000 targets matched: only the first 10 000 by id are added.
+    pub capped: bool,
+}
+
+/// The answer of an add by filter. A target already in the queue counts as `existing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct QueueMatchingAdded {
+    /// Targets added.
+    pub added: u64,
+    /// Targets that were already in the queue.
+    pub existing: u64,
+    /// Matched targets not added because a deletion blocks them.
+    pub blocked: u64,
+    /// More than 10 000 targets matched: only the first 10 000 by id were considered.
+    pub capped: bool,
 }
 
 /// Body of `POST /api/v1/projects/{project}/annotation-queues/{id}/next`. `{}` is enough.

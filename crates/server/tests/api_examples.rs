@@ -18,7 +18,7 @@ use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAd
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
-    NextQueueItem, SkipQueueItem,
+    NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
 };
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
@@ -484,6 +484,13 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<AddQueueItems>("requests/annotation-queue-items-add.json");
     roundtrip::<NextQueueItem>("requests/annotation-queue-next.json");
     roundtrip::<SkipQueueItem>("requests/annotation-queue-skip.json");
+    // `QueueMatchingRequest` holds a `TimeParam`, which has no `Serialize`, so it is only
+    // deserialized.
+    let matching_text =
+        fs::read_to_string(api_dir().join("requests/annotation-queue-matching.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<QueueMatchingRequest>(&matching_text)
+        .unwrap_or_else(|error| panic!("requests/annotation-queue-matching.json: {error}"));
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
@@ -563,6 +570,14 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "skip_annotation_queue_item",
             "requests/annotation-queue-skip.json",
+        ),
+        (
+            "preview_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
+        ),
+        (
+            "add_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
@@ -716,6 +731,10 @@ fn generated_files_roundtrip() {
             "list_annotation_queue_items" => roundtrip::<Page<AnnotationQueueItem>>(&example.file),
             "get_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "add_annotation_queue_items" => roundtrip::<AddedQueueItems>(&example.file),
+            "add_annotation_queue_matching" => roundtrip::<QueueMatchingAdded>(&example.file),
+            "preview_annotation_queue_matching" => {
+                roundtrip::<QueueMatchingPreview>(&example.file);
+            }
             "next_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
             "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),

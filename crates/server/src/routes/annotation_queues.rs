@@ -16,13 +16,14 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use cetra_core::ids::{ProjectId, SpanId, TraceId};
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 
 use crate::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
-    AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue,
-    NextQueueItem, QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueTarget,
-    SkipQueueItem, SkippedQueueItem, UpdateAnnotationQueue,
+    AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue, NextQueueItem,
+    QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueMatchingAdded,
+    QueueMatchingPreview, QueueMatchingRequest, QueueTarget, SkipQueueItem, SkippedQueueItem,
+    UpdateAnnotationQueue,
 };
 use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
@@ -35,7 +36,7 @@ use crate::meta::annotation_queues::{
     self as store, Counts, MAX_DEFINITIONS, NewQueue, QueueChanges, QueueCreate, QueueRow,
     QueueUpdate, Target,
 };
-use crate::routes::read::{Deadline, open_query, page_limit};
+use crate::routes::read::{Deadline, READ_TIMEOUT, check_search, open_query, page_limit};
 
 /// A queue body is a name, two texts and up to 50 ids (D-AQ-7).
 const QUEUE_BODY_LIMIT: usize = 64 * 1024;
@@ -43,6 +44,10 @@ const QUEUE_BODY_LIMIT: usize = 64 * 1024;
 const ITEMS_BODY_LIMIT: usize = 1024 * 1024;
 /// A reviewer body is `{}` or a short reason (D-AQ-5).
 const REVIEW_BODY_LIMIT: usize = 16 * 1024;
+/// A matching body is a filter, a search and two times (D-AQ-8).
+const MATCHING_BODY_LIMIT: usize = 64 * 1024;
+/// Most targets an add by filter adds, and most a preview counts (D-AQ-8).
+pub(crate) const MAX_MATCHING: usize = 10_000;
 /// Longest skip reason, in characters after trimming.
 const MAX_REASON_CHARS: usize = 1_000;
 /// Longest queue name, in characters after trimming.
@@ -126,6 +131,26 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: post(add_items).layer(DefaultBodyLimit::max(ITEMS_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+            access: Access::Project {
+                perm: ProjectPerm::ManageQueues,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(preview_matching).layer(DefaultBodyLimit::max(MATCHING_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+            access: Access::Project {
+                perm: ProjectPerm::ManageQueues,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(add_matching).layer(DefaultBodyLimit::max(MATCHING_BODY_LIMIT)),
         },
         RouteDef {
             method: Method::GET,
@@ -651,8 +676,54 @@ async fn add_items(
         }
     }
 
-    // The queue is checked again, and the deletion guard asked for each target, in the writer's
-    // transaction (D-M-6), so a deletion that lands meanwhile still blocks the add.
+    let indexes: Vec<usize> = candidates.iter().map(|candidate| candidate.index).collect();
+    let found: Vec<(store::NewItem, Vec<TraceId>)> = candidates
+        .into_iter()
+        .map(|candidate| (candidate.item, candidate.guard))
+        .collect();
+    let inserted = insert_found(&state, project, queue_id, added_by, found).await?;
+    skipped.extend(inserted.blocked.into_iter().filter_map(|position| {
+        indexes
+            .get(position)
+            .map(|&index| skip(index, "a deletion blocks this target"))
+    }));
+    skipped.sort_by_key(|item| item.index);
+    tracing::info!(
+        project_id = %project,
+        queue_id = %queue_id,
+        added = inserted.added,
+        existing = inserted.existing,
+        skipped = skipped.len(),
+        "annotation queue items added"
+    );
+    Ok((
+        StatusCode::CREATED,
+        error::Json(AddedQueueItems {
+            added: inserted.added,
+            existing: inserted.existing,
+            skipped,
+        }),
+    ))
+}
+
+/// What [`insert_found`] did: the counts, and the positions in `found` the deletion guard blocked.
+struct InsertFound {
+    added: u64,
+    existing: u64,
+    blocked: Vec<usize>,
+}
+
+/// Guards and inserts `found`, each row with the traces the deletion guard asks about, in the
+/// writer's transaction. The queue is checked again there (404 when it is gone), and the guard is
+/// asked for each target (D-M-6), so a deletion that lands meanwhile still blocks the add. A queue
+/// past the item cap is 422 and nothing is added (D-AQ-8).
+async fn insert_found(
+    state: &AppState,
+    project: ProjectId,
+    queue_id: Uuid,
+    added_by: (store::AddedByKind, Uuid),
+    found: Vec<(store::NewItem, Vec<TraceId>)>,
+) -> Result<InsertFound, ApiError> {
     let now = state.clock.now_ns();
     let deletions = state.clone();
     let outcome = state
@@ -664,8 +735,8 @@ async fn add_items(
                 }
                 let mut blocked = Vec::new();
                 let mut items = Vec::new();
-                for candidate in candidates {
-                    let guarded = candidate.guard.iter().any(|trace| {
+                for (position, (item, guard)) in found.into_iter().enumerate() {
+                    let guarded = guard.iter().any(|trace| {
                         deletions
                             .deletions
                             .guard
@@ -673,9 +744,9 @@ async fn add_items(
                             .is_some()
                     });
                     if guarded {
-                        blocked.push(candidate.index);
+                        blocked.push(position);
                     } else {
-                        items.push(candidate.item);
+                        items.push(item);
                     }
                 }
                 let inserted =
@@ -689,28 +760,212 @@ async fn add_items(
         AddWrite::Written { inserted, blocked } => (inserted, blocked),
     };
     let (added, existing) = items_answer(inserted)?;
-    skipped.extend(
-        blocked
-            .into_iter()
-            .map(|index| skip(index, "a deletion blocks this target")),
-    );
-    skipped.sort_by_key(|item| item.index);
+    Ok(InsertFound {
+        added,
+        existing,
+        blocked,
+    })
+}
+
+/// The targets a queue's list filter selects over a window: at most `cap` of them, with the
+/// target time and the traces the deletion guard asks about, and whether more matched.
+struct Matching {
+    found: Vec<(store::NewItem, Vec<TraceId>)>,
+    capped: bool,
+}
+
+/// `POST /annotation-queues/{id}/items/matching/preview`: counts what the add by filter would add.
+/// Answers 200.
+async fn preview_matching(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<QueuePath>,
+    error::Json(body): error::Json<QueueMatchingRequest>,
+) -> Result<error::Json<QueueMatchingPreview>, ApiError> {
+    let matching = matching_targets(
+        &state,
+        access.project.org_id,
+        access.project.id,
+        path.id,
+        &body,
+        MAX_MATCHING,
+    )
+    .await?;
+    Ok(error::Json(QueueMatchingPreview {
+        matched: u64::try_from(matching.found.len()).unwrap_or(u64::MAX),
+        capped: matching.capped,
+    }))
+}
+
+/// `POST /annotation-queues/{id}/items/matching`: adds what the queue kind's list filter matches
+/// over the window, at most 10 000 (D-AQ-8). Evaluation traces are never added. Answers 201.
+async fn add_matching(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<QueuePath>,
+    error::Json(body): error::Json<QueueMatchingRequest>,
+) -> Result<(StatusCode, error::Json<QueueMatchingAdded>), ApiError> {
+    let project = access.project.id;
+    let queue_id = path.id;
+    let matching = matching_targets(
+        &state,
+        access.project.org_id,
+        project,
+        queue_id,
+        &body,
+        MAX_MATCHING,
+    )
+    .await?;
+    let added_by = added_by_of(&principal)?;
+    let capped = matching.capped;
+    let inserted = insert_found(&state, project, queue_id, added_by, matching.found).await?;
+    let blocked = u64::try_from(inserted.blocked.len()).unwrap_or(u64::MAX);
     tracing::info!(
         project_id = %project,
         queue_id = %queue_id,
-        added,
-        existing,
-        skipped = skipped.len(),
-        "annotation queue items added"
+        added = inserted.added,
+        existing = inserted.existing,
+        blocked,
+        capped,
+        "annotation queue items added by filter"
     );
     Ok((
         StatusCode::CREATED,
-        error::Json(AddedQueueItems {
-            added,
-            existing,
-            skipped,
+        error::Json(QueueMatchingAdded {
+            added: inserted.added,
+            existing: inserted.existing,
+            blocked,
+            capped,
         }),
     ))
+}
+
+/// The matching targets of queue `queue_id` for `body`, at most `cap` of them. Shared by the
+/// preview and the add. Order: 404 when the queue is absent, a session queue refuses a search,
+/// the search length is checked, then the scan runs under the read timeout over the data window.
+async fn matching_targets(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+    queue_id: Uuid,
+    body: &QueueMatchingRequest,
+    cap: usize,
+) -> Result<Matching, ApiError> {
+    let target = store::get(state.meta.reader(), project, queue_id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .target;
+    let filter = non_blank(body.filter.as_deref());
+    let search = non_blank(body.search.as_deref());
+    if search.is_some() && target == Target::Session {
+        return Err(field_error("search", "sessions have no search"));
+    }
+    check_search(search)?;
+    let window = cetra_storage::TimeWindow::new(body.from.ns(), body.to.ns())?;
+    let ctx = open_query(state, org, project, None).await?;
+    let include_experiments = body.include_experiments;
+    let matching = match target {
+        Target::Trace => {
+            let ids = cetra_storage::filter_trace_ids(
+                &ctx,
+                cetra_storage::FilterDeletionRequest {
+                    filter,
+                    search,
+                    window,
+                    include_eval: false,
+                    include_experiments,
+                    limit: cap.saturating_add(1),
+                    timeout: READ_TIMEOUT,
+                },
+            )
+            .await?;
+            let capped = ids.len() > cap;
+            let found = ids
+                .into_iter()
+                .take(cap)
+                .map(|found| {
+                    (
+                        store::NewItem {
+                            trace_id: Some(found.trace_id.to_hex()),
+                            span_id: None,
+                            session_id: None,
+                            target_time: found.start_time,
+                        },
+                        vec![found.trace_id],
+                    )
+                })
+                .collect();
+            Matching { found, capped }
+        }
+        Target::Span => {
+            let spans = cetra_storage::filter_span_targets(
+                &ctx,
+                cetra_storage::SpanTargetFilter {
+                    filter,
+                    search,
+                    window,
+                    include_experiments,
+                    limit: cap,
+                    timeout: READ_TIMEOUT,
+                },
+            )
+            .await?;
+            let capped = spans.capped;
+            let found = spans
+                .targets
+                .into_iter()
+                .map(|found| {
+                    (
+                        store::NewItem {
+                            trace_id: Some(found.trace_id.to_hex()),
+                            span_id: Some(found.span_id.to_hex()),
+                            session_id: None,
+                            target_time: found.trace_start,
+                        },
+                        vec![found.trace_id],
+                    )
+                })
+                .collect();
+            Matching { found, capped }
+        }
+        Target::Session => {
+            let sessions = cetra_storage::filter_session_targets(
+                &ctx,
+                cetra_storage::SessionTargetFilter {
+                    filter,
+                    window,
+                    include_experiments,
+                    limit: cap,
+                    timeout: READ_TIMEOUT,
+                },
+            )
+            .await?;
+            let capped = sessions.capped;
+            let found = sessions
+                .targets
+                .into_iter()
+                .map(|found| {
+                    (
+                        store::NewItem {
+                            trace_id: None,
+                            span_id: None,
+                            session_id: Some(found.session_id),
+                            target_time: found.start_time,
+                        },
+                        found.trace_ids,
+                    )
+                })
+                .collect();
+            Matching { found, capped }
+        }
+    };
+    Ok(matching)
+}
+
+/// Blank filter or search text means "no filter" or "no search".
+fn non_blank(text: Option<&str>) -> Option<&str> {
+    text.map(str::trim).filter(|text| !text.is_empty())
 }
 
 /// `DELETE /annotation-queues/{id}/items/{item_id}`: removes one item. Answers 204, or 404.
@@ -2600,5 +2855,361 @@ mod tests {
         assert_eq!(done.status, StatusCode::NOT_FOUND);
         let none = claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await;
         assert_eq!(none.status, StatusCode::NO_CONTENT);
+    }
+
+    /// One hour in epoch milliseconds, and one day.
+    const HOUR_MS: i64 = 3_600_000;
+    const DAY_MS: i64 = 86_400_000;
+
+    /// The window `[now - 1 h, now + 1 h)` of a matching body, as epoch milliseconds.
+    fn window(now: i64) -> Value {
+        let ms = now / 1_000_000;
+        json!({
+            "from": (ms - HOUR_MS).to_string(),
+            "to": (ms + HOUR_MS).to_string(),
+        })
+    }
+
+    /// Calls the matching preview (`/preview`) or the add (`""`) of `queue` as `cookie`.
+    async fn matching(
+        app: &TestApp,
+        seeded: &Seeded,
+        queue: Uuid,
+        action: &str,
+        body: Value,
+    ) -> TestResponse {
+        let path = format!("{}/{queue}/items/matching{action}", base(seeded));
+        send(app, Method::POST, &path, &seeded.cookie, Some(body)).await
+    }
+
+    /// Commits one span of `trace` named `name`, a root span starting at `start`.
+    async fn commit_named(app: &TestApp, seeded: &Seeded, trace: TraceId, name: &str, start: i64) {
+        let mut span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = "e400000000000001".parse::<SpanId>().expect("span id hex");
+        span.parent_span_id = None;
+        span.name = name.to_owned();
+        span.start_time = start;
+        span.end_time = start + 1_000_000_000;
+        span.ingest_time = app.state.clock.now_ns();
+        app.commit_spans(&seeded.project, vec![span]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn preview_and_add_matching_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        for n in 1..=3 {
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+        }
+        app.commit_trace_at(&seeded.project, trace_id(4), 0, now - 2 * DAY_MS * 1_000_000)
+            .await;
+
+        let preview = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
+        assert_eq!(preview.status, StatusCode::OK);
+        let counted: QueueMatchingPreview = preview.json();
+        assert_eq!(
+            counted,
+            QueueMatchingPreview {
+                matched: 3,
+                capped: false,
+            }
+        );
+
+        let added = matching(&app, &seeded, queue.id, "", window(now)).await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let answer: QueueMatchingAdded = added.json();
+        assert_eq!(
+            answer,
+            QueueMatchingAdded {
+                added: 3,
+                existing: 0,
+                blocked: 0,
+                capped: false,
+            }
+        );
+
+        let again = matching(&app, &seeded, queue.id, "", window(now)).await;
+        let answer: QueueMatchingAdded = again.json();
+        assert_eq!(answer.added, 0);
+        assert_eq!(answer.existing, 3);
+        assert_eq!(items_of(&app, &seeded, queue.id).await.len(), 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_respects_the_filter_and_search() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        commit_named(&app, &seeded, trace_id(1), "needle", now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+
+        let mut body = window(now);
+        body["filter"] = json!("name = 'needle'");
+        let preview = matching(&app, &seeded, queue.id, "/preview", body.clone()).await;
+        assert_eq!(preview.status, StatusCode::OK);
+        let counted: QueueMatchingPreview = preview.json();
+        assert_eq!(counted.matched, 1);
+
+        let added = matching(&app, &seeded, queue.id, "", body).await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let items = items_of(&app, &seeded, queue.id).await;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].trace_id, Some(trace_id(1).to_hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_spans_and_sessions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let spans = create_of(&app, &seeded, "Spans", "span", definition).await;
+        let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
+        let now = app.state.clock.now_ns();
+        commit_span(&app, &seeded, trace_id(1), 1, now, Some("s-1"), false).await;
+        commit_span(
+            &app,
+            &seeded,
+            trace_id(2),
+            2,
+            now + 1_000_000_000,
+            Some("s-1"),
+            false,
+        )
+        .await;
+        commit_span(&app, &seeded, trace_id(3), 3, now, None, false).await;
+
+        let span_added = matching(&app, &seeded, spans.id, "", window(now)).await;
+        assert_eq!(span_added.status, StatusCode::CREATED);
+        let answer: QueueMatchingAdded = span_added.json();
+        assert_eq!(answer.added, 3);
+        let mut span_items = items_of(&app, &seeded, spans.id).await;
+        span_items.sort_by_key(|item| item.trace_id.clone());
+        assert_eq!(span_items.len(), 3);
+        assert_eq!(span_items[1].target_time, now + 1_000_000_000);
+        assert!(span_items.iter().all(|item| item.span_id.is_some()));
+
+        // Session `s-1` is one target, with the start of its earliest trace.
+        let session_added = matching(&app, &seeded, sessions.id, "", window(now)).await;
+        let answer: QueueMatchingAdded = session_added.json();
+        assert_eq!(answer.added, 1);
+        let session_items = items_of(&app, &seeded, sessions.id).await;
+        assert_eq!(session_items.len(), 1);
+        assert_eq!(session_items[0].session_id.as_deref(), Some("s-1"));
+        assert_eq!(session_items[0].target_time, now);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_queue_refuses_search() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
+        let now = app.state.clock.now_ns();
+        let mut body = window(now);
+        body["search"] = json!("refund");
+
+        let preview = matching(&app, &seeded, sessions.id, "/preview", body.clone()).await;
+        assert_refused_at(&preview, "search");
+        let added = matching(&app, &seeded, sessions.id, "", body).await;
+        assert_refused_at(&added, "search");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_is_capped() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let traces = create(&app, &seeded, "Traces", definition).await;
+        let spans = create_of(&app, &seeded, "Spans", "span", definition).await;
+        let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
+        let now = app.state.clock.now_ns();
+        for n in 1..=3_u64 {
+            let session = format!("c-{n}");
+            let trace = trace_id(u128::from(n));
+            commit_span(&app, &seeded, trace, n, now, Some(&session), false).await;
+        }
+        let body: QueueMatchingRequest =
+            serde_json::from_value(window(now)).expect("a matching body");
+
+        for queue in [traces.id, spans.id, sessions.id] {
+            let Ok(matching) =
+                matching_targets(&app.state, seeded.org_id, seeded.project.id, queue, &body, 2)
+                    .await
+            else {
+                panic!("the matching targets of a queue");
+            };
+            assert_eq!(matching.found.len(), 2, "queue {queue}");
+            assert!(matching.capped, "queue {queue}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_skips_guarded_targets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace_id(1)],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+
+        let added = matching(&app, &seeded, queue.id, "", window(now)).await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let answer: QueueMatchingAdded = added.json();
+        assert_eq!(
+            answer,
+            QueueMatchingAdded {
+                added: 1,
+                existing: 0,
+                blocked: 1,
+                capped: false,
+            }
+        );
+        let items = items_of(&app, &seeded, queue.id).await;
+        assert_eq!(items[0].trace_id, Some(trace_id(2).to_hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_never_adds_evaluation_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        commit_span(&app, &seeded, trace_id(5), 5, now, None, true).await;
+        app.commit_trace_at(&seeded.project, trace_id(6), 0, now).await;
+
+        let preview = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
+        let counted: QueueMatchingPreview = preview.json();
+        assert_eq!(counted.matched, 1);
+        let added = matching(&app, &seeded, queue.id, "", window(now)).await;
+        let answer: QueueMatchingAdded = added.json();
+        assert_eq!(answer.added, 1);
+        let items = items_of(&app, &seeded, queue.id).await;
+        assert_eq!(items[0].trace_id, Some(trace_id(6).to_hex()));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_respects_the_data_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now - 60 * DAY_MS * 1_000_000)
+            .await;
+
+        // The window reaches back 90 days; the data window shows 30.
+        let mut body = window(now);
+        body["from"] = json!((now / 1_000_000 - 90 * DAY_MS).to_string());
+        let preview = matching(&app, &seeded, queue.id, "/preview", body.clone()).await;
+        let counted: QueueMatchingPreview = preview.json();
+        assert_eq!(counted.matched, 1);
+        let added = matching(&app, &seeded, queue.id, "", body).await;
+        let answer: QueueMatchingAdded = added.json();
+        assert_eq!(answer.added, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn matching_permissions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+
+        let denied = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        let denied = send(
+            &app,
+            Method::POST,
+            &format!("{}/{}/items/matching", base(&seeded), queue.id),
+            &viewer.cookie,
+            Some(window(now)),
+        )
+        .await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+        let read_key = app
+            .request(
+                Method::POST,
+                &format!("{}/{}/items/matching", base(&seeded), queue.id),
+            )
+            .header("authorization", &format!("Bearer {}", seeded.read_key))
+            .json(&window(now))
+            .send()
+            .await;
+        assert_eq!(read_key.status, StatusCode::FORBIDDEN);
+
+        let write_key = app.write_key(&seeded).await;
+        let added = app
+            .request(
+                Method::POST,
+                &format!("{}/{}/items/matching", base(&seeded), queue.id),
+            )
+            .header("authorization", &format!("Bearer {write_key}"))
+            .json(&window(now))
+            .send()
+            .await;
+        assert_eq!(added.status, StatusCode::CREATED);
+        let answer: QueueMatchingAdded = added.json();
+        assert_eq!(answer.added, 1);
+        let items = items_of(&app, &seeded, queue.id).await;
+        assert_eq!(items[0].added_by, QueueItemAddedBy::Key);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bad_matching_bodies_are_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+
+        let mut bad_filter = window(now);
+        bad_filter["filter"] = json!("name =");
+        let response = matching(&app, &seeded, queue.id, "/preview", bad_filter).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+        let problem: Value = response.json();
+        assert_eq!(problem["code"], "invalid_filter");
+
+        let mut empty_window = window(now);
+        let from = empty_window["from"].clone();
+        empty_window["to"] = from;
+        let response = matching(&app, &seeded, queue.id, "", empty_window).await;
+        assert_eq!(response.status, StatusCode::BAD_REQUEST);
+
+        let missing = matching(
+            &app,
+            &seeded,
+            Uuid::now_v7(),
+            "/preview",
+            window(now),
+        )
+        .await;
+        assert_eq!(missing.status, StatusCode::NOT_FOUND);
     }
 }

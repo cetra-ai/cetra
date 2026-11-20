@@ -345,6 +345,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "add_annotation_queue_items",
     ),
     (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+        "preview_annotation_queue_matching",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+        "add_annotation_queue_matching",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
         "get_annotation_queue_item",
@@ -1244,6 +1254,12 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "add_annotation_queue_items" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429", "503"]);
+        } else if *id == "preview_annotation_queue_matching" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429", "503"]);
+        } else if *id == "add_annotation_queue_matching" {
+            expected_errors.extend([
+                "400", "401", "403", "404", "413", "415", "422", "429", "503",
+            ]);
         } else if *id == "next_annotation_queue_item" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
         } else if *id == "skip_annotation_queue_item" {

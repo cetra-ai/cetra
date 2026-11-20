@@ -40,10 +40,10 @@ use super::alerts::{
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
 use super::annotation_queues::{
-    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, NextQueueItem,
-    SkipQueueItem,
-    AnnotationQueueListParams, CreateAnnotationQueue, QueueCounts, QueueItemAddedBy,
-    QueueItemStatus, QueueItemTarget, QueueTarget, SkippedQueueItem, UpdateAnnotationQueue,
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
+    AnnotationQueueListParams, CreateAnnotationQueue, NextQueueItem, QueueCounts, QueueItemAddedBy,
+    QueueItemStatus, QueueItemTarget, QueueMatchingAdded, QueueMatchingPreview,
+    QueueMatchingRequest, QueueTarget, SkipQueueItem, SkippedQueueItem, UpdateAnnotationQueue,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
@@ -306,6 +306,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AddQueueItems>();
     set.insert::<SkippedQueueItem>();
     set.insert::<AddedQueueItems>();
+    set.insert::<QueueMatchingRequest>();
+    set.insert::<QueueMatchingPreview>();
+    set.insert::<QueueMatchingAdded>();
     set.insert::<NextQueueItem>();
     set.insert::<SkipQueueItem>();
     set.insert::<CreateDashboard>();
@@ -4009,6 +4012,44 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 413, 415, 422, 429, 503],
     ))
     .build();
+    let preview_matching = operation(
+        "preview_annotation_queue_matching",
+        "annotation_queues",
+        "Count the targets a filter would add to an annotation queue",
+    )
+    .description(Some(
+        "Counts what the queue kind's list filter matches over `from` to `to`: traces for a trace queue, spans for a span queue, sessions for a session queue. A session queue takes no `search`. At most 10 000 are counted (`capped` says more matched). Evaluation traces are never matched. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .request_body(Some(json_body("QueueMatchingRequest")))
+    .responses(responses(
+        "200",
+        json_of::<QueueMatchingPreview>("The number of matching targets."),
+        &[400, 401, 403, 404, 413, 415, 429, 503],
+    ))
+    .build();
+    let add_matching = operation(
+        "add_annotation_queue_matching",
+        "annotation_queues",
+        "Add the targets a filter matches to an annotation queue",
+    )
+    .description(Some(
+        "Adds what the queue kind's list filter matches over `from` to `to`, the same selection as the preview: at most 10 000 targets per call (`capped` says more matched; which are added is not specified). Evaluation traces are never matched. A target already in the queue counts as `existing`; a target a deletion blocks counts as `blocked` and is not added. The answer is 201 whatever the counts. A queue that would pass 100 000 items is 422 and nothing is added. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .request_body(Some(json_body("QueueMatchingRequest")))
+    .responses(responses(
+        "201",
+        json_of::<QueueMatchingAdded>("The counts of the add."),
+        &[400, 401, 403, 404, 413, 415, 422, 429, 503],
+    ))
+    .build();
     let remove_item = operation(
         "remove_annotation_queue_item",
         "annotation_queues",
@@ -4173,6 +4214,14 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/annotation-queues/{{id}}/items"),
             PathItem::new(HttpMethod::Post, add_items),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/matching/preview"),
+            PathItem::new(HttpMethod::Post, preview_matching),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/matching"),
+            PathItem::new(HttpMethod::Post, add_matching),
         )
         .path(
             format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}"),
