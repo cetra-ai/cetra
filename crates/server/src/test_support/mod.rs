@@ -893,6 +893,7 @@ impl TestApp {
                     spans,
                     media: Vec::new(),
                     rejections: cetra_otel::Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await

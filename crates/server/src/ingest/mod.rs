@@ -370,7 +370,12 @@ impl Ingest {
             if spans > max_spans {
                 return Err(IngestError::TooManySpans);
             }
-            let mut normalized = normalize(&request, &ctx, &prices);
+            let mut normalized = normalize(
+                &request,
+                &ctx,
+                &prices,
+                &cetra_otel::AgentContexts::default(),
+            );
             let rewritten = rewrite_reserved_environment(&mut normalized.spans);
             Ok((normalized, rewritten))
         });
@@ -683,7 +688,7 @@ mod tests {
             retention_days: project.retention_days,
             limits: app.state.config.ingest.limits(&app.state.config.media),
         };
-        normalize(request, &ctx, prices)
+        normalize(request, &ctx, prices, &cetra_otel::AgentContexts::default())
     }
 
     /// The commit target of `project` at the app's clock, with no request bytes.
@@ -1282,6 +1287,7 @@ mod tests {
                     spans: Vec::new(),
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1347,6 +1353,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1403,6 +1410,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
         };

@@ -19,6 +19,7 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 use opentelemetry_proto::tonic::trace::v1::span::Link;
 use serde_json::{Map, Value as Json};
 
+use crate::agents::AgentContexts;
 use crate::bag::AttrBag;
 use crate::context::fill;
 use crate::detect::detect;
@@ -87,6 +88,8 @@ pub struct Normalized {
     pub media: Vec<MediaBlob>,
     /// Why the other spans were dropped.
     pub rejections: Rejections,
+    /// Spans dropped on purpose (Codex internals, D-CA-6); neither rejected nor stored.
+    pub discarded: u64,
 }
 
 /// Normalize one export request into spans, media, and rejections.
@@ -94,8 +97,13 @@ pub fn normalize(
     request: &ExportTraceServiceRequest,
     ctx: &IngestContext,
     prices: &crate::cost::PriceTable,
+    agents: &AgentContexts,
 ) -> Normalized {
-    let batch = Batch { ctx, prices };
+    let batch = Batch {
+        ctx,
+        prices,
+        agents,
+    };
     let mut spans = Vec::new();
     let mut rejections = Rejections::default();
     let mut media = crate::media::MediaSink::new(&ctx.limits);
@@ -122,6 +130,7 @@ pub fn normalize(
         spans,
         media: media.into_media(),
         rejections,
+        discarded: 0,
     }
 }
 
@@ -178,6 +187,8 @@ fn non_empty(text: &str) -> Option<String> {
 struct Batch<'a> {
     ctx: &'a IngestContext,
     prices: &'a crate::cost::PriceTable,
+    #[expect(dead_code, reason = "read by the coding-agent rules from N2 on")]
+    agents: &'a AgentContexts,
 }
 
 fn accept_span(
@@ -525,6 +536,7 @@ mod tests {
             &ExportTraceServiceRequest::default(),
             &context(),
             &no_prices(),
+            &AgentContexts::default(),
         );
         assert!(normalized.spans.is_empty());
         assert!(normalized.media.is_empty());
@@ -551,7 +563,12 @@ mod tests {
                 ..ResourceSpans::default()
             }],
         };
-        let normalized = normalize(&with_scope, &context(), &no_prices());
+        let normalized = normalize(
+            &with_scope,
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert!(normalized.spans.is_empty());
         assert_eq!(normalized.rejections.total(), 0);
     }
@@ -625,7 +642,12 @@ mod tests {
                 ..ResourceSpans::default()
             }],
         };
-        let normalized = normalize(&request, &context(), &no_prices());
+        let normalized = normalize(
+            &request,
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert_eq!(normalized.spans.len(), 2);
         assert_eq!(
             normalized.spans[0].resource_attributes,
@@ -672,7 +694,12 @@ mod tests {
         let mut span = span_at(1_767_225_590_000_000_000, 1_767_225_591_000_000_000);
         span.trace_id = vec![1, 2, 3];
         span.span_id = vec![0; 8];
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert!(normalized.spans.is_empty());
         assert_eq!(normalized.rejections.total(), 1);
         assert_eq!(normalized.rejections.count(RejectReason::InvalidTraceId), 1);
@@ -692,7 +719,12 @@ mod tests {
             message: String::new(),
             code: 9,
         });
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         let span = &normalized.spans[0];
         assert_eq!(span.events.len(), 1);
         assert_eq!(span.events[0].time, start as i64);
@@ -722,7 +754,12 @@ mod tests {
             span_id: vec![0x66; 8],
             ..Link::default()
         });
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         let span = &normalized.spans[0];
         assert_eq!(span.parent_span_id, None);
         assert_eq!(span.links.len(), 1);
@@ -737,7 +774,12 @@ mod tests {
             string_attribute("ai.model.id", "gpt"),
             string_attribute("gen_ai.request.model", "gpt"),
         ];
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert_eq!(
             normalized.spans[0].conventions,
             vec![Convention::Genai, Convention::Vercel]

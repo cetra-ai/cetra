@@ -50,7 +50,12 @@ fn run_case(case: &Case, bless: bool) -> Result<(), String> {
     let request = decode_json(&bytes).map_err(|err| format!("{label}: input.json: {err}"))?;
     let prices =
         PriceTable::new(load_prices()).map_err(|err| format!("{label}: prices.json: {err}"))?;
-    let normalized = normalize(&request, &context_of(case)?, &prices);
+    let normalized = normalize(
+        &request,
+        &context_of(case)?,
+        &prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     let actual = document(&normalized);
     let Some(expected) = &case.expected else {
         if bless {
@@ -337,7 +342,14 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
                 continue;
             }
         };
-        for span in normalize(&request, &context, &prices).spans {
+        for span in normalize(
+            &request,
+            &context,
+            &prices,
+            &cetra_otel::AgentContexts::default(),
+        )
+        .spans
+        {
             let llm = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
             let modelled = span.request_model.is_some() || span.response_model.is_some();
             let counted = span.input_tokens.is_some() || span.output_tokens.is_some();

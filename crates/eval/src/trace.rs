@@ -114,7 +114,12 @@ pub(crate) fn build(
     prices: &PriceTable,
 ) -> Normalized {
     let request = export_request(input);
-    let normalized = normalize(&request, ingest, prices);
+    let normalized = normalize(
+        &request,
+        ingest,
+        prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     if normalized.rejections.total() > 0 {
         tracing::warn!(
             evaluator_id = %input.evaluator.id,

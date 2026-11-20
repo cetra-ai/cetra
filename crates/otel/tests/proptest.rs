@@ -566,11 +566,11 @@ proptest! {
     #[test]
     fn normalize_holds_the_span_invariants(request in request()) {
         let ctx = context();
-        let first = normalize(&request, &ctx, prices());
-        let second = normalize(&request, &ctx, prices());
+        let first = normalize(&request, &ctx, prices(), &cetra_otel::AgentContexts::default());
+        let second = normalize(&request, &ctx, prices(), &cetra_otel::AgentContexts::default());
         prop_assert_eq!(&first, &second);
         prop_assert_eq!(
-            first.spans.len() as u64 + first.rejections.total(),
+            first.spans.len() as u64 + first.rejections.total() + first.discarded,
             input_span_count(&request)
         );
         let hashes: Vec<String> = first.media.iter().map(|blob| blob.sha256.clone()).collect();

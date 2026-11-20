@@ -542,7 +542,14 @@ mod tests {
         };
         let prices = PriceTable::new(builtin_price_rows()).expect("built-in prices");
         let request = decode_json(&body).expect("fixture decodes");
-        let expected = normalize(&request, &ctx, &prices).rejections.message();
+        let expected = normalize(
+            &request,
+            &ctx,
+            &prices,
+            &cetra_otel::AgentContexts::default(),
+        )
+        .rejections
+        .message();
         assert_eq!(partial["errorMessage"].as_str(), expected.as_deref());
         assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
     }
