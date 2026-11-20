@@ -116,12 +116,12 @@ pub(super) async fn resolve(
         })
         .await
         .map_err(|error| super::from_meta(&error))?;
-    if stored {
-        if let (Some(user), Some(map)) = (context_user.as_deref(), contexts.project(project)) {
-            map.write()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|_, _, context| context.user.as_deref() != Some(user));
-        }
+    if let (true, Some(user), Some(map)) =
+        (stored, context_user.as_deref(), contexts.project(project))
+    {
+        map.write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, _, context| context.user.as_deref() != Some(user));
     }
     if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 {
         tracing::info!(

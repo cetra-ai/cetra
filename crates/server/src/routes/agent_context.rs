@@ -181,13 +181,13 @@ mod tests {
     use std::sync::PoisonError;
     use std::time::Duration;
 
+    use super::{store, validate};
     use axum::http::{Method, StatusCode};
     use cetra_core::ids::ProjectId;
     use cetra_otel::AgentContext;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
-    use super::*;
     use crate::meta::agent_contexts::load_contexts;
     use crate::test_support::{TestApp, TestResponse, assert_logs_clean, set_limits};
 
@@ -342,13 +342,16 @@ mod tests {
             .await
             .unwrap();
 
-        let response = post_context(
-            &app,
-            &seeded.ingest_key,
-            &json!({"agent": "codex", "session_id": SESSION, "branch": "main"}),
+        // The ingest key of a dropped project no longer authenticates, so the handler's
+        // `store` step is called directly.
+        let post = validate(
+            serde_json::from_value(
+                json!({"agent": "codex", "session_id": SESSION, "branch": "main"}),
+            )
+            .unwrap(),
         )
-        .await;
-        assert_eq!(response.status, StatusCode::NO_CONTENT);
+        .unwrap();
+        assert!(!store(&app.state, project, &post).await.unwrap());
         assert!(app.state.ingest.contexts().project(project).is_none());
     }
 

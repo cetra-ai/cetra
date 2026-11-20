@@ -19,21 +19,24 @@ pub(crate) struct AgentContextRow {
     pub(crate) updated_at: i64,
 }
 
+/// One `agent_contexts` record as selected: project, agent, session, repository, branch, user, time.
+type ContextRecord = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+
 /// Every row of an active project of an active org, ordered by `project_id, agent, session_id`.
 ///
 /// # Errors
 ///
 /// [`MetaError`] when the query fails, or `MetaError::Corrupt` for a `project_id` that is not a UUID.
 pub(crate) async fn load_contexts(pool: &SqlitePool) -> Result<Vec<AgentContextRow>, MetaError> {
-    let records: Vec<(
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        i64,
-    )> = sqlx::query_as(
+    let records: Vec<ContextRecord> = sqlx::query_as(
         "SELECT c.project_id, c.agent, c.session_id, c.repository, c.branch, c.user_id, c.updated_at \
          FROM agent_contexts c \
          JOIN projects p ON p.id = c.project_id \

@@ -1497,6 +1497,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("AgentContextBody", &["repository", "branch", "user"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()

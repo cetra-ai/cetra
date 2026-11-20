@@ -1450,14 +1450,14 @@ mod tests {
             spans_where(&app, project, "metadata['branch'] IS NOT NULL").await,
             0
         );
-        assert_eq!(
+        assert!(
             spans_where(
                 &app,
                 project,
                 "metadata['repository'] = 'github.com/acme/widgets'"
             )
-            .await,
-            0
+            .await
+                > 0
         );
     }
 

@@ -515,7 +515,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     match crate::meta::agent_contexts::load_contexts(state.meta.reader()).await {
         Ok(rows) => state.ingest.contexts().load(rows),
         Err(error) => {
-            tracing::warn!(error = %error, "agent contexts could not be loaded; starting empty")
+            tracing::warn!(error = %error, "agent contexts could not be loaded; starting empty");
         }
     }
     // The guard is a safety net for judge runs; the server starts without it.

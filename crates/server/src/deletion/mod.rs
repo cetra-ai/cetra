@@ -754,6 +754,7 @@ mod tests {
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::names::metadata_key;
     use cetra_core::span::Span;
+    use cetra_otel::AgentContext;
     use cetra_storage::DeletionStatus;
     use cetra_storage::error::{AppendError, DeletionError};
 
