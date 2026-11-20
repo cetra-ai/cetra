@@ -18,9 +18,9 @@ import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import { recordUrls } from "@/test/requests";
+import tracesFixture from "../../../../../../fixtures/api/responses/traces.json";
 import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
-import tracesFixture from "../../../../../../fixtures/api/responses/traces.json";
 
 const FIRST = "a1000000000000000000000000000006";
 
@@ -1786,7 +1786,7 @@ async function leaveTraces(router: TracesRouter) {
   await router.navigate({ to: "/$org/$project/sessions", params: TRACES_PATH });
 }
 
-async function returnToTraces(router: TracesRouter, search: { live?: number } = {}) {
+async function returnToTraces(router: TracesRouter, search: { live?: 1 } = {}) {
   await router.navigate({ to: "/$org/$project/traces", params: TRACES_PATH, search });
   await screen.findByRole("grid", { name: "Traces" });
 }

@@ -5,8 +5,8 @@ import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
 import { recordUrls } from "@/test/requests";
-import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 import spansFixture from "../../../../../../fixtures/api/responses/spans.json";
+import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 
 const TRACE = "a1000000000000000000000000000006";
 const SPAN = "b100000000000061";
