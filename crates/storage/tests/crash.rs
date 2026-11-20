@@ -150,6 +150,8 @@ fn span_batch(batch_id: u64, rows: usize) -> arrow::array::RecordBatch {
                 provider: None,
                 request_model: None,
                 response_model: None,
+                prompt_name: None,
+                prompt_version: None,
                 operation: None,
                 input_tokens: None,
                 output_tokens: None,

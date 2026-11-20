@@ -132,6 +132,40 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET /experiments/compare?ids=a,b[,c[,d]]&threshold=` | 2–4 experiments of one dataset, the first is the baseline; deltas over the items both ran without error, one cell per experiment that ran the item (matched by id; the cell's output is its lowest repetition's), regressions and improvements, `only=regressed|improved|changed`, improved and regressed counts per score and per experiment (D-J-21); a page holds at most 16 MiB of text (D-J-13) |
 | `GET /experiments/summaries?ids=a,b,…` | 1–25 distinct experiments, answered in request order: the summaries the list page shows (score badges, cost, latency, errors, trend); unknown or hidden ids are left out; an experiment too large to summarize is listed in `skipped` (D-J-20) |
 
+### Prompts
+
+Track V ([`plans/v-prompts/00-design.md`](../plans/v-prompts/00-design.md) § API has the types). Reads need project view; writes need `ManagePrompts` (member, key scope `write`, read-write PATs), and protected labels need a project admin or a `write` key. Settings writes need `ManageSettings` (D-V-10, D-V-13). Errors use the existing codes: `400` for validation, `403 forbidden` for a protected label refused, `404 not_found` for a missing prompt, version or label, `409` at a cap.
+
+| Method & path | Notes |
+|---|---|
+| `GET/POST /prompts` | list `?q=&label=&tag=` (keyset-paged by name); create makes the prompt with version 1 (D-V-2, D-V-7) |
+| `GET/PATCH/DELETE /prompts/{prompt}` | `{prompt}` = name; PATCH changes the description and tags only; delete removes the versions, labels and history; a protected label on the prompt refuses it (D-V-2, D-V-10) |
+| `GET /prompts/{prompt}/resolve?label=&version=` | the version a label (default `production`), `latest` or `version` points at; a strong `ETag`, and `304` when `If-None-Match` matches (D-V-9, D-V-12) |
+| `GET/POST /prompts/{prompt}/versions` | list newest first (`cursor` = last version of a page; at most 50 per page, a larger `limit` is clamped to 50); create appends version *n + 1*, optionally with labels (D-V-7) |
+| `GET /prompts/{prompt}/versions/{version}` | one version with its labels, variables and placeholders |
+| `PUT /prompts/{prompt}/labels/{label}` | `{version}`; points the label at the version, creating the label when new; `200` with the prompt; `latest` is 400 (D-V-8, D-V-10) |
+| `DELETE /prompts/{prompt}/labels/{label}` | removes the label and keeps the versions; `204`; a label that is not set is 404 (D-V-8, D-V-10) |
+| `GET /prompts/{prompt}/label-events` | label history newest first (`cursor` = id of the last event of a page) (D-V-8) |
+| `GET /prompts/{prompt}/metrics?from=&to=&versions=` | per-version counts, cost, latency p50/p95, token averages and score means of the linked `llm` spans; `from` defaults to 7 days before `to`, `to` to now, and the window is at most 90 days; `versions` is 1 to 50 comma-separated numbers, default all; newest version first (D-V-17) |
+| `GET /prompt-settings` | the project's protected labels, `["production"]` until set (D-V-10) |
+| `PUT /prompt-settings` | `{protected_labels}`, at most 20 valid labels; project admins only (D-V-10) |
+
+### Playground
+
+Track V M6 (D-V-20 to D-V-26, D-V-33 to D-V-37). One route, answered as a stream, and the rules around it.
+
+| Method & path | Notes |
+|---|---|
+| `POST /playground/runs` | `RunPlayground` (D-V-26): members and above, through a session or a read-write PAT, never an API key. The body is `{connection_id, model, messages, variables?, placeholders?, params?, tools?, tool_choice?, response_format?, source?}` (D-V-21). The answer is `text/event-stream`: `start` `{trace_id}`, `text` `{delta}`, `tool_call` `{id, name, arguments}`, then `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}`, with a `ping` every 15 s (D-V-20). A refusal before the stream is a problem answer: `400` with field errors, or `429 rate_limited` (D-V-24). |
+
+- **Messages.** Each `messages` entry is a canonical message (01) or `{"type": "placeholder", "name": …}`, which is replaced in place by the messages given under that name in `placeholders`. `{{name}}` in the text parts written in `messages` is rendered from `variables`; placeholder messages are not rendered. A missing variable or placeholder is a `400` before the stream starts, with the field of the part (`messages[i].parts[j]`). At most 200 messages after placeholders, and a 2 MiB body (D-V-21, D-V-37).
+- **Limits.** Per user, 60 runs a minute and 4 at once; per org, 16 at once. A run waits at most 10 s for its connection's slot and rate token, then answers `429` (D-V-24, D-V-35). A call takes at most 300 s and fails after 60 s of silence. `max_tokens` defaults to 4 096 and is at most 65 536.
+- **Trace.** Each run is one trace with one `llm` span in the reserved environment `cetra-playground` (D-V-22, D-V-33). Playground spans are not units: they never count against the units cap or the usage counter (D-V-23). The default trace lists leave them out, and `include_eval` shows them. The run's trace is committed after the stream ends, also when the client cancelled. A cancelled run has status error and the message `cancelled`, and its provider call is dropped.
+- **Connection status.** A run uses the connection whatever its `status`, and never marks it failing (D-V-36).
+- **Tools.** Tools are never run. A tool-mode response format forces its own tool, so the user's tools are not callable in the same run. Media and unknown parts are refused (D-V-25).
+- **Notes.** Playground traces carry no end-user id, so a delete-by-user never matches them; they go with project and trace deletions. The overview's "Evaluation cost" widget counts `cetra-eval` only.
+- **Audit and restore.** The audit log records `playground run` with ids, the outcome and the latency, never the payload. Restore mode refuses runs (D-N-25).
+
 ### Evaluation & alerts
 
 | Method & path | Notes |

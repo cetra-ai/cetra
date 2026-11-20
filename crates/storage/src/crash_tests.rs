@@ -167,6 +167,8 @@ fn batch_rows(batch: u8) -> arrow::array::RecordBatch {
                 provider: None,
                 request_model: None,
                 response_model: None,
+                prompt_name: None,
+                prompt_version: None,
                 operation: None,
                 input_tokens: None,
                 output_tokens: None,

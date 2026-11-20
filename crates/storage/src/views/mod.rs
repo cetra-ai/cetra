@@ -581,6 +581,8 @@ mod tests {
                 "request_model",
                 "response_model",
                 "model",
+                "prompt_name",
+                "prompt_version",
                 "operation",
                 "input_tokens",
                 "output_tokens",
@@ -647,6 +649,7 @@ mod tests {
                 "total_tokens",
                 "cost_total",
                 "models",
+                "prompts",
             ],
         );
         let sessions = field_names(&ctx, "sessions").await;

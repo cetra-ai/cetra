@@ -117,6 +117,15 @@ use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
     PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
 };
+use super::playground::{
+    PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
+    PlaygroundTool,
+};
+use super::prompts::{
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
+    PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
+    PromptVersion, PromptVersionMetrics, ResolveParams, SetLabelRequest, UpdatePromptRequest,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -199,6 +208,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<VerifyEmailRequest>();
     set.insert::<ResendVerificationRequest>();
     set.insert::<UpdateMeRequest>();
+    set.insert::<PlaygroundRunRequest>();
+    set.insert::<PlaygroundParams>();
+    set.insert::<PlaygroundTool>();
+    set.insert::<PlaygroundResponseFormat>();
+    set.insert::<PlaygroundSource>();
     set.insert::<ChangePasswordRequest>();
     set.insert::<Me>();
     set.insert::<User>();
@@ -368,6 +382,22 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateDatasetRequest>();
     set.insert::<UpdateDatasetRequest>();
     set.insert_page::<Dataset>("DatasetPage");
+    set.insert::<PromptKind>();
+    set.insert::<PromptLabel>();
+    set.insert::<Prompt>();
+    set.insert::<PromptVersion>();
+    set.insert::<CreatePromptRequest>();
+    set.insert::<CreateVersionRequest>();
+    set.insert::<UpdatePromptRequest>();
+    set.insert::<SetLabelRequest>();
+    set.insert::<PromptLabelEvent>();
+    set.insert::<PromptSettings>();
+    set.insert::<PromptMetrics>();
+    set.insert::<PromptVersionMetrics>();
+    set.insert::<PromptScoreMean>();
+    set.insert_page::<Prompt>("PromptPage");
+    set.insert_page::<PromptVersion>("PromptVersionPage");
+    set.insert_page::<PromptLabelEvent>("PromptLabelEventPage");
     set.insert::<DatasetVersion>();
     set.insert::<DatasetItem>();
     set.insert::<NewDatasetItem>();
@@ -563,6 +593,11 @@ pub fn openapi() -> OpenApi {
                 "Named score shapes that score writes and evaluators must fit.",
             ),
             tag("datasets", "Versioned datasets and their items."),
+            tag("playground", "Playground runs: one model run streamed over SSE, traced in cetra-playground (not billed)."),
+            tag(
+                "prompts",
+                "The prompt registry: versioned prompts with labels (D-V-2).",
+            ),
             tag(
                 "experiments",
                 "Experiments run by the SDK and their results.",
@@ -642,6 +677,7 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
     ("UpdateDatasetRequest", "description"),
+    ("UpdatePromptRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
 ];
@@ -898,8 +934,10 @@ fn paths() -> Paths {
     let paths = online_rule_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
+    let paths = playground_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = dataset_paths(paths);
+    let paths = prompt_paths(paths);
     let paths = experiment_paths(paths);
     let paths = model_price_paths(paths);
     let paths = org_model_price_paths(paths);
@@ -2883,6 +2921,29 @@ fn eval_job_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+fn playground_paths(paths: PathsBuilder) -> PathsBuilder {
+    let run = operation(
+        "post_playground_run",
+        "playground",
+        "Stream a playground run",
+    )
+    .description(Some(
+        "Members and above, through a session or a read-write personal access token. API keys cannot call it. Answers `text/event-stream`: `start` `{trace_id}`, then `text` `{delta}` and `tool_call` `{id, name, arguments}` events, then one last `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}` (class `retryable`, `pause` or `permanent`). A `ping` comes every 15 seconds. A response format is answered in `text` events. Tools are never run. A tool named `auto`, `none` or `required` cannot be forced by name through `tool_choice`. The run is traced into the reserved environment `cetra-playground`, which is not billed. The connection is used whatever its status, and a failure never marks it failing.",
+    ))
+    .parameters(Some(vec![project_param()]))
+    .request_body(Some(json_body("PlaygroundRunRequest")))
+    .responses(responses(
+        "200",
+        sse("The run's events, as `text/event-stream`."),
+        &[400, 401, 403, 404, 413, 429, 503],
+    ))
+    .build();
+    paths.path(
+        format!("{PROJECT}/playground/runs"),
+        PathItem::new(HttpMethod::Post, run),
+    )
+}
+
 fn backfill_paths(paths: PathsBuilder) -> PathsBuilder {
     let id = path_uuid("id", "Online rule id.");
     let list = operation(
@@ -3535,6 +3596,283 @@ fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
         .build()
 }
 
+const PROMPT_READ: &str = "Any project member, or an API key with `read`.";
+const PROMPT_READ_VERSIONS: &str =
+    "Any project member, or an API key with `read`. At most 50 versions per page.";
+const PROMPT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).";
+
+/// The prompt routes (D-V-2, D-V-7, D-V-9, D-V-12, D-V-13). Reads need project view; writes
+/// need `ManagePrompts`.
+fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
+    let prompt = path_string("prompt", "Prompt name.");
+    let version = ParameterBuilder::new()
+        .name("version")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Version number, starting at 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let list = operation("list_prompts", "prompts", "List prompts")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(with_query::<PromptListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("PromptPage", "One page of prompts."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_prompt", "prompts", "Create a prompt")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreatePromptRequest")))
+        .responses(responses(
+            "201",
+            json_of::<PromptVersion>("The prompt's first version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let get = operation("get_prompt", "prompts", "Get a prompt")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The prompt."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_prompt", "prompts", "Update a prompt")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Changes the description and the tags. The name, the type and the versions never change.",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .request_body(Some(json_body("UpdatePromptRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The updated prompt."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let delete = operation("delete_prompt", "prompts", "Delete a prompt")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let resolve = operation(
+        "get_prompt_resolve",
+        "prompts",
+        "Resolve a prompt to a version",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12). The tag covers the whole body, including the computed `latest` label, so it changes when a newer version is saved.",
+    ))
+    .parameters(Some(with_query::<ResolveParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses_with(
+        [
+            (
+                "200",
+                ResponseBuilder::new()
+                    .description("The resolved version. The `ETag` header holds its strong tag.")
+                    .content(
+                        "application/json",
+                        Content::new(Some(Ref::from_schema_name("PromptVersion"))),
+                    )
+                    .build(),
+            ),
+            (
+                "304",
+                ResponseBuilder::new()
+                    .description("Not modified: the If-None-Match tag matches.")
+                    .build(),
+            ),
+        ],
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let version_list = operation(
+        "list_prompt_versions",
+        "prompts",
+        "List the versions of a prompt",
+    )
+    .description(Some(PROMPT_READ_VERSIONS))
+    .parameters(Some(with_query::<PageParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("PromptVersionPage", "One page of versions, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let version_create = operation("post_prompt_version", "prompts", "Create a version")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .request_body(Some(json_body("CreateVersionRequest")))
+        .responses(responses(
+            "201",
+            json_of::<PromptVersion>("The new version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let version_get = operation("get_prompt_version", "prompts", "Get a version")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param(), prompt.clone(), version]))
+        .responses(responses(
+            "200",
+            json_of::<PromptVersion>("The version."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let label = path_string("label", "Label name.");
+    let label_set = operation("put_prompt_label", "prompts", "Move a label")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Points the label at the version, creating it when it is new; a protected label needs a project admin or a `write` key (D-V-10). `latest` is computed and cannot be set.",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone(), label.clone()]))
+        .request_body(Some(json_body("SetLabelRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The prompt, with its labels."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let label_delete = operation("delete_prompt_label", "prompts", "Remove a label")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). The versions stay; a protected label needs a project admin or a `write` key (D-V-10).",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone(), label]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Removed.").build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let metrics = operation(
+        "get_prompt_metrics",
+        "prompts",
+        "Get per-version prompt metrics",
+    )
+    .description(Some(format!(
+        "{PROMPT_READ} Default window: the last 7 days; at most 90 days (D-V-17)."
+    )))
+    .parameters(Some(with_query::<PromptMetricsParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<PromptMetrics>("Per-version metrics of the prompt over the window."),
+        READ_ERRORS,
+    ))
+    .build();
+    let label_events = operation(
+        "list_prompt_label_events",
+        "prompts",
+        "List the label history of a prompt",
+    )
+    .description(Some(PROMPT_READ))
+    .parameters(Some(with_query::<PageParams>(vec![
+        project_param(),
+        prompt,
+    ])))
+    .responses(responses(
+        "200",
+        json_named(
+            "PromptLabelEventPage",
+            "One page of label moves, newest first.",
+        ),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let settings_get = operation("get_prompt_settings", "prompts", "Get the prompt settings")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param()]))
+        .responses(responses(
+            "200",
+            json_of::<PromptSettings>("The project's protected labels."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let settings_put = operation("put_prompt_settings", "prompts", "Set the prompt settings")
+        .description(Some("Project admins (D-V-10)."))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("PromptSettings")))
+        .responses(responses(
+            "200",
+            json_of::<PromptSettings>("The stored protected labels."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/prompts"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/prompts"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/resolve"),
+            PathItem::new(HttpMethod::Get, resolve),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions"),
+            PathItem::new(HttpMethod::Get, version_list),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions"),
+            PathItem::new(HttpMethod::Post, version_create),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions/{{version}}"),
+            PathItem::new(HttpMethod::Get, version_get),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/labels/{{label}}"),
+            PathItem::new(HttpMethod::Put, label_set),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/labels/{{label}}"),
+            PathItem::new(HttpMethod::Delete, label_delete),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/metrics"),
+            PathItem::new(HttpMethod::Get, metrics),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/label-events"),
+            PathItem::new(HttpMethod::Get, label_events),
+        )
+        .path(
+            format!("{PROJECT}/prompt-settings"),
+            PathItem::new(HttpMethod::Get, settings_get),
+        )
+        .path(
+            format!("{PROJECT}/prompt-settings"),
+            PathItem::new(HttpMethod::Put, settings_put),
+        )
+}
+
 const EXPERIMENT_READ: &str = "Any project member, or an API key with `read`.";
 const EXPERIMENT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-J-5).";
 
@@ -3914,7 +4252,7 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let query = operation("query_widget", "dashboards", "Get one widget's data")
         .description(Some(
-            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("WidgetQueryRequest")))
@@ -4307,8 +4645,10 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 const EXCLUSIONS: &str = concat!(
-    "Evaluation traces (`environment = ",
+    "Evaluation and playground traces (`environment = ",
     cetra_core::cetra_name!("-eval"),
+    "` or `environment = ",
+    cetra_core::cetra_name!("-playground"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
 

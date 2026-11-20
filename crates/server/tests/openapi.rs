@@ -570,6 +570,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "post_evaluator_run",
     ),
     (
+        "post",
+        "/api/v1/projects/{project}/playground/runs",
+        "post_playground_run",
+    ),
+    (
         "get",
         "/api/v1/projects/{project}/online-rules/{id}/backfills",
         "list_backfills",
@@ -775,6 +780,73 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/models/{id}",
         "delete_model_price",
     ),
+    ("get", "/api/v1/projects/{project}/prompts", "list_prompts"),
+    ("post", "/api/v1/projects/{project}/prompts", "post_prompt"),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "get_prompt",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "patch_prompt",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "delete_prompt",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/resolve",
+        "get_prompt_resolve",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "list_prompt_versions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "post_prompt_version",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}",
+        "get_prompt_version",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "put_prompt_label",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "delete_prompt_label",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/label-events",
+        "list_prompt_label_events",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/metrics",
+        "get_prompt_metrics",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompt-settings",
+        "get_prompt_settings",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompt-settings",
+        "put_prompt_settings",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -817,6 +889,11 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_score_definitions",
     "list_datasets",
     "list_dataset_versions",
+    "list_prompts",
+    "get_prompt_resolve",
+    "list_prompt_versions",
+    "list_prompt_label_events",
+    "get_prompt_metrics",
     "list_dataset_items",
     "list_dataset_version_changes",
     "list_experiment_trends",
@@ -850,6 +927,7 @@ const READ_OPERATIONS: &[&str] = &[
     "get_evaluator_stats",
     "get_online_rule_stats",
     "get_experiment_summaries",
+    "get_prompt_metrics",
 ];
 
 const TAGS: &[&str] = &[
@@ -864,8 +942,10 @@ const TAGS: &[&str] = &[
     "users",
     "scores",
     "evaluation",
+    "playground",
     "score_definitions",
     "datasets",
+    "prompts",
     "experiments",
     "model_prices",
     "schema",
@@ -1156,8 +1236,15 @@ fn document_lint() {
             || *id == "delete_org_model_price"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
+        } else if *id == "get_evaluator"
+            || *id == "delete_score_definition"
+            || *id == "get_prompt_version"
+            || *id == "delete_prompt_label"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_playground_run" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1172,9 +1259,18 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
+        } else if *id == "post_dataset"
+            || *id == "patch_dataset"
+            || *id == "post_dataset_items"
+            || *id == "post_prompt"
+            || *id == "post_prompt_version"
+            || *id == "put_prompt_label"
+        {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
-        } else if *id == "patch_dataset_item" {
+        } else if *id == "patch_dataset_item"
+            || *id == "patch_prompt"
+            || *id == "put_prompt_settings"
+        {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1291,6 +1387,9 @@ fn document_lint() {
         ("DatasetPage", "Dataset"),
         ("DatasetVersionPage", "DatasetVersion"),
         ("DatasetItemPage", "DatasetItem"),
+        ("PromptPage", "Prompt"),
+        ("PromptVersionPage", "PromptVersion"),
+        ("PromptLabelEventPage", "PromptLabelEvent"),
         ("ExperimentPage", "Experiment"),
         ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
@@ -1461,7 +1560,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
@@ -1525,6 +1624,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("UpdatePromptRequest", &["description"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()
@@ -1577,6 +1677,9 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DatasetVersionPage",
         "DatasetItemPage",
         "ItemChangePage",
+        "PromptPage",
+        "PromptVersionPage",
+        "PromptLabelEventPage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",

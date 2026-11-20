@@ -205,6 +205,8 @@ pub(crate) fn span_row(trace: u16, span: u8, start: i64, ingest: i64) -> Span {
         provider: None,
         request_model: None,
         response_model: None,
+        prompt_name: None,
+        prompt_version: None,
         operation: None,
         input_tokens: None,
         output_tokens: None,
@@ -446,6 +448,7 @@ struct TraceColumns {
     total_tokens: Int64Builder,
     cost_total: Float64Builder,
     models: ListBuilder<StringBuilder>,
+    prompts: ListBuilder<StringBuilder>,
     last_ingest_time: TimestampNanosecondBuilder,
     partial_count: Int32Builder,
 }
@@ -485,6 +488,7 @@ impl TraceColumns {
             total_tokens: Int64Builder::with_capacity(rows),
             cost_total: Float64Builder::with_capacity(rows),
             models: utf8_list(rows),
+            prompts: utf8_list(rows),
             last_ingest_time: timestamp(rows),
             partial_count: Int32Builder::with_capacity(rows),
         }
@@ -517,6 +521,7 @@ impl TraceColumns {
         let mut tags = BTreeSet::new();
         let mut metadata = root.map(|span| span.metadata.clone()).unwrap_or_default();
         let mut models = BTreeSet::new();
+        let mut prompts = BTreeSet::new();
         for span in &ordered {
             tags.extend(span.tags.iter().cloned());
             if root.is_none_or(|root| root.span_id != span.span_id) {
@@ -526,6 +531,9 @@ impl TraceColumns {
             }
             if let Some(model) = span.response_model.clone().or(span.request_model.clone()) {
                 models.insert(model);
+            }
+            if let (Some(name), Some(version)) = (&span.prompt_name, span.prompt_version) {
+                prompts.insert(format!("{name}@{version}"));
             }
         }
         self.project_id
@@ -614,6 +622,10 @@ impl TraceColumns {
             self.models.values().append_value(model);
         }
         self.models.append(true);
+        for prompt in &prompts {
+            self.prompts.values().append_value(prompt);
+        }
+        self.prompts.append(true);
         let last_ingest = ordered
             .iter()
             .map(|span| span.ingest_time)
@@ -652,6 +664,7 @@ impl TraceColumns {
             Arc::new(self.total_tokens.finish()),
             Arc::new(self.cost_total.finish()),
             Arc::new(self.models.finish()),
+            Arc::new(self.prompts.finish()),
             Arc::new(self.last_ingest_time.finish()),
             Arc::new(self.partial_count.finish()),
         ]

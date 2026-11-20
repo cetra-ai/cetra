@@ -447,6 +447,8 @@ fn build_spans(plan: &TracePlan, group: &GroupPlan, payloads: &Payloads) -> Vec<
             provider: s.model.map(|_| "openai".to_owned()),
             request_model: s.model.map(|m| MODELS[m].to_owned()),
             response_model: None,
+            prompt_name: None,
+            prompt_version: None,
             operation: None,
             input_tokens: s.tokens,
             output_tokens: s.tokens.map(|t| t / 2),

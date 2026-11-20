@@ -25,6 +25,8 @@ export {
   type Usage,
   withLlmSpan,
 } from "./llm.js";
+export { Prompt, PromptNotAvailable, type PromptValues } from "./prompt.js";
+export { type GetPromptOptions, getPrompt, type Prompts } from "./prompts.js";
 export { flush, init, shutdown, spanProcessor, tracerProvider } from "./runtime.js";
 export { type ScoreOptions, score } from "./scores.js";
 export {
@@ -37,6 +39,7 @@ export {
   type SpanOptions,
   withSpan,
 } from "./span.js";
+export { type ChatEntry, type ChatMessage, PromptCompileError } from "./template.js";
 export { uuid7 } from "./uuid.js";
 
 /** Package version. Kept equal to package.json. */

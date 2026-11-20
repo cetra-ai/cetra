@@ -107,7 +107,7 @@ provider.shutdown()
 
 Metadata keys use letters, digits, `_`, `.` and `-`. The SDK skips a key that does not. Keep personal data out of metadata, or mask it. See [Masking, sampling and truncation](/docs/tracing/privacy-controls/).
 
-The environment `cetra-eval` is reserved for cetra's own evaluator runs, and `experiment` is the default for experiment runs. cetra renames `cetra-eval` on spans you send to `cetra-eval-external`.
+The environments `cetra-eval` and `cetra-playground` are reserved for cetra's own evaluator and playground runs, and `experiment` is the default for experiment runs. cetra renames `cetra-eval` and `cetra-playground` on spans you send to `cetra-eval-external` and `cetra-playground-external`.
 
 ## In the UI
 

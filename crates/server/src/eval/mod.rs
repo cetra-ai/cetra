@@ -9,6 +9,7 @@ pub(crate) mod dispatch;
 pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
+pub(crate) mod interactive;
 pub(crate) mod pending;
 pub(crate) mod retry;
 pub(crate) mod rule_check;

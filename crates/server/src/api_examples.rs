@@ -16,12 +16,13 @@ use crate::api::common::Page;
 use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
 use crate::api::facets::FacetsResponse;
+use crate::api::prompts::{Prompt, PromptLabelEvent, PromptMetrics, PromptSettings, PromptVersion};
 use crate::api::schema::SchemaResponse;
 use crate::api::sessions::{SessionDetail, SessionSummary};
 use crate::api::sql::SqlQueryResult;
 use crate::api::traces::{SpanDetail, SpanSummary, TraceDetail, TraceSummary};
 use crate::api::users::{EndUserDetail, EndUserSummary};
-use crate::test_support::{EXAMPLE_CONVERSATION, EXAMPLE_PROJECT, TestApp};
+use crate::test_support::{EXAMPLE_CONVERSATION, EXAMPLE_PROJECT, EXAMPLE_PROMPT, TestApp};
 
 const MEDIA: &str = "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581";
 const EXAMPLE_DATASET: &str = "01900000-0000-7000-8000-000000000c01";
@@ -206,6 +207,7 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     app.load_example_dataset(project).await;
     app.seed_example_faq_dataset().await;
     app.seed_example_conversation().await;
+    app.seed_example_prompts().await;
     let cookie = cookie.as_str();
     let mut out = Output::default();
 
@@ -436,6 +438,103 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &trends,
     );
 
+    // The prompt registry: the example prompts of `fixtures/api/README.md` § Fixed identifiers.
+    let prompts: Page<Prompt> = fetch(&app, cookie, "/prompts").await;
+    out.add("list_prompts", &[], &[], "responses/prompts.json", &prompts);
+    let prompt: Prompt = fetch(&app, cookie, &format!("/prompts/{EXAMPLE_PROMPT}")).await;
+    out.add(
+        "get_prompt",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}.json"),
+        &prompt,
+    );
+    let production: PromptVersion =
+        fetch(&app, cookie, &format!("/prompts/{EXAMPLE_PROMPT}/resolve")).await;
+    out.add(
+        "get_prompt_resolve",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/resolve.json"),
+        &production,
+    );
+    let staging: PromptVersion = fetch(
+        &app,
+        cookie,
+        &format!("/prompts/{EXAMPLE_PROMPT}/resolve?label=staging"),
+    )
+    .await;
+    out.add(
+        "get_prompt_resolve",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[("label", "staging")],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/resolve-staging.json"),
+        &staging,
+    );
+    let versions: Page<PromptVersion> =
+        fetch(&app, cookie, &format!("/prompts/{EXAMPLE_PROMPT}/versions")).await;
+    out.add(
+        "list_prompt_versions",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/versions.json"),
+        &versions,
+    );
+    for number in ["1", "2"] {
+        let version: PromptVersion = fetch(
+            &app,
+            cookie,
+            &format!("/prompts/{EXAMPLE_PROMPT}/versions/{number}"),
+        )
+        .await;
+        out.add(
+            "get_prompt_version",
+            &[("prompt", EXAMPLE_PROMPT), ("version", number)],
+            &[],
+            &format!("responses/prompts/{EXAMPLE_PROMPT}/versions/{number}.json"),
+            &version,
+        );
+    }
+    let events: Page<PromptLabelEvent> = fetch(
+        &app,
+        cookie,
+        &format!("/prompts/{EXAMPLE_PROMPT}/label-events"),
+    )
+    .await;
+    out.add(
+        "list_prompt_label_events",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/label-events.json"),
+        &events,
+    );
+    let metrics: PromptMetrics = fetch(
+        &app,
+        cookie,
+        &format!(
+            "/prompts/{EXAMPLE_PROMPT}/metrics?from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z"
+        ),
+    )
+    .await;
+    out.add(
+        "get_prompt_metrics",
+        &[("prompt", EXAMPLE_PROMPT)],
+        &[
+            ("from", "2026-01-01T00:00:00Z"),
+            ("to", "2026-01-02T00:00:00Z"),
+        ],
+        &format!("responses/prompts/{EXAMPLE_PROMPT}/metrics.json"),
+        &metrics,
+    );
+    let settings: PromptSettings = fetch(&app, cookie, "/prompt-settings").await;
+    out.add(
+        "get_prompt_settings",
+        &[],
+        &[],
+        "responses/prompt-settings.json",
+        &settings,
+    );
+
     // Every facet the web shows open by default, and every preset field, has an answer here.
     const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
     const FACETS: &[(&str, &str)] = &[
@@ -545,6 +644,32 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
 
     // Static entries, copied from the hand-written list this generator replaces.
     out.manifest.extend([
+        // The create answers are the versions the read answers above already serve.
+        example_created(
+            "post_prompt",
+            BTreeMap::new(),
+            &format!("responses/prompts/{EXAMPLE_PROMPT}/versions/1.json"),
+        ),
+        example_created(
+            "post_prompt_version",
+            params(&[("prompt", EXAMPLE_PROMPT)]),
+            &format!("responses/prompts/{EXAMPLE_PROMPT}/versions/2.json"),
+        ),
+        // The label answer is the prompt, as the read serves it: `staging` already points at 2.
+        example(
+            "put_prompt_label",
+            params(&[("prompt", EXAMPLE_PROMPT), ("label", "staging")]),
+            BTreeMap::new(),
+            &format!("responses/prompts/{EXAMPLE_PROMPT}.json"),
+            "application/json",
+        ),
+        example(
+            "put_prompt_settings",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "responses/prompt-settings.json",
+            "application/json",
+        ),
         // The create answer has the shape of the read, so the read's file serves it too.
         example_created(
             "post_dataset",

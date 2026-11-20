@@ -147,7 +147,7 @@ const TRACES_COLUMNS: FacetColumns = FacetColumns {
         "user_id",
     ],
     bools: &["has_root"],
-    lists: &["tags", "models"],
+    lists: &["tags", "models", "prompts"],
     keys: &["metadata"],
     numbers: &[
         "duration_ms",
@@ -171,6 +171,7 @@ const SPANS_COLUMNS: FacetColumns = FacetColumns {
         "release",
         "provider",
         "model",
+        "prompt_name",
         "request_model",
         "response_model",
         "operation",
