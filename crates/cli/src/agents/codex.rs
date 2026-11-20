@@ -280,6 +280,24 @@ mod tests {
     }
 
     #[test]
+    fn codex_hooks_have_no_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        let home = dir.path().join("codex");
+        run_setup(&codex_args(), &paths, &home);
+        let hooks: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+        for event in CODEX_EVENTS {
+            let hook = &hooks["hooks"][event][0]["hooks"][0];
+            assert_eq!(
+                hook["command"], "/opt/cetra/bin/cetra agents hook codex",
+                "{event}"
+            );
+            assert!(hook.get("timeout").is_none(), "{event}: {hook}");
+        }
+    }
+
+    #[test]
     fn codex_home_parameter_is_used() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_under(dir.path());

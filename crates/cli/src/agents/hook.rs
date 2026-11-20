@@ -17,7 +17,9 @@ use super::{Agent, AgentsFile, Paths};
 const BUDGET: Duration = Duration::from_secs(2);
 const STDIN_LIMIT: u64 = 65_536;
 const STDIN_WAIT: Duration = Duration::from_millis(500);
-const GIT_LIMIT: Duration = Duration::from_secs(1);
+const GIT_LIMIT: Duration = Duration::from_millis(800);
+/// Time kept for the post: git gets what is left beyond this.
+const POST_RESERVE: Duration = Duration::from_millis(400);
 const MIN_POST: Duration = Duration::from_millis(100);
 
 #[derive(Deserialize)]
@@ -79,14 +81,16 @@ fn prepare(
         .map_err(|_| "agents.toml is invalid")?
         .ok_or("not set up; run cetra agents setup")?;
 
-    let repository = git_value(&hook_input.cwd, &["remote", "get-url", "origin"], deadline)
-        .map(|url| strip_user_info(&url));
-    let branch = git_value(
-        &hook_input.cwd,
-        &["rev-parse", "--abbrev-ref", "HEAD"],
-        deadline,
-    )
-    .filter(|branch| branch != "HEAD");
+    // Both git calls run at once, each with the same timeout.
+    let timeout = git_timeout(deadline);
+    let cwd = hook_input.cwd.as_str();
+    let (repository, branch) = thread::scope(|scope| {
+        let remote = scope.spawn(|| git_value(cwd, &["remote", "get-url", "origin"], timeout));
+        let head = scope.spawn(|| git_value(cwd, &["rev-parse", "--abbrev-ref", "HEAD"], timeout));
+        (remote.join().ok().flatten(), head.join().ok().flatten())
+    });
+    let repository = repository.map(|url| strip_user_info(&url));
+    let branch = branch.filter(|branch| branch != "HEAD");
 
     let mut body = json!({
         "agent": agent.wire_name(),
@@ -121,16 +125,21 @@ fn read_input(
     }
 }
 
-/// The trimmed stdout of `git -C <cwd> <args>`, or `None` when it is empty, fails or no time
-/// is left. Git is not run without time left.
-fn git_value(cwd: &str, args: &[&str], deadline: Instant) -> Option<String> {
+/// The timeout of each git call: `min(GIT_LIMIT, time left - POST_RESERVE)`. `None` when that
+/// is not positive, and then git is not run at all.
+fn git_timeout(deadline: Instant) -> Option<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
-    if left.is_zero() {
-        return None;
-    }
+    let budget = left.checked_sub(POST_RESERVE)?;
+    (!budget.is_zero()).then(|| budget.min(GIT_LIMIT))
+}
+
+/// The trimmed stdout of `git -C <cwd> <args>`, or `None` when it is empty, fails or `timeout`
+/// is `None`.
+fn git_value(cwd: &str, args: &[&str], timeout: Option<Duration>) -> Option<String> {
+    let timeout = timeout?;
     let mut full = vec!["-C", cwd];
     full.extend_from_slice(args);
-    let output = run_with_timeout("git", &full, &[], left.min(GIT_LIMIT))?;
+    let output = run_with_timeout("git", &full, &[], timeout)?;
     let value = output.trim();
     (!value.is_empty()).then(|| value.to_owned())
 }
@@ -527,6 +536,12 @@ mod tests {
         crate::run_cli(["cetra", "agents", "hook", "codex"])
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn hook_with_bad_arguments_through_run_cli_exits_zero() {
+        // A missing agent is a clap error; the hook still reports success.
+        crate::run_cli(["cetra", "agents", "hook"]).await.unwrap();
     }
 
     #[test]

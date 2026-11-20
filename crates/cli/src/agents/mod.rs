@@ -88,7 +88,7 @@ pub(crate) struct SetupArgs {
     /// Do not turn on prompt and tool content capture.
     #[arg(long)]
     pub(crate) no_content: bool,
-    /// Print the settings, including the key, instead of writing them. The printed key is what makes them work.
+    /// Print the merged settings files (including the key and any other settings in them) instead of writing them.
     #[arg(long)]
     pub(crate) print: bool,
 }

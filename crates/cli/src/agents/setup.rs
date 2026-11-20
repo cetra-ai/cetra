@@ -32,7 +32,10 @@ const GEMINI_TELEMETRY: [&str; 6] = [
     "otlpProtocol",
     "logPrompts",
 ];
+const KEY_PREFIX: &str = "sk-cetra-";
 const HEADERS_PREFIX: &str = "OTEL_EXPORTER_OTLP_HEADERS=";
+/// The form some people write the headers line in, as a shell `export`.
+const EXPORTED_HEADERS_PREFIX: &str = "export OTEL_EXPORTER_OTLP_HEADERS=";
 pub(super) const NOT_FOUND_NOTE: &str = "agents.toml not found; telemetry settings left unchanged";
 pub(super) const OTHER_SERVER_NOTE: &str =
     "the telemetry settings point to another server; left unchanged";
@@ -42,24 +45,36 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
     refuse_on_windows()?;
     let url = credentials::server_url(&args.url)?;
     let key = args.key.expose();
-    if !key.starts_with("sk-cetra-") {
+    // The error never echoes the key.
+    if !is_ingest_key(key) {
         anyhow::bail!("the key must be a project secret key (sk-cetra-…) with the ingest scope");
     }
-    if args.agent != Agent::Copilot && !args.print {
-        let user = user_for(args.user.as_deref(), &[]);
-        AgentsFile {
-            url: url.clone(),
-            key: key.to_owned(),
-            user,
-        }
-        .save(&paths.agents_file())?;
-    }
+    // agents.toml is saved last, and only when the agent's settings were written.
+    let agents_file = (args.agent != Agent::Copilot && !args.print).then(|| AgentsFile {
+        url: url.clone(),
+        key: key.to_owned(),
+        user: user_for(args.user.as_deref(), &[]),
+    });
     match args.agent {
-        Agent::ClaudeCode => claude_code_setup(args, &url, paths, out),
-        Agent::Codex => codex::setup(args, &url, paths, &codex::codex_home(paths), out),
-        Agent::GeminiCli => gemini_cli_setup(args, &url, paths, out),
-        Agent::Copilot => copilot(args, &url, out),
+        Agent::ClaudeCode => claude_code_setup(args, &url, paths, out)?,
+        Agent::Codex => codex::setup(args, &url, paths, &codex::codex_home(paths), out)?,
+        Agent::GeminiCli => gemini_cli_setup(args, &url, paths, out)?,
+        Agent::Copilot => copilot(args, &url, out)?,
     }
+    if let Some(file) = agents_file {
+        file.save(&paths.agents_file())?;
+    }
+    Ok(())
+}
+
+/// `sk-cetra-` followed by one or more of ASCII letters, digits, `_` and `-`.
+fn is_ingest_key(key: &str) -> bool {
+    key.strip_prefix(KEY_PREFIX).is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
 }
 
 /// `cetra agents remove <agent>`. Results and notes go to `out`.
@@ -125,21 +140,41 @@ fn shell_quote(path: &Path) -> String {
     if plain {
         return text.into_owned();
     }
+    shell_single_quote(&text)
+}
+
+/// `text` in single quotes, with each single quote written as `'\''`.
+fn shell_single_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
+}
+
+/// The hook timeout each agent's settings take, in that agent's unit: seconds for Claude Code,
+/// milliseconds for Gemini CLI. Codex's unit is unverified, so its hooks get no timeout.
+fn hook_timeout(agent: Agent) -> Option<u64> {
+    match agent {
+        Agent::ClaudeCode => Some(5),
+        Agent::GeminiCli => Some(5000),
+        Agent::Codex | Agent::Copilot => None,
+    }
 }
 
 fn is_our_hook(command: &str, agent: Agent) -> bool {
     command.ends_with(&format!("agents hook {}", agent.wire_name()))
 }
 
-/// Sets one hook per event, after removing our earlier entries for the agent. Other entries
-/// keep their value and order.
+/// Sets one hook per event. When one of our hooks already has this command and timeout, it
+/// stays where it is; otherwise our earlier entries for the agent are removed and the new one
+/// is appended. Other entries keep their value and order.
 pub(super) fn set_hooks(
     root: &mut Map<String, Value>,
     events: &[&str],
     command: &str,
     agent: Agent,
 ) -> anyhow::Result<()> {
+    let mut hook = json!({"type": "command", "command": command});
+    if let Some(seconds) = hook_timeout(agent) {
+        hook["timeout"] = json!(seconds);
+    }
     let hooks = object_entry(root, "hooks")?;
     for event in events {
         let entries = hooks
@@ -147,10 +182,36 @@ pub(super) fn set_hooks(
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .with_context(|| format!("the {event} hooks setting is not an array"))?;
+        if has_exact_hook(entries, &hook, agent) {
+            continue;
+        }
         remove_ours(entries, agent);
-        entries.push(json!({"hooks": [{"type": "command", "command": command, "timeout": 5}]}));
+        entries.push(json!({"hooks": [hook.clone()]}));
     }
     Ok(())
+}
+
+/// Whether `entries` holds our hook and nothing else of ours: the hook is `hook` itself (same
+/// command and timeout) and no other of our hooks is present.
+fn has_exact_hook(entries: &[Value], hook: &Value, agent: Agent) -> bool {
+    let mut exact = false;
+    let mut ours = 0;
+    for element in entries {
+        let Some(inner) = element.get("hooks").and_then(Value::as_array) else {
+            continue;
+        };
+        for candidate in inner {
+            let is_ours = candidate
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|command| is_our_hook(command, agent));
+            if is_ours {
+                ours += 1;
+                exact |= candidate == hook;
+            }
+        }
+    }
+    exact && ours == 1
 }
 
 /// Removes our hooks from every event. Events emptied by that are dropped, and so is `hooks`
@@ -253,16 +314,19 @@ pub(super) fn settings_bytes(root: &Map<String, Value>) -> anyhow::Result<Vec<u8
     Ok(bytes)
 }
 
-/// Writes a settings file with mode 0600, following a symlink to its target. The first write
-/// of a file keeps a copy beside it, `<file>.cetra-backup`. True when the file changed.
+/// Writes a settings file with mode 0600, following a symlink to its target (a dangling link
+/// too: the target is created). The first write of a file keeps a copy beside it,
+/// `<file>.cetra-backup`. True when the file changed.
 pub(super) fn write_settings(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> {
-    let target = if path.exists() {
-        fs::canonicalize(path).with_context(|| format!("resolving {}", path.display()))?
-    } else {
-        path.to_path_buf()
-    };
+    let target = resolve_symlinks(path)?;
     match fs::read(&target) {
-        Ok(current) if current == bytes => return Ok(false),
+        Ok(current) if current == bytes => {
+            // Unchanged, but a file holding our key must not stay readable by others.
+            if contains_key(bytes) {
+                set_private_mode(&target)?;
+            }
+            return Ok(false);
+        }
         Ok(_) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(_) => anyhow::bail!("reading {}", path.display()),
@@ -270,6 +334,49 @@ pub(super) fn write_settings(path: &Path, bytes: &[u8]) -> anyhow::Result<bool> 
     backup_once(&target)?;
     write_private_file(&target, bytes)?;
     Ok(true)
+}
+
+/// The file a settings path writes to: the path itself, or the target of each symlink on the
+/// way (a relative target is taken from the link's directory). A missing file is its own
+/// target.
+fn resolve_symlinks(path: &Path) -> anyhow::Result<PathBuf> {
+    const MAX_LINKS: usize = 40;
+    let mut target = path.to_path_buf();
+    for _ in 0..MAX_LINKS {
+        let link = match fs::symlink_metadata(&target) {
+            Ok(metadata) if metadata.file_type().is_symlink() => target.clone(),
+            Ok(_) => return Ok(target),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(target),
+            Err(_) => anyhow::bail!("reading {}", path.display()),
+        };
+        let next =
+            fs::read_link(&link).with_context(|| format!("reading the link {}", path.display()))?;
+        target = if next.is_absolute() {
+            next
+        } else {
+            link.parent()
+                .context("the settings path has no directory")?
+                .join(next)
+        };
+    }
+    anyhow::bail!("too many symbolic links for {}", path.display())
+}
+
+/// Whether settings bytes hold a cetra key (the Authorization header of the telemetry).
+fn contains_key(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes).contains(KEY_PREFIX)
+}
+
+#[cfg(unix)]
+fn set_private_mode(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("setting the mode of {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_private_mode(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
 }
 
 /// Copies an existing file to `<file>.cetra-backup` unless that backup already exists.
@@ -442,25 +549,27 @@ fn join_lines(lines: &[String]) -> String {
     lines.iter().map(|line| format!("{line}\n")).collect()
 }
 
-/// The `.env` text with its headers line set to `line`. The first such line is replaced and
-/// keeps its `\r`; otherwise `line` is appended. Other lines keep their bytes and order.
-fn env_with_header(text: &str, line: &str) -> String {
+/// The `.env` text with its headers line set to `line`, and whether an existing headers line
+/// with another value was replaced. The first headers line (plain or `export`ed) is replaced
+/// and keeps its `\r`; otherwise `line` is appended. Other lines keep their bytes and order.
+fn env_with_header(text: &str, line: &str) -> (String, bool) {
     let mut lines = split_lines(text);
-    match lines
-        .iter()
-        .position(|kept| kept.starts_with(HEADERS_PREFIX))
-    {
+    let mut replaced_other = false;
+    match lines.iter().position(|kept| {
+        kept.starts_with(HEADERS_PREFIX) || kept.starts_with(EXPORTED_HEADERS_PREFIX)
+    }) {
         Some(index) => {
             let carriage = if lines[index].ends_with('\r') {
                 "\r"
             } else {
                 ""
             };
+            replaced_other = lines[index].trim_end_matches('\r') != line;
             lines[index] = format!("{line}{carriage}");
         }
         None => lines.push(line.to_owned()),
     }
-    join_lines(&lines)
+    (join_lines(&lines), replaced_other)
 }
 
 /// The `.env` text without the lines equal to `line` (a trailing `\r` ignored), or `None` when
@@ -496,9 +605,16 @@ fn gemini_cli_setup(
         Agent::GeminiCli,
     )?;
     let env_text = read_optional_text(&env_path)?.unwrap_or_default();
-    let env = env_with_header(&env_text, &gemini_header_line(args.key.expose()));
+    let (env, replaced_other) = env_with_header(&env_text, &gemini_header_line(args.key.expose()));
     emit(&settings_path, &settings_bytes(&root)?, args.print, out)?;
     emit(&env_path, env.as_bytes(), args.print, out)?;
+    if replaced_other && !args.print {
+        writeln!(
+            out,
+            "replaced an existing OTEL_EXPORTER_OTLP_HEADERS line; the original is in {}.cetra-backup",
+            env_path.display()
+        )?;
+    }
     if !args.print {
         writeln!(
             out,
@@ -562,7 +678,11 @@ fn copilot(args: &SetupArgs, url: &str, out: &mut dyn Write) -> anyhow::Result<(
         "# Copilot CLI: add to your shell profile (Copilot CLI only exports to https:// endpoints)"
     )?;
     writeln!(out, "export COPILOT_OTEL_ENABLED=true")?;
-    writeln!(out, "export OTEL_EXPORTER_OTLP_ENDPOINT={url}")?;
+    writeln!(
+        out,
+        "export OTEL_EXPORTER_OTLP_ENDPOINT={}",
+        shell_single_quote(url)
+    )?;
     writeln!(out, "export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf")?;
     writeln!(
         out,
@@ -731,6 +851,10 @@ mod tests {
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             "/opt/cetra/bin/cetra agents hook claude-code"
         );
+        assert_eq!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["timeout"],
+            5
+        );
         let agents = AgentsFile::load(&paths.agents_file()).unwrap().unwrap();
         assert_eq!(agents.user.as_deref(), Some("dev@example.com"));
         let mode = fs::metadata(paths.agents_file())
@@ -788,6 +912,39 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn claude_setup_keeps_a_user_hook_after_ours_on_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        let path = claude_path(&paths);
+        run_setup(&setup_args(Agent::ClaudeCode), &paths);
+        // The user adds a hook after ours in the same event.
+        let mut settings = json_at(&path);
+        settings["hooks"]["SessionStart"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"hooks": [{"type": "command", "command": "later"}]}));
+        write_file(
+            &path,
+            &format!("{}\n", serde_json::to_string_pretty(&settings).unwrap()),
+        );
+        let before = fs::read(&path).unwrap();
+        let output = run_setup(&setup_args(Agent::ClaudeCode), &paths);
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert!(!output.contains("wrote"), "{output}");
+        let session = json_at(&path)["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(session.len(), 2);
+        assert_eq!(
+            session[0]["hooks"][0]["command"],
+            "/opt/cetra/bin/cetra agents hook claude-code"
+        );
+        assert_eq!(session[1]["hooks"][0]["command"], "later");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn claude_setup_no_content_removes_content_flags() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_under(dir.path());
@@ -815,6 +972,7 @@ mod tests {
         assert!(error.contains("not valid JSON"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "not json");
         assert!(!backup_of(&path).exists());
+        assert!(!paths.agents_file().exists());
     }
 
     #[cfg(unix)]
@@ -854,6 +1012,26 @@ mod tests {
         let settings = json_at(&target);
         assert_eq!(settings["model"], "x");
         assert!(settings["env"].is_object());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_setup_writes_through_a_dangling_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        let target = paths.home.join("dotfiles").join("claude.json");
+        let link = claude_path(&paths);
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        // A relative link to a file that does not exist yet.
+        std::os::unix::fs::symlink("../dotfiles/claude.json", &link).unwrap();
+        run_setup(&setup_args(Agent::ClaudeCode), &paths);
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(json_at(&target)["env"].is_object());
     }
 
     #[cfg(unix)]
@@ -979,6 +1157,50 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn gemini_hook_timeout_is_in_milliseconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        run_setup(&setup_args(Agent::GeminiCli), &paths);
+        let settings = json_at(&gemini_dir(&paths).join("settings.json"));
+        for event in GEMINI_EVENTS {
+            assert_eq!(
+                settings["hooks"][event][0]["hooks"][0]["timeout"], 5000,
+                "{event}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gemini_env_export_line_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        let env_path = gemini_dir(&paths).join(".env");
+        let original =
+            "FOO=1\nexport OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20sk-cetra-old\n";
+        write_file(&env_path, original);
+        let out = run_setup(&setup_args(Agent::GeminiCli), &paths);
+        let env = fs::read_to_string(&env_path).unwrap();
+        assert!(
+            !env.contains("export OTEL_EXPORTER_OTLP_HEADERS"),
+            "{env:?}"
+        );
+        assert_eq!(
+            env,
+            "FOO=1\nOTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20sk-cetra-test\n"
+        );
+        assert!(
+            out.contains(&format!(
+                "replaced an existing OTEL_EXPORTER_OTLP_HEADERS line; the original is in {}.cetra-backup",
+                env_path.display()
+            )),
+            "{out}"
+        );
+        assert_eq!(fs::read_to_string(backup_of(&env_path)).unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn gemini_no_content_sets_log_prompts_false() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths_under(dir.path());
@@ -995,7 +1217,7 @@ mod tests {
         let paths = paths_under(dir.path());
         let out = run_setup(&setup_args(Agent::Copilot), &paths);
         assert!(
-            out.contains("export OTEL_EXPORTER_OTLP_ENDPOINT=https://cetra.example.com\n"),
+            out.contains("export OTEL_EXPORTER_OTLP_ENDPOINT='https://cetra.example.com'\n"),
             "{out}"
         );
         assert!(out.contains("export OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY"));
@@ -1043,6 +1265,32 @@ mod tests {
             .to_string();
         assert!(error.contains("sk-cetra-"), "{error}");
         assert!(!error.contains("pat-secret-value"), "{error}");
+    }
+
+    #[test]
+    fn setup_rejects_a_key_with_bad_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        for key in [
+            "sk-cetra-",
+            "sk-cetra-abc'def",
+            "sk-cetra-ab cd",
+            "sk-cetra-ab/cd",
+            "sk-cetra-ab\"cd",
+        ] {
+            let mut args = setup_args(Agent::ClaudeCode);
+            args.key = Token::from_str(key).unwrap();
+            let error = setup(&args, &paths, &mut Vec::new())
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                error,
+                "the key must be a project secret key (sk-cetra-…) with the ingest scope"
+            );
+            assert!(!error.contains("ab"), "{error}");
+        }
+        assert!(!paths.agents_file().exists());
+        assert!(!claude_path(&paths).exists());
     }
 
     #[test]

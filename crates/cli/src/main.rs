@@ -245,23 +245,44 @@ fn main() {
 }
 
 async fn async_main() -> i32 {
-    match run_cli(std::env::args_os()).await {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let hook = is_hook_invocation(&args);
+    let code = match run_cli(args).await {
         Ok(()) => 0,
         Err(error) => {
             let mut stderr = io::stderr().lock();
             let _ = writeln!(stderr, "{error:#}");
             1
         }
+    };
+    if hook {
+        // Exit here, before the runtime is dropped: a blocked DNS lookup or blocking-pool task
+        // must not hold the agent past the hook's budget. The hook always exits 0.
+        std::process::exit(0);
     }
+    code
+}
+
+/// Whether argv starts with `agents hook` (argv[1] and argv[2]).
+fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
+    args.get(1).and_then(|arg| arg.to_str()) == Some("agents")
+        && args.get(2).and_then(|arg| arg.to_str()) == Some("hook")
 }
 
 /// Run one CLI invocation. `main` turns `Err` into exit status 1.
 async fn run_cli(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
 ) -> anyhow::Result<()> {
+    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let hook = is_hook_invocation(&args);
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) => {
+            if hook {
+                // The hook never fails (D-CA-8): clap's message goes to stderr, the status is 0.
+                let _ = error.print();
+                return Ok(());
+            }
             error.print()?;
             if error.exit_code() == 0 {
                 return Ok(());

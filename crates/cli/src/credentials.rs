@@ -46,9 +46,22 @@ pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()
     let directory = path.parent().context("file path has no directory")?;
     fs::create_dir_all(directory).context("creating the directory")?;
     let temporary = temporary_path(path);
-    write_private(&temporary, bytes)?;
-    fs::rename(&temporary, path).context("replacing the file")?;
-    Ok(())
+    let result = write_private(&temporary, bytes).and_then(|()| {
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", file_name(path)))
+    });
+    if result.is_err() {
+        // A failed write leaves no temporary file behind.
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The last component of `path` for error messages; never the whole path.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "file".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// Drops a trailing slash so one server is one map key.
@@ -128,14 +141,18 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).context("creating credentials")?;
-    file.write_all(bytes).context("writing credentials")?;
-    file.sync_all().context("writing credentials")?;
+    let name = file_name(path);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("writing {name}"))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {name}"))?;
+    file.sync_all().with_context(|| format!("writing {name}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))
-            .context("setting the credentials file mode")?;
+            .with_context(|| format!("writing {name}"))?;
     }
     Ok(())
 }
