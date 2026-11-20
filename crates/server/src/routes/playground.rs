@@ -23,9 +23,9 @@ use cetra_eval::playground::{
     PlaygroundEntry, PlaygroundTrace, RenderError, build_playground_trace, render_messages,
 };
 use cetra_eval::{
-    CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_DEFAULT, CHAT_MAX_TOKENS_MAX, CHAT_TIMEOUT_MAX, ChatDone,
-    ChatError, ChatEvent, ChatParams, ChatRequest, ChatStream, ErrorClass, FinishReason,
-    JudgeConnection, ResponseFormat, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    CHAT_MAX_TOKENS_DEFAULT, CHAT_MAX_TOKENS_MAX, CHAT_TIMEOUT_MAX, ChatDone, ChatError, ChatEvent,
+    ChatParams, ChatRequest, ChatStream, ErrorClass, JudgeConnection, ResponseFormat, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::{mpsc, watch};
@@ -58,6 +58,16 @@ const CLIENT_BUFFER: usize = 16;
 
 /// How long a run waits for its connection's slot and rate token (D-V-35).
 pub(crate) const INTERACTIVE_WAIT: Duration = Duration::from_secs(10);
+
+/// How long the provider may stay silent before the run fails: its connect or head wait, and the
+/// gap between two of its chunks (spec 09 § Playground: 60 s). Pings do not count as provider
+/// output.
+#[cfg(not(test))]
+pub(crate) const RUN_IDLE: Duration = cetra_eval::CHAT_IDLE_TIMEOUT;
+
+/// Short in tests, so a silent provider is tested in seconds.
+#[cfg(test)]
+pub(crate) const RUN_IDLE: Duration = Duration::from_secs(5);
 
 /// The tool that carries the answer when a response format is set (D-V-25).
 const SUBMIT_ANSWER: &str = "submit_answer";
@@ -105,6 +115,7 @@ async fn run_playground(
         .transpose()?;
     check_reserved(&body)?;
     check_model(&body.model)?;
+    check_source(body.source.as_ref())?;
     let max_tokens = check_max_tokens(body.params.max_tokens)?;
     let messages =
         render_messages(&entries, &body.variables, &placeholders).map_err(render_error)?;
@@ -123,7 +134,7 @@ async fn run_playground(
         params: chat_params(&body.params),
         max_tokens,
         timeout: CHAT_TIMEOUT_MAX,
-        idle_timeout: CHAT_IDLE_TIMEOUT,
+        idle_timeout: RUN_IDLE,
     };
     cetra_eval::check_chat_request(&request).map_err(check_error)?;
     let row = connections::get_connection(
@@ -139,6 +150,9 @@ async fn run_playground(
         .get(&state.secrets, &row)
         .map_err(internal)?;
     let now = state.clock.now_ns();
+    // Admission (the org's and the user's limits) comes before the connection's slot, so a run
+    // that answers 429 for a busy connection has already spent its place in the user's minute
+    // (spec 09 § Playground).
     let guard = state
         .limits
         .playground
@@ -198,6 +212,8 @@ struct Run {
     tool_calls: Vec<ToolCall>,
     /// The provider's last event, when the stream reached it.
     done: Option<ChatDone>,
+    /// The forced answer tool's call was streamed as text (tool mode).
+    answered: bool,
     /// The error that ended the run.
     error: Option<ChatError>,
     /// Time from the start of the run to the first text or tool call.
@@ -261,10 +277,17 @@ async fn run_task(task: RunTask) {
         .json("start", &json!({"trace_id": trace_id.to_hex()}))
         .await
     {
-        match cetra_eval::stream_chat(state.eval_runner.egress(), connection.as_ref(), &request)
-            .await
-        {
-            Ok(stream) => {
+        // The client or a shutdown may leave before the provider answers its head (D-V-37): the
+        // provider call is dropped then, and the run is cancelled.
+        let opened = tokio::select! {
+            biased;
+            () = shut(&mut closed) => None,
+            () = emitter.tx.closed() => None,
+            result = cetra_eval::stream_chat(state.eval_runner.egress(), connection.as_ref(), &request) => Some(result),
+        };
+        match opened {
+            None => run.cancelled = true,
+            Some(Ok(stream)) => {
                 let submit_answer = request.response_format.is_some();
                 read_stream(
                     stream,
@@ -276,7 +299,7 @@ async fn run_task(task: RunTask) {
                 )
                 .await;
             }
-            Err(error) => run.error = Some(error),
+            Some(Err(error)) => run.error = Some(error),
         }
     } else {
         run.cancelled = true;
@@ -290,11 +313,20 @@ async fn run_task(task: RunTask) {
     } else {
         run.error.as_ref().map(ToString::to_string)
     };
+    // In tool mode the provider reports a tool call for the answer. When the answer was streamed
+    // as text and no other tool call exists, the run stopped normally (D-V-25).
+    let answered_only = run.answered && run.tool_calls.is_empty();
     let finish = run
         .done
         .as_ref()
         .and_then(|done| done.finish_reason.as_ref())
-        .map(FinishReason::as_str);
+        .map(|reason| {
+            if answered_only && matches!(reason.as_str(), "tool_call" | "tool_calls") {
+                "stop"
+            } else {
+                reason.as_str()
+            }
+        });
     let usage = run.done.as_ref().and_then(|done| done.usage);
     let response_model = run
         .done
@@ -386,10 +418,21 @@ async fn run_task(task: RunTask) {
     );
 }
 
+/// Reads the provider's next event and gives the stream back with it. The read is a future that
+/// owns the stream, so the select loop in [`read_stream`] can hold it across ping ticks.
+async fn pull(mut stream: ChatStream) -> (ChatStream, Result<Option<ChatEvent>, ChatError>) {
+    let next = stream.next().await;
+    (stream, next)
+}
+
 /// Forwards the provider's events to the client until the stream ends, fails, or the client or
 /// the server goes away. Dropping `stream` closes the provider's request.
+///
+/// The provider read is held across the ping ticks. Re-creating it on every ping would restart
+/// the provider's idle timeout (inside the read) each time, so a silent provider would never
+/// time out.
 async fn read_stream(
-    mut stream: ChatStream,
+    stream: ChatStream,
     emitter: &mut Emitter,
     run: &mut Run,
     closed: &mut watch::Receiver<bool>,
@@ -401,6 +444,7 @@ async fn read_stream(
         StreamTiming::DEFAULT.ping,
     );
     ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut pending = Box::pin(pull(stream));
     loop {
         tokio::select! {
             biased;
@@ -418,46 +462,50 @@ async fn read_stream(
                     return;
                 }
             }
-            next = stream.next() => match next {
-                Ok(Some(ChatEvent::Text(delta))) => {
-                    run.first_token(started);
-                    run.text.push_str(&delta);
-                    if !emitter.json("text", &json!({"delta": delta})).await {
-                        run.cancelled = true;
-                        return;
-                    }
-                }
-                Ok(Some(ChatEvent::ToolCall(call))) => {
-                    run.first_token(started);
-                    if submit_answer && call.name == SUBMIT_ANSWER {
-                        let delta = call.arguments.to_string();
+            (stream, next) = &mut pending => {
+                match next {
+                    Ok(Some(ChatEvent::Text(delta))) => {
+                        run.first_token(started);
                         run.text.push_str(&delta);
                         if !emitter.json("text", &json!({"delta": delta})).await {
                             run.cancelled = true;
                             return;
                         }
-                    } else {
-                        let event = json!({
-                            "id": call.id,
-                            "name": call.name,
-                            "arguments": call.arguments,
-                        });
-                        if !emitter.json("tool_call", &event).await {
-                            run.cancelled = true;
-                            return;
+                    }
+                    Ok(Some(ChatEvent::ToolCall(call))) => {
+                        run.first_token(started);
+                        if submit_answer && call.name == SUBMIT_ANSWER {
+                            let delta = call.arguments.to_string();
+                            run.answered = true;
+                            run.text.push_str(&delta);
+                            if !emitter.json("text", &json!({"delta": delta})).await {
+                                run.cancelled = true;
+                                return;
+                            }
+                        } else {
+                            let event = json!({
+                                "id": call.id,
+                                "name": call.name,
+                                "arguments": call.arguments,
+                            });
+                            if !emitter.json("tool_call", &event).await {
+                                run.cancelled = true;
+                                return;
+                            }
+                            run.tool_calls.push(call);
                         }
-                        run.tool_calls.push(call);
+                    }
+                    Ok(Some(ChatEvent::Done(done))) => {
+                        run.done = Some(done);
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(error) => {
+                        run.error = Some(error);
+                        return;
                     }
                 }
-                Ok(Some(ChatEvent::Done(done))) => {
-                    run.done = Some(done);
-                    return;
-                }
-                Ok(None) => return,
-                Err(error) => {
-                    run.error = Some(error);
-                    return;
-                }
+                pending = Box::pin(pull(stream));
             }
         }
     }
@@ -691,7 +739,21 @@ fn render_error(error: RenderError) -> ApiError {
             "messages",
             &format!("must be at most {MAX_MESSAGES} messages after placeholders"),
         ),
+        RenderError::TooLarge => field_error("messages", &RenderError::TooLarge.to_string()),
     }
+}
+
+/// The source names a prompt version: its name follows the prompt name rule (D-V-2), and its
+/// version is at least 1 (D-V-8).
+fn check_source(source: Option<&PlaygroundSource>) -> Result<(), ApiError> {
+    if let Some(PlaygroundSource::Prompt { name, version }) = source {
+        crate::prompts::check_name(name)
+            .map_err(|error| field_error("source.name", &error.message))?;
+        if *version < 1 {
+            return Err(field_error("source.version", "must be at least 1"));
+        }
+    }
+    Ok(())
 }
 
 /// A failed check of the built request. Its text names no payload.
@@ -1183,6 +1245,12 @@ mod tests {
         let events = read_events(stream_run(&app, &seeded, &body).await).await;
         assert_eq!(text_deltas(&events), r#"{"answer":"yes"}"#);
         assert!(events.iter().all(|event| event.0 != "tool_call"));
+        // The provider said `tool_calls` for the answer tool, which was streamed as text: the run
+        // stopped normally (D-V-25).
+        let done = events.last().expect("events");
+        assert_eq!(done.0, "done");
+        assert_eq!(done.1["finish_reason"], "stop");
+        assert_eq!(done.1["output"]["finish_reason"], "stop");
     }
 
     #[tokio::test]
@@ -1260,5 +1328,220 @@ mod tests {
         assert_eq!(names(&events).last().copied(), Some("done"));
         assert!(logs.contains("playground run"), "{logs}");
         assert!(!logs.contains("canary-text"), "{logs}");
+    }
+
+    /// Serves `router` on loopback and returns the provider's base URL.
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        format!("http://{addr}/v1")
+    }
+
+    #[tokio::test]
+    async fn placeholders_expand_into_the_trace() {
+        let (_mock, base) = provider(vec![chat_turn("Noted.", 1, 4, 1)]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut body = run_body(connection);
+        body["messages"] = json!([
+            {"type": "placeholder", "name": "history"},
+            {"role": "user", "parts": [{"type": "text", "content": "Next: {{product}}"}]}
+        ]);
+        body["placeholders"] = json!({"history": [
+            {"role": "user", "parts": [{"type": "text", "content": "earlier question"}]}
+        ]});
+        let events = read_events(stream_run(&app, &seeded, &body).await).await;
+        assert_eq!(names(&events).last().copied(), Some("done"));
+        let trace_id = events[0].1["trace_id"].as_str().expect("trace id");
+        let detail = trace_detail(&app, &seeded, trace_id)
+            .await
+            .expect("the playground trace");
+        let span_id = detail["spans"][0]["span"]["span_id"]
+            .as_str()
+            .expect("span id");
+        let span_path = format!(
+            "/api/v1/projects/{}/traces/{trace_id}/spans/{span_id}",
+            seeded.project.id
+        );
+        let span = app
+            .request(Method::GET, &span_path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(span.status, 200, "{}", text(&span));
+        let input = text(&span);
+        assert!(input.contains("earlier question"), "{input}");
+        assert!(input.contains("Next: cetra"), "{input}");
+
+        // A placeholder with no entry is a 400 before the stream starts.
+        body["placeholders"] = json!({});
+        let response = app
+            .request(Method::POST, &run_path(&seeded))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let problem: Value = response.json();
+        assert_eq!(problem["errors"][0]["field"], "placeholders");
+    }
+
+    #[tokio::test]
+    async fn rendered_text_over_4_mib_is_400() {
+        let (_mock, base) = provider(vec![]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut body = run_body(connection);
+        body["variables"] = json!({"big": "x".repeat(1 << 20)});
+        body["messages"] = json!([
+            {"role": "user", "parts": [{"type": "text", "content": "{{big}}{{big}}{{big}}{{big}}{{big}}"}]}
+        ]);
+        let response = app
+            .request(Method::POST, &run_path(&seeded))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let problem: Value = response.json();
+        assert_eq!(problem["errors"][0]["field"], "messages");
+        assert_eq!(
+            problem["errors"][0]["message"],
+            "the rendered messages are larger than 4 MiB"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_names_are_bounded() {
+        let (_mock, base) = provider(vec![]).await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let cases = [
+            (json!({"prompt": {"name": "", "version": 1}}), "source.name"),
+            (
+                json!({"prompt": {"name": "a b", "version": 1}}),
+                "source.name",
+            ),
+            (
+                json!({"prompt": {"name": "a".repeat(201), "version": 1}}),
+                "source.name",
+            ),
+            (
+                json!({"prompt": {"name": "support-reply", "version": 0}}),
+                "source.version",
+            ),
+        ];
+        for (source, field) in cases {
+            let mut body = run_body(connection);
+            body["source"] = source;
+            let response = app
+                .request(Method::POST, &run_path(&seeded))
+                .header(header::COOKIE.as_str(), &seeded.cookie)
+                .json(&body)
+                .send()
+                .await;
+            assert_eq!(response.status, 400, "{}", text(&response));
+            let problem: Value = response.json();
+            assert_eq!(problem["errors"][0]["field"], field);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_org_answers_429_past_sixteen_runs() {
+        let (app, seeded) = new_app().await;
+        // The connection is never called: admission refuses the run first.
+        let connection =
+            create_connection(&app, &seeded, "acme", "http://127.0.0.1:9/v1", 16, "native").await;
+        let now = app.state.clock.now_ns();
+        // Sixteen runs of other users fill the org's slots.
+        let mut held = Vec::new();
+        for _ in 0..16 {
+            let guard = app
+                .state
+                .limits
+                .playground
+                .admit(Uuid::now_v7(), seeded.org_id, now)
+                .unwrap_or_else(|_| panic!("an org slot"));
+            held.push(guard);
+        }
+        let refused = app
+            .request(Method::POST, &run_path(&seeded))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&run_body(connection))
+            .send()
+            .await;
+        assert_eq!(refused.status, 429, "{}", text(&refused));
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn a_client_leaving_before_the_head_cancels_the_run() {
+        // The provider sleeps before it answers, so the run has no response head yet.
+        let base = serve(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Json(json!({}))
+            }),
+        ))
+        .await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let mut stream = stream_run(&app, &seeded, &run_body(connection)).await;
+        let start = stream
+            .next_event(Duration::from_secs(5))
+            .await
+            .expect("the start event");
+        let started: Value = serde_json::from_str(&start.data).expect("json");
+        let trace_id = started["trace_id"].as_str().expect("trace id").to_owned();
+        drop(stream);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(detail) = trace_detail(&app, &seeded, &trace_id).await
+                && detail["trace"]["status"] == "error"
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run waiting for the head was not traced as cancelled"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_silent_provider_ends_the_run_by_the_idle_timeout() {
+        // One chunk, then the provider stays silent: the run ends after RUN_IDLE of silence.
+        // Pings do not restart the provider's idle timeout (see `read_stream`).
+        let chunk = "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"gpt-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n";
+        let base = serve(axum::Router::new().route(
+            "/v1/chat/completions",
+            post(move || async move {
+                let first = futures::stream::iter(vec![Ok::<Vec<u8>, std::io::Error>(
+                    chunk.as_bytes().to_vec(),
+                )]);
+                let body = futures::StreamExt::chain(first, futures::stream::pending());
+                Response::builder()
+                    .header(header::CONTENT_TYPE.as_str(), "text/event-stream")
+                    .body(axum::body::Body::from_stream(body))
+                    .expect("a response")
+            }),
+        ))
+        .await;
+        let (app, seeded) = new_app().await;
+        let connection = create_connection(&app, &seeded, "acme", &base, 2, "native").await;
+        let started = std::time::Instant::now();
+        let events = read_events(stream_run(&app, &seeded, &run_body(connection)).await).await;
+        assert_eq!(names(&events).last().copied(), Some("error"), "{events:?}");
+        assert!(
+            started.elapsed() >= RUN_IDLE,
+            "the run ended before the idle timeout"
+        );
     }
 }

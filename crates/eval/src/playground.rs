@@ -27,6 +27,10 @@ use crate::trace::{
 /// Most messages a rendered request holds, after placeholders are expanded (D-V-37).
 const MAX_MESSAGES: usize = 200;
 
+/// Most bytes of `text` parts a rendered request holds: the request's own parts, once rendered,
+/// and the placeholders' parts (D-V-37).
+pub const RENDER_MAX_BYTES: usize = 4 * 1024 * 1024;
+
 /// One request entry: a canonical message or a placeholder.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(untagged)]
@@ -88,22 +92,28 @@ pub enum RenderError {
     /// More than 200 messages after expansion.
     #[error("too many messages")]
     TooMany,
+    /// The rendered `text` parts are more than [`RENDER_MAX_BYTES`] in all.
+    #[error("the rendered messages are larger than 4 MiB")]
+    TooLarge,
 }
 
 /// Expands placeholders in place and renders the `text` parts of the request's own messages with
-/// `variables` (placeholder messages are copied unrendered). At most 200 messages after expansion.
+/// `variables` (placeholder messages are copied unrendered). At most 200 messages after expansion,
+/// and at most [`RENDER_MAX_BYTES`] of `text` parts in all, checked before each part is appended.
 ///
 /// # Errors
 ///
 /// Returns [`RenderError::MissingPlaceholder`] for a placeholder with no entry in `placeholders`,
-/// [`RenderError::Template`] for a text part that does not render, and
-/// [`RenderError::TooMany`] when the expanded list would exceed 200 messages.
+/// [`RenderError::Template`] for a text part that does not render, [`RenderError::TooMany`] when
+/// the expanded list would exceed 200 messages, and [`RenderError::TooLarge`] when the text parts
+/// would exceed [`RENDER_MAX_BYTES`].
 pub fn render_messages(
     entries: &[PlaygroundEntry],
     variables: &BTreeMap<String, String>,
     placeholders: &BTreeMap<String, Vec<Message>>,
 ) -> Result<Vec<Message>, RenderError> {
     let mut messages = Vec::new();
+    let mut budget = RENDER_MAX_BYTES;
     for (index, entry) in entries.iter().enumerate() {
         match entry {
             PlaygroundEntry::Placeholder { name, .. } => {
@@ -111,11 +121,14 @@ pub fn render_messages(
                     return Err(RenderError::MissingPlaceholder { name: name.clone() });
                 };
                 ensure_room(messages.len(), found.len())?;
-                messages.extend(found.iter().cloned());
+                for message in found {
+                    spend(&mut budget, text_bytes(message))?;
+                    messages.push(message.clone());
+                }
             }
             PlaygroundEntry::Message(message) => {
                 ensure_room(messages.len(), 1)?;
-                messages.push(render_message(index, message, variables)?);
+                messages.push(render_message(index, message, variables, &mut budget)?);
             }
         }
     }
@@ -129,21 +142,37 @@ fn ensure_room(current: usize, added: usize) -> Result<(), RenderError> {
     Ok(())
 }
 
+/// Takes `bytes` from the render budget, or fails with [`RenderError::TooLarge`].
+fn spend(budget: &mut usize, bytes: usize) -> Result<(), RenderError> {
+    *budget = budget.checked_sub(bytes).ok_or(RenderError::TooLarge)?;
+    Ok(())
+}
+
+/// The bytes of a message's `text` parts.
+fn text_bytes(message: &Message) -> usize {
+    message.parts.iter().fold(0usize, |total, part| match part {
+        Part::Text { content, .. } => total.saturating_add(content.len()),
+        _ => total,
+    })
+}
+
 fn render_message(
     index: usize,
     message: &Message,
     variables: &BTreeMap<String, String>,
+    budget: &mut usize,
 ) -> Result<Message, RenderError> {
     let mut rendered = message.clone();
     for (part_index, part) in rendered.parts.iter_mut().enumerate() {
         if let Part::Text { content, .. } = part {
-            let text = plain_template::render(content.as_str(), variables).map_err(|source| {
-                RenderError::Template {
+            let text = plain_template::render_up_to(content.as_str(), variables, *budget)
+                .map_err(|source| RenderError::Template {
                     index,
                     part: part_index,
                     source,
-                }
-            })?;
+                })?
+                .ok_or(RenderError::TooLarge)?;
+            spend(budget, text.len())?;
             *content = text;
         }
     }
@@ -532,6 +561,31 @@ mod tests {
             render_messages(&entries[..1], &vars(&[]), &placeholder("many", many))
                 .map(|messages| messages.len()),
             Ok(200)
+        );
+    }
+
+    #[test]
+    fn rendered_text_is_capped_at_4_mib() {
+        let big = "x".repeat(1 << 20);
+        let variables = vars(&[("big", big.as_str())]);
+        let uses = |count: usize| {
+            vec![PlaygroundEntry::Message(text(
+                Role::User,
+                &"{{big}}".repeat(count),
+            ))]
+        };
+        // Four megabytes of value, in one part: exactly the budget.
+        assert!(render_messages(&uses(4), &variables, &BTreeMap::new()).is_ok());
+        assert_eq!(
+            render_messages(&uses(5), &variables, &BTreeMap::new()),
+            Err(RenderError::TooLarge)
+        );
+        // Placeholder messages count too: three of 2 MiB are over the budget.
+        let entries = vec![placeholder_entry("history")];
+        let history = vec![text(Role::User, &"y".repeat(2 << 20)); 3];
+        assert_eq!(
+            render_messages(&entries, &vars(&[]), &placeholder("history", history)),
+            Err(RenderError::TooLarge)
         );
     }
 
