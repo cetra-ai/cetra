@@ -8,6 +8,7 @@ import {
   ListChecks,
   MessagesSquare,
   Rows3,
+  SquareTerminal,
   Table2,
   Users,
   Waypoints,
@@ -26,6 +27,12 @@ export const projectNav = [
   { section: "Observe", to: "/$org/$project/users", label: "Users", icon: Users },
   { section: "Monitor", to: "/$org/$project/alerts", label: "Alerts", icon: BellRing },
   { section: "Evaluate", to: "/$org/$project/prompts", label: "Prompts", icon: FileText },
+  {
+    section: "Evaluate",
+    to: "/$org/$project/playground",
+    label: "Playground",
+    icon: SquareTerminal,
+  },
   { section: "Evaluate", to: "/$org/$project/evaluators", label: "Evaluators", icon: Gauge },
   {
     section: "Evaluate",

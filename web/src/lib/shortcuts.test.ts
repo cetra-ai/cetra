@@ -45,6 +45,7 @@ it("recognizes keys, chords, and modifiers", () => {
   expect(reduceShortcut("g", { ...plain, key: "i" }, false).action).toBe("go-datasets");
   expect(reduceShortcut("g", { ...plain, key: "x" }, false).action).toBe("go-experiments");
   expect(reduceShortcut("g", { ...plain, key: "r" }, false).action).toBe("go-prompts");
+  expect(reduceShortcut("g", { ...plain, key: "l" }, false).action).toBe("go-playground");
   expect(reduceShortcut("g", { ...plain, key: "d" }, false).action).toBe("go-dashboard");
   expect(reduceShortcut("g", { ...plain, key: "j" }, false)).toEqual({
     chord: null,
@@ -70,6 +71,7 @@ it("gives every project page its go letter and back again", () => {
   expect(goKeyOf("/$org/$project/sessions")).toBe("s");
   expect(goKeyOf("/$org/$project/experiments")).toBe("x");
   expect(goKeyOf("/$org/$project/prompts")).toBe("r");
+  expect(goKeyOf("/$org/$project/playground")).toBe("l");
   expect(goKeyOf("/$org/$project/settings/general")).toBeUndefined();
   for (const letter of Object.keys(GO_TARGETS)) {
     const target = GO_TARGETS[letter as keyof typeof GO_TARGETS];
