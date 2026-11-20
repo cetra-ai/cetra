@@ -4,6 +4,9 @@
 //! and passes the lookup to `normalize`, which only reads it.
 
 mod claude_code;
+mod codex;
+mod copilot;
+mod gemini_cli;
 #[cfg(test)]
 mod test_support;
 
@@ -16,10 +19,10 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 
 use crate::bag::AttrBag;
 use crate::context::ContextFields;
-use crate::payload::Assembled;
+use crate::payload::{Assembled, Payload};
 use crate::usage::Usage;
-use crate::value::as_str;
-use crate::warn::Warnings;
+use crate::value::{InvalidNumber, as_i64, as_str};
+use crate::warn::{Warning, Warnings};
 
 /// One coding-agent session's context (D-CA-9), as the server stores it.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -160,6 +163,8 @@ pub(crate) fn is_redacted(text: &str) -> bool {
 pub(crate) struct Finish {
     /// The tool's name, which a tool span takes (D-CA-6).
     pub(crate) tool_name: Option<String>,
+    /// Codex only: the turn's id, which the spans are re-linked to (D-CA-6).
+    pub(crate) turn_id: Option<String>,
 }
 
 /// D-CA-3. The first rule that matches wins.
@@ -201,27 +206,49 @@ fn attribute<'a>(attributes: &'a [KeyValue], key: &str) -> Option<&'a AnyValue> 
         .and_then(|attr| attr.value.as_ref())
 }
 
+/// D-CA-6: Codex's internal spans are dropped and counted, never stored or rejected.
+pub(crate) fn discarded(
+    agent: Option<CodingAgent>,
+    span_name: &str,
+    attributes: &[KeyValue],
+) -> bool {
+    agent == Some(CodingAgent::Codex) && !codex::kept(span_name, attributes)
+}
+
 /// The values [`finish`] needs. Read before the bag is consumed.
 pub(crate) fn finish_inputs(agent: Option<CodingAgent>, bag: &AttrBag<'_>) -> Finish {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        return Finish {
+    match agent {
+        Some(CodingAgent::ClaudeCode) => Finish {
             tool_name: claude_code::tool_name(bag),
-        };
+            turn_id: None,
+        },
+        Some(CodingAgent::Codex) => Finish {
+            tool_name: peek_text(bag, "tool_name"),
+            turn_id: codex::turn_id(bag),
+        },
+        Some(CodingAgent::GeminiCli | CodingAgent::Copilot) => Finish {
+            tool_name: peek_text(bag, "gen_ai.tool.name"),
+            turn_id: None,
+        },
+        None => Finish::default(),
     }
-    Finish::default()
 }
 
 /// The span kind an agent decides, or `None` for the generic mapping.
 pub(crate) fn kind(agent: Option<CodingAgent>, span_name: &str) -> Option<SpanKind> {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        return claude_code::kind(span_name);
+    match agent? {
+        CodingAgent::ClaudeCode => claude_code::kind(span_name),
+        CodingAgent::Codex => codex::kind(span_name),
+        CodingAgent::GeminiCli => gemini_cli::kind(span_name),
+        CodingAgent::Copilot => None,
     }
-    None
 }
 
 /// The D-CA-4 metadata, and the session context's person, repository and branch (D-CA-5, D-CA-9).
 pub(crate) fn context(
     agent: Option<CodingAgent>,
+    span_name: &str,
+    attributes: &[KeyValue],
     bag: &mut AttrBag<'_>,
     fields: &mut ContextFields,
     agents: &AgentContexts,
@@ -234,7 +261,9 @@ pub(crate) fn context(
         .insert(key::CODING_AGENT.to_owned(), agent.wire_name().to_owned());
     match agent {
         CodingAgent::ClaudeCode => claude_code::context(bag, fields, agents),
-        CodingAgent::Codex | CodingAgent::GeminiCli | CodingAgent::Copilot => {}
+        CodingAgent::Codex => codex::context(span_name, attributes, bag, fields, agents),
+        CodingAgent::GeminiCli => gemini_cli::context(fields, agents),
+        CodingAgent::Copilot => copilot::context(bag, fields),
     }
 }
 
@@ -246,10 +275,11 @@ pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     warnings: &mut Warnings,
 ) -> Option<Usage> {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        return claude_code::usage(span_name, kind, bag, warnings);
+    match agent? {
+        CodingAgent::ClaudeCode => claude_code::usage(span_name, kind, bag, warnings),
+        CodingAgent::Codex => codex::usage(span_name, kind, bag, warnings),
+        CodingAgent::GeminiCli | CodingAgent::Copilot => None,
     }
-    None
 }
 
 /// Time to first token from the agent's own name, or `None`.
@@ -258,10 +288,10 @@ pub(crate) fn ttft(
     bag: &mut AttrBag<'_>,
     warnings: &mut Warnings,
 ) -> Option<i64> {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        return claude_code::ttft(bag, warnings);
+    match agent? {
+        CodingAgent::ClaudeCode => claude_code::ttft(bag, warnings),
+        CodingAgent::Codex | CodingAgent::GeminiCli | CodingAgent::Copilot => None,
     }
-    None
 }
 
 /// Payloads the agent reads from its own attributes and events (D-CA-6).
@@ -273,20 +303,128 @@ pub(crate) fn payload(
     assembled: &mut Assembled,
     warnings: &mut Warnings,
 ) {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        claude_code::payload(span_name, bag, events, assembled, warnings);
+    match agent {
+        Some(CodingAgent::ClaudeCode) => {
+            claude_code::payload(span_name, bag, events, assembled, warnings);
+        }
+        Some(CodingAgent::GeminiCli) => gemini_cli::payload(span_name, bag, assembled, warnings),
+        Some(CodingAgent::Codex | CodingAgent::Copilot) | None => {}
     }
 }
 
-/// The span's name and attributes after the build (D-CA-6).
+/// The span's name, parent and id, and its resource attributes, after the build (D-CA-6).
 pub(crate) fn finish(
     agent: Option<CodingAgent>,
     span_name: &str,
+    kind: SpanKind,
     inputs: &Finish,
     built: &mut Span,
 ) {
-    if agent == Some(CodingAgent::ClaudeCode) {
-        claude_code::finish(span_name, inputs, built);
+    match agent {
+        Some(CodingAgent::ClaudeCode) => claude_code::finish(span_name, inputs, built),
+        Some(CodingAgent::Codex) => codex::finish(span_name, inputs, built),
+        Some(CodingAgent::GeminiCli) => gemini_cli::finish(span_name, inputs, built),
+        Some(CodingAgent::Copilot) => copilot::finish(kind, inputs, built),
+        None => {}
+    }
+}
+
+/// A tool span takes the tool's name, and the original name moves to `cetra.span_name` (D-CA-6).
+/// Nothing changes when the name is the same.
+pub(crate) fn rename_tool(built: &mut Span, name: &str) {
+    if built.name == name {
+        return;
+    }
+    let original = std::mem::replace(&mut built.name, name.to_owned());
+    built
+        .attributes
+        .insert(SPAN_NAME_ATTRIBUTE.to_owned(), original);
+}
+
+/// A non-empty string, peeked: the bag keeps the key unread.
+fn peek_text(bag: &AttrBag<'_>, name: &str) -> Option<String> {
+    bag.get(name)
+        .and_then(as_str)
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+}
+
+/// A trimmed, non-empty string. It is taken when it is returned.
+pub(crate) fn take_text(bag: &mut AttrBag<'_>, name: &str) -> Option<String> {
+    let text = bag
+        .get(name)
+        .and_then(as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())?
+        .to_owned();
+    bag.take(name);
+    Some(text)
+}
+
+/// A non-negative count, taken when it is read. A negative or non-numeric value is
+/// invalid (rule 20) and stays unread.
+pub(crate) fn count(bag: &mut AttrBag<'_>, name: &str, warnings: &mut Warnings) -> Option<i64> {
+    let value = bag.get(name)?;
+    match as_i64(value) {
+        Ok(Some(number)) if number >= 0 => {
+            bag.take(name);
+            Some(number)
+        }
+        Ok(Some(_)) | Err(InvalidNumber) => {
+            warnings.add(Warning::InvalidNumber);
+            None
+        }
+        Ok(None) => None,
+    }
+}
+
+/// Sets the input and drops the input error of the convention that read it (N2 rule).
+pub(crate) fn set_input(assembled: &mut Assembled, payload: Payload) {
+    assembled.io.input = Some(payload);
+    assembled.io.errors.retain(|code| !code.ends_with(":input"));
+}
+
+/// Sets the output and drops the output error of the convention that read it (N2 rule).
+pub(crate) fn set_output(assembled: &mut Assembled, payload: Payload) {
+    assembled.io.output = Some(payload);
+    assembled
+        .io
+        .errors
+        .retain(|code| !code.ends_with(":output"));
+}
+
+/// The session context of `agent` for `fields.session_id` (D-CA-5 rank 2, D-CA-9): its user,
+/// repository and branch replace the span's own values. Nothing is removed when the context
+/// has no value.
+pub(crate) fn apply_session_context(
+    agents: &AgentContexts,
+    agent: &str,
+    fields: &mut ContextFields,
+) {
+    let Some(stored) = fields
+        .session_id
+        .as_deref()
+        .and_then(|session| agents.get(agent, session))
+    else {
+        return;
+    };
+    let user = stored
+        .user
+        .as_deref()
+        .map(|text| text.trim().to_lowercase())
+        .filter(|text| !text.is_empty());
+    let repository = stored.repository.clone();
+    let branch = stored.branch.clone();
+    if let Some(user) = user {
+        fields.user_id = Some(user);
+    }
+    if let Some(repository) = repository {
+        fields
+            .metadata
+            .insert(key::REPOSITORY.to_owned(), repository);
+    }
+    if let Some(branch) = branch {
+        fields.metadata.insert(key::BRANCH.to_owned(), branch);
     }
 }
 

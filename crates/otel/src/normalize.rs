@@ -105,7 +105,7 @@ pub fn normalize(
         agents,
     };
     let mut spans = Vec::new();
-    let mut rejections = Rejections::default();
+    let mut tally = Tally::default();
     let mut media = crate::media::MediaSink::new(&ctx.limits);
     for resource_spans in &request.resource_spans {
         let resource = encode_resource(resource_spans.resource.as_ref());
@@ -118,7 +118,7 @@ pub fn normalize(
                     &resource,
                     scope_name.clone(),
                     scope_version.clone(),
-                    &mut rejections,
+                    &mut tally,
                     &mut media,
                 ) {
                     spans.push(built);
@@ -129,9 +129,16 @@ pub fn normalize(
     Normalized {
         spans,
         media: media.into_media(),
-        rejections,
-        discarded: 0,
+        rejections: tally.rejections,
+        discarded: tally.discarded,
     }
+}
+
+/// What `accept_span` drops: rejected spans (counted by reason) and discarded spans (D-CA-6).
+#[derive(Default)]
+struct Tally {
+    rejections: Rejections,
+    discarded: u64,
 }
 
 struct EncodedResource<'a> {
@@ -196,7 +203,7 @@ fn accept_span(
     resource: &EncodedResource<'_>,
     scope_name: Option<String>,
     scope_version: Option<String>,
-    rejections: &mut Rejections,
+    tally: &mut Tally,
     media: &mut crate::media::MediaSink<'_>,
 ) -> Option<Span> {
     media.clear_refs();
@@ -206,30 +213,35 @@ fn accept_span(
         &span.name,
         &span.attributes,
     );
+    // Before the validity checks, so an internal span is never counted as rejected.
+    if agents::discarded(agent, &span.name, &span.attributes) {
+        tally.discarded += 1;
+        return None;
+    }
     let trace_id = match TraceId::from_slice(&span.trace_id) {
         Ok(id) => id,
         Err(_) => {
-            rejections.record(RejectReason::InvalidTraceId);
+            tally.rejections.record(RejectReason::InvalidTraceId);
             return None;
         }
     };
     let span_id = match SpanId::from_slice(&span.span_id) {
         Ok(id) => id,
         Err(_) => {
-            rejections.record(RejectReason::InvalidSpanId);
+            tally.rejections.record(RejectReason::InvalidSpanId);
             return None;
         }
     };
     let Ok(start_time) = i64::try_from(span.start_time_unix_nano) else {
-        rejections.record(RejectReason::TimestampOverflow);
+        tally.rejections.record(RejectReason::TimestampOverflow);
         return None;
     };
     let Ok(end_time) = i64::try_from(span.end_time_unix_nano) else {
-        rejections.record(RejectReason::TimestampOverflow);
+        tally.rejections.record(RejectReason::TimestampOverflow);
         return None;
     };
     if start_out_of_range(start_time, batch.ctx) {
-        rejections.record(RejectReason::StartTimeOutOfRange);
+        tally.rejections.record(RejectReason::StartTimeOutOfRange);
         return None;
     }
 
@@ -246,7 +258,14 @@ fn accept_span(
         None => span_kind(&mut bag),
     };
     let mut fields = fill(&mut bag, &resource.view, &mut warnings);
-    agents::context(agent, &mut bag, &mut fields, batch.agents);
+    agents::context(
+        agent,
+        &span.name,
+        &span.attributes,
+        &mut bag,
+        &mut fields,
+        batch.agents,
+    );
     let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
         Some(counted) => counted,
         None => usage(
@@ -374,7 +393,7 @@ fn accept_span(
         schema_version: SCHEMA_VERSION,
     };
     payload::write(&mut built, assembled.io);
-    agents::finish(agent, &span.name, &finish_inputs, &mut built);
+    agents::finish(agent, &span.name, span_kind, &finish_inputs, &mut built);
     crate::truncate::truncate_columns(&mut built, batch.ctx.limits.max_attribute_bytes);
     Some(built)
 }
