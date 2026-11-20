@@ -217,8 +217,12 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `cetra query "<sql>" \| --file <path> --project … [--param k=v]… [--from … --to … \| --since 24h] [--limit n] [--timeout-ms n] [--format table\|csv\|json\|ndjson\|parquet] [-o <path>]` | SQL console from the terminal; CSV, NDJSON and Parquet stream through the export path (D-H-12) |
 | `cetra traces list [--filter …] [--search …] [--from …] [--to …] [--since 24h] [--sort …] [--order …] [--limit n] [--cursor …] [--include-eval] [--include-experiments] [--format table\|json]` · `cetra traces get <id> [--around <time>] [--format tree\|json]` | inspect traces |
 | `cetra projects list [--format table\|json]` | projects the token can read |
+| `cetra agents setup <agent> --url` | configure Claude Code, Codex, Gemini CLI or Copilot to send traces to cetra; key from `CETRA_INGEST_KEY` or `--key`; `--user`, `--no-content`, `--print` (D-CA-10) |
+| `cetra agents remove <agent>` | remove what setup wrote (D-CA-10) |
 | `cetra bench ingest --rate 50000 --duration 60s --target …` | load generator (synthetic OTLP) |
 | `cetra version` | |
 | `cetra health [--url http://127.0.0.1:8080]` | exits 0 when `GET <url>/readyz` answers 200 within 5 s, else 1; the container healthcheck (D-N-4) |
 
 The remote commands (`query`, `traces`, `projects`) take the server and token from `--url`/`--token`, then `CETRA_URL`/`CETRA_TOKEN`, then the `cetra login` credentials file; `--project` or `CETRA_PROJECT` names the project (D-H-12).
+
+`cetra agents hook <agent>` is hidden: the agents' hooks run it to send the session context (D-CA-8).
