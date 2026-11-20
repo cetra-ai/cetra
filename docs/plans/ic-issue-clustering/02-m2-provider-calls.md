@@ -407,7 +407,7 @@ pub fn fingerprint_hex(fields: &ErrorFields<'_>) -> String;
   - placeholders are not rewritten: `"https://h.io/2026-01-01"` → `"<url:https://h.io>"`.
 - `normalize_cuts_at_512_chars_on_a_char_boundary`: 600 `é` give 512 characters.
 - `fingerprint_golden`: a fixed `ErrorFields` gives a fixed hex string. Compute it once, check it by hand against a SHA-256 of the documented byte layout in the test (build the bytes manually, hash with `Sha256`, compare), and pin it.
-- `fingerprint_separates_fields`: `("ab", "c")` and `("a", "bc")` differ, and so do `None` and `Some("")`.
+- `fingerprint_separates_fields`: `("ab", "c")` and `("a", "bc")` differ. `None` and `Some("")` hash the same by design (length 0, no bytes); callers turn empty strings into `None`.
 - `fingerprint_is_stable_across_volatile_parts`: two messages that differ only in a UUID and a number give the same fingerprint after `normalize_message`.
 - Proptest (`crate::hostile_tests::config()`): `normalize_never_panics_and_is_bounded` for any `String`. The output has at most 512 chars and no leading or trailing whitespace. There is no idempotence property: placeholders are plain text on a second pass.
 
