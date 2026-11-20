@@ -10,7 +10,7 @@ const { commands, note, noteHref, id } = Astro.props;
 ---
 <div class="copy" data-copy>
   {commands.length > 1 && (
-    <div class="tablist" role="tablist">
+    <div class="tablist" role="tablist" aria-label="Install method">
       {commands.map((c, i) => (
         <button
           type="button"
@@ -33,7 +33,7 @@ const { commands, note, noteHref, id } = Astro.props;
       aria-labelledby={commands.length > 1 ? `${id}-tab-${i}` : undefined}
       hidden={i !== 0}
     >
-      <pre><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{c.command}</span></code></pre>
+      <pre tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{c.command}</span></code></pre>
       <button type="button" class="copy-btn" aria-label="Copy command" data-copy-target={`${id}-panel-${i}`}>Copy</button>
     </div>
   ))}
@@ -133,7 +133,13 @@ const { commands, note, noteHref, id } = Astro.props;
     ms: number,
   ) {
     button.textContent = label;
-    if (status) status.textContent = announcement;
+    // Clear the live region first, so a repeated message is announced again.
+    if (status) {
+      status.textContent = "";
+      window.setTimeout(() => {
+        status.textContent = announcement;
+      }, 50);
+    }
     window.clearTimeout(resetTimers.get(button));
     resetTimers.set(
       button,

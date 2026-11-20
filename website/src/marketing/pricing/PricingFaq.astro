@@ -1,0 +1,69 @@
+---
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+---
+
+<Section tone="ink" width="narrow" labelledby="pricing-faq-title">
+  <SectionHeading eyebrow="Questions" title="Pricing questions" id="pricing-faq-title" />
+  <div class="faq">
+    <details>
+      <summary><span class="question">What is a unit?</span></summary>
+      <p class="muted">One span or one score sent to cetra. A trace with 20 spans is 20 units. Scores from your LLM judges count too; the spans of the judge calls do not.</p>
+    </details>
+    <details>
+      <summary><span class="question">What happens at the limit?</span></summary>
+      <p class="muted">On Free, cetra stops accepting new spans and scores for the rest of the month and tells you why. On paid plans, ingestion continues and the extra units are billed, unless you set a spend cap.</p>
+    </details>
+    <details>
+      <summary><span class="question">What does "history" mean?</span></summary>
+      <p class="muted">How far back you can see your data. Older data is hidden, and an upgrade shows it again. It is deleted 30 days after it leaves the window.</p>
+    </details>
+    <details>
+      <summary><span class="question">Who counts as a seat?</span></summary>
+      <p class="muted">Owners, admins and members. Viewers are free and unlimited.</p>
+    </details>
+    <details>
+      <summary><span class="question">Is self-hosted cetra limited?</span></summary>
+      <p class="muted">No. Without a licence key it has every core feature and no limits on volume, seats or retention. The licence adds single sign-on and project roles.</p>
+    </details>
+  </div>
+</Section>
+
+<style>
+  .faq {
+    margin-top: var(--space-7);
+  }
+  details {
+    border-bottom: 1px solid var(--line);
+    padding-block: var(--space-4);
+  }
+  summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-4);
+    list-style: none;
+    cursor: pointer;
+  }
+  summary::-webkit-details-marker {
+    display: none;
+  }
+  .question {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+  }
+  /* The marker is decoration: its text is empty for screen readers. */
+  summary::after {
+    content: "+" / "";
+    flex: none;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    color: var(--accent);
+  }
+  details[open] summary::after {
+    content: "−" / "";
+  }
+  details p {
+    margin-top: var(--space-3);
+  }
+</style>

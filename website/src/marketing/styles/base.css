@@ -99,6 +99,34 @@ pre {
 .muted {
   color: var(--fg-muted);
 }
+/* Dot list: each item gets an accent dot. */
+.bullets {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+.bullets > li {
+  display: flex;
+  gap: var(--space-3);
+  align-items: baseline;
+}
+.bullets > li::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  transform: translateY(-2px);
+}
+/* A row of buttons. Its margin is set where the row is used. */
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
 .visually-hidden {
   position: absolute;
   width: 1px;

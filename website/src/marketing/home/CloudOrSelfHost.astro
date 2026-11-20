@@ -11,11 +11,11 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     eyebrow="Two ways to run it"
     title="Our cloud, or your server."
     id="deploy-title"
-    lede="The same software either way. Move between them when your needs change."
+    lede="The same software either way."
   />
   <div class="cards">
     <Card title="cetra Cloud">
-      <ul class="points">
+      <ul class="points bullets">
         <li>Free up to 100,000 spans and scores a month</li>
         <li>Paid plans from $30 a month</li>
         <li>Hosted in the EU</li>
@@ -26,7 +26,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
       </div>
     </Card>
     <Card title="Self-hosted">
-      <ul class="points">
+      <ul class="points bullets">
         <li>Free, with no limits on volume, seats or retention</li>
         <li>One binary, Docker or Helm</li>
         <li>A licence key adds single sign-on and project roles</li>
@@ -37,6 +37,11 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
       </div>
     </Card>
   </div>
+  <div class="more">
+    <Button href="/pricing/" variant="ghost">See pricing →</Button>
+    <Button href="/self-hosting/" variant="ghost">Self-hosting →</Button>
+    <Button href="/security/" variant="ghost">Security →</Button>
+  </div>
 </Section>
 
 <style>
@@ -46,32 +51,13 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
     gap: var(--space-5);
     margin-top: var(--space-7);
   }
-  .points {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-    display: grid;
-    gap: var(--space-2);
-  }
-  .points li {
-    position: relative;
-    padding-left: var(--space-4);
-  }
-  .points li::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    top: 0.55em;
-    width: 6px;
-    height: 6px;
-    background: var(--accent);
-    border-radius: 50%;
-  }
   .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-3);
     margin-top: var(--space-5);
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-6);
   }
   @media (max-width: 860px) {
     .cards {

@@ -165,11 +165,27 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
     if (!built) findings.push(`broken internal link: ${href}`);
   }
 
-  if (
-    tags(stripped, "a").some((a) => a.get("href") === "#main") &&
-    !allAttributes(stripped).some((a) => a.get("id") === "main")
-  ) {
-    findings.push("skip link target #main missing");
+  // Every id a reference points at must exist on the page: aria-labelledby and aria-controls
+  // tokens, and in-page links. Tabs set aria-controls at runtime, so it is absent from the HTML.
+  const ids = new Set(
+    allAttributes(stripped)
+      .map((a) => a.get("id"))
+      .filter(Boolean),
+  );
+  const targets = new Set();
+  for (const a of allAttributes(stripped)) {
+    for (const attribute of ["aria-labelledby", "aria-controls"]) {
+      for (const token of (a.get(attribute) ?? "").split(/\s+/)) {
+        if (token !== "") targets.add(token);
+      }
+    }
+  }
+  for (const a of tags(stripped, "a")) {
+    const href = a.get("href") ?? "";
+    if (href.startsWith("#") && href.length > 1) targets.add(href.slice(1));
+  }
+  for (const target of targets) {
+    if (!ids.has(target)) findings.push(`missing id target: ${target}`);
   }
 
   // Everything a reader or a screen reader hears: the body text, the title, the description,

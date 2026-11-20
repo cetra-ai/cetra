@@ -1,0 +1,113 @@
+---
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+import {
+  ENTERPRISE,
+  formatMoney,
+  formatUnits,
+  OVERAGE_PER_100K,
+  PLANS,
+  TEAMS_ADDON,
+} from "../data/pricing.mjs";
+import { CLOUD, CONTACT_EMAIL } from "../site";
+import Price from "./Price.astro";
+---
+
+<h2 class="visually-hidden" id="plans-title">Plans</h2>
+<div class="grid grid--plans">
+  {
+    PLANS.map((plan) => (
+      <div class:list={["plan", plan.id === "pro" && "plan--pro"]}>
+        <Card title={plan.name}>
+          {plan.id === "pro" && <p class="eyebrow badge">Recommended</p>}
+          <Price amount={formatMoney(plan.priceMonthly)} suffix="/ month" />
+          <p>{plan.blurb}</p>
+          <div class="actions">
+            <Button href={CLOUD.signup} external>{plan.cta}</Button>
+          </div>
+          <ul class="points bullets">
+            <li>{formatUnits(plan.includedUnits)} spans and scores a month</li>
+            <li>{plan.overage ? `Then ${formatMoney(OVERAGE_PER_100K)} per 100,000` : "Hard limit, no overage"}</li>
+            <li>{plan.dataAccess} of history</li>
+            <li>{plan.seats}</li>
+            {plan.projects && <li>{plan.projects}</li>}
+            {plan.support && <li>{plan.support}</li>}
+            <li>{plan.rules}</li>
+          </ul>
+        </Card>
+      </div>
+    ))
+  }
+</div>
+<div class="grid grid--wide">
+  <Card title={TEAMS_ADDON.name}>
+    <Price
+      amount={formatMoney(TEAMS_ADDON.priceMonthly)}
+      suffix={`/ month on top of ${TEAMS_ADDON.requires}`}
+    />
+    <ul class="points bullets">
+      {TEAMS_ADDON.features.map((feature) => <li>{feature}</li>)}
+    </ul>
+    <div class="actions">
+      <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+    </div>
+  </Card>
+  <Card title={ENTERPRISE.name}>
+    <Price amount="Custom" />
+    <ul class="points bullets">
+      {ENTERPRISE.features.map((feature) => <li>{feature}</li>)}
+    </ul>
+    <div class="actions">
+      <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+    </div>
+  </Card>
+</div>
+<p class="muted note">
+  Prices in USD, excluding tax. A unit is one span or one score. Viewers are free on every plan.
+  cetra Cloud runs in the EU.
+</p>
+
+<style>
+  .grid {
+    display: grid;
+    gap: var(--space-5);
+  }
+  .grid--plans {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    margin-top: var(--space-7);
+  }
+  .grid--wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    margin-top: var(--space-5);
+  }
+  .plan {
+    display: flex;
+    flex-direction: column;
+  }
+  .plan :global(.card) {
+    flex: 1;
+  }
+  .plan--pro :global(.card) {
+    border-color: var(--accent);
+  }
+  .badge {
+    margin-top: var(--space-2);
+  }
+  .actions {
+    margin-top: var(--space-5);
+  }
+  .points {
+    margin: var(--space-5) 0 0;
+  }
+  .note {
+    font-size: var(--text-sm);
+    text-align: center;
+    margin-top: var(--space-6);
+  }
+  @media (max-width: 960px) {
+    .grid--plans,
+    .grid--wide {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

@@ -1,0 +1,172 @@
+---
+import {
+  DEFAULT_SCORES,
+  DEFAULT_SPANS,
+  estimateText,
+  PLANS,
+  suggestedPlan,
+} from "../data/pricing.mjs";
+
+const units = DEFAULT_SPANS + DEFAULT_SCORES;
+const suggested = suggestedPlan(units).id;
+---
+
+<div class="calc">
+  <div class="fields">
+    <div class="field">
+      <label for="calc-spans">Spans a month</label>
+      <input
+        id="calc-spans"
+        type="number"
+        min="0"
+        step="10000"
+        value={DEFAULT_SPANS}
+        inputmode="numeric"
+        autocomplete="off"
+        aria-describedby="calc-note"
+      />
+    </div>
+    <div class="field">
+      <label for="calc-scores">Scores a month</label>
+      <input
+        id="calc-scores"
+        type="number"
+        min="0"
+        step="1000"
+        value={DEFAULT_SCORES}
+        inputmode="numeric"
+        autocomplete="off"
+        aria-describedby="calc-note"
+      />
+    </div>
+  </div>
+  <div id="calc-out" class="out">
+    {
+      PLANS.map((plan) => (
+        <span class="row" data-plan={plan.id}>
+          <span class="row-name">{plan.name}</span>
+          <span class="eyebrow" data-suggested hidden={plan.id !== suggested}>Suggested</span>
+          <span class="row-value" data-value>{estimateText(plan, units)}</span>
+        </span>
+      ))
+    }
+  </div>
+  <p class="visually-hidden" role="status" id="calc-status"></p>
+  <p class="muted note" id="calc-note">
+    You can set a spend cap: ingestion stops at the cap. Usage over the included amount is billed
+    per unit. Large volumes get lower rates; talk to us.
+  </p>
+</div>
+
+<script>
+  import {
+    estimateText,
+    formatUnits,
+    parseUnits,
+    PLANS,
+    suggestedPlan,
+  } from "../data/pricing.mjs";
+
+  const spans = document.getElementById("calc-spans") as HTMLInputElement;
+  const scores = document.getElementById("calc-scores") as HTMLInputElement;
+  const out = document.getElementById("calc-out") as HTMLElement;
+  const status = document.getElementById("calc-status") as HTMLElement;
+
+  let timer: number | undefined;
+
+  /** Updates the visual rows at once. */
+  function renderRows(units: number) {
+    const suggested = suggestedPlan(units).id;
+    for (const plan of PLANS) {
+      const row = out.querySelector<HTMLElement>(`[data-plan="${plan.id}"]`);
+      const value = row?.querySelector("[data-value]");
+      const badge = row?.querySelector<HTMLElement>("[data-suggested]");
+      if (!value || !badge) continue;
+      value.textContent = estimateText(plan, units);
+      badge.hidden = plan.id !== suggested;
+    }
+  }
+
+  /** One sentence for the status region, read by screen readers after a pause in typing. */
+  function announce(units: number) {
+    const suggested = suggestedPlan(units);
+    const text = estimateText(suggested, units);
+    status.textContent =
+      suggested.id === "free"
+        ? `Free covers ${formatUnits(units)} a month.`
+        : text.startsWith("$")
+          ? `About ${text} a month on ${suggested.name}, the suggested plan.`
+          : "At this volume, talk to us for a price.";
+  }
+
+  function onInput() {
+    const units = parseUnits(spans.value) + parseUnits(scores.value);
+    renderRows(units);
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => announce(units), 400);
+  }
+
+  spans.addEventListener("input", onInput);
+  scores.addEventListener("input", onInput);
+  renderRows(parseUnits(spans.value) + parseUnits(scores.value));
+</script>
+
+<style>
+  .calc {
+    margin-top: var(--space-7);
+    max-width: 44rem;
+    display: grid;
+    gap: var(--space-5);
+  }
+  .fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+  }
+  .field {
+    display: grid;
+    gap: var(--space-2);
+  }
+  label {
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  input {
+    background: var(--surface);
+    color: var(--fg);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    padding: var(--space-2) var(--space-3);
+    font: inherit;
+    width: 100%;
+  }
+  .out {
+    display: grid;
+    border-top: 1px solid var(--line);
+  }
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2) var(--space-3);
+    padding-block: var(--space-4);
+    border-bottom: 1px solid var(--line);
+  }
+  .row-name {
+    font-family: var(--font-display);
+    font-size: var(--text-lg);
+  }
+  .row-value {
+    margin-left: auto;
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+  }
+  .note {
+    font-size: var(--text-sm);
+  }
+  @media (max-width: 560px) {
+    .fields {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
