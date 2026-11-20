@@ -15,6 +15,7 @@ from cetra._config import ConfigError, resolve_config
 from cetra._retry import retry_delay
 
 if TYPE_CHECKING:
+    from cetra._annotation_queues import AnnotationQueues
     from cetra._datasets import Datasets
 
 _PROJECT_PATH: Final = "/api/v1/projects/current"
@@ -62,7 +63,7 @@ class ApiError(Exception):
 
 
 class Client:
-    """REST client for datasets (spec 10 § Datasets and experiments).
+    """REST client for datasets and annotation queues (spec 10 § Datasets and experiments).
 
     Configuration resolves as for ``init()``: the argument, then ``CETRA_API_KEY``
     and ``CETRA_BASE_URL``, then the default URL. Raises ``ConfigError`` without a key.
@@ -77,10 +78,12 @@ class Client:
         self._session = requests.Session()
         # Tests replace this attribute to record the retry delays instead of sleeping.
         self._sleep: Callable[[float], None] = time.sleep
-        # Deferred: _datasets imports this module for _segment.
+        # Deferred: _datasets and _annotation_queues import this module for _segment.
+        from cetra._annotation_queues import AnnotationQueues
         from cetra._datasets import Datasets
 
         self._datasets: Datasets = Datasets(self)
+        self._annotation_queues: AnnotationQueues = AnnotationQueues(self)
 
     def __repr__(self) -> str:
         return f"Client(base_url={self._base_url!r})"
@@ -89,6 +92,11 @@ class Client:
     def datasets(self) -> "Datasets":
         """Dataset calls: ``create``, ``get``, ``list`` and ``delete``."""
         return self._datasets
+
+    @property
+    def annotation_queues(self) -> "AnnotationQueues":
+        """Annotation queues of the key's project (D-AQ-8)."""
+        return self._annotation_queues
 
     def _request(
         self,
