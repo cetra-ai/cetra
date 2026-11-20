@@ -23,7 +23,7 @@ use crate::error::{Result, StrataError};
 use crate::file::{SCAN_PARALLEL_BYTES, StrataFile};
 use crate::hot::Layer;
 use crate::io::ScanKind;
-use crate::narrow::{BlockEntry, Dictionary, decode_chunk_view, flags};
+use crate::narrow::{BlockEntry, DictKind, Dictionary, decode_chunk_view, flags};
 use crate::payload::{
     FrameBodies, FrameEntry, PayloadHeader, build_payload_values, ids_of, payload_contains,
     payload_contains_rows, read_header, refs_segments,
@@ -678,6 +678,37 @@ impl ScanBatches {
     /// The schema of the batches.
     pub fn schema(&self) -> SchemaRef {
         Arc::clone(&self.output)
+    }
+
+    /// The batches with every narrow Utf8 column that has a file dictionary as
+    /// `Dictionary(UInt32, Utf8)`, the arrays the scan decodes, instead of strings: an
+    /// aggregate grouped on such a column groups on its codes (`aggregate.rs`).
+    pub(crate) fn keep_dictionaries(mut self) -> Self {
+        let mut fields: Vec<Field> = self
+            .output
+            .fields()
+            .iter()
+            .map(|f| f.as_ref().clone())
+            .collect();
+        for (field, column) in fields.iter_mut().zip(&self.columns) {
+            if let OutputColumn::Narrow(c) = column
+                && let Some(info) = self.infos.get(c)
+                && info
+                    .dict
+                    .as_ref()
+                    .is_some_and(|d| d.kind() == DictKind::Utf8)
+            {
+                *field = field.clone().with_data_type(DataType::Dictionary(
+                    Box::new(DataType::UInt32),
+                    Box::new(DataType::Utf8),
+                ));
+            }
+        }
+        self.output = Arc::new(Schema::new_with_metadata(
+            fields,
+            self.output.metadata().clone(),
+        ));
+        self
     }
 
     /// The frames held for the batches not built yet.

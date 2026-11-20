@@ -21,6 +21,7 @@ use arrow::datatypes::{DataType, Field, Fields, Schema, SchemaRef};
 use cpu_time::ProcessTime;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl};
+use datafusion::execution::SessionStateBuilder;
 use datafusion::prelude::{SessionConfig, SessionContext};
 use futures::TryStreamExt;
 use futures::future::try_join_all;
@@ -626,7 +627,13 @@ fn new_ctx(loc: &Location, partitions: Option<usize>) -> R<SessionContext> {
     if let Some(n) = partitions {
         cfg = cfg.with_target_partitions(n);
     }
-    let ctx = SessionContext::new_with_config(cfg);
+    // Strata's aggregate rule (strata/src/aggregate.rs) groups on dictionary codes;
+    // FMT_NO_AGG_RULE=1 leaves every aggregate to DataFusion, for comparison.
+    let mut builder = SessionStateBuilder::new().with_config(cfg).with_default_features();
+    if std::env::var_os("FMT_NO_AGG_RULE").is_none() {
+        builder = builder.with_physical_optimizer_rule(Arc::new(strata::StrataAggregateRule));
+    }
+    let ctx = SessionContext::new_with_state(builder.build());
     ctx.register_object_store(&loc.url, loc.store.clone());
     Ok(ctx)
 }

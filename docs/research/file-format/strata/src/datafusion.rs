@@ -191,7 +191,10 @@ const MIN_PARTITION_ROWS: u64 = 65_536;
 
 /// Splits each file into about `target / files` contiguous row ranges of at least
 /// `MIN_PARTITION_ROWS` rows. A file that is not split reads all its rows (`None`).
-fn split_files(files: &[Arc<StrataFile>], target: usize) -> Vec<(usize, Option<Range<u32>>)> {
+pub(crate) fn split_files(
+    files: &[Arc<StrataFile>],
+    target: usize,
+) -> Vec<(usize, Option<Range<u32>>)> {
     let per_file = target.div_ceil(files.len().max(1)).max(1) as u64;
     let mut parts = Vec::new();
     for (index, file) in files.iter().enumerate() {
@@ -694,6 +697,9 @@ impl TableProvider for StrataTable {
     }
 }
 
+/// The files, projection and predicate of a plain scan ([`StrataExec::plain_scan`]).
+pub(crate) type PlainScan<'a> = (&'a [Arc<StrataFile>], &'a [usize], Option<&'a Predicate>);
+
 /// Reads Strata files for one table scan.
 #[derive(Debug)]
 pub struct StrataExec {
@@ -1029,6 +1035,16 @@ impl StrataExec {
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
         }
+    }
+
+    /// The files, projection and predicate of a plain scan: no lookup, limit or pushed sort.
+    /// `None` otherwise. An aggregate over a plain scan may run in Strata (`aggregate.rs`).
+    pub(crate) fn plain_scan(&self) -> Option<PlainScan<'_>> {
+        (self.lookup.is_none() && self.limit.is_none() && self.order.is_none()).then_some((
+            self.files.as_slice(),
+            self.projection.as_slice(),
+            self.predicate.as_ref(),
+        ))
     }
 
     /// The number of partitions: one per row range, and one when there is no file.

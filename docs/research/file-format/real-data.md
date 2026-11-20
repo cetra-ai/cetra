@@ -341,6 +341,43 @@ Before, the file pruning already dropped the files outside the range, but inside
 - **Frames: +4%** against Parquet's text column. Frames are 64 KiB so that a point read decompresses little; Parquet's pages are about 1 MB.
 - **Previews: +23%**, of which about 64 MiB is the preview store's own index and refs. Previews are rarely searched; dropping their index would save 0.7% of the file, and make a `LIKE` on a preview column read every frame.
 
+## Narrow aggregates
+
+Vortex compact won `model_rollup_day` on toucan and wildchat and FineWeb's spans per hour. After the changes above (ms, local, median of 30 runs; FineWeb 10):
+
+| Query | Strata | Vortex compact | Parquet default |
+|---|---|---|---|
+| wildchat `model_rollup_day` | 17.3 (CPU 104) | 14.1 (CPU 82) | 23.0 |
+| toucan `model_rollup_day` | 11.4 (CPU 49) | 10.8 (CPU 30) | 15.4 |
+| light `model_rollup_day` | 21.0 | 20.6 | 47.4 |
+| FineWeb spans per hour | 81 | 84 | 83 |
+
+Before the change below, only wildchat's rollup still trailed, by 3 ms. Its profile: DataFusion's grouping on the `model` strings 15% of the CPU, decoding chunks 12%, gathering the selected rows 7%, casting the dictionary codes to `Utf8View` 6%, starting the threads of each wave about 5% (`pthread_create`, `mmap`, `munmap`), local reads 10%.
+
+**Tried and dropped: rayon's pool instead of threads per wave.** `map_in_order` ran its groups on rayon's global pool (one thread per core) instead of starting scoped threads. Against the committed code, two alternating rounds: wildchat's rollup −6%, payload's −15%, but full scans +6 to +24% (payload 352 → 436 ms) and many queries of a few ms +10 to +40%. Rayon's threads compete with DataFusion's tokio threads for the same cores, and its idle threads wake slower than a thread starts. The scoped threads stay.
+
+**Grouping on codes.** A `GROUP BY` on a narrow Utf8 column with plain aggregates now runs in Strata (`strata/src/aggregate.rs`). `StrataAggregateRule`, a physical optimizer rule registered with the session, replaces DataFusion's aggregate over a plain `StrataExec` by a `StrataAggregateExec` when:
+- there is one group column, a narrow Utf8 column of every file;
+- every aggregate is `count`, `sum`, `avg`, `min` or `max` of a narrow signed-integer column (`count`, `sum` and `avg` also take floats, `count` a literal), with no `DISTINCT`, `FILTER` or `ORDER BY`, possibly through DataFusion's casts to Float64;
+- every filter is applied exactly by the scan (no lookup, limit or pushed sort).
+
+The scan reads the group column as dictionary arrays (`ScanBatches::keep_dictionaries`), and each part of a file (the row ranges of a scan's partitions, one task each) accumulates per code, then merges by value once per code and batch. A file without a dictionary for the column groups by value. The results are DataFusion's: a test compares every supported aggregate, with NULL groups and values, filters, a file without dictionary and several partitions, and checks that other shapes keep DataFusion's plan.
+
+**Results** (`model_rollup_day`, ms, mean of three alternating rounds of 30 runs, CPU in brackets; simulated S3 one round of 5):
+
+| Dataset | Without the rule | With it | Vortex compact | S3 sim. without | S3 sim. with |
+|---|---|---|---|---|---|
+| light | 21.4 (188) | **17.1** (155) | 20.5 (155) | 144 | 128 |
+| payload | 10.0 (42) | **9.4** (35) | 10.3 (28) | 128 | 124 |
+| swe | 5.6 (15) | **4.5** (12) | 6.3 (17) | 88 | 83 |
+| openswe | 3.7 (8) | **2.8** (6) | 5.1 (13) | 80 | 74 |
+| toucan | 11.8 (49) | 11.0 (42) | **9.8** (28) | 124 | 92 |
+| wildchat | 16.0 (98) | 13.8 (80) | **12.7** (77) | 132 | 105 |
+
+- Strata now wins the rollup on four datasets, and trails Vortex compact by about 1 ms on toucan and wildchat, where decoding and gathering the rows remain.
+- A first version ran one task per file and accumulated each file on one thread: light's four large files took 28.6 ms instead of 20.6. Splitting the files as the scan's partitions fixed it.
+- The rule changes no other query of the bench: the others have no `GROUP BY`, or group on an expression (`date_trunc`), which stays in DataFusion.
+
 ## Simulated S3
 
 Every number above is local disk with the OS page cache warm, where a request costs microseconds. On S3 a request costs a first-byte latency, and one request runs at one connection's throughput, so the same reader can rank differently. `FMT_SIM_S3=1` estimates S3 times without S3 (2026-11-20, `bench/src/sim.rs`):

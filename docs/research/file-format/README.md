@@ -580,6 +580,8 @@ Two gaps remain:
 
 - **Time ranges, S3 and writes:** a search with a time range now searches only the rows in the range: the newest matches of "help me" in the last 5 minutes take 54 ms instead of 90. `FMT_SIM_S3=1` estimates S3 times from each reader's own requests (30 ms first byte, 90 MB/s per connection); it found merged ranges too large (now 4 MiB) and too few requests in flight (now 256), and cut Strata's simulated S3 times by 10–60% on searches and full scans. Writes run on every core: FineWeb from 95 to about 300 MiB/s, with byte-identical files. On FineWeb the gram index is three quarters of Strata's 21% extra size.
 
+- **Grouping on codes:** a `GROUP BY` on a dictionary column with plain aggregates now runs in Strata, per dictionary code (`StrataAggregateRule`). `model_rollup_day` dropped by 6–25%; Strata now wins it on four of six datasets and trails Vortex compact by about 1 ms on the other two.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong

@@ -48,6 +48,7 @@ mod scan;
 mod segment;
 mod shred;
 
+mod aggregate;
 mod config;
 mod datafusion;
 mod error;
@@ -64,6 +65,7 @@ mod writer;
 #[doc(hidden)]
 pub mod fuzz_entry;
 
+pub use aggregate::{StrataAggregateExec, StrataAggregateRule};
 pub use config::Config;
 pub use datafusion::{StrataExec, StrataTable, table_schema};
 pub use error::{Result, StrataError};

@@ -601,6 +601,8 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 
   The counters come from `IoStats` before and after each partition's read. Strata's `scan` does not report chunks pruned or frames read, so those two counters are dropped.
 
+**`StrataAggregateRule`** (physical optimizer rule; the session registers it). It replaces an aggregate over a plain `StrataExec` (no lookup, limit or pushed sort; through repartitions, partition merges and a projection of columns and numeric casts) by a `StrataAggregateExec` when there is one group column, a narrow Utf8 column of every file, and every aggregate is `count`, `sum`, `avg`, `min` or `max` of a narrow signed-integer column (`count`, `sum`, `avg` also of floats, `count` of a literal), with no `DISTINCT`, `FILTER` or `ORDER BY`. The exec scans the files' row ranges as a scan's partitions, one task each, with the group column as dictionary arrays, and accumulates per code; it outputs one batch in one partition. Results are DataFusion's (`real-data.md` § Narrow aggregates).
+
 ### S9. Fast paths (no DataFusion)
 
 ```rust
