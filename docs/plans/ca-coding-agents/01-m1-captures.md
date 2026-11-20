@@ -274,6 +274,7 @@ All phases are sequential. C5 touches only `fixtures/otlp/genai/` and could run 
 - `tools/capture/ts/scenarios/codex/exec-command/{scenario.json,main.ts}` (new)
 - `tools/capture/ts/scenarios/gemini_cli/shell-tool/{scenario.json,main.ts}` (new)
 - `fixtures/otlp/{claude_code/bash-tool,codex/exec-command,gemini_cli/shell-tool}/{input.json,case.json}` (written by the tool)
+- `tools/capture/src/run.rs` (the check's comparison only, step 5b)
 
 **The common shape of `main.ts`:**
 
@@ -379,7 +380,7 @@ main().catch((error: unknown) => {
 - `spec_refs`: `["02 § Convention detection"]` (every scenario has it; it is required).
 - `instrumentation` and `libraries`: `"@openai/codex"`.
 - `span_names`: `["turn/start", "session_task.turn", "run_turn", "codex.sampling", "handle_responses", "exec_command"]`.
-- `timing_attributes`: `["codex.response.receive_wait_ms", "busy_ns", "idle_ns"]`.
+- `timing_attributes`: `["codex.response.receive_wait_ms", "busy_ns", "idle_ns", "thread.id", "dispatch_to_result_ready_ms"]`. `thread.id` is the OS thread number, an integer that `volatile_attributes` cannot mask (only strings are), and `dispatch_to_result_ready_ms` is a measured duration on an event.
 - `volatile_attributes`: `["thread.id", "conversation.id", "turn.id", "turn_id", "thread_id", "submission.id", "unified_exec_process_id"]`.
 - `turns`, two of them:
   1. `api: "openai.responses"`, `model: "gpt-5.5-codex"`, `tool_calls: [{"id": "call_capture_1", "name": "exec_command", "arguments": {"cmd": "echo hello"}}]`, `finish: "tool_calls"`, `usage: {input: 400, output: 30, cache_read: 300, cache_write: 0, reasoning: 10}`.
@@ -405,7 +406,7 @@ main().catch((error: unknown) => {
 - `description`: "Gemini CLI 0.68.0 in -p mode: a model-routing call, then one run_shell_command tool call; traces with prompts."
 - `spec_refs`: `["02 § Convention detection"]`.
 - `instrumentation` and `libraries`: `"@google/gemini-cli"`.
-- `timing_attributes`: `["gen_ai.input.messages", "gen_ai.system_instructions"]`. They hold today's date and the temporary paths.
+- `timing_attributes`: `["gen_ai.input.messages", "gen_ai.system_instructions", "gen_ai.output.messages"]`. The first two hold today's date and the temporary paths; the output messages of `tool_call` and `schedule_tool_calls` hold measured durations and millisecond timestamps. The fixture keeps the values; only the recapture comparison skips them.
 - `volatile_attributes`: `["gen_ai.conversation.id", "gen_ai.prompt.name", "gen_ai.tool.call_id", "session.id"]`.
 - `turns`, three of them, all `api: "gemini.generate_content"`:
   1. `model: "gemini-3.5-flash-lite"`, `text: "{\"complexity_reasoning\": \"simple\", \"complexity_score\": 5}"`, `finish: "stop"`, `usage: {input: 400, output: 20, cache_read: 0, cache_write: 0, reasoning: 0}`. This is the routing call (non-streamed).
@@ -423,6 +424,7 @@ main().catch((error: unknown) => {
 
    Report the span count per case.
 5. Run `just check-capture` twice. The second run must show no difference. If one does, find the attribute that changes and stop and report it. The fix is a `volatile_attributes` or `timing_attributes` entry, which needs a plan change.
+5b. **Resource attribute order.** Codex (Rust) emits its resource attributes in a different order on each run. In `run.rs` `json_differences`, before `diff`, sort every `resourceSpans[*].resource.attributes` array of both `committed_input` and `produced_input` by its `key` string, with a new `fn sort_resource_attributes(value: &mut Value)`. A stable sort keeps duplicate keys in their order. This changes only the check, not what is written. Test: `check_ignores_resource_attribute_order`, two inputs that differ only in that order give no differences.
 6. `cargo test -p cetra-otel --test golden -- --nocapture` must pass. If `captured_llm_spans_are_priced_by_the_builtin_snapshot` fails for a new case, stop and report the span's model and provider. Do not change the snapshot or the scenario models. The models used (`claude-opus-5-5`, `gemini-3.5-flash-lite`, `gemini-3.8-flash`) are in `crates/otel/prices/builtin.json`, and Codex spans carry no model. Its output must contain `awaiting bless: claude_code/bash-tool`, `awaiting bless: codex/exec-command` and `awaiting bless: gemini_cli/shell-tool`.
 
 **Done when:**
