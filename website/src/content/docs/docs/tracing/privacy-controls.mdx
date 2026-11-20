@@ -132,6 +132,10 @@ The UI shows a **truncated at ingest** badge on a cut input or output. The `trun
 
 A request is limited separately by the OTLP endpoint. See [OTLP endpoint](/docs/reference/otlp/).
 
+## The assistant
+
+The in-app assistant sends your questions, the page context, the chat history and the results of the tools it calls to the provider of the connection it uses. Its chats are private to you and are deleted 30 days after their last activity. Its turns are traced in the `cetra-assistant` environment with no message text. See [Assistant](/docs/platform/assistant/) for what is stored and for how long.
+
 ## Deleting data
 
 To remove data cetra already stored, by user, trace, filter, project or organization, see [Deletion and retention](/docs/platform/deletion-and-retention/).

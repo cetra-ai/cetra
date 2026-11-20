@@ -104,6 +104,7 @@ export default defineConfig({
                   items: [
                     { label: "Alerts", link: "/docs/platform/alerts/" },
                     { label: "MCP server", link: "/docs/platform/mcp/" },
+                    { label: "Assistant", link: "/docs/platform/assistant/" },
                     { label: "API keys and tokens", link: "/docs/platform/api-keys/" },
                     { label: "Organizations and roles", link: "/docs/platform/organizations/" },
                     { label: "Single sign-on", link: "/docs/platform/sso/" },

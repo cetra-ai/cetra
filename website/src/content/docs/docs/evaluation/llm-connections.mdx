@@ -47,6 +47,10 @@ A judge must answer in a fixed shape. The connection's structured output mode sa
 
 If a provider rejects the mode, the judge fails with an error that names the setting to change. cetra does not switch modes by itself.
 
+## The assistant
+
+The in-app assistant uses one of your organization's connections. An org admin picks it in Organization settings → Assistant. Deleting that connection turns the assistant off. A connection marked failing still serves the assistant. See [Assistant](/docs/platform/assistant/).
+
 ## How keys are stored
 
 cetra encrypts the API key and any extra header values with the instance's encryption key before it writes them to the database. The UI and the API never show them again: they show only the last 4 characters of the key and the header names. To replace a key, edit the connection and enter a new one.
