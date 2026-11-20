@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronDown, Pencil, Trash2 } from "lucide-react";
+import { ChevronDown, History, Pencil, Trash2 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
@@ -249,7 +249,7 @@ export function ConversationMenu({
     }
   }, [conversations, current, ref]);
 
-  const label = selected && selected.title.trim() !== "" ? selected.title : "Untitled chat";
+  const label = selected && selected.title.trim() !== "" ? selected.title : "New chat";
   return (
     <>
       <DropdownMenu>
@@ -258,8 +258,10 @@ export function ConversationMenu({
             type="button"
             variant="ghost"
             size="sm"
+            aria-label={`Chats: ${label}`}
             className="min-w-0 max-w-56 justify-start"
           >
+            <History aria-hidden="true" className="text-muted-foreground" />
             <span className="truncate">{label}</span>
             <ChevronDown aria-hidden="true" />
           </Button>

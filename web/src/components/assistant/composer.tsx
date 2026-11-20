@@ -1,8 +1,9 @@
 import { SendHorizontal, Square, X } from "lucide-react";
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { PageContext } from "@/lib/assistant/context";
+import { fieldLabel, PAGE_LABEL, placeholderOf } from "@/lib/assistant/starters";
 
 export const MESSAGE_MAX_BYTES = 16384;
 const COUNT_FROM_BYTES = 15000;
@@ -21,8 +22,9 @@ export function chipValue(value: string | number | boolean): string {
 }
 
 /**
- * The message box. Enter sends and Shift+Enter adds a line. While a turn streams the Send button
- * becomes Stop. The page context shows as chips; `page` cannot be removed.
+ * The message box: one bordered box with the text, the page context as chips and Send. Enter sends
+ * and Shift+Enter adds a line. While a turn streams Send becomes Stop. `page` cannot be removed.
+ * `footer` is the line under the box (the connection).
  */
 export function Composer({
   value,
@@ -32,6 +34,7 @@ export function Composer({
   streaming,
   context,
   onRemove,
+  footer,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -40,6 +43,7 @@ export function Composer({
   streaming: boolean;
   context: PageContext;
   onRemove: (key: string) => void;
+  footer?: ReactNode;
 }) {
   const bytes = byteLength(value);
   const tooLong = bytes > MESSAGE_MAX_BYTES;
@@ -56,63 +60,83 @@ export function Composer({
   }
 
   return (
-    <div className="flex shrink-0 flex-col gap-2 border-t p-3">
-      {Object.entries(context).length > 0 ? (
-        <ul aria-label="Page context" className="flex flex-wrap gap-1">
-          {Object.entries(context).map(([key, value]) => (
-            <li
-              key={key}
-              className="flex max-w-full items-center gap-1 rounded-sm border bg-muted px-1.5 py-0.5 text-caption"
-            >
-              <span className="truncate">
-                <span className="font-medium">{key}</span>: {chipValue(value)}
-              </span>
-              {key === "page" ? null : (
-                <button
-                  type="button"
-                  aria-label={`Remove ${key}`}
-                  className="rounded-sm text-muted-foreground hover:text-foreground"
-                  onClick={() => {
-                    onRemove(key);
-                  }}
-                >
-                  <X aria-hidden="true" className="size-3" />
-                </button>
-              )}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="flex items-end gap-2">
+    <div className="flex shrink-0 flex-col gap-1.5 p-3">
+      <div className="flex flex-col rounded-lg border border-input bg-input/30 shadow-xs focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50">
         <Textarea
           aria-label="Message the assistant"
+          placeholder={placeholderOf(context.page)}
           value={value}
           rows={2}
-          className="max-h-40 min-h-10 flex-1 resize-none"
+          className="max-h-48 min-h-14 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent"
           onChange={(event) => {
             onChange(event.target.value);
           }}
           onKeyDown={onKeyDown}
         />
-        {streaming ? (
-          <Button type="button" variant="outline" size="icon" aria-label="Stop" onClick={onStop}>
-            <Square />
-          </Button>
-        ) : (
-          <Button type="button" size="icon" aria-label="Send" disabled={!canSend} onClick={onSend}>
-            <SendHorizontal />
-          </Button>
-        )}
+        <div className="flex items-end gap-2 px-2 pb-2">
+          <ul aria-label="Page context" className="flex min-w-0 flex-1 flex-wrap gap-1">
+            {Object.entries(context).map(([key, item]) => (
+              <li
+                key={key}
+                className="flex max-w-full items-center gap-1 rounded-sm bg-muted px-1.5 py-0.5 text-caption text-muted-foreground"
+              >
+                <span className="truncate">
+                  {key === "page" ? (
+                    <span className="font-medium text-foreground">{PAGE_LABEL[context.page]}</span>
+                  ) : (
+                    <>
+                      <span className="font-medium text-foreground">{fieldLabel(key)}</span>{" "}
+                      {chipValue(item)}
+                    </>
+                  )}
+                </span>
+                {key === "page" ? null : (
+                  <button
+                    type="button"
+                    aria-label={`Remove ${key}`}
+                    className="rounded-sm text-muted-foreground hover:text-foreground"
+                    onClick={() => {
+                      onRemove(key);
+                    }}
+                  >
+                    <X aria-hidden="true" className="size-3" />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          {streaming ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="icon-sm"
+              aria-label="Stop"
+              onClick={onStop}
+            >
+              <Square />
+            </Button>
+          ) : (
+            <Button
+              type="button"
+              size="icon-sm"
+              aria-label="Send"
+              title="Send (Enter) · Shift+Enter for a new line"
+              disabled={!canSend}
+              onClick={onSend}
+            >
+              <SendHorizontal />
+            </Button>
+          )}
+        </div>
       </div>
-      {bytes > COUNT_FROM_BYTES ? (
-        <p
-          className={
-            tooLong ? "text-caption text-destructive" : "text-caption text-muted-foreground"
-          }
-        >
-          {bytes} / {MESSAGE_MAX_BYTES} bytes
-        </p>
-      ) : null}
+      <div className="flex items-center gap-2 text-caption text-muted-foreground">
+        <div className="min-w-0 flex-1">{footer}</div>
+        {bytes > COUNT_FROM_BYTES ? (
+          <p className={tooLong ? "shrink-0 text-destructive" : "shrink-0"}>
+            {bytes} / {MESSAGE_MAX_BYTES} bytes
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 }

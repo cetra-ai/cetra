@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
-import { SquarePen, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Info, Sparkles, SquarePen, X } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { fieldErrors, problemOf } from "@/api/problem";
 import {
   assistantStatusQuery,
@@ -17,9 +17,10 @@ import { Unavailable } from "@/components/assistant/unavailable";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { fitContext, type PageContext, pageContext, withoutField } from "@/lib/assistant/context";
 import { setPanelOpen, useCurrentConversation } from "@/lib/assistant/panel";
+import { startersOf } from "@/lib/assistant/starters";
 import {
   type AssistantBubble,
   applyEvent,
@@ -35,7 +36,6 @@ const PAUSE_HINT = "Ask an admin to check the LLM connection.";
 const RESTORE_TEXT = "The assistant is paused while this server is in restore mode.";
 const LOST_TEXT = "The connection to the server was lost.";
 const ASK_TEXT = "The question could not be sent.";
-const EMPTY_TEXT = "Ask about this project's traces, metrics, evaluations and settings.";
 const CREATE_TEXT = "The chat could not be created.";
 
 /** A message the panel shows under the transcript. `retry` resends the same message and context. */
@@ -113,7 +113,7 @@ function streamingUpdate(
  * connection notice. Mounted inside the project layout and keyed by project by its caller.
  */
 export function AssistantPanel() {
-  const { org, project, ref } = useProject();
+  const { org, project, ref, data: projectData } = useProject();
   const queryClient = useQueryClient();
   const status = useQuery(assistantStatusQuery(org, project));
   const usable = status.data?.usable === true;
@@ -246,8 +246,9 @@ export function AssistantPanel() {
     };
   }, []);
 
-  function send() {
-    const message = draft.trim();
+  /** Sends `text` (the composer's by default, or a starter question). */
+  function send(text: string = draft) {
+    const message = text.trim();
     if (message === "") {
       return;
     }
@@ -259,6 +260,19 @@ export function AssistantPanel() {
     }
     startTurn(current, message, context);
   }
+
+  const connection =
+    usable && status.data
+      ? {
+          name: status.data.connection_name ?? "an LLM connection",
+          detail: [
+            status.data.adapter ? adapterLabel(status.data.adapter) : undefined,
+            status.data.model,
+          ]
+            .filter((part): part is string => part !== undefined && part !== "")
+            .join(", "),
+        }
+      : undefined;
 
   const stored = detail.data !== undefined ? bubblesOf(detail.data.messages) : [];
   const bubbles: Bubble[] =
@@ -286,27 +300,18 @@ export function AssistantPanel() {
             }}
           />
           <div className="flex-1" />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="New chat"
-            disabled={pending}
-            onClick={newChat}
-          >
+          <HeaderButton label="New chat" disabled={pending} onClick={newChat}>
             <SquarePen />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Close the assistant"
+          </HeaderButton>
+          <HeaderButton
+            label="Close the assistant"
+            hint="Close (Ctrl/Cmd+I)"
             onClick={() => {
               setPanelOpen(false);
             }}
           >
             <X />
-          </Button>
+          </HeaderButton>
         </header>
         {status.isPending ? (
           <div className="flex flex-col gap-2 p-4">
@@ -320,7 +325,16 @@ export function AssistantPanel() {
               project={project}
               conversationId={current ?? ""}
               bubbles={bubbles}
-              empty={EMPTY_TEXT}
+              empty={
+                <EmptyChat
+                  project={projectData.name}
+                  starters={startersOf(shown.page)}
+                  disclosure={connection === undefined ? null : <Disclosure {...connection} />}
+                  onPick={(question) => {
+                    send(question);
+                  }}
+                />
+              }
             />
             {notice !== undefined ? (
               <div
@@ -351,7 +365,9 @@ export function AssistantPanel() {
             <Composer
               value={draft}
               onChange={setDraft}
-              onSend={send}
+              onSend={() => {
+                send();
+              }}
               onStop={() => {
                 turnRef.current?.controller.abort();
               }}
@@ -363,6 +379,7 @@ export function AssistantPanel() {
                   keys: [...(removed.page === shown.page ? removed.keys : []), key],
                 });
               }}
+              footer={connection === undefined ? null : <ConnectionLine {...connection} />}
             />
           </>
         ) : (
@@ -370,22 +387,6 @@ export function AssistantPanel() {
             <Unavailable reason={status.data?.reason} />
           </div>
         )}
-        {usable && status.data ? (
-          <p className="shrink-0 border-t p-3 text-caption text-muted-foreground">
-            Answers use{" "}
-            <span className="font-medium text-foreground">
-              {status.data.connection_name ?? "an LLM connection"}
-            </span>{" "}
-            (
-            {[
-              status.data.adapter ? adapterLabel(status.data.adapter) : undefined,
-              status.data.model,
-            ]
-              .filter((part) => part !== undefined && part !== "")
-              .join(", ")}
-            ). What the assistant reads is sent to that provider.
-          </p>
-        ) : null}
       </section>
     </TooltipProvider>
   );
@@ -396,4 +397,117 @@ function adapterLabel(adapter: string): string {
   return adapter in LLM_ADAPTER_LABELS
     ? LLM_ADAPTER_LABELS[adapter as keyof typeof LLM_ADAPTER_LABELS]
     : adapter;
+}
+
+type Connection = { name: string; detail: string };
+
+/** "Answers use <connection> (<provider>, <model>). What the assistant reads is sent …". */
+function Disclosure({ name, detail }: Connection) {
+  return (
+    <>
+      Answers use <span className="font-medium text-foreground">{name}</span>
+      {detail === "" ? "" : ` (${detail})`}. What the assistant reads is sent to that provider.
+    </>
+  );
+}
+
+/** The connection under the composer, short; its tooltip says what is sent where. */
+function ConnectionLine({ name, detail }: Connection) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          className="flex max-w-full items-center gap-1 rounded-sm outline-none hover:text-foreground focus-visible:ring-3 focus-visible:ring-ring/50"
+        >
+          <Info aria-hidden="true" className="size-3 shrink-0" />
+          <span className="truncate">
+            {[name, detail].filter((part) => part !== "").join(" · ")}
+          </span>
+        </button>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-64">
+        <Disclosure name={name} detail={detail} />
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** A chat with no messages: what to ask, three questions for this page, and the disclosure. */
+function EmptyChat({
+  project,
+  starters,
+  disclosure,
+  onPick,
+}: {
+  project: string;
+  starters: string[];
+  disclosure: ReactNode;
+  onPick: (question: string) => void;
+}) {
+  return (
+    <div className="mx-auto flex max-w-sm flex-col items-center gap-4 px-2 py-6 text-center">
+      <span className="flex size-9 items-center justify-center rounded-full bg-muted">
+        <Sparkles aria-hidden="true" className="size-4 text-muted-foreground" />
+      </span>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-title font-medium">Ask about {project}</h2>
+        <p className="text-muted-foreground">
+          Its traces, metrics, evaluations and settings. The assistant can also draft filters, SQL,
+          dashboards and rules for you to apply.
+        </p>
+      </div>
+      <ul aria-label="Suggested questions" className="flex w-full flex-col gap-1.5">
+        {starters.map((question) => (
+          <li key={question}>
+            <button
+              type="button"
+              className="w-full rounded-md border px-3 py-2 text-left hover:bg-accent focus-visible:outline-hidden focus-visible:ring-3 focus-visible:ring-ring/50"
+              onClick={() => {
+                onPick(question);
+              }}
+            >
+              {question}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {disclosure === null ? null : (
+        <p className="text-caption text-muted-foreground">{disclosure}</p>
+      )}
+    </div>
+  );
+}
+
+/** An icon button of the header, with its name as a tooltip. */
+function HeaderButton({
+  label,
+  hint = label,
+  disabled,
+  onClick,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label={label}
+          disabled={disabled}
+          onClick={onClick}
+        >
+          {children}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent>{hint}</TooltipContent>
+    </Tooltip>
+  );
 }

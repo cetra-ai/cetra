@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { ThumbsDown, ThumbsUp } from "lucide-react";
-import { type UIEvent, useEffect, useRef } from "react";
+import { type ReactNode, type UIEvent, useEffect, useRef } from "react";
 import { $api } from "@/api/client";
 import { projectRef } from "@/api/project-ref";
 import { conversationKey } from "@/api/queries-assistant";
@@ -140,7 +140,8 @@ export function Transcript({
   project: string;
   conversationId: string;
   bubbles: Bubble[];
-  empty: string;
+  /** Shown while the chat has no messages. */
+  empty: ReactNode;
 }) {
   const ref = projectRef(org, project);
   const queryClient = useQueryClient();
@@ -187,7 +188,7 @@ export function Transcript({
       className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-3"
     >
       {bubbles.length === 0 ? (
-        <p className="m-auto p-6 text-center text-muted-foreground">{empty}</p>
+        <div className="m-auto w-full">{empty}</div>
       ) : (
         bubbles.map((bubble, index) =>
           bubble.role === "user" ? (
