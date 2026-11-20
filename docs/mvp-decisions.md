@@ -29,6 +29,8 @@ Competitor research: `research/competitors.md`.
 - Built-in Rust checks (exact, contains, regex, JSON valid, JSON schema, Levenshtein); webhook evaluator.
 - Experiments run client-side via SDK `evaluate(dataset, task, scorers)`.
 
+**Prompts** (D191, track V): a versioned prompt registry with labels, SDK `get_prompt` with caching and fallback, prompt versions linked to traces, and a playground that runs prompts and recorded LLM spans against the org's LLM connections.
+
 **Alerts**: error rate, cost over window, p95 latency, judge score under threshold → Slack webhook, webhook, email.
 
 **Access**
@@ -69,8 +71,8 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 | D16 | Table layout | Own Parquet layout + manifest in the metadata DB. No Iceberg/Delta in v1. |
 | D17 | SDK | Python + TypeScript, thin layer over OpenTelemetry; reuse OpenInference/OpenLLMetry instrumentors; REST client for datasets/experiments/scores. |
 | D18 | Experiments | Client-side via SDK. No server-side runs in MVP. |
-| D19 | Prompt registry | Not in MVP. |
-| D20 | Out of MVP | Annotation queues, playground, issue detection, prompt registry, gateway, SAML, 2FA/passkeys, message dedup. Custom dashboards were out until D-C-16 moved them in. |
+| D19 | Prompt registry | In the MVP (D191). |
+| D20 | Out of MVP | Annotation queues, issue detection, gateway, SAML, 2FA/passkeys, message dedup. Custom dashboards were out until D-C-16 moved them in; the playground and the prompt registry until D191. |
 | D21 | Judge providers | OpenAI-compatible + native Anthropic + native Gemini; encrypted credentials per org/project. |
 | D22 | Roles | owner / admin / member / viewer at org level, optional per-project override. |
 | D23 | Performance targets (soft, not MVP-blocking) | 8 cores / 32 GB: ≥50k spans/s ingest; span visible in UI <2 s; filtered trace list over 1B spans p95 <500 ms; 1k-span trace opens <200 ms; full-text search over 30 days <2 s. |
@@ -241,6 +243,7 @@ D1–D168 below are numbered in one sequence. From now on a track's decisions ar
 | D188 | cargo deny paused | **The user, 2026-11-18: off until the first public release.** New RustSec advisories kept turning every branch red while nothing is released. `just check-rust` and CI's `rust-policy` job no longer run `just deny`, and the weekly advisories workflow runs only by hand. `just deny` and `deny.toml` stay, and anyone can run them. **Re-enable before tagging the first release:** put `deny` back in `check-rust` and in CI's `rust-policy` job, restore the weekly schedule in `advisories.yml`, and fix or ignore (with a reason) whatever `just deny` then reports (`docs/plans/n-packaging/README.md` § First public release). |
 | D189 | Logo | **The user, 2026-11-19: the Caetra c.** The rim of a *caetra* (the small round shield the name comes from) opened into a lowercase c, with the boss at its centre; teal `#0f766e` (light teal `#2dd4bf` on dark), the name in Space Grotesk 600 converted to outlines. The files and their rules are in `assets/brand/`; the web UI's favicons are made from its icon. (D188 is taken by the cargo deny pause on the UI pages branch.) |
 | D190 | Copyright holder | **The user, 2026-11-19: the company sebastiencs.** The MIT `LICENSE` files (the root and both SDKs) say `Copyright (c) 2026 sebastiencs`, and the root `LICENSE` names sebastiencs as the licensor of the Elastic License 2.0 directories. Those directories' `LICENSE` files stay the verbatim Elastic License 2.0 text that `just check-ee` checks. Settles track P's open item (`docs/plans/p-entitlements/00-design.md` § Open items). |
+| D191 | Prompt registry and playground | **The user, 2026-11-20: both in the MVP** (replaces D19; amends D20). Track V designs them: a versioned prompt registry with labels, SDK fetch with caching and fallback, prompts linked to traces, and a playground that runs prompts and recorded spans against the org's LLM connections. |
 
 ## Track F — SDK tracing
 
@@ -798,6 +801,41 @@ Decisions of track W (`docs/plans/docs-site/README.md`), numbered `D-W-<n>` (`do
 | D-W-17 | API overview URL | **The REST API overview is at `reference/api/overview/`**, because `starlight-openapi` owns `reference/api/`. |
 | D-W-18 | Configuration reference follows the code | **Where spec 12 and the loader differ, the page follows the loader and spec 12 is corrected.** `AWS_REGION` and `CETRA_RESTORE_MODE` are not aliases, `telemetry.*` and `tls.*` are refused, and the storage keys the spec omitted are listed. |
 | D-W-19 | `llms.txt` | **`starlight-llms-txt` 0.12.0 at its default paths**: `/llms.txt`, `/llms-full.txt` and `/llms-small.txt` at the site root. The `links` job (lychee) runs with the nightly workflow, not weekly. The generated changelog page is git-ignored and is skipped by `check-env-vars.mjs`, since it names removed variables. |
+
+## Track V — Prompt registry and playground
+
+Decisions of track V (`docs/plans/v-prompts/00-design.md`), numbered `D-V-<n>` (`docs/roadmap.md` § Decision IDs). The design doc gives each decision in full with the alternatives rejected; "(user)" marks the user's choices of 2026-11-20. The others are the design's proposals, under review with the design doc.
+
+| # | Topic | Decision |
+|---|---|---|
+| D-V-1 | Plan form | A design doc and seven milestones: M1 registry API, M2 SDK `get_prompt`, M3 trace linking, M4 registry UI, M5 streaming provider layer, M6 playground API, M7 playground UI and closeout. M1 creates every V table in one migration. |
+| D-V-2 | Names | Prompts belong to a project. A name is 1–200 characters `[A-Za-z0-9][A-Za-z0-9_.-]*`, unique in the project, never renamed ("Duplicate as…" instead), and is the path key. No folders. At most 5,000 prompts per project and 10,000 versions per prompt. |
+| D-V-3 | Templates (user) | Plain `{{ name }}` substitution, `name` = `[A-Za-z_][A-Za-z0-9_]*`, values inserted verbatim. Saving refuses any other `{{…}}`, `{%` or `{#`, so every template is valid minijinja and renders as under D163. A missing variable is an error at `compile`. No full Jinja, no per-version format field. |
+| D-V-4 | Where templates render | In the SDK for applications, on the server (Rust) for the playground. The Rust, Python and TypeScript renderers pass the shared cases in `fixtures/prompts/`. |
+| D-V-5 | Types | `text` (one string) or `chat` (1–200 entries of `{role: system\|user\|assistant, content}` or `{type: "placeholder", name}`), fixed per prompt. A placeholder takes a message list at `compile`; missing is an error, empty is allowed. At most 256 KiB of template and 100 variables and placeholders. |
+| D-V-6 | Config | A JSON object of at most 64 KiB on each version. `model`, `connection_id`, `params`, `tools`, `tool_choice` and `response_format` are validated; other keys are kept as given. |
+| D-V-7 | Versions | Integers from 1, immutable, with an optional commit message (≤ 500 characters). A save is `latest_version + 1` with its label changes in one write, serialized on the prompt row. Versions are never edited or deleted on their own. |
+| D-V-8 | Labels | Mutable pointers, one version per label, `[a-z0-9][a-z0-9_.-]{0,63}`, never only digits, never `latest`. `latest` is computed (the highest version). Every move is recorded in `prompt_label_events`. At most 50 labels per prompt. |
+| D-V-9 | Default label | The fetch resolves `production` by default; a missing label is `404 prompt_label_not_found`. The UI's create dialog labels the first version `production` by default; the API never adds a label by itself. |
+| D-V-10 | Protected labels (user) | A per-project list `protected_prompt_labels`, default `["production"]`, edited by project admins. Moving or removing a protected label, a save that sets one, or deleting a prompt that carries one needs a project admin (session or read-write PAT) or an `sk` key with `write` (only admins create keys; CI promotion); else `403 protected_label`. |
+| D-V-11 | Storage | `meta.db`: `prompts`, `prompt_versions`, `prompt_labels`, `prompt_label_events`, `projects.protected_prompt_labels`. Not hidden by the data window, not touched by retention or GDPR deletion; dropped with the project or org. |
+| D-V-12 | Fetch | `GET /api/v1/projects/{project}/prompts/{name}?label=\|version=` answers the resolved version with a strong `ETag` (`304` on `If-None-Match`). It needs the `read` key scope (in the default `sk` scopes). |
+| D-V-13 | Permissions | Reads: `ProjectPerm::View`. Writes: a new `ProjectPerm::ManagePrompts` (role `member`, key scope `write`, read-write PATs). Protected labels: D-V-10. The protected list: `ManageSettings`. |
+| D-V-14 | SDK cache | `get_prompt` needs `init()`. In-process cache per `(name, label or version)`: versions never expire, labels are fresh for `cache_ttl_s` (60; 0 = off), then served stale while one background refresh revalidates with `If-None-Match`; at most 1,000 entries. A first fetch: 5 s timeout, 2 retries. Failure: the stale entry, else the `fallback` (`is_fallback`, no version), else `PromptNotAvailable`. The 402 pause does not apply to fetches. |
+| D-V-15 | Linking | `cetra.context(prompt=…)` writes `cetra.prompt.name` and `cetra.prompt.version` on every span started inside; `compile()` also writes them on the current span. They become span columns `prompt_name` (Utf8 dict, P) and `prompt_version` (Int64, P), and the trace column `prompts` (distinct union of `name@version`). `cetra-core` change owned by the coordinator. Before the first public release `FORMAT_VERSION` stays 1 (D185); after it, the change bumps it with the previous reader. |
+| D-V-16 | Langfuse attributes | Normalization reads `cetra.prompt.*`, then `langfuse.observation.prompt.name`/`.version`. A version that is not a positive integer stays in `attributes` with a warning; a version without a name is dropped with a warning. Prompts are not checked against the registry. |
+| D-V-17 | Per-version metrics | `GET …/prompts/{name}/metrics` aggregates, per version, over the linked `llm` spans in the window (default 7 days, within the data window): counts, error rate, cost, latency p50/p95, tokens, and the average of numeric and boolean scores on the linked traces and spans. Default exclusions apply. |
+| D-V-18 | Licence (user) | MIT core, no plan gate and no count limits beyond D-V-2 and D-V-24, nothing under `ee/`, no new feature in D-P-12. Every competitor ships both on its free tier. |
+| D-V-19 | Provider layer | The judge adapters (D21, D159) generalize into one streaming chat layer in `cetra-eval` (messages, tools, tool choice, response format, params; events: text deltas, tool calls, usage, finish reason, response model). Judges become one caller, unchanged in behaviour. The egress client gains a streaming POST with D166, the 4 MiB cap and an idle timeout. |
+| D-V-20 | Transport | `POST …/playground/runs` answers `text/event-stream` (`start`, `text`, `tool_call`, `done`, `error`, a ping every 15 s), one request per model column; aborting the fetch cancels the provider call. No WebSockets, no multiplexed stream, no browser-to-provider calls. |
+| D-V-21 | Run request | `{connection_id, model, messages (canonical, ≤ 200, 2 MiB body), variables?, placeholders?, params?, tools?, tool_choice?, response_format?, source?}`. The server renders `{{var}}`s; `source` (a prompt version or a span) is recorded only. |
+| D-V-22 | Playground traces | Each run is one trace with one `llm` span in the reserved environment `cetra-playground`, built as OTLP and normalized like judge traces (D161), priced with the project's table (T), with `cetra.playground.run_by` and the source in metadata. `cetra-playground` is reserved everywhere `cetra-eval` is (SDK check, OTLP rewrite, default and strict exclusions), through one `cetra-core` test. |
+| D-V-23 | Units (user) | Playground spans are not units: G's counter skips every reserved environment (generalizes D-I-31). No units-cap check and no rule budget on runs. |
+| D-V-24 | Limits | Per user 60 runs a minute and 4 at once, per org 16 at once (`429`). A run takes its connection's concurrency slot and rate token (D-I-4, D-I-6) ahead of rule jobs, waiting at most 10 s (`429 connection_busy`). 300 s per call, 60 s idle, `max_tokens` default 4,096 and at most 65,536. The UI shows 1–4 columns. |
+| D-V-25 | Parts sent | Text, `tool_call` and `tool_call_response` parts, system instructions, tool definitions, tool choice and a response schema (through the connection's structured-output mode). Tools are never run; users type tool results. Media and unknown parts are refused. |
+| D-V-26 | Run permission | A new `ProjectPerm::RunPlayground`: role `member`, session or read-write PAT, never an API key. |
+| D-V-27 | Save as version | The playground saves its text messages and config as a new version or a new prompt (`ManagePrompts`, D-V-10); messages with tool parts are refused. |
+| D-V-28 | Client-side state | The draft lives in the URL and in `localStorage` per project; no runs table. Recent runs are the user's `cetra-playground` traces. |
 
 ## Open
 
