@@ -1,9 +1,4 @@
-import {
-  keepPreviousData,
-  useInfiniteQuery,
-  useQuery,
-  useQueryClient,
-} from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { Trash2, Waypoints } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -70,7 +65,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
-import { anchorKey, LIST_CACHE, NEW_ROWS_LIMIT, useListAnchor } from "@/lib/list-anchor";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import {
@@ -218,7 +219,7 @@ function TracesPage() {
   const list = useInfiniteQuery({
     ...listOptions,
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
+    placeholderData: keepSameProject(listOptions.queryKey),
     enabled: !hold,
     refetchInterval: (query) => {
       if (hold || !needsOnboarding) {
@@ -520,7 +521,6 @@ function TracesPage() {
                       reason={reason}
                       status={live.status}
                       onPressedChange={(on) => {
-                        listAnchor.renew();
                         void navigate({
                           to: "/$org/$project/traces",
                           params: { org, project },
@@ -744,7 +744,10 @@ function TracesPage() {
                       <div className="min-h-0 flex-1 overflow-auto">
                         <OnboardingPanel origin={window.location.origin} />
                       </div>
-                    ) : !hold && list.data && !probing ? (
+                    ) : !hold &&
+                      list.data &&
+                      !probing &&
+                      !(list.isPlaceholderData && rows.length === 0) ? (
                       <>
                         <TracesHistogram
                           org={org}

@@ -301,6 +301,9 @@ it("the pill shows the new spans and loads them", async () => {
     await waitFor(() => {
       expect(recording.urls.some(isListRequest)).toBe(true);
     });
+    await waitFor(() => {
+      expect(screen.getByRole("grid", { name: "Spans" })).not.toHaveAttribute("aria-busy");
+    });
     expect(screen.queryByRole("button", { name: /new span/ })).not.toBeInTheDocument();
   } finally {
     recording.stop();
@@ -316,7 +319,7 @@ it("no pill without new spans", async () => {
       return undefined;
     }),
   );
-  const { router } = await renderApp("/acme/support-bot/spans");
+  const { router, queryClient } = await renderApp("/acme/support-bot/spans");
   await screen.findByRole("grid", { name: "Spans" });
   await leaveSpans(router);
   const recording = recordUrls();
@@ -325,8 +328,8 @@ it("no pill without new spans", async () => {
     await waitFor(() => {
       expect(recording.urls.some(isCheckRequest)).toBe(true);
     });
-    // Let the empty answer land before asserting that no pill shows.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The empty answer has landed once nothing is fetching.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(screen.queryByRole("button", { name: /new span/ })).not.toBeInTheDocument();
   } finally {
     recording.stop();

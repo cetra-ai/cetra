@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -41,7 +41,13 @@ import { UsersSummary, usersKpiQuery, usersKpis } from "@/components/user/users-
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatCost } from "@/lib/format";
-import { anchorKey, LIST_CACHE, NEW_ROWS_LIMIT, useListAnchor } from "@/lib/list-anchor";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseUsersSearch, type UsersSearch } from "@/lib/search/users";
@@ -142,18 +148,19 @@ function UsersPage() {
     includeEval: search.eval === 1,
     includeExperiments: search.exp === 1,
   };
+  const listOptions = userListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...userListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
-      filter: search.filter,
-      includeEval: search.eval === 1,
-      includeExperiments: search.exp === 1,
-    }),
+    ...listOptions,
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
+    placeholderData: keepSameProject(listOptions.queryKey),
     enabled: !hold,
   });
   // Users with activity since the anchor: asked once after a return to a remembered window.
@@ -183,7 +190,6 @@ function UsersPage() {
       includeExperiments: search.exp === 1,
     }),
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
     enabled: !hold && !filterError,
   });
   const top = useQuery({
@@ -196,7 +202,6 @@ function UsersPage() {
       limit: 5,
     }),
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
     enabled: !hold && !filterError,
   });
   const fetchNextPage = useCallback(() => {
@@ -434,7 +439,7 @@ function UsersPage() {
                         <h2 className="text-body font-medium">{filterError.title}</h2>
                         <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                       </div>
-                    ) : !hold && list.data ? (
+                    ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
                       <>
                         <UsersSummary
                           kpis={usersKpis(headline.data)}

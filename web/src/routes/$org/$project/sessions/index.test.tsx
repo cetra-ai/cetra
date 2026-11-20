@@ -299,6 +299,9 @@ it("the pill shows the new sessions and loads them", async () => {
     await waitFor(() => {
       expect(recording.urls.some(isListRequest)).toBe(true);
     });
+    await waitFor(() => {
+      expect(screen.getByRole("grid", { name: "Sessions" })).not.toHaveAttribute("aria-busy");
+    });
     expect(screen.queryByRole("button", { name: /with new activity/ })).not.toBeInTheDocument();
   } finally {
     recording.stop();

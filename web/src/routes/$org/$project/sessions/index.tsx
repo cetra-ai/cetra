@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { MessagesSquare } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -47,7 +47,13 @@ import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
-import { anchorKey, LIST_CACHE, NEW_ROWS_LIMIT, useListAnchor } from "@/lib/list-anchor";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import {
   anchorOf,
@@ -170,18 +176,19 @@ function SessionsPage() {
   const [queueOpen, setQueueOpen] = useState(false);
   const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
   const [matchOpen, setMatchOpen] = useState(false);
+  const listOptions = sessionListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...sessionListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
-      filter: search.filter,
-      includeEval: search.eval === 1,
-      includeExperiments: search.exp === 1,
-    }),
+    ...listOptions,
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
+    placeholderData: keepSameProject(listOptions.queryKey),
     enabled: !hold,
   });
   // Sessions that arrived since the anchor: asked once after a return to a remembered window.
@@ -419,7 +426,7 @@ function SessionsPage() {
                 <h2 className="text-body font-medium">{filterError.title}</h2>
                 <p className="text-body text-destructive">{filterMessage(filterError)}</p>
               </div>
-            ) : !hold && list.data ? (
+            ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
               <>
                 <SessionsSummary sessions={rows} more={list.hasNextPage} />
                 <div className="border-b px-3 py-2">

@@ -1,4 +1,4 @@
-import { keepPreviousData, useInfiniteQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Rows3 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -47,7 +47,13 @@ import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
-import { anchorKey, LIST_CACHE, NEW_ROWS_LIMIT, useListAnchor } from "@/lib/list-anchor";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
@@ -166,19 +172,20 @@ function SpansPage() {
   const [queueOpen, setQueueOpen] = useState(false);
   const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
   const [matchOpen, setMatchOpen] = useState(false);
+  const listOptions = spanListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    search: search.search,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...spanListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
-      search: search.search,
-      filter: search.filter,
-      includeEval: search.eval === 1,
-      includeExperiments: search.exp === 1,
-    }),
+    ...listOptions,
     ...LIST_CACHE,
-    placeholderData: keepPreviousData,
+    placeholderData: keepSameProject(listOptions.queryKey),
     enabled: !hold,
   });
   // Spans that arrived since the anchor: asked once after a return to a remembered window.
@@ -497,7 +504,7 @@ function SpansPage() {
                         <h2 className="text-body font-medium">{filterError.title}</h2>
                         <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                       </div>
-                    ) : !hold && list.data ? (
+                    ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
                       <DataTable
                         tableId="spans"
                         ariaLabel="Spans"

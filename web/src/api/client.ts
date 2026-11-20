@@ -32,8 +32,15 @@ const LIST_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/projects/{project}/users",
 ]);
 
-/** A list query of Traces, Spans, Sessions or Users (D-C-23). */
-export function isListQuery(query: { queryKey: QueryKey }): boolean {
+/**
+ * A list query of Traces, Spans, Sessions or Users, or a widget query (the traces histogram, the
+ * Users KPIs): cached as long as a list window, D-C-23. The widget path is `WIDGET_QUERY_PATH` in
+ * `@/api/dashboards`, written out here: importing it would be a cycle through `$api`.
+ */
+export function isWindowQuery(query: { queryKey: QueryKey }): boolean {
+  if (query.queryKey[0] === "post") {
+    return query.queryKey[1] === "/api/v1/projects/{project}/dashboards/query";
+  }
   return query.queryKey[0] === "get" && LIST_PATHS.has(String(query.queryKey[1]));
 }
 
@@ -43,7 +50,7 @@ export function createAppQueryClient(): QueryClient {
     // refetches it in the background.
     mutationCache: new MutationCache({
       onSuccess: () => {
-        void client.invalidateQueries({ predicate: isListQuery, refetchType: "none" });
+        void client.invalidateQueries({ predicate: isWindowQuery, refetchType: "none" });
       },
     }),
     defaultOptions: {

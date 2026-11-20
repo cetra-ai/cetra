@@ -1830,6 +1830,9 @@ it("the pill shows the new traces and loads them", async () => {
     await waitFor(() => {
       expect(recording.urls.some(isListRequest)).toBe(true);
     });
+    await waitFor(() => {
+      expect(screen.getByRole("grid", { name: "Traces" })).not.toHaveAttribute("aria-busy");
+    });
     expect(screen.queryByRole("button", { name: /new trace/ })).not.toBeInTheDocument();
   } finally {
     recording.stop();
@@ -1865,7 +1868,7 @@ it("no pill without new traces", async () => {
       return undefined;
     }),
   );
-  const { router } = await renderApp("/acme/support-bot/traces");
+  const { router, queryClient } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
   await leaveTraces(router);
   const recording = recordUrls();
@@ -1874,8 +1877,8 @@ it("no pill without new traces", async () => {
     await waitFor(() => {
       expect(recording.urls.some(isCheckRequest)).toBe(true);
     });
-    // Let the empty answer land before asserting that no pill shows.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The empty answer has landed once nothing is fetching.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
     expect(screen.queryByRole("button", { name: /new trace/ })).not.toBeInTheDocument();
   } finally {
     recording.stop();
@@ -1975,6 +1978,21 @@ it("live mode starts a new window on return", async () => {
       expect(recording.urls.some(isListRequest)).toBe(true);
     });
     expect(recording.urls.some(isCheckRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("turning live off starts a new window", async () => {
+  server.use(traceStreamHandler(() => undefined));
+  const { router } = await renderApp("/acme/support-bot/traces?live=1");
+  await screen.findByRole("grid", { name: "Traces" });
+  const recording = recordUrls();
+  try {
+    await router.navigate({ to: "/$org/$project/traces", params: TRACES_PATH, search: {} });
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
   } finally {
     recording.stop();
   }

@@ -1,8 +1,9 @@
 import { act, renderHook } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ANCHOR_REUSE_MS,
   anchorKey,
+  keepSameProject,
   resetListAnchors,
   useListAnchor,
   type WindowSearch,
@@ -179,6 +180,58 @@ it("returns a remembered scroll on the next mount with the same anchor, and not 
   const afterRenew = renderHook(() => useListAnchor(KEY, false));
   expect(afterRenew.result.current.reused).toBe(true);
   expect(afterRenew.result.current.scroll).toBeUndefined();
+});
+
+it("fresh going from true to false starts a new window and stores it", () => {
+  const mounted = renderHook(({ fresh }: { fresh: boolean }) => useListAnchor(KEY, fresh), {
+    initialProps: { fresh: false },
+  });
+  at(MINUTE);
+  mounted.rerender({ fresh: true });
+  at(2 * MINUTE);
+  mounted.rerender({ fresh: false });
+  expect(mounted.result.current.reused).toBe(false);
+  expect(mounted.result.current.anchor).toBe(T0 + 2 * MINUTE);
+  mounted.unmount();
+  at(3 * MINUTE);
+  const back = renderHook(() => useListAnchor(KEY, false));
+  expect(back.result.current.reused).toBe(true);
+  expect(back.result.current.anchor).toBe(T0 + 2 * MINUTE);
+});
+
+it("a key change on a mounted page clears the stored scroll", () => {
+  const mounted = renderHook(({ key }: { key: string }) => useListAnchor(key, false), {
+    initialProps: { key: KEY },
+  });
+  act(() => {
+    mounted.result.current.rememberScroll({ rowId: "row-4", offset: 2 });
+  });
+  mounted.rerender({ key: OTHER_KEY });
+  mounted.rerender({ key: KEY });
+  expect(mounted.result.current.reused).toBe(true);
+  mounted.unmount();
+  const again = renderHook(() => useListAnchor(KEY, false));
+  expect(again.result.current.reused).toBe(true);
+  expect(again.result.current.scroll).toBeUndefined();
+});
+
+describe("keepSameProject", () => {
+  const listKey = (project: string) => [
+    "get",
+    "/api/v1/projects/{project}/spans",
+    { params: { path: { project } } },
+  ];
+
+  it("keeps the previous data only from the same project", () => {
+    const keep = keepSameProject<string>(listKey("acme/shop"));
+    expect(keep("rows", { queryKey: listKey("acme/shop") })).toBe("rows");
+    expect(keep("rows", { queryKey: listKey("acme/other") })).toBeUndefined();
+  });
+
+  it("keeps nothing without a previous query", () => {
+    const keep = keepSameProject<string>(listKey("acme/shop"));
+    expect(keep("rows", undefined)).toBeUndefined();
+  });
 });
 
 it("resetListAnchors forgets every remembered anchor", () => {
