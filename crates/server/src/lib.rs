@@ -30,6 +30,7 @@ pub(crate) mod live;
 pub(crate) mod mcp;
 pub(crate) mod meta;
 pub(crate) mod prices;
+pub(crate) mod prompts;
 pub(crate) mod retention;
 pub(crate) mod routes;
 pub(crate) mod scores;

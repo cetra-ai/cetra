@@ -16,7 +16,9 @@ pub(crate) enum Warning {
     InputExcludesCache,
     InvalidEventTime,
     InvalidNumber,
+    InvalidPromptVersion,
     MaxDepth,
+    PromptVersionWithoutName,
 }
 
 impl Warning {
@@ -28,7 +30,9 @@ impl Warning {
             Self::InputExcludesCache => "input_excludes_cache",
             Self::InvalidEventTime => "invalid_event_time",
             Self::InvalidNumber => "invalid_number",
+            Self::InvalidPromptVersion => "invalid_prompt_version",
             Self::MaxDepth => "max_depth",
+            Self::PromptVersionWithoutName => "prompt_version_without_name",
         }
     }
 }
@@ -82,7 +86,9 @@ mod tests {
             Warning::InputExcludesCache,
             Warning::InvalidEventTime,
             Warning::InvalidNumber,
+            Warning::InvalidPromptVersion,
             Warning::MaxDepth,
+            Warning::PromptVersionWithoutName,
         ];
         let mut by_code = ordered;
         by_code.sort_by_key(|warning| warning.code());
@@ -98,7 +104,9 @@ mod tests {
                 "input_excludes_cache",
                 "invalid_event_time",
                 "invalid_number",
+                "invalid_prompt_version",
                 "max_depth",
+                "prompt_version_without_name",
             ]
         );
     }

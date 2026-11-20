@@ -26,6 +26,8 @@ The cetra SDKs set these attributes. You can also set them yourself on any OpenT
 | `cetra.cost.total` | float | `set_cost` | The total cost in USD, reported by your code. cetra does not compute a cost when it is present. |
 | `cetra.experiment.id` | string | `evaluate` | The experiment a span belongs to. |
 | `cetra.dataset_item.id` | string | `evaluate` | The dataset item an experiment run used. |
+| `cetra.prompt.name` | string | `context` and `compile` | The registry prompt the span used. |
+| `cetra.prompt.version` | integer | `context` and `compile` | The version of that prompt, 1 or higher. |
 
 ## Set by cetra
 
@@ -40,6 +42,8 @@ cetra writes these attributes on its own spans, for example the traces of evalua
 | `cetra.eval.rule_id` | string | On an evaluator's trace: the online rule that ran it. |
 | `cetra.eval.experiment_id` | string | On an evaluator's trace: the experiment it scored. |
 | `cetra.eval.evaluator_id` | string | On an evaluator's trace: the evaluator. |
+| `cetra.playground.run_by` | string | On a playground run's trace: the user who ran it. |
+| `cetra.playground.source` | string | On a playground run's trace: the prompt it used, `prompt:<name>@<version>`, or the span it came from, `span:<trace>:<span>`. |
 | `cetra.normalize_warning` | string list | Warning codes for recoverable problems found while reading the span, such as `end_before_start`. |
 | `cetra.normalize_error` | string | Codes for a payload that cetra recognized but could not convert. The raw value is kept. |
 

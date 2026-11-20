@@ -1,0 +1,83 @@
+{
+  "data": [
+    {
+      "name": "support-reply",
+      "type": "chat",
+      "version": 2,
+      "template": [
+        {
+          "role": "system",
+          "content": "You are a friendly support agent for {{ product }}. Answer in {{ language }}."
+        },
+        {
+          "type": "placeholder",
+          "name": "history"
+        },
+        {
+          "role": "user",
+          "content": "{{ question }}"
+        }
+      ],
+      "config": {
+        "model": "gpt-4o",
+        "params": {
+          "temperature": 0.3,
+          "max_tokens": 512
+        }
+      },
+      "labels": [
+        "latest",
+        "staging"
+      ],
+      "variables": [
+        "product",
+        "language",
+        "question"
+      ],
+      "placeholders": [
+        "history"
+      ],
+      "commit_message": "Friendlier tone",
+      "created_at": "2026-01-01T00:00:02.000000000Z"
+    },
+    {
+      "name": "support-reply",
+      "type": "chat",
+      "version": 1,
+      "template": [
+        {
+          "role": "system",
+          "content": "You are a support agent for {{ product }}."
+        },
+        {
+          "type": "placeholder",
+          "name": "history"
+        },
+        {
+          "role": "user",
+          "content": "{{ question }}"
+        }
+      ],
+      "config": {
+        "model": "gpt-4o",
+        "params": {
+          "temperature": 0.3,
+          "max_tokens": 512
+        }
+      },
+      "labels": [
+        "production"
+      ],
+      "variables": [
+        "product",
+        "question"
+      ],
+      "placeholders": [
+        "history"
+      ],
+      "commit_message": "First version",
+      "created_at": "2026-01-01T00:00:01.000000000Z"
+    }
+  ],
+  "next_cursor": null
+}

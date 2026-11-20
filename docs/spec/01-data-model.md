@@ -55,7 +55,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `service_name` | Utf8 (dict), nullable | P | Resource `service.name`. |
 | `session_id` | Utf8, nullable | P | Bloom filter. |
 | `user_id` | Utf8, nullable | P | Bloom filter. GDPR key. |
-| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `experiment` default for experiment runs. |
+| `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `cetra-playground` (playground runs, D-V-22), `experiment` default for experiment runs. The reserved set is `cetra_core::names::environment::RESERVED` (D-V-33); each reserved value is hidden by default, not an online-rule target, not a trace an evaluator can load, rewritten when received over OTLP, and not billed (D-V-34). |
 | `release` | Utf8 (dict), nullable | P | Git SHA / version string. |
 | `tags` | List(Utf8) | P | |
 | `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. |
@@ -63,6 +63,8 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `request_model` | Utf8 (dict), nullable | P | |
 | `response_model` | Utf8 (dict), nullable | P | |
 | `model` | Utf8 (dict), nullable | P | `coalesce(response_model, request_model)`, used for cost + grouping. |
+| `prompt_name` | Utf8 (dict), nullable | P | Registry prompt (`cetra.prompt.name`, D-V-15). |
+| `prompt_version` | Int64, nullable | P | Its version, ≥ 1. |
 | `operation` | Utf8 (dict), nullable | | GenAI `operation.name` if any. |
 | `input_tokens` | Int64, nullable | P | Includes cached tokens (OTel semantics). |
 | `output_tokens` | Int64, nullable | P | Includes reasoning tokens. |
@@ -160,6 +162,7 @@ Rows of `spans` and `traces` are partitioned by the trace's **anchor day** (03 �
 | `input_tokens` … `total_tokens` | Int64 | sum |
 | `cost_total` | Float64 | sum, in integer units of 1e-18 USD so the result does not depend on merge order (D-A2-4) |
 | `models` | List(Utf8) | distinct union |
+| `prompts` | List(Utf8) | distinct union of `name@version` (spans with both) |
 | `last_ingest_time` | Timestamp | max |
 | `partial_count` | Int32 | sum (1 per partial; = 1 after full compaction) |
 

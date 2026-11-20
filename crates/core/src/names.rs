@@ -42,6 +42,10 @@ pub mod attr {
     pub const METADATA_PREFIX: &str = crate::cetra_name!(".metadata.");
     /// `cetra.environment`. Spec 02 § Context fields, spec 10.
     pub const ENVIRONMENT: &str = crate::cetra_name!(".environment");
+    /// `cetra.prompt.name`. The registry prompt a span used (D-V-15).
+    pub const PROMPT_NAME: &str = crate::cetra_name!(".prompt.name");
+    /// `cetra.prompt.version`. The version of that prompt (D-V-15).
+    pub const PROMPT_VERSION: &str = crate::cetra_name!(".prompt.version");
     /// `cetra.release`. Spec 02 § Context fields.
     pub const RELEASE: &str = crate::cetra_name!(".release");
     /// `cetra.ttft_ns`. Spec 02 § Model, provider, usage.
@@ -77,6 +81,10 @@ pub mod metadata_key {
     /// `cetra.normalize_warning`, stored in `attributes`: a JSON array of warning codes,
     /// sorted and without duplicates. Spec 02 § Normalization rules.
     pub const NORMALIZE_WARNING: &str = crate::cetra_name!(".normalize_warning");
+    /// `cetra.playground.run_by`: the user who ran a playground run (D-V-22).
+    pub const PLAYGROUND_RUN_BY: &str = crate::cetra_name!(".playground.run_by");
+    /// `cetra.playground.source`: the prompt or span a playground run came from (D-V-22).
+    pub const PLAYGROUND_SOURCE: &str = crate::cetra_name!(".playground.source");
 }
 
 /// Keys written into score metadata by evaluators.
@@ -105,8 +113,33 @@ pub mod environment {
     pub const EVAL: &str = crate::cetra_name!("-eval");
     /// What external data that claimed [`EVAL`] is rewritten to. Spec 06.
     pub const EVAL_EXTERNAL: &str = crate::cetra_name!("-eval-external");
+    /// Reserved for playground runs (D-V-22, D-V-33).
+    pub const PLAYGROUND: &str = crate::cetra_name!("-playground");
+    /// What external data that claimed [`PLAYGROUND`] is rewritten to (D-V-33).
+    pub const PLAYGROUND_EXTERNAL: &str = crate::cetra_name!("-playground-external");
+    /// Environments only the server writes. Their traces are hidden by default, excluded from
+    /// online rules, refused as evaluation targets, rewritten when received over OTLP, and not
+    /// billed (D-V-33, D-V-34). A new reserved environment is added here.
+    pub const RESERVED: &[&str] = &[EVAL, PLAYGROUND];
     /// Default environment for experiment runs. Spec 01 `environment`.
     pub const EXPERIMENT: &str = "experiment";
+
+    /// Whether `environment` is reserved (D-V-33).
+    #[must_use]
+    pub fn is_reserved(environment: &str) -> bool {
+        RESERVED.contains(&environment)
+    }
+
+    /// The name that external data claiming a reserved `environment` is rewritten to (D-V-33).
+    /// `None` when `environment` is not reserved.
+    #[must_use]
+    pub fn external_alias(environment: &str) -> Option<&'static str> {
+        match environment {
+            e if e == EVAL => Some(EVAL_EXTERNAL),
+            e if e == PLAYGROUND => Some(PLAYGROUND_EXTERNAL),
+            _ => None,
+        }
+    }
 }
 
 /// Media references stored in payloads.
@@ -149,6 +182,8 @@ mod tests {
             ("attr", "TAGS", attr::TAGS),
             ("attr", "METADATA_PREFIX", attr::METADATA_PREFIX),
             ("attr", "ENVIRONMENT", attr::ENVIRONMENT),
+            ("attr", "PROMPT_NAME", attr::PROMPT_NAME),
+            ("attr", "PROMPT_VERSION", attr::PROMPT_VERSION),
             ("attr", "RELEASE", attr::RELEASE),
             ("attr", "TTFT_NS", attr::TTFT_NS),
             ("attr", "COST_TOTAL", attr::COST_TOTAL),
@@ -192,6 +227,16 @@ mod tests {
                 metadata_key::NORMALIZE_WARNING,
             ),
             (
+                "metadata_key",
+                "PLAYGROUND_RUN_BY",
+                metadata_key::PLAYGROUND_RUN_BY,
+            ),
+            (
+                "metadata_key",
+                "PLAYGROUND_SOURCE",
+                metadata_key::PLAYGROUND_SOURCE,
+            ),
+            (
                 "score_metadata_key",
                 "JUDGE_TRACE_ID",
                 score_metadata_key::JUDGE_TRACE_ID,
@@ -223,6 +268,12 @@ mod tests {
             ),
             ("environment", "EVAL", environment::EVAL),
             ("environment", "EVAL_EXTERNAL", environment::EVAL_EXTERNAL),
+            ("environment", "PLAYGROUND", environment::PLAYGROUND),
+            (
+                "environment",
+                "PLAYGROUND_EXTERNAL",
+                environment::PLAYGROUND_EXTERNAL,
+            ),
             ("environment", "EXPERIMENT", environment::EXPERIMENT),
             ("media", "URI_SCHEME", media::URI_SCHEME),
             ("media", "DROPPED_URI", media::DROPPED_URI),
@@ -242,6 +293,40 @@ mod tests {
             .map(|(module, name, value)| format!("{module}::{name} = \"{value}\""))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn reserved_environments() {
+        assert!(environment::is_reserved(environment::EVAL));
+        assert!(environment::is_reserved("cetra-playground"));
+        assert!(!environment::is_reserved("production"));
+        assert!(!environment::is_reserved("cetra-eval-external"));
+        assert!(!environment::is_reserved("cetra-playground-external"));
+        assert!(!environment::is_reserved(""));
+
+        assert_eq!(
+            environment::external_alias(environment::EVAL),
+            Some(environment::EVAL_EXTERNAL)
+        );
+        assert_eq!(
+            environment::external_alias(environment::PLAYGROUND),
+            Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(environment::external_alias("production"), None);
+        assert_eq!(
+            environment::external_alias(environment::EVAL_EXTERNAL),
+            None
+        );
+        for reserved in environment::RESERVED {
+            assert!(
+                environment::is_reserved(reserved),
+                "{reserved} is not reserved"
+            );
+            assert!(
+                environment::external_alias(reserved).is_some(),
+                "{reserved} has no external alias"
+            );
+        }
     }
 
     #[test]
@@ -267,6 +352,8 @@ mod tests {
             attr::TAGS,
             attr::METADATA_PREFIX,
             attr::ENVIRONMENT,
+            attr::PROMPT_NAME,
+            attr::PROMPT_VERSION,
             attr::RELEASE,
             attr::TTFT_NS,
             attr::COST_TOTAL,
@@ -281,8 +368,12 @@ mod tests {
             metadata_key::EVAL_EVALUATOR_ID,
             metadata_key::NORMALIZE_ERROR,
             metadata_key::NORMALIZE_WARNING,
+            metadata_key::PLAYGROUND_RUN_BY,
+            metadata_key::PLAYGROUND_SOURCE,
             environment::EVAL,
             environment::EVAL_EXTERNAL,
+            environment::PLAYGROUND,
+            environment::PLAYGROUND_EXTERNAL,
             media::DROPPED_URI,
         ];
         for value in branded {
@@ -308,6 +399,8 @@ mod tests {
         attr::TAGS,
         attr::METADATA_PREFIX,
         attr::ENVIRONMENT,
+        attr::PROMPT_NAME,
+        attr::PROMPT_VERSION,
         attr::RELEASE,
         attr::TTFT_NS,
         attr::COST_TOTAL,
@@ -322,6 +415,8 @@ mod tests {
         metadata_key::EVAL_EVALUATOR_ID,
         metadata_key::NORMALIZE_ERROR,
         metadata_key::NORMALIZE_WARNING,
+        metadata_key::PLAYGROUND_RUN_BY,
+        metadata_key::PLAYGROUND_SOURCE,
     ];
 
     #[test]

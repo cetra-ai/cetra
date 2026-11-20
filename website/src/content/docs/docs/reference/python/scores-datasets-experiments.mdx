@@ -189,6 +189,10 @@ result.assert_min("exact", 0.8)  # raises AssertionError when the mean is below 
   with a warning; the run continues, and the local result still holds them.
 - `summary()` prints the experiment id, not a link to the UI.
 
+### Prompts
+
+`client.prompts` manages the prompt registry from scripts and CI: `get(name, label=..., version=...)` reads a prompt version without the SDK's cache, `list()` returns the prompt names, `create` adds a prompt with its first version, `create_version` adds a version, and `set_label(name, label, version)` moves a label to a version. The label `production` is the default for `get`. Each call raises `ApiError` on an error answer, like the dataset calls. Writes are sent once and never retried; reads retry like the other client reads. The [Prompts](/docs/evaluation/prompts/) page shows how the prompts are fetched and linked.
+
 ### Keys
 
 The key needs the `read`, `write` and `ingest` scopes. `read` covers listing

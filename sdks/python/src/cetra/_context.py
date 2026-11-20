@@ -11,7 +11,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextvars import Token
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from opentelemetry.baggage import set_baggage
 from opentelemetry.context import (
@@ -25,6 +25,9 @@ from opentelemetry.context import (
 
 from cetra._log import logger
 from cetra._mask import apply
+
+if TYPE_CHECKING:
+    from cetra._prompts import Prompt
 
 CONTEXT_KEY: Final = create_key("cetra.context")
 _BAGGAGE_SESSION_KEY: Final = "cetra.session.id"
@@ -52,6 +55,8 @@ class ContextValues:
         default_factory=dict
     )  # an immutable copy (MappingProxyType)
     experiment: ExperimentLink | None = None
+    # (name, version) of the prompt in use; version is None for a fallback (D-V-15).
+    prompt: tuple[str, int | None] | None = None
 
 
 def current_values(ctx: Context | None = None) -> ContextValues:
@@ -86,6 +91,19 @@ def _valid_tags(tags: object) -> tuple[str, ...]:
         return tuple(item for item in tags if isinstance(item, str))
     logger.debug("cetra: context tags ignored: not a sequence of strings")
     return ()
+
+
+def _valid_prompt(prompt: "Prompt | None") -> tuple[str, int | None] | None:
+    """The name and version of a ``Prompt``; anything else is dropped with a debug log."""
+    if prompt is None:
+        return None
+    # Deferred: _prompts imports the runtime, which imports this module.
+    from cetra._prompts import Prompt
+
+    if isinstance(prompt, Prompt):
+        return (prompt.name, prompt.version)
+    logger.debug("cetra: context prompt ignored: not a Prompt")
+    return None
 
 
 def _valid_metadata(metadata: object) -> dict[str, object]:
@@ -132,6 +150,7 @@ class context:  # noqa: N801  # public API name from spec 10
         tags: Sequence[str] | None = None,
         metadata: Mapping[str, object] | None = None,
         propagate: bool = False,
+        prompt: "Prompt | None" = None,
     ) -> None:
         """Validate the arguments without raising; invalid values are dropped."""
         self._propagate = propagate
@@ -142,12 +161,14 @@ class context:  # noqa: N801  # public API name from spec 10
             self._user_id = _valid_id("user_id", user_id)
             self._tags = _valid_tags(tags)
             self._metadata = _valid_metadata(metadata)
+            self._prompt = _valid_prompt(prompt)
         except Exception as error:  # noqa: BLE001  # never raise into the app (spec 10 rule 4)
             logger.debug("cetra: context() arguments ignored (%s)", type(error).__name__)
             self._session_id = None
             self._user_id = None
             self._tags = ()
             self._metadata = {}
+            self._prompt = None
 
     def _enter(self) -> None:
         """Merge with the current values, mask metadata, attach (D-F-12)."""
@@ -159,6 +180,7 @@ class context:  # noqa: N801  # public API name from spec 10
             tags=tuple(dict.fromkeys(outer.tags + self._tags)),
             metadata=MappingProxyType({**outer.metadata, **inner_metadata}),
             experiment=outer.experiment,
+            prompt=self._prompt if self._prompt is not None else outer.prompt,
         )
         ctx = set_value(CONTEXT_KEY, merged)
         if self._propagate:

@@ -66,6 +66,8 @@ humantime-serde.workspace = true
 rmcp.workspace = true
 
 [dev-dependencies]
+# The playground's streamed runs are tested against the capture mock provider (D-I-43).
+cetra-capture.workspace = true
 ed25519-dalek.workspace = true
 http-body.workspace = true
 tracing-subscriber.workspace = true
