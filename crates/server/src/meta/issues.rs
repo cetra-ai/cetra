@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use cetra_core::ids::{OrgId, ProjectId};
+use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 use sqlx::{QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -13,6 +13,14 @@ use super::{MetaError, unique_or};
 const SOURCES: &str = "issue_sources";
 const ISSUES: &str = "issues";
 const EVENTS: &str = "issue_events";
+#[cfg_attr(not(test), allow(dead_code))]
+const CANDIDATES: &str = "issue_candidates";
+#[cfg_attr(not(test), allow(dead_code))]
+const REFITS: &str = "issue_refits";
+
+/// Interruptions a candidate may take before it fails (D-I-12, as for eval jobs).
+#[cfg_attr(not(test), allow(dead_code))]
+const MAX_CANDIDATE_INTERRUPTIONS: i64 = 3;
 
 /// Shown when a source name is taken in its project.
 const SOURCE_CONFLICT: &str = "an issue source with this name already exists";
@@ -839,6 +847,1005 @@ pub(crate) async fn list_events(
     records.into_iter().map(event_from).collect()
 }
 
+// candidates
+
+/// The state of an issue candidate (D-IC-12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum CandidateStatus {
+    Queued,
+    Running,
+    Pending,
+    Assigned,
+    Outlier,
+    Dropped,
+    Failed,
+    Skipped,
+}
+
+impl CandidateStatus {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Pending => "pending",
+            Self::Assigned => "assigned",
+            Self::Outlier => "outlier",
+            Self::Dropped => "dropped",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "pending" => Some(Self::Pending),
+            "assigned" => Some(Self::Assigned),
+            "outlier" => Some(Self::Outlier),
+            "dropped" => Some(Self::Dropped),
+            "failed" => Some(Self::Failed),
+            "skipped" => Some(Self::Skipped),
+            _ => None,
+        }
+    }
+}
+
+/// What a candidate is about: a trace, one span of a trace, or a session (D-IC-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum CandidateTarget {
+    Trace,
+    Span,
+    Session,
+}
+
+impl CandidateTarget {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Trace => "trace",
+            Self::Span => "span",
+            Self::Session => "session",
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "trace" => Some(Self::Trace),
+            "span" => Some(Self::Span),
+            "session" => Some(Self::Session),
+            _ => None,
+        }
+    }
+}
+
+/// One stored issue candidate (D-IC-1, D-IC-12). Times are nanoseconds.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct CandidateRow {
+    pub(crate) id: Uuid,
+    pub(crate) project_id: ProjectId,
+    pub(crate) source_id: Uuid,
+    pub(crate) target: CandidateTarget,
+    pub(crate) trace_id: Option<TraceId>,
+    pub(crate) span_id: Option<SpanId>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) trace_start: Option<i64>,
+    pub(crate) score_id: Option<Uuid>,
+    /// `<source>:<trace>`, `<source>:<trace>:<span>` or `<source>:session:<session>`.
+    pub(crate) dedup_key: String,
+    pub(crate) status: CandidateStatus,
+    pub(crate) attempts: u32,
+    /// Claims so far; the fence of every write made by a worker.
+    pub(crate) claims: u32,
+    pub(crate) interruptions: u32,
+    pub(crate) load_retries: u32,
+    pub(crate) not_before: i64,
+    pub(crate) error_class: Option<String>,
+    pub(crate) issue_id: Option<Uuid>,
+    pub(crate) summary: Option<String>,
+    pub(crate) summary_prompt_version: Option<u32>,
+    /// Embedding of the summary (D-IC-5).
+    pub(crate) vector: Option<Vec<f32>>,
+    pub(crate) embed_model: Option<String>,
+    pub(crate) dimension: Option<u32>,
+    pub(crate) call_trace_id: Option<TraceId>,
+    /// USD spent on the candidate's calls.
+    pub(crate) cost_usd: f64,
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+/// How a worker leaves a running candidate (A5). The spend is passed to
+/// [`finish_candidate`] separately.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum CandidateFinish {
+    /// The summary is stored; the candidate stays `running`.
+    Summarized {
+        summary: String,
+        prompt_version: u32,
+        call_trace_id: TraceId,
+    },
+    /// The embedding is stored; the candidate waits for a refit.
+    Pending {
+        vector: Vec<f32>,
+        embed_model: String,
+        dimension: u32,
+    },
+    /// The embedding is stored and the candidate joined `issue_id`.
+    Assigned {
+        issue_id: Uuid,
+        vector: Vec<f32>,
+        embed_model: String,
+        dimension: u32,
+    },
+    /// The candidate is not kept.
+    Dropped,
+    /// A failed attempt goes back to `queued`.
+    Retry {
+        not_before: i64,
+    },
+    /// A failed trace load goes back to `queued` and counts a load retry.
+    LoadRetry {
+        not_before: i64,
+    },
+    /// Back to `queued` with no counter change (saturated connection, source missing or paused).
+    Requeue {
+        not_before: i64,
+    },
+    /// Back to `queued`, with the attempt given back (a pause after `start_candidate_attempt`).
+    PauseRequeue {
+        not_before: i64,
+    },
+    Failed {
+        class: &'static str,
+    },
+    Skipped {
+        class: &'static str,
+    },
+}
+
+/// Inserts a candidate unless its `dedup_key` already exists. `true` when inserted.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the insert fails, for example when the source does not exist.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn insert_candidate(
+    conn: &mut SqliteConnection,
+    row: &CandidateRow,
+) -> Result<bool, MetaError> {
+    let result = sqlx::query(
+        "INSERT INTO issue_candidates (id, project_id, source_id, target, trace_id, span_id, \
+         session_id, user_id, trace_start, score_id, dedup_key, status, attempts, claims, \
+         interruptions, load_retries, not_before, error_class, issue_id, summary, \
+         summary_prompt_version, vector, embed_model, dimension, call_trace_id, cost_usd, \
+         created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(dedup_key) DO NOTHING",
+    )
+    .bind(row.id.to_string())
+    .bind(row.project_id.to_string())
+    .bind(row.source_id.to_string())
+    .bind(row.target.as_str())
+    .bind(row.trace_id.map(|id| id.as_bytes().to_vec()))
+    .bind(row.span_id.map(|id| id.as_bytes().to_vec()))
+    .bind(&row.session_id)
+    .bind(&row.user_id)
+    .bind(row.trace_start)
+    .bind(row.score_id.map(|id| id.to_string()))
+    .bind(&row.dedup_key)
+    .bind(row.status.as_str())
+    .bind(i64::from(row.attempts))
+    .bind(i64::from(row.claims))
+    .bind(i64::from(row.interruptions))
+    .bind(i64::from(row.load_retries))
+    .bind(row.not_before)
+    .bind(&row.error_class)
+    .bind(row.issue_id.map(|id| id.to_string()))
+    .bind(&row.summary)
+    .bind(row.summary_prompt_version.map(i64::from))
+    .bind(row.vector.as_deref().map(encode_vector))
+    .bind(&row.embed_model)
+    .bind(row.dimension.map(i64::from))
+    .bind(row.call_trace_id.map(|id| id.as_bytes().to_vec()))
+    .bind(row.cost_usd)
+    .bind(row.created_at)
+    .bind(row.updated_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Adds one to the source's candidate count for `day` (UTC day start, nanoseconds) when that
+/// count is below `cap`. `false` at the cap, when `cap` is 0, and when the source does not exist.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the upsert fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn admit_daily(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    day: i64,
+    cap: u32,
+) -> Result<bool, MetaError> {
+    let result = sqlx::query(
+        "INSERT INTO issue_source_days (source_id, day, candidates, spent_usd) \
+         SELECT ?1, ?2, 1, 0 WHERE ?3 > 0 AND EXISTS (SELECT 1 FROM issue_sources WHERE id = ?1) \
+         ON CONFLICT(source_id, day) DO UPDATE SET candidates = candidates + 1 \
+         WHERE candidates < ?3",
+    )
+    .bind(source.to_string())
+    .bind(day)
+    .bind(i64::from(cap))
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Adds `usd` to the source's spend on `day` (UTC day start, nanoseconds). A non-finite or
+/// negative amount adds 0. A source that no longer exists inserts nothing, so a finish that
+/// lands after a deletion does not fail (as for rule spend).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the upsert fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn add_spend(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    day: i64,
+    usd: f64,
+) -> Result<(), MetaError> {
+    let usd = if usd.is_finite() && usd > 0.0 {
+        usd
+    } else {
+        0.0
+    };
+    sqlx::query(
+        "INSERT INTO issue_source_days (source_id, day, candidates, spent_usd) \
+         SELECT ?, ?, 0, ? WHERE EXISTS (SELECT 1 FROM issue_sources WHERE id = ?) \
+         ON CONFLICT(source_id, day) DO UPDATE SET spent_usd = spent_usd + excluded.spent_usd",
+    )
+    .bind(source.to_string())
+    .bind(day)
+    .bind(usd)
+    .bind(source.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The source's spend on the days `from_day <= day < to_day`, in USD.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn spent_between(
+    pool: &SqlitePool,
+    source: Uuid,
+    from_day: i64,
+    to_day: i64,
+) -> Result<f64, MetaError> {
+    let total: f64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(spent_usd), 0.0) FROM issue_source_days \
+         WHERE source_id = ? AND day >= ? AND day < ?",
+    )
+    .bind(source.to_string())
+    .bind(from_day)
+    .bind(to_day)
+    .fetch_one(pool)
+    .await?;
+    Ok(total)
+}
+
+/// Queued candidates ready at `now` (`not_before <= now`), oldest `not_before` first, of enabled
+/// unpaused sources of active projects in active orgs. A source whose chat or embedding
+/// connection is in `saturated` is skipped. At most `limit` rows.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn ready_candidates(
+    pool: &SqlitePool,
+    now: i64,
+    saturated: &[Uuid],
+    limit: u32,
+) -> Result<Vec<CandidateRow>, MetaError> {
+    let saturated: Vec<String> = saturated.iter().map(Uuid::to_string).collect();
+    // A list of strings always serializes; the fallback is the empty list.
+    let saturated = serde_json::to_string(&saturated).unwrap_or_else(|_| "[]".to_owned());
+    let records: Vec<CandidateRecord> = sqlx::query_as(
+        "SELECT c.* FROM issue_candidates c \
+         JOIN issue_sources s ON s.id = c.source_id \
+         JOIN projects p ON p.id = s.project_id \
+         JOIN orgs o ON o.id = p.org_id \
+         WHERE c.status = 'queued' AND c.not_before <= ?1 \
+         AND s.enabled = 1 AND s.paused_reason IS NULL \
+         AND p.state = 'active' AND o.state = 'active' \
+         AND (s.chat_connection_id IS NULL \
+              OR s.chat_connection_id NOT IN (SELECT value FROM json_each(?2))) \
+         AND (s.embed_connection_id IS NULL \
+              OR s.embed_connection_id NOT IN (SELECT value FROM json_each(?2))) \
+         ORDER BY c.not_before, c.id LIMIT ?3",
+    )
+    .bind(now)
+    .bind(saturated)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(candidate_from).collect()
+}
+
+/// Claims a queued candidate: `queued → running`, `claims += 1`. Returns the new claim count,
+/// or `None` when the candidate is not queued.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn claim_candidate(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    now: i64,
+) -> Result<Option<u32>, MetaError> {
+    let claims: Option<i64> = sqlx::query_scalar(
+        "UPDATE issue_candidates SET status = 'running', claims = claims + 1, updated_at = ? \
+         WHERE id = ? AND status = 'queued' RETURNING claims",
+    )
+    .bind(now)
+    .bind(id.to_string())
+    .fetch_optional(&mut *conn)
+    .await?;
+    claims
+        .map(|value| u32_from(value, CANDIDATES, "claims"))
+        .transpose()
+}
+
+/// Counts an attempt before a call: `attempts += 1`, for the running claim `claims`. Returns the
+/// new attempt count, or `None` when the claim is stale.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn start_candidate_attempt(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    claims: u32,
+    now: i64,
+) -> Result<Option<u32>, MetaError> {
+    let attempts: Option<i64> = sqlx::query_scalar(
+        "UPDATE issue_candidates SET attempts = attempts + 1, updated_at = ? \
+         WHERE id = ? AND status = 'running' AND claims = ? RETURNING attempts",
+    )
+    .bind(now)
+    .bind(id.to_string())
+    .bind(i64::from(claims))
+    .fetch_optional(&mut *conn)
+    .await?;
+    attempts
+        .map(|value| u32_from(value, CANDIDATES, "attempts"))
+        .transpose()
+}
+
+/// Leaves a running candidate as `finish` says, fenced by `status = 'running' AND claims`.
+/// Adds `spent_usd` (a non-finite or negative amount adds 0) to its cost in every case. `false`
+/// means the fence failed and nothing changed on the candidate.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn finish_candidate(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    claims: u32,
+    finish: CandidateFinish,
+    spent_usd: f64,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let spent = if spent_usd.is_finite() && spent_usd > 0.0 {
+        spent_usd
+    } else {
+        0.0
+    };
+    let id = id.to_string();
+    let claims = i64::from(claims);
+    let result =
+        match finish {
+            CandidateFinish::Summarized {
+                summary,
+                prompt_version,
+                call_trace_id,
+            } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET summary = ?, summary_prompt_version = ?, \
+                 call_trace_id = ?, error_class = NULL, cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(summary)
+                .bind(i64::from(prompt_version))
+                .bind(call_trace_id.as_bytes().to_vec())
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Pending {
+                vector,
+                embed_model,
+                dimension,
+            } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'pending', vector = ?, embed_model = ?, \
+                 dimension = ?, error_class = NULL, cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(encode_vector(&vector))
+                .bind(embed_model)
+                .bind(i64::from(dimension))
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Assigned {
+                issue_id,
+                vector,
+                embed_model,
+                dimension,
+            } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'assigned', issue_id = ?, vector = ?, \
+                 embed_model = ?, dimension = ?, error_class = NULL, cost_usd = cost_usd + ?, \
+                 updated_at = ? WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(issue_id.to_string())
+                .bind(encode_vector(&vector))
+                .bind(embed_model)
+                .bind(i64::from(dimension))
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Dropped => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'dropped', cost_usd = cost_usd + ?, \
+                 updated_at = ? WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Retry { not_before } | CandidateFinish::Requeue { not_before } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'queued', not_before = ?, \
+                 cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(not_before)
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::LoadRetry { not_before } => sqlx::query(
+                "UPDATE issue_candidates SET status = 'queued', load_retries = load_retries + 1, \
+                 not_before = ?, cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+            )
+            .bind(not_before)
+            .bind(spent)
+            .bind(now)
+            .bind(id)
+            .bind(claims)
+            .execute(&mut *conn)
+            .await?,
+            CandidateFinish::PauseRequeue { not_before } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'queued', not_before = ?, \
+                 attempts = MAX(attempts - 1, 0), cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(not_before)
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Failed { class } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'failed', error_class = ?, \
+                 cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(class)
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+            CandidateFinish::Skipped { class } => {
+                sqlx::query(
+                    "UPDATE issue_candidates SET status = 'skipped', error_class = ?, \
+                 cost_usd = cost_usd + ?, updated_at = ? \
+                 WHERE id = ? AND status = 'running' AND claims = ?",
+                )
+                .bind(class)
+                .bind(spent)
+                .bind(now)
+                .bind(id)
+                .bind(claims)
+                .execute(&mut *conn)
+                .await?
+            }
+        };
+    Ok(result.rows_affected() > 0)
+}
+
+/// Sets the target of a running candidate after its trace loads (A4), fenced by
+/// `status = 'running' AND claims`. The trace and its start are set; a user or session already on
+/// the candidate is kept. `false` means the fence failed.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[allow(clippy::too_many_arguments)] // the candidate, its claim, the resolved trace and its owners, and the time
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn set_candidate_target(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    claims: u32,
+    trace_id: TraceId,
+    trace_start: i64,
+    user_id: Option<&str>,
+    session_id: Option<&str>,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let result = sqlx::query(
+        "UPDATE issue_candidates SET trace_id = ?, trace_start = ?, \
+         user_id = COALESCE(user_id, ?), session_id = COALESCE(session_id, ?), updated_at = ? \
+         WHERE id = ? AND status = 'running' AND claims = ?",
+    )
+    .bind(trace_id.as_bytes().to_vec())
+    .bind(trace_start)
+    .bind(user_id)
+    .bind(session_id)
+    .bind(now)
+    .bind(id.to_string())
+    .bind(i64::from(claims))
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// The interruption rule for candidates (D-I-12), for startup and the janitor: a `running`
+/// candidate not updated since `older_than` fails with class `interrupted` when it has been
+/// interrupted [`MAX_CANDIDATE_INTERRUPTIONS`] times, and goes back to `queued` with one more
+/// interruption otherwise. Returns how many rows changed.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when an update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn interrupt_candidates(
+    conn: &mut SqliteConnection,
+    older_than: i64,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let failed = sqlx::query(
+        "UPDATE issue_candidates SET status = 'failed', error_class = 'interrupted', \
+         updated_at = ?1 \
+         WHERE status = 'running' AND updated_at < ?2 AND interruptions >= ?3",
+    )
+    .bind(now)
+    .bind(older_than)
+    .bind(MAX_CANDIDATE_INTERRUPTIONS)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    let requeued = sqlx::query(
+        "UPDATE issue_candidates SET status = 'queued', not_before = ?1, \
+         interruptions = interruptions + 1, updated_at = ?1 \
+         WHERE status = 'running' AND updated_at < ?2",
+    )
+    .bind(now)
+    .bind(older_than)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    Ok(failed + requeued)
+}
+
+/// The centroids of a source's issues that are not merged: `(id, state, centroid,
+/// member_count)`, ordered by id. Issues without a centroid are left out.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn source_centroids(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+) -> Result<Vec<(Uuid, IssueState, Vec<f32>, u64)>, MetaError> {
+    let records: Vec<(String, String, Vec<u8>, i64)> = sqlx::query_as(
+        "SELECT id, state, centroid, member_count FROM issues \
+         WHERE source_id = ? AND state <> 'merged' AND centroid IS NOT NULL ORDER BY id",
+    )
+    .bind(source.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    records
+        .into_iter()
+        .map(|(id, state, centroid, member_count)| {
+            Ok((
+                parse_uuid(&id, ISSUES, "id")?,
+                IssueState::from_db(&state).ok_or_else(|| corrupt(ISSUES, "state"))?,
+                decode_vector(&centroid, ISSUES, "centroid")?,
+                u64::try_from(member_count).map_err(|_| corrupt(ISSUES, "member_count"))?,
+            ))
+        })
+        .collect()
+}
+
+/// The pending candidates of `source` created at or after `since`, newest first (ties by id
+/// descending), at most `limit`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn pending_candidates(
+    pool: &SqlitePool,
+    source: Uuid,
+    since: i64,
+    limit: u32,
+) -> Result<Vec<CandidateRow>, MetaError> {
+    let records: Vec<CandidateRecord> = sqlx::query_as(
+        "SELECT * FROM issue_candidates \
+         WHERE source_id = ? AND status = 'pending' AND created_at >= ? \
+         ORDER BY created_at DESC, id DESC LIMIT ?",
+    )
+    .bind(source.to_string())
+    .bind(since)
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(candidate_from).collect()
+}
+
+/// Marks each of `ids` that is still `pending` as joined to `issue`. Returns the ids that were
+/// assigned, in the order given: a candidate deleted or assigned since it was read is skipped.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when an update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn set_candidates_assigned(
+    conn: &mut SqliteConnection,
+    ids: &[Uuid],
+    issue: Uuid,
+    now: i64,
+) -> Result<Vec<Uuid>, MetaError> {
+    let mut assigned = Vec::with_capacity(ids.len());
+    for id in ids {
+        let result = sqlx::query(
+            "UPDATE issue_candidates SET status = 'assigned', issue_id = ?, updated_at = ? \
+             WHERE id = ? AND status = 'pending'",
+        )
+        .bind(issue.to_string())
+        .bind(now)
+        .bind(id.to_string())
+        .execute(&mut *conn)
+        .await?;
+        if result.rows_affected() > 0 {
+            assigned.push(*id);
+        }
+    }
+    Ok(assigned)
+}
+
+/// Pending candidates of `source` created before `before` become outliers. Returns how many.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn mark_outliers(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    before: i64,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let result = sqlx::query(
+        "UPDATE issue_candidates SET status = 'outlier', updated_at = ? \
+         WHERE source_id = ? AND status = 'pending' AND created_at < ?",
+    )
+    .bind(now)
+    .bind(source.to_string())
+    .bind(before)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Sets the source's embedding dimension when it is NULL (D-IC-5), and returns the stored
+/// dimension: the one just set, or the one set before.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the source does not exist or the query fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn set_embed_dimension(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    dimension: u32,
+) -> Result<u32, MetaError> {
+    sqlx::query(
+        "UPDATE issue_sources SET embed_dimension = ? WHERE id = ? AND embed_dimension IS NULL",
+    )
+    .bind(i64::from(dimension))
+    .bind(source.to_string())
+    .execute(&mut *conn)
+    .await?;
+    let stored: Option<i64> =
+        sqlx::query_scalar("SELECT embed_dimension FROM issue_sources WHERE id = ?")
+            .bind(source.to_string())
+            .fetch_one(&mut *conn)
+            .await?;
+    let stored = stored.ok_or_else(|| corrupt(SOURCES, "embed_dimension"))?;
+    u32_from(stored, SOURCES, "embed_dimension")
+}
+
+// spend and refits
+
+/// One stored refit of an LLM source (D-IC-8). Times are nanoseconds.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct RefitRow {
+    pub(crate) id: Uuid,
+    pub(crate) source_id: Uuid,
+    /// `schedule` or `manual`.
+    pub(crate) trigger: &'static str,
+    pub(crate) started_at: i64,
+    pub(crate) finished_at: Option<i64>,
+    pub(crate) pending: u32,
+    pub(crate) clusters: u32,
+    pub(crate) created: u32,
+    pub(crate) joined: u32,
+    pub(crate) outliers: u32,
+    pub(crate) cost_usd: f64,
+    pub(crate) error_class: Option<String>,
+}
+
+/// Inserts a refit row.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the insert fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn insert_refit(
+    conn: &mut SqliteConnection,
+    row: &RefitRow,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO issue_refits (id, source_id, trigger, started_at, finished_at, pending, \
+         clusters, created, joined, outliers, cost_usd, error_class) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(row.id.to_string())
+    .bind(row.source_id.to_string())
+    .bind(row.trigger)
+    .bind(row.started_at)
+    .bind(row.finished_at)
+    .bind(i64::from(row.pending))
+    .bind(i64::from(row.clusters))
+    .bind(i64::from(row.created))
+    .bind(i64::from(row.joined))
+    .bind(i64::from(row.outliers))
+    .bind(row.cost_usd)
+    .bind(&row.error_class)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Writes the counters, cost, finish time and error class of the refit in `row`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn finish_refit(
+    conn: &mut SqliteConnection,
+    row: &RefitRow,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE issue_refits SET finished_at = ?, pending = ?, clusters = ?, created = ?, \
+         joined = ?, outliers = ?, cost_usd = ?, error_class = ? WHERE id = ?",
+    )
+    .bind(row.finished_at)
+    .bind(i64::from(row.pending))
+    .bind(i64::from(row.clusters))
+    .bind(i64::from(row.created))
+    .bind(i64::from(row.joined))
+    .bind(i64::from(row.outliers))
+    .bind(row.cost_usd)
+    .bind(&row.error_class)
+    .bind(row.id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// The refits of `source`, newest first (ties by id descending), at most `limit`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn list_refits(
+    pool: &SqlitePool,
+    source: Uuid,
+    limit: u32,
+) -> Result<Vec<RefitRow>, MetaError> {
+    let records: Vec<RefitRecord> = sqlx::query_as(
+        "SELECT id, source_id, trigger, started_at, finished_at, pending, clusters, created, \
+         joined, outliers, cost_usd, error_class FROM issue_refits WHERE source_id = ? \
+         ORDER BY started_at DESC, id DESC LIMIT ?",
+    )
+    .bind(source.to_string())
+    .bind(i64::from(limit))
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(refit_from).collect()
+}
+
+/// When the source's latest refit started (nanoseconds), or `None` when it has none.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn last_refit_started(
+    pool: &SqlitePool,
+    source: Uuid,
+) -> Result<Option<i64>, MetaError> {
+    let started: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(started_at) FROM issue_refits WHERE source_id = ?")
+            .bind(source.to_string())
+            .fetch_one(pool)
+            .await?;
+    Ok(started)
+}
+
+/// Enabled, unpaused LLM sources of active projects in active orgs whose `next_refit_at` is at
+/// or before `now`, ordered by `next_refit_at`, then id.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn due_refits(pool: &SqlitePool, now: i64) -> Result<Vec<SourceRow>, MetaError> {
+    let records: Vec<SourceRecord> = sqlx::query_as(
+        "SELECT s.* FROM issue_sources s \
+         JOIN projects p ON p.id = s.project_id \
+         JOIN orgs o ON o.id = p.org_id \
+         WHERE s.enabled = 1 AND s.paused_reason IS NULL \
+         AND s.kind IN ('score', 'feedback', 'topic') \
+         AND p.state = 'active' AND o.state = 'active' \
+         AND s.next_refit_at <= ? ORDER BY s.next_refit_at, s.id",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    records.into_iter().map(source_from).collect()
+}
+
+/// Sets the source's next scheduled refit (nanoseconds).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn set_next_refit(
+    conn: &mut SqliteConnection,
+    source: Uuid,
+    at: i64,
+) -> Result<(), MetaError> {
+    sqlx::query("UPDATE issue_sources SET next_refit_at = ? WHERE id = ?")
+        .bind(at)
+        .bind(source.to_string())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+/// Closes the refits that never finished (startup, D-I-12): `finished_at = now` and error class
+/// `interrupted`. Returns how many.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn close_open_refits(
+    conn: &mut SqliteConnection,
+    now: i64,
+) -> Result<u64, MetaError> {
+    let result = sqlx::query(
+        "UPDATE issue_refits SET finished_at = ?, error_class = 'interrupted' \
+         WHERE finished_at IS NULL",
+    )
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected())
+}
+
+/// Enabled, unpaused LLM sources (`score`, `feedback`, `topic`) of active projects in active
+/// orgs, with the project's org and its completion timeout, for the triggers.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) async fn llm_sources(
+    pool: &SqlitePool,
+) -> Result<Vec<(SourceRow, OrgId, Option<i64>)>, MetaError> {
+    let records: Vec<LlmSourceRecord> = sqlx::query_as(
+        "SELECT s.*, p.org_id, \
+         CAST(CASE WHEN json_valid(p.settings) AND json_type(p.settings) = 'object' \
+              THEN json_extract(p.settings, '$.trace_completion_timeout_s') END AS INTEGER) \
+           AS completion_timeout_s \
+         FROM issue_sources s \
+         JOIN projects p ON p.id = s.project_id \
+         JOIN orgs o ON o.id = p.org_id \
+         WHERE s.enabled = 1 AND s.paused_reason IS NULL \
+         AND s.kind IN ('score', 'feedback', 'topic') \
+         AND p.state = 'active' AND o.state = 'active' \
+         ORDER BY s.project_id, s.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    records
+        .into_iter()
+        .map(|record| {
+            Ok((
+                source_from(record.source)?,
+                OrgId::from_uuid(parse_uuid(&record.org_id, SOURCES, "org_id")?),
+                record.completion_timeout_s,
+            ))
+        })
+        .collect()
+}
+
 // rows
 
 #[derive(sqlx::FromRow)]
@@ -948,7 +1955,11 @@ fn issue_from(record: IssueRecord) -> Result<IssueRow, MetaError> {
         resolved_by: optional_uuid(record.resolved_by, ISSUES, "resolved_by")?,
         created_at: record.created_at,
         updated_at: record.updated_at,
-        centroid: record.centroid.as_deref().map(decode_vector).transpose()?,
+        centroid: record
+            .centroid
+            .as_deref()
+            .map(|bytes| decode_vector(bytes, ISSUES, "centroid"))
+            .transpose()?,
         member_count: u64::try_from(record.member_count)
             .map_err(|_| corrupt(ISSUES, "member_count"))?,
     })
@@ -977,6 +1988,152 @@ fn event_from(record: EventRecord) -> Result<EventRow, MetaError> {
     })
 }
 
+#[derive(sqlx::FromRow)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct CandidateRecord {
+    id: String,
+    project_id: String,
+    source_id: String,
+    target: String,
+    trace_id: Option<Vec<u8>>,
+    span_id: Option<Vec<u8>>,
+    session_id: Option<String>,
+    user_id: Option<String>,
+    trace_start: Option<i64>,
+    score_id: Option<String>,
+    dedup_key: String,
+    status: String,
+    attempts: i64,
+    claims: i64,
+    interruptions: i64,
+    load_retries: i64,
+    not_before: i64,
+    error_class: Option<String>,
+    issue_id: Option<String>,
+    summary: Option<String>,
+    summary_prompt_version: Option<i64>,
+    vector: Option<Vec<u8>>,
+    embed_model: Option<String>,
+    dimension: Option<i64>,
+    call_trace_id: Option<Vec<u8>>,
+    cost_usd: f64,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn candidate_from(record: CandidateRecord) -> Result<CandidateRow, MetaError> {
+    Ok(CandidateRow {
+        id: parse_uuid(&record.id, CANDIDATES, "id")?,
+        project_id: ProjectId::from_uuid(parse_uuid(&record.project_id, CANDIDATES, "project_id")?),
+        source_id: parse_uuid(&record.source_id, CANDIDATES, "source_id")?,
+        target: CandidateTarget::from_db(&record.target)
+            .ok_or_else(|| corrupt(CANDIDATES, "target"))?,
+        trace_id: record
+            .trace_id
+            .as_deref()
+            .map(|bytes| TraceId::from_slice(bytes).map_err(|_| corrupt(CANDIDATES, "trace_id")))
+            .transpose()?,
+        span_id: record
+            .span_id
+            .as_deref()
+            .map(|bytes| SpanId::from_slice(bytes).map_err(|_| corrupt(CANDIDATES, "span_id")))
+            .transpose()?,
+        session_id: record.session_id,
+        user_id: record.user_id,
+        trace_start: record.trace_start,
+        score_id: optional_uuid(record.score_id, CANDIDATES, "score_id")?,
+        dedup_key: record.dedup_key,
+        status: CandidateStatus::from_db(&record.status)
+            .ok_or_else(|| corrupt(CANDIDATES, "status"))?,
+        attempts: u32_from(record.attempts, CANDIDATES, "attempts")?,
+        claims: u32_from(record.claims, CANDIDATES, "claims")?,
+        interruptions: u32_from(record.interruptions, CANDIDATES, "interruptions")?,
+        load_retries: u32_from(record.load_retries, CANDIDATES, "load_retries")?,
+        not_before: record.not_before,
+        error_class: record.error_class,
+        issue_id: optional_uuid(record.issue_id, CANDIDATES, "issue_id")?,
+        summary: record.summary,
+        summary_prompt_version: optional_u32(
+            record.summary_prompt_version,
+            CANDIDATES,
+            "summary_prompt_version",
+        )?,
+        vector: record
+            .vector
+            .as_deref()
+            .map(|bytes| decode_vector(bytes, CANDIDATES, "vector"))
+            .transpose()?,
+        embed_model: record.embed_model,
+        dimension: optional_u32(record.dimension, CANDIDATES, "dimension")?,
+        call_trace_id: record
+            .call_trace_id
+            .as_deref()
+            .map(|bytes| {
+                TraceId::from_slice(bytes).map_err(|_| corrupt(CANDIDATES, "call_trace_id"))
+            })
+            .transpose()?,
+        cost_usd: record.cost_usd,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    })
+}
+
+#[derive(sqlx::FromRow)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct RefitRecord {
+    id: String,
+    source_id: String,
+    trigger: String,
+    started_at: i64,
+    finished_at: Option<i64>,
+    pending: i64,
+    clusters: i64,
+    created: i64,
+    joined: i64,
+    outliers: i64,
+    cost_usd: f64,
+    error_class: Option<String>,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn refit_from(record: RefitRecord) -> Result<RefitRow, MetaError> {
+    let trigger = match record.trigger.as_str() {
+        "schedule" => "schedule",
+        "manual" => "manual",
+        _ => return Err(corrupt(REFITS, "trigger")),
+    };
+    Ok(RefitRow {
+        id: parse_uuid(&record.id, REFITS, "id")?,
+        source_id: parse_uuid(&record.source_id, REFITS, "source_id")?,
+        trigger,
+        started_at: record.started_at,
+        finished_at: record.finished_at,
+        pending: u32_from(record.pending, REFITS, "pending")?,
+        clusters: u32_from(record.clusters, REFITS, "clusters")?,
+        created: u32_from(record.created, REFITS, "created")?,
+        joined: u32_from(record.joined, REFITS, "joined")?,
+        outliers: u32_from(record.outliers, REFITS, "outliers")?,
+        cost_usd: record.cost_usd,
+        error_class: record.error_class,
+    })
+}
+
+/// An LLM source with the org of its project and the project's completion timeout.
+#[derive(sqlx::FromRow)]
+#[cfg_attr(not(test), allow(dead_code))]
+struct LlmSourceRecord {
+    org_id: String,
+    completion_timeout_s: Option<i64>,
+    #[sqlx(flatten)]
+    source: SourceRecord,
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn u32_from(value: i64, table: &'static str, column: &'static str) -> Result<u32, MetaError> {
+    u32::try_from(value).map_err(|_| corrupt(table, column))
+}
+
 /// A vector as f32 little-endian bytes: the BLOB form of a centroid or a candidate vector.
 pub(crate) fn encode_vector(vector: &[f32]) -> Vec<u8> {
     vector
@@ -985,19 +2142,25 @@ pub(crate) fn encode_vector(vector: &[f32]) -> Vec<u8> {
         .collect()
 }
 
-/// The vector [`encode_vector`] wrote. A length that is not a multiple of four is corrupt.
+/// The vector [`encode_vector`] wrote, read from `table.column` for the error. A length that is
+/// not a multiple of four is corrupt.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError::Corrupt`] when the length is not a multiple of four.
-pub(crate) fn decode_vector(bytes: &[u8]) -> Result<Vec<f32>, MetaError> {
+/// Returns [`MetaError::Corrupt`] naming `table` and `column` when the length is not a multiple
+/// of four.
+pub(crate) fn decode_vector(
+    bytes: &[u8],
+    table: &'static str,
+    column: &'static str,
+) -> Result<Vec<f32>, MetaError> {
     if !bytes.len().is_multiple_of(4) {
-        return Err(corrupt(ISSUES, "centroid"));
+        return Err(corrupt(table, column));
     }
     bytes
         .chunks_exact(4)
         .map(|chunk| -> Result<f32, MetaError> {
-            let array: [u8; 4] = chunk.try_into().map_err(|_| corrupt(ISSUES, "centroid"))?;
+            let array: [u8; 4] = chunk.try_into().map_err(|_| corrupt(table, column))?;
             Ok(f32::from_le_bytes(array))
         })
         .collect()
@@ -1063,15 +2226,21 @@ fn optional_uuid(
 
 #[cfg(test)]
 mod tests {
-    use cetra_core::ids::{OrgId, ProjectId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use uuid::Uuid;
 
     use super::{
-        EventKind, EventRow, IssueListQuery, IssueRow, IssueSort, IssueState, SourceKind,
-        SourceRow, count_enabled_sources, decode_vector, delete_source, encode_vector, get_issue,
-        get_issue_tx, get_source, insert_event, insert_issue, insert_source, issue_by_fingerprint,
-        list_events, list_issues, list_sources, merged_ids, open_counts, retarget_merged,
-        sweep_sources, update_issue, update_source,
+        CandidateFinish, CandidateRecord, CandidateRow, CandidateStatus, CandidateTarget,
+        EventKind, EventRow, IssueListQuery, IssueRow, IssueSort, IssueState, RefitRow, SourceKind,
+        SourceRow, add_spend, admit_daily, candidate_from, claim_candidate, close_open_refits,
+        count_enabled_sources, decode_vector, delete_source, due_refits, encode_vector,
+        finish_candidate, finish_refit, get_issue, get_issue_tx, get_source, insert_candidate,
+        insert_event, insert_issue, insert_refit, insert_source, interrupt_candidates,
+        issue_by_fingerprint, last_refit_started, list_events, list_issues, list_refits,
+        list_sources, llm_sources, mark_outliers, merged_ids, open_counts, pending_candidates,
+        ready_candidates, retarget_merged, set_candidate_target, set_candidates_assigned,
+        set_embed_dimension, set_next_refit, source_centroids, spent_between,
+        start_candidate_attempt, sweep_sources, update_issue, update_source,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::projects::{delete_project, insert_project, mark_project_deleting};
@@ -1852,21 +3021,898 @@ mod tests {
         let bytes = encode_vector(&vector);
         assert_eq!(bytes.len(), 16);
         assert_eq!(&bytes[..4], &1.0_f32.to_le_bytes()[..]);
-        assert_eq!(decode_vector(&bytes).unwrap(), vector);
+        assert_eq!(decode_vector(&bytes, "issues", "centroid").unwrap(), vector);
         assert_eq!(
-            decode_vector(&encode_vector(&[])).unwrap(),
+            decode_vector(&encode_vector(&[]), "issues", "centroid").unwrap(),
             Vec::<f32>::new()
         );
-        let error = decode_vector(&bytes[..15]).unwrap_err();
+        let error = decode_vector(&bytes[..15], "issue_candidates", "vector").unwrap_err();
         assert!(
             matches!(
                 error,
                 MetaError::Corrupt {
-                    table: "issues",
-                    column: "centroid"
+                    table: "issue_candidates",
+                    column: "vector"
                 }
             ),
             "{error:?}"
         );
+    }
+
+    const DAY: i64 = 86_400_000_000_000;
+
+    fn trace(byte: u8) -> TraceId {
+        TraceId::from_slice(&[byte; 16]).unwrap()
+    }
+
+    /// A queued trace candidate of `source`, created at `created_at`.
+    fn candidate(
+        id: u128,
+        source: &SourceRow,
+        dedup: &str,
+        status: CandidateStatus,
+        created_at: i64,
+    ) -> CandidateRow {
+        CandidateRow {
+            id: Uuid::from_u128(id),
+            project_id: source.project_id,
+            source_id: source.id,
+            target: CandidateTarget::Trace,
+            trace_id: Some(trace(7)),
+            span_id: None,
+            session_id: None,
+            user_id: None,
+            trace_start: Some(created_at),
+            score_id: None,
+            dedup_key: dedup.to_owned(),
+            status,
+            attempts: 0,
+            claims: 0,
+            interruptions: 0,
+            load_retries: 0,
+            not_before: created_at,
+            error_class: None,
+            issue_id: None,
+            summary: None,
+            summary_prompt_version: None,
+            vector: None,
+            embed_model: None,
+            dimension: None,
+            call_trace_id: None,
+            cost_usd: 0.0,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    async fn put_candidate(db: &MetaDb, row: CandidateRow) -> bool {
+        db.write(move |conn| Box::pin(async move { insert_candidate(conn, &row).await }))
+            .await
+            .unwrap()
+    }
+
+    async fn read_candidate(db: &MetaDb, id: Uuid) -> CandidateRow {
+        let record: CandidateRecord = sqlx::query_as("SELECT * FROM issue_candidates WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        candidate_from(record).unwrap()
+    }
+
+    fn scored_source(project: ProjectId, name: &str, kind: SourceKind) -> SourceRow {
+        let mut row = source(project, name, true);
+        row.kind = kind;
+        row
+    }
+
+    async fn admit(db: &MetaDb, source: Uuid, day: i64, cap: u32) -> bool {
+        db.write(move |conn| Box::pin(async move { admit_daily(conn, source, day, cap).await }))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_candidate_round_trips_and_a_duplicate_dedup_key_is_ignored() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let src = scored_source(project, "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let mut row = candidate(1, &src, "k1", CandidateStatus::Pending, NOW);
+        row.target = CandidateTarget::Span;
+        row.span_id = Some(SpanId::from_slice(&[9; 8]).unwrap());
+        row.session_id = Some("session-1".to_owned());
+        row.user_id = Some("user-1".to_owned());
+        row.score_id = Some(Uuid::from_u128(77));
+        row.attempts = 2;
+        row.claims = 3;
+        row.interruptions = 1;
+        row.load_retries = 1;
+        row.not_before = NOW + 5;
+        row.error_class = Some("retryable".to_owned());
+        row.summary = Some("the summary".to_owned());
+        row.summary_prompt_version = Some(4);
+        row.vector = Some(vec![0.5, -1.0]);
+        row.embed_model = Some("embed-model".to_owned());
+        row.dimension = Some(2);
+        row.call_trace_id = Some(trace(5));
+        row.cost_usd = 0.25;
+        row.updated_at = NOW + 1;
+        assert!(put_candidate(&db, row.clone()).await);
+
+        let listed = pending_candidates(db.reader(), src.id, 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(listed, vec![row.clone()]);
+
+        let mut duplicate = candidate(2, &src, "k1", CandidateStatus::Queued, NOW);
+        duplicate.updated_at = NOW;
+        assert!(!put_candidate(&db, duplicate).await);
+        assert_eq!(count(&db, "SELECT COUNT(*) FROM issue_candidates").await, 1);
+    }
+
+    #[tokio::test]
+    async fn admit_daily_stops_at_the_cap_and_starts_again_the_next_day() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let day = 5 * DAY;
+
+        assert!(admit(&db, src.id, day, 2).await);
+        assert!(admit(&db, src.id, day, 2).await);
+        assert!(!admit(&db, src.id, day, 2).await);
+        assert!(!admit(&db, src.id, day, 2).await);
+        assert!(admit(&db, src.id, day + DAY, 2).await);
+        // A cap of 0 admits nothing, and a source that does not exist admits nothing.
+        assert!(!admit(&db, src.id, day + 2 * DAY, 0).await);
+        assert!(!admit(&db, Uuid::from_u128(999), day, 5).await);
+    }
+
+    #[tokio::test]
+    async fn add_spend_accumulates_per_day_and_sums_a_range() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let day = 5 * DAY;
+        let id = src.id;
+        db.write(move |conn| {
+            Box::pin(async move {
+                add_spend(conn, id, day, 0.25).await?;
+                add_spend(conn, id, day, 0.5).await?;
+                add_spend(conn, id, day + DAY, 1.0).await?;
+                // A non-finite amount adds nothing.
+                add_spend(conn, id, day + DAY, f64::NAN).await?;
+                // A source that does not exist inserts nothing.
+                add_spend(conn, Uuid::from_u128(999), day, 4.0).await
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            spent_between(db.reader(), src.id, day, day + DAY)
+                .await
+                .unwrap(),
+            0.75
+        );
+        assert_eq!(
+            spent_between(db.reader(), src.id, day, day + 2 * DAY)
+                .await
+                .unwrap(),
+            1.75
+        );
+        assert_eq!(
+            spent_between(db.reader(), Uuid::from_u128(999), day, day + DAY)
+                .await
+                .unwrap(),
+            0.0
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_start_and_finish_are_fenced_by_the_claim() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let row = candidate(1, &src, "k1", CandidateStatus::Queued, NOW);
+        put_candidate(&db, row.clone()).await;
+        let id = row.id;
+
+        let claimed = db
+            .write(move |conn| Box::pin(async move { claim_candidate(conn, id, NOW).await }))
+            .await
+            .unwrap();
+        assert_eq!(claimed, Some(1));
+        let again = db
+            .write(move |conn| Box::pin(async move { claim_candidate(conn, id, NOW).await }))
+            .await
+            .unwrap();
+        assert_eq!(again, None);
+
+        let attempts = db
+            .write(move |conn| {
+                Box::pin(async move { start_candidate_attempt(conn, id, 1, NOW).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(attempts, Some(1));
+        let stale_attempt = db
+            .write(move |conn| {
+                Box::pin(async move { start_candidate_attempt(conn, id, 0, NOW).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(stale_attempt, None);
+
+        let stale = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    finish_candidate(
+                        conn,
+                        id,
+                        0,
+                        CandidateFinish::Retry {
+                            not_before: NOW + 10,
+                        },
+                        0.5,
+                        NOW,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(!stale);
+        let untouched = read_candidate(&db, id).await;
+        assert_eq!(untouched.status, CandidateStatus::Running);
+        assert_eq!(untouched.cost_usd, 0.0);
+
+        let retried = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    finish_candidate(
+                        conn,
+                        id,
+                        1,
+                        CandidateFinish::Retry {
+                            not_before: NOW + 10,
+                        },
+                        0.5,
+                        NOW + 1,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(retried);
+        let back = read_candidate(&db, id).await;
+        assert_eq!(back.status, CandidateStatus::Queued);
+        assert_eq!(back.not_before, NOW + 10);
+        assert_eq!(back.attempts, 1);
+        assert_eq!(back.cost_usd, 0.5);
+        assert_eq!(back.updated_at, NOW + 1);
+    }
+
+    #[tokio::test]
+    async fn finish_candidate_writes_each_variant() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let src = scored_source(project, "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        put_issue(
+            &db,
+            issue(50, src.id, project, "group", IssueState::Open, NOW),
+        )
+        .await;
+        // Each candidate is running with claim 1; `attempts` is 2 so a pause can give one back.
+        for n in 1..=9_u128 {
+            let mut row = candidate(n, &src, &format!("k{n}"), CandidateStatus::Running, NOW);
+            row.claims = 1;
+            row.attempts = 2;
+            put_candidate(&db, row).await;
+        }
+        let summarized = Uuid::from_u128(1);
+        let pending = Uuid::from_u128(2);
+        let assigned = Uuid::from_u128(3);
+        let dropped = Uuid::from_u128(4);
+        let load_retry = Uuid::from_u128(5);
+        let pause = Uuid::from_u128(6);
+        let failed = Uuid::from_u128(7);
+        let skipped = Uuid::from_u128(8);
+        let requeued = Uuid::from_u128(9);
+
+        let writes: Vec<(Uuid, CandidateFinish)> = vec![
+            (
+                summarized,
+                CandidateFinish::Summarized {
+                    summary: "a summary".to_owned(),
+                    prompt_version: 3,
+                    call_trace_id: trace(8),
+                },
+            ),
+            (
+                pending,
+                CandidateFinish::Pending {
+                    vector: vec![1.0, 2.0],
+                    embed_model: "embed".to_owned(),
+                    dimension: 2,
+                },
+            ),
+            (
+                assigned,
+                CandidateFinish::Assigned {
+                    issue_id: Uuid::from_u128(50),
+                    vector: vec![3.0, 4.0],
+                    embed_model: "embed".to_owned(),
+                    dimension: 2,
+                },
+            ),
+            (dropped, CandidateFinish::Dropped),
+            (
+                load_retry,
+                CandidateFinish::LoadRetry {
+                    not_before: NOW + 2,
+                },
+            ),
+            (
+                pause,
+                CandidateFinish::PauseRequeue {
+                    not_before: NOW + 3,
+                },
+            ),
+            (
+                failed,
+                CandidateFinish::Failed {
+                    class: "trace_not_found",
+                },
+            ),
+            (skipped, CandidateFinish::Skipped { class: "budget" }),
+            (
+                requeued,
+                CandidateFinish::Requeue {
+                    not_before: NOW + 4,
+                },
+            ),
+        ];
+        for (id, finish) in writes {
+            let done = db
+                .write(move |conn| {
+                    Box::pin(
+                        async move { finish_candidate(conn, id, 1, finish, 0.1, NOW + 1).await },
+                    )
+                })
+                .await
+                .unwrap();
+            assert!(done);
+        }
+
+        let summarized = read_candidate(&db, summarized).await;
+        assert_eq!(summarized.status, CandidateStatus::Running);
+        assert_eq!(summarized.summary.as_deref(), Some("a summary"));
+        assert_eq!(summarized.summary_prompt_version, Some(3));
+        assert_eq!(summarized.call_trace_id, Some(trace(8)));
+        assert!((summarized.cost_usd - 0.1).abs() < 1e-12);
+
+        let pending = read_candidate(&db, pending).await;
+        assert_eq!(pending.status, CandidateStatus::Pending);
+        assert_eq!(pending.vector, Some(vec![1.0, 2.0]));
+        assert_eq!(pending.embed_model.as_deref(), Some("embed"));
+        assert_eq!(pending.dimension, Some(2));
+
+        let assigned = read_candidate(&db, assigned).await;
+        assert_eq!(assigned.status, CandidateStatus::Assigned);
+        assert_eq!(assigned.issue_id, Some(Uuid::from_u128(50)));
+        assert_eq!(assigned.vector, Some(vec![3.0, 4.0]));
+
+        assert_eq!(
+            read_candidate(&db, dropped).await.status,
+            CandidateStatus::Dropped
+        );
+
+        let load_retry = read_candidate(&db, load_retry).await;
+        assert_eq!(load_retry.status, CandidateStatus::Queued);
+        assert_eq!(load_retry.load_retries, 1);
+        assert_eq!(load_retry.not_before, NOW + 2);
+
+        let pause = read_candidate(&db, pause).await;
+        assert_eq!(pause.status, CandidateStatus::Queued);
+        assert_eq!(pause.attempts, 1);
+        assert_eq!(pause.not_before, NOW + 3);
+
+        let failed = read_candidate(&db, failed).await;
+        assert_eq!(failed.status, CandidateStatus::Failed);
+        assert_eq!(failed.error_class.as_deref(), Some("trace_not_found"));
+
+        let skipped = read_candidate(&db, skipped).await;
+        assert_eq!(skipped.status, CandidateStatus::Skipped);
+        assert_eq!(skipped.error_class.as_deref(), Some("budget"));
+
+        let requeued = read_candidate(&db, requeued).await;
+        assert_eq!(requeued.status, CandidateStatus::Queued);
+        assert_eq!(requeued.attempts, 2);
+        assert_eq!(requeued.not_before, NOW + 4);
+        assert_eq!(requeued.load_retries, 0);
+    }
+
+    #[tokio::test]
+    async fn interrupt_candidates_requeues_then_fails_at_the_third_interruption() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let mut once = candidate(1, &src, "k1", CandidateStatus::Running, NOW);
+        once.claims = 1;
+        let mut last = candidate(2, &src, "k2", CandidateStatus::Running, NOW);
+        last.claims = 1;
+        last.interruptions = 3;
+        let mut fresh = candidate(3, &src, "k3", CandidateStatus::Running, NOW + 100);
+        fresh.claims = 1;
+        put_candidate(&db, once).await;
+        put_candidate(&db, last).await;
+        put_candidate(&db, fresh).await;
+
+        // Rows not updated since `NOW + 50` are interrupted; `fresh` is left alone.
+        let changed = db
+            .write(move |conn| {
+                Box::pin(async move { interrupt_candidates(conn, NOW + 50, NOW + 60).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(changed, 2);
+
+        let requeued = read_candidate(&db, Uuid::from_u128(1)).await;
+        assert_eq!(requeued.status, CandidateStatus::Queued);
+        assert_eq!(requeued.interruptions, 1);
+        assert_eq!(requeued.not_before, NOW + 60);
+        let failed = read_candidate(&db, Uuid::from_u128(2)).await;
+        assert_eq!(failed.status, CandidateStatus::Failed);
+        assert_eq!(failed.error_class.as_deref(), Some("interrupted"));
+        let untouched = read_candidate(&db, Uuid::from_u128(3)).await;
+        assert_eq!(untouched.status, CandidateStatus::Running);
+        assert_eq!(untouched.interruptions, 0);
+    }
+
+    #[tokio::test]
+    async fn ready_candidates_skips_paused_saturated_and_future_candidates() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let (chat, embed, saturated) = (
+            Uuid::from_u128(11),
+            Uuid::from_u128(12),
+            Uuid::from_u128(13),
+        );
+        for id in [chat, embed, saturated] {
+            connection(&db, org, id).await;
+        }
+        let mut ok = scored_source(project, "ok", SourceKind::Score);
+        ok.chat_connection_id = Some(chat);
+        ok.embed_connection_id = Some(embed);
+        let mut paused = scored_source(project, "paused", SourceKind::Score);
+        paused.paused_reason = Some("connection".to_owned());
+        let mut chat_saturated = scored_source(project, "chat", SourceKind::Score);
+        chat_saturated.chat_connection_id = Some(saturated);
+        let mut embed_saturated = scored_source(project, "embed", SourceKind::Score);
+        embed_saturated.embed_connection_id = Some(saturated);
+        // A source without connections has NULL in both columns, which is not saturated.
+        let bare = scored_source(project, "bare", SourceKind::Score);
+        for row in [&ok, &paused, &chat_saturated, &embed_saturated, &bare] {
+            put_source(&db, row.clone()).await;
+        }
+
+        let wanted = candidate(1, &ok, "k1", CandidateStatus::Queued, NOW);
+        let mut future = candidate(2, &ok, "k2", CandidateStatus::Queued, NOW);
+        future.not_before = NOW + 1_000;
+        let blocked_paused = candidate(3, &paused, "k3", CandidateStatus::Queued, NOW);
+        let blocked_chat = candidate(4, &chat_saturated, "k4", CandidateStatus::Queued, NOW);
+        let blocked_embed = candidate(5, &embed_saturated, "k5", CandidateStatus::Queued, NOW);
+        let mut bare_row = candidate(6, &bare, "k6", CandidateStatus::Queued, NOW);
+        bare_row.not_before = NOW - 1;
+        for row in [
+            wanted,
+            future,
+            blocked_paused,
+            blocked_chat,
+            blocked_embed,
+            bare_row,
+        ] {
+            put_candidate(&db, row).await;
+        }
+
+        let ids =
+            |rows: &[CandidateRow]| rows.iter().map(|row| row.id.as_u128()).collect::<Vec<_>>();
+        let ready = ready_candidates(db.reader(), NOW, &[saturated], 10)
+            .await
+            .unwrap();
+        // Oldest `not_before` first.
+        assert_eq!(ids(&ready), vec![6, 1]);
+        let embed_busy = ready_candidates(db.reader(), NOW, &[embed], 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&embed_busy), vec![6]);
+        let limited = ready_candidates(db.reader(), NOW, &[], 1).await.unwrap();
+        assert_eq!(ids(&limited), vec![6]);
+    }
+
+    #[tokio::test]
+    async fn source_centroids_leaves_out_merged_issues_and_issues_without_a_centroid() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let src = scored_source(project, "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let mut open = issue(1, src.id, project, "open", IssueState::Open, NOW);
+        open.centroid = Some(vec![1.0, 2.0]);
+        open.member_count = 3;
+        let mut merged = issue(2, src.id, project, "merged", IssueState::Merged, NOW);
+        merged.merged_into = Some(Uuid::from_u128(1));
+        merged.centroid = Some(vec![9.0, 9.0]);
+        let mut resolved = issue(3, src.id, project, "resolved", IssueState::Resolved, NOW);
+        resolved.centroid = Some(vec![3.0, 4.0]);
+        resolved.member_count = 5;
+        let no_centroid = issue(4, src.id, project, "none", IssueState::Open, NOW);
+        for row in [open, merged, resolved, no_centroid] {
+            put_issue(&db, row).await;
+        }
+
+        let centroids = db
+            .write(move |conn| Box::pin(async move { source_centroids(conn, src.id).await }))
+            .await
+            .unwrap();
+        assert_eq!(
+            centroids,
+            vec![
+                (Uuid::from_u128(1), IssueState::Open, vec![1.0, 2.0], 3),
+                (Uuid::from_u128(3), IssueState::Resolved, vec![3.0, 4.0], 5),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_candidates_is_newest_first_and_mark_outliers_takes_the_old_ones() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let old = candidate(1, &src, "k1", CandidateStatus::Pending, NOW - 100);
+        let middle = candidate(2, &src, "k2", CandidateStatus::Pending, NOW - 50);
+        let newest = candidate(3, &src, "k3", CandidateStatus::Pending, NOW);
+        let queued = candidate(4, &src, "k4", CandidateStatus::Queued, NOW - 10);
+        for row in [old, middle, newest, queued] {
+            put_candidate(&db, row).await;
+        }
+
+        let ids =
+            |rows: &[CandidateRow]| rows.iter().map(|row| row.id.as_u128()).collect::<Vec<_>>();
+        let all = pending_candidates(db.reader(), src.id, NOW - 100, 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&all), vec![3, 2, 1]);
+        let recent = pending_candidates(db.reader(), src.id, NOW - 60, 10)
+            .await
+            .unwrap();
+        assert_eq!(ids(&recent), vec![3, 2]);
+        let first = pending_candidates(db.reader(), src.id, NOW - 100, 1)
+            .await
+            .unwrap();
+        assert_eq!(ids(&first), vec![3]);
+
+        let marked = db
+            .write(move |conn| {
+                Box::pin(async move { mark_outliers(conn, src.id, NOW - 10, NOW + 1).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(marked, 2);
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(1)).await.status,
+            CandidateStatus::Outlier
+        );
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(2)).await.status,
+            CandidateStatus::Outlier
+        );
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(3)).await.status,
+            CandidateStatus::Pending
+        );
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(4)).await.status,
+            CandidateStatus::Queued
+        );
+    }
+
+    #[tokio::test]
+    async fn set_candidates_assigned_returns_only_the_pending_rows_it_assigned() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let project = projects[0];
+        let src = scored_source(project, "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        put_issue(
+            &db,
+            issue(50, src.id, project, "group", IssueState::Open, NOW),
+        )
+        .await;
+        put_candidate(&db, candidate(1, &src, "k1", CandidateStatus::Pending, NOW)).await;
+        put_candidate(&db, candidate(2, &src, "k2", CandidateStatus::Queued, NOW)).await;
+        put_candidate(&db, candidate(3, &src, "k3", CandidateStatus::Pending, NOW)).await;
+        let issue_id = Uuid::from_u128(50);
+        let ids = [Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(3)];
+
+        let assigned = db
+            .write(move |conn| {
+                Box::pin(
+                    async move { set_candidates_assigned(conn, &ids, issue_id, NOW + 1).await },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(assigned, vec![Uuid::from_u128(1), Uuid::from_u128(3)]);
+        let first = read_candidate(&db, Uuid::from_u128(1)).await;
+        assert_eq!(first.status, CandidateStatus::Assigned);
+        assert_eq!(first.issue_id, Some(issue_id));
+        assert_eq!(
+            read_candidate(&db, Uuid::from_u128(2)).await.status,
+            CandidateStatus::Queued
+        );
+
+        // The fence: an assigned candidate is not assigned again.
+        let again = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    set_candidates_assigned(conn, &[Uuid::from_u128(1)], issue_id, NOW + 2).await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_candidate_target_sets_the_trace_and_keeps_an_owner_already_set() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let mut row = candidate(1, &src, "session:s1", CandidateStatus::Running, NOW);
+        row.target = CandidateTarget::Session;
+        row.trace_id = None;
+        row.trace_start = None;
+        row.session_id = Some("s1".to_owned());
+        row.claims = 1;
+        let id = row.id;
+        put_candidate(&db, row).await;
+
+        let stale = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    set_candidate_target(
+                        conn,
+                        id,
+                        0,
+                        trace(3),
+                        NOW + 3,
+                        Some("user-2"),
+                        Some("s2"),
+                        NOW + 4,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(!stale);
+
+        let set = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    set_candidate_target(
+                        conn,
+                        id,
+                        1,
+                        trace(3),
+                        NOW + 3,
+                        Some("user-2"),
+                        Some("s2"),
+                        NOW + 4,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(set);
+        let stored = read_candidate(&db, id).await;
+        assert_eq!(stored.trace_id, Some(trace(3)));
+        assert_eq!(stored.trace_start, Some(NOW + 3));
+        assert_eq!(stored.user_id.as_deref(), Some("user-2"));
+        // The session was set before, so it is kept.
+        assert_eq!(stored.session_id.as_deref(), Some("s1"));
+    }
+
+    #[tokio::test]
+    async fn set_embed_dimension_sets_once_and_then_returns_the_stored_value() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let id = src.id;
+
+        let first = db
+            .write(move |conn| Box::pin(async move { set_embed_dimension(conn, id, 512).await }))
+            .await
+            .unwrap();
+        assert_eq!(first, 512);
+        let second = db
+            .write(move |conn| Box::pin(async move { set_embed_dimension(conn, id, 256).await }))
+            .await
+            .unwrap();
+        assert_eq!(second, 512);
+        let stored = get_source(db.reader(), projects[0], id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.embed_dimension, Some(512));
+
+        let missing = db
+            .write(move |conn| {
+                Box::pin(async move { set_embed_dimension(conn, Uuid::from_u128(999), 8).await })
+            })
+            .await;
+        assert!(missing.is_err());
+    }
+
+    fn refit(id: u128, source: Uuid, trigger: &'static str, started_at: i64) -> RefitRow {
+        RefitRow {
+            id: Uuid::from_u128(id),
+            source_id: source,
+            trigger,
+            started_at,
+            finished_at: None,
+            pending: 0,
+            clusters: 0,
+            created: 0,
+            joined: 0,
+            outliers: 0,
+            cost_usd: 0.0,
+            error_class: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn refits_round_trip_and_list_newest_first() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        assert_eq!(last_refit_started(db.reader(), src.id).await.unwrap(), None);
+
+        let mut first = refit(1, src.id, "schedule", NOW);
+        first.finished_at = Some(NOW + 1);
+        first.pending = 4;
+        first.clusters = 1;
+        first.created = 1;
+        first.joined = 2;
+        first.outliers = 1;
+        first.cost_usd = 0.5;
+        let mut second = refit(2, src.id, "manual", NOW + 10);
+        second.error_class = Some("busy".to_owned());
+        for row in [first.clone(), second.clone()] {
+            db.write(move |conn| Box::pin(async move { insert_refit(conn, &row).await }))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            list_refits(db.reader(), src.id, 10).await.unwrap(),
+            vec![second.clone(), first.clone()]
+        );
+        assert_eq!(
+            list_refits(db.reader(), src.id, 1).await.unwrap(),
+            vec![second.clone()]
+        );
+        assert_eq!(
+            last_refit_started(db.reader(), src.id).await.unwrap(),
+            Some(NOW + 10)
+        );
+
+        let mut finished = second.clone();
+        finished.finished_at = Some(NOW + 20);
+        finished.error_class = None;
+        finished.created = 3;
+        finished.cost_usd = 1.0;
+        db.write(move |conn| Box::pin(async move { finish_refit(conn, &finished).await }))
+            .await
+            .unwrap();
+        let listed = list_refits(db.reader(), src.id, 10).await.unwrap();
+        assert_eq!(listed[0].finished_at, Some(NOW + 20));
+        assert_eq!(listed[0].error_class, None);
+        assert_eq!(listed[0].created, 3);
+        assert_eq!(listed[0].cost_usd, 1.0);
+        assert_eq!(listed[1], first);
+    }
+
+    #[tokio::test]
+    async fn close_open_refits_closes_only_the_refits_that_never_finished() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (_, projects) = seed(&db, &["support"]).await;
+        let src = scored_source(projects[0], "scores", SourceKind::Score);
+        put_source(&db, src.clone()).await;
+        let mut done = refit(1, src.id, "schedule", NOW);
+        done.finished_at = Some(NOW + 1);
+        let open = refit(2, src.id, "manual", NOW + 2);
+        for row in [done.clone(), open.clone()] {
+            db.write(move |conn| Box::pin(async move { insert_refit(conn, &row).await }))
+                .await
+                .unwrap();
+        }
+
+        let closed = db
+            .write(move |conn| Box::pin(async move { close_open_refits(conn, NOW + 9).await }))
+            .await
+            .unwrap();
+        assert_eq!(closed, 1);
+        let listed = list_refits(db.reader(), src.id, 10).await.unwrap();
+        assert_eq!(listed[0].finished_at, Some(NOW + 9));
+        assert_eq!(listed[0].error_class.as_deref(), Some("interrupted"));
+        assert_eq!(listed[1], done);
+    }
+
+    #[tokio::test]
+    async fn due_refits_and_llm_sources_leave_out_the_wrong_kinds_pauses_and_inactive_projects() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, projects) = seed(&db, &["a", "b"]).await;
+        let project = projects[0];
+        let mut due = scored_source(project, "due", SourceKind::Topic);
+        due.next_refit_at = Some(NOW);
+        let mut later = scored_source(project, "later", SourceKind::Feedback);
+        later.next_refit_at = Some(NOW + 1);
+        let mut paused = scored_source(project, "paused", SourceKind::Score);
+        paused.next_refit_at = Some(NOW);
+        paused.paused_reason = Some("connection".to_owned());
+        let mut error = scored_source(project, "errors", SourceKind::Error);
+        error.next_refit_at = Some(NOW);
+        let mut disabled = scored_source(project, "disabled", SourceKind::Score);
+        disabled.next_refit_at = Some(NOW);
+        disabled.enabled = false;
+        let mut inactive = scored_source(projects[1], "inactive", SourceKind::Score);
+        inactive.next_refit_at = Some(NOW);
+        for row in [&due, &later, &paused, &error, &disabled, &inactive] {
+            put_source(&db, row.clone()).await;
+        }
+        let deleting = projects[1];
+        db.write(move |conn| {
+            Box::pin(async move { mark_project_deleting(conn, deleting, NOW).await })
+        })
+        .await
+        .unwrap();
+
+        let due_now = due_refits(db.reader(), NOW).await.unwrap();
+        assert_eq!(due_now, vec![due.clone()]);
+
+        // A source moved to `now` by `set_next_refit` is due.
+        let later_id = later.id;
+        db.write(move |conn| Box::pin(async move { set_next_refit(conn, later_id, NOW).await }))
+            .await
+            .unwrap();
+        let due_after = due_refits(db.reader(), NOW).await.unwrap();
+        assert_eq!(due_after.len(), 2);
+
+        let swept = llm_sources(db.reader()).await.unwrap();
+        let mut ids: Vec<Uuid> = swept.iter().map(|(row, _, _)| row.id).collect();
+        ids.sort();
+        let mut expected = vec![due.id, later.id];
+        expected.sort();
+        assert_eq!(ids, expected);
+        for (_, org_id, timeout) in &swept {
+            assert_eq!(*org_id, org);
+            assert_eq!(*timeout, None);
+        }
     }
 }
