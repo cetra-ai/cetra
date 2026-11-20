@@ -4,6 +4,7 @@ import { PlugZap } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
+import { orgAssistantKey } from "@/api/queries-assistant";
 import { connectionsInit, connectionsKey } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { DataTable, type DataTableColumn } from "@/components/data-table/data-table";
@@ -39,6 +40,10 @@ export const Route = createFileRoute("/$org/settings/llm-connections")({
   validateSearch: (search) => parseSettingsListSearch(search, SORTS),
   component: LlmConnectionsPage,
 });
+
+function deleteWarning(name: string): string {
+  return `Evaluators that use ${name} stop working. If the assistant uses it, the assistant turns off.`;
+}
 
 const COLUMNS: DataTableColumn<Connection>[] = [
   {
@@ -332,6 +337,11 @@ function ConnectionDetail({
   const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/llm-connections/{id}", {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: connectionsKey(org) });
+      // Deleting the connection turns the assistant off when it uses it (spec 09 § Assistant).
+      void queryClient.invalidateQueries({ queryKey: orgAssistantKey(org) });
+      void queryClient.invalidateQueries({
+        queryKey: ["get", "/api/v1/projects/{project}/assistant"],
+      });
     },
   });
   const failing = connection.status === "failing";
@@ -358,7 +368,7 @@ function ConnectionDetail({
           <ConnectionForm org={org} connection={connection} onCreated={noop} onTest={onTest} />
           <DangerZone
             title="Delete connection"
-            description={`Evaluators that use ${connection.name} stop working.`}
+            description={deleteWarning(connection.name)}
             buttonLabel="Delete…"
             onOpen={() => {
               remove.reset();
@@ -374,7 +384,7 @@ function ConnectionDetail({
                 }
               }}
               title="Delete connection?"
-              description={`Evaluators that use ${connection.name} stop working.`}
+              description={deleteWarning(connection.name)}
               expected={connection.name}
               inputLabel={`Type "${connection.name}" to confirm`}
               confirmLabel="Delete"

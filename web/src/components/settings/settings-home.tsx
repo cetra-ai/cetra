@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { $api } from "@/api/client";
+import { orgAssistantInit } from "@/api/queries-assistant";
 import { channelsQuery } from "@/api/queries-alerts";
 import { scoreDefinitionsInit } from "@/api/queries-evaluation";
 import { orgPricesInit, projectPricesInit } from "@/api/queries-prices";
@@ -257,6 +258,31 @@ function ConnectionsStatus({ org }: { org: string }) {
   );
 }
 
+function AssistantStatus({ org }: { org: string }) {
+  const setting = $api.useQuery("get", "/api/v1/orgs/{org}/assistant", orgAssistantInit(org));
+  const connections = $api.useQuery(
+    "get",
+    "/api/v1/orgs/{org}/llm-connections",
+    connectionsInit(org),
+  );
+  if (setting.isPending || connections.isPending) {
+    return <Skeleton className="h-4 w-40" />;
+  }
+  if (setting.data === undefined || connections.data === undefined) {
+    return null;
+  }
+  const connectionId = setting.data.connection_id;
+  const connection = connections.data.data.find((candidate) => candidate.id === connectionId);
+  if (!setting.data.enabled || connection === undefined) {
+    return <StatusLine>Off</StatusLine>;
+  }
+  return (
+    <StatusLine>
+      {["On", connection.name, setting.data.model].filter(Boolean).join(" · ")}
+    </StatusLine>
+  );
+}
+
 function OrgPricesStatus({ org }: { org: string }) {
   const query = $api.useQuery("get", "/api/v1/orgs/{org}/models", orgPricesInit(org));
   if (query.isPending) {
@@ -340,6 +366,8 @@ function orgStatus(to: string, ctx: { org: string; role: OrgRole | undefined }) 
       return <OrgMembersStatus org={org} canInvite={atLeast(role, "admin")} />;
     case "/$org/settings/llm-connections":
       return <ConnectionsStatus org={org} />;
+    case "/$org/settings/assistant":
+      return <AssistantStatus org={org} />;
     case "/$org/settings/models":
       return <OrgPricesStatus org={org} />;
     case "/$org/settings/sso":

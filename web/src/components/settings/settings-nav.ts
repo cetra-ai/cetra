@@ -1,5 +1,6 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  Bot,
   BellRing,
   Building2,
   CircleDollarSign,
@@ -62,6 +63,14 @@ export const orgSettingsNav = [
     icon: Plug,
     description: "Provider keys for LLM judges",
     keywords: ["openai", "anthropic", "judge", "provider"],
+    ownerOnly: false,
+  },
+  {
+    to: "/$org/settings/assistant",
+    label: "Assistant",
+    icon: Bot,
+    description: "Turn on the in-app assistant and pick its model.",
+    keywords: ["assistant", "ai", "chat", "copilot"],
     ownerOnly: false,
   },
   {
