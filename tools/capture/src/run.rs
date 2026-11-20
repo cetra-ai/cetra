@@ -543,18 +543,6 @@ fn process(
         &scenario.span_names,
         &scenario.volatile_attributes,
     )?;
-    let kept = request.resource_spans.iter().any(|resource| {
-        resource
-            .scope_spans
-            .iter()
-            .any(|scope| !scope.spans.is_empty())
-    });
-    if !scenario.span_names.is_empty() && !kept {
-        return Err(CaptureError::CaptureIncomplete {
-            case: scenario.case.to_string(),
-            reasons: vec!["span_names matched no span".to_owned()],
-        });
-    }
     scrub(
         &mut request,
         &ScrubContext {
@@ -1483,6 +1471,9 @@ mod tests {
             panic!("expected CaptureIncomplete");
         };
         assert_eq!(case, "genai/alpha");
-        assert_eq!(reasons, vec!["span_names matched no span".to_owned()]);
+        assert_eq!(
+            reasons,
+            vec!["span_names entry matched no span: missing".to_owned()]
+        );
     }
 }

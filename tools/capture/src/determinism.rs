@@ -4,7 +4,7 @@
 //! their original IDs, their absolute clock, and how the SDK batched the
 //! exports; this function gives them one JSON shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::DateTime;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
@@ -29,7 +29,7 @@ pub fn deterministic(
     span_names: &[String],
     volatile: &[String],
 ) -> Result<ExportTraceServiceRequest, CaptureError> {
-    select(&mut exports, span_names);
+    select(&mut exports, span_names, &case.to_string())?;
     let mut groups = merge(exports);
     remint(&mut groups, &case.to_string());
     revolatile(&mut groups, volatile);
@@ -40,12 +40,20 @@ pub fn deterministic(
 
 /// Keeps only the spans whose name is in `span_names`. Empty keeps every span.
 ///
+/// Every entry must name at least one span in the exports, or the capture is
+/// incomplete. The reason names the entry, which is a span name from the scenario.
+///
 /// Parent ids are not changed: a kept span whose parent was dropped keeps the
 /// parent's id, and [`remint`] and [`nest`] treat it as a root.
-fn select(exports: &mut [ExportTraceServiceRequest], span_names: &[String]) {
+fn select(
+    exports: &mut [ExportTraceServiceRequest],
+    span_names: &[String],
+    case: &str,
+) -> Result<(), CaptureError> {
     if span_names.is_empty() {
-        return;
+        return Ok(());
     }
+    ensure_every_name_matches(exports, span_names, case)?;
     for export in exports.iter_mut() {
         for resource_spans in export.resource_spans.iter_mut() {
             for scope_spans in resource_spans.scope_spans.iter_mut() {
@@ -55,6 +63,30 @@ fn select(exports: &mut [ExportTraceServiceRequest], span_names: &[String]) {
             }
         }
     }
+    Ok(())
+}
+
+fn ensure_every_name_matches(
+    exports: &[ExportTraceServiceRequest],
+    span_names: &[String],
+    case: &str,
+) -> Result<(), CaptureError> {
+    let present: HashSet<&str> = exports
+        .iter()
+        .flat_map(|export| export.resource_spans.iter())
+        .flat_map(|resource_spans| resource_spans.scope_spans.iter())
+        .flat_map(|scope_spans| scope_spans.spans.iter())
+        .map(|span| span.name.as_str())
+        .collect();
+    for name in span_names {
+        if !present.contains(name.as_str()) {
+            return Err(CaptureError::CaptureIncomplete {
+                case: case.to_owned(),
+                reasons: vec![format!("span_names entry matched no span: {name}")],
+            });
+        }
+    }
+    Ok(())
 }
 
 struct Carried {
@@ -1665,6 +1697,28 @@ mod tests {
         assert_eq!(
             parent,
             &second.resource_spans[0].scope_spans[0].spans[0].parent_span_id
+        );
+    }
+
+    #[test]
+    fn every_span_name_must_match() {
+        let names = ["b".to_owned(), "missing".to_owned()];
+        let error = deterministic(
+            vec![packaged("api", "genai", three_spans(0x01))],
+            &case(),
+            INGEST,
+            &[],
+            &names,
+            &[],
+        )
+        .unwrap_err();
+        let CaptureError::CaptureIncomplete { case, reasons } = error else {
+            panic!("expected CaptureIncomplete");
+        };
+        assert_eq!(case, "genai/chat-tool");
+        assert_eq!(
+            reasons,
+            vec!["span_names entry matched no span: missing".to_owned()]
         );
     }
 
