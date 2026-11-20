@@ -8,9 +8,10 @@ minimumReleaseAge: 10080
 overrides:
   "@opentelemetry/api": "1.9.0"
 
-# The coding agents' install scripts stay off: the captures run the agents from
-# node_modules/.bin, and the spike ran them without any of these scripts.
+# Claude Code's install script only links its native binary from the platform
+# package (@anthropic-ai/claude-code-<platform>) into bin/claude.exe; without it
+# the CLI refuses to start. The other scripts stay off: the agents run without them.
 allowBuilds:
-  "@anthropic-ai/claude-code@2.1.323": false
+  "@anthropic-ai/claude-code@2.1.323": true
   "@github/keytar@7.10.6": false
   "node-pty@1.0.0": false
