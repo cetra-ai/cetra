@@ -1,0 +1,8 @@
+{
+  "description": "A version below 1 keeps the name and records invalid_prompt_version. A version without any name stays in attributes and records prompt_version_without_name.",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Context fields",
+    "02 § Normalization rules / 18"
+  ]
+}

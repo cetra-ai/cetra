@@ -864,6 +864,7 @@ version = "0.0.0"
 dependencies = [
  "axum",
  "bytes",
+ "cetra-capture",
  "cetra-core",
  "cetra-otel",
  "hex",
@@ -926,6 +927,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "bytesize",
+ "cetra-capture",
  "cetra-core",
  "cetra-eval",
  "cetra-otel",

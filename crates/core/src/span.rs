@@ -70,6 +70,12 @@ pub struct Span {
     /// Model named in the response. Spec 01 `response_model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_model: Option<String>,
+    /// Registry prompt this span used (`cetra.prompt.name`, D-V-15). Not checked against the registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
+    /// Version of that prompt (`cetra.prompt.version`, ≥ 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<i64>,
     /// GenAI operation name. Spec 01 `operation`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -220,6 +226,8 @@ pub(crate) fn minimal_span() -> Span {
         provider: None,
         request_model: None,
         response_model: None,
+        prompt_name: None,
+        prompt_version: None,
         operation: None,
         input_tokens: None,
         output_tokens: None,
@@ -286,6 +294,8 @@ pub(crate) fn full_span() -> Span {
         provider: Some("openai".to_owned()),
         request_model: Some("gpt-5-mini".to_owned()),
         response_model: Some("gpt-5-mini-2026-11".to_owned()),
+        prompt_name: Some("support-reply".to_owned()),
+        prompt_version: Some(2),
         operation: Some("chat".to_owned()),
         input_tokens: Some(10),
         output_tokens: Some(4),

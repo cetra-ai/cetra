@@ -25,11 +25,11 @@ Column reference for each view is generated from the Arrow schemas and served at
 
 ## Default exclusions
 
-Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM 'cetra-eval'` and exclude experiment traces (`metadata['cetra.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the `cetra-eval` exclusion is not added; the experiment exclusion still is.
+Unless the request opts in (`include_eval=true` / `include_experiments=true`, or the filter explicitly constrains `environment`), list pages, user aggregates, dashboard series and alert queries add `environment IS DISTINCT FROM` each reserved environment (`'cetra-eval'` and `'cetra-playground'`, D-V-33) and exclude experiment traces (`metadata['cetra.experiment_id'] IS NULL`). "The filter explicitly constrains `environment`" means the filter text references the `environment` column anywhere. Then the reserved-environment exclusions are not added; the experiment exclusion still is.
 
 The exclusions apply to the view the request reads: `traces` and `spans` directly; session and user lists through the traces they aggregate; span-based and score-based metrics through a semi-join on the excluded traces.
 
-**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment = 'cetra-eval' OR metadata['cetra.experiment_id'] IS NOT NULL)`.
+**Strict exclusions** (D-I-9). Online-rule matching (`trace_refresh`, `span_refresh`, and the trace and span lists used by preview and backfill) sets `strict_exclusions`: evaluation, playground and experiment traces are left out whatever the filter names. On spans the test is on the span's trace: `trace_id NOT IN (SELECT trace_id FROM traces WHERE environment IN ('cetra-eval', 'cetra-playground') OR metadata['cetra.experiment_id'] IS NOT NULL)`.
 
 **Match counts** (D-I-9). The online-rule preview counts the traces or spans that a filter matches in a window with strict exclusions, stopping at 10 001 rows (`match_count`), so the editor can show "10 000 or more" without reading every row. A spans count with strict exclusions also reads the project's traces to leave out evaluation and experiment traces, and that subquery is not bounded by the window. On a large project such a count can therefore hit its 10 s timeout and answer `422 query_timeout`. This is accepted: the editor then says the count could not be loaded. With strict exclusions, `trace_refresh` returns only `trace_id` and `start_time`, the two columns the trigger needs.
 
@@ -177,11 +177,11 @@ Counts are integers; `rate` is 0 to 1; durations are nanoseconds; costs are summ
 
 | View | values | list values | keys | histogram |
 |---|---|---|---|---|
-| traces | `name`, `status`, `environment`, `release`, `session_id`, `user_id`, `has_root` | `tags`, `models` | `metadata` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens`, `span_count`, `error_count`, `llm_count` |
-| spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
+| traces | `name`, `status`, `environment`, `release`, `session_id`, `user_id`, `has_root` | `tags`, `models`, `prompts` | `metadata` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens`, `span_count`, `error_count`, `llm_count` |
+| spans | `name`, `span_kind`, `status`, `service_name`, `environment`, `release`, `provider`, `model`, `request_model`, `response_model`, `prompt_name`, `operation`, `cost_source`, `scope_name`, `session_id`, `user_id` | `tags` | `metadata`, `attributes`, `resource_attributes` | `duration_ms`, `cost_total`, `total_tokens`, `input_tokens`, `output_tokens` |
 | sessions | `user_id` | `tags` | — | `duration_ms`, `trace_count`, `error_count`, `total_tokens`, `cost_total` |
 
-Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count).
+Any other field is `400 bad_request`; so is `search` on sessions. IDs other than session and user IDs are not facets (their cardinality is the row count). A trace filter `prompts @> ['support-bot@5']` selects the traces that link that prompt version (D-V-15).
 
 The answer has `kind` (`values`, `keys` or `histogram`), `total` (rows counted) and `missing` (rows with no value: null, or an empty list or map; for numbers also NaN and ±inf). `values` and `keys` return at most `limit` (1–100, default 10) values with their row counts, by count descending then value ascending, and `more` when more matched; `q` (1–200 characters) keeps values containing it, case-insensitively. A list row counts once under each distinct element, a map row once under each key; booleans are `"true"`/`"false"`. `histogram` returns exact `min` and `max`, approximate `p50`, `p95` and `p99`, and buckets: 20 of equal width over `[min, p99)` plus `[p99, max]`, or one `[min, max]` bucket when `p99 ≤ min`; it is absent when no row has a value. Values are `f64`.
 

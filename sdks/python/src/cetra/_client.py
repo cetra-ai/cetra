@@ -16,6 +16,7 @@ from cetra._retry import retry_delay
 
 if TYPE_CHECKING:
     from cetra._datasets import Datasets
+    from cetra._prompts import Prompts
 
 _PROJECT_PATH: Final = "/api/v1/projects/current"
 _TIMEOUT_S: Final = 30
@@ -81,6 +82,10 @@ class Client:
         from cetra._datasets import Datasets
 
         self._datasets: Datasets = Datasets(self)
+        # Deferred for the same reason: _prompts imports this module for ApiError.
+        from cetra._prompts import Prompts
+
+        self._prompts: Prompts = Prompts(self)
 
     def __repr__(self) -> str:
         return f"Client(base_url={self._base_url!r})"
@@ -89,6 +94,11 @@ class Client:
     def datasets(self) -> "Datasets":
         """Dataset calls: ``create``, ``get``, ``list`` and ``delete``."""
         return self._datasets
+
+    @property
+    def prompts(self) -> "Prompts":
+        """Prompt calls: ``get``, ``list``, ``create``, ``create_version`` and ``set_label``."""
+        return self._prompts
 
     def _request(
         self,

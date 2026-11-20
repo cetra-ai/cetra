@@ -112,6 +112,10 @@ pub struct TraceSummary {
     pub cost_total: Option<f64>,
     /// Sorted distinct model names.
     pub models: Vec<String>,
+    /// Distinct `name@version` of the prompt versions that this trace's spans link (D-V-15).
+    /// Omitted when no span links a prompt version.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prompts: Vec<String>,
     /// Latest score of each name attached to this trace.
     pub scores: Vec<ScoreBrief>,
 }
@@ -172,6 +176,12 @@ pub struct SpanSummary {
     /// Response model, or the request model when the response names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
+    /// Prompt version, a number of at least 1, from the convention that named the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<i64>,
     /// Input tokens, including cached tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<i64>,
@@ -320,6 +330,12 @@ pub struct SpanDetail {
     /// Response model, or the request model when the response names none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_name: Option<String>,
+    /// Prompt version, a number of at least 1, from the convention that named the prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_version: Option<i64>,
     /// GenAI operation name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
@@ -427,6 +443,8 @@ impl From<&Span> for SpanSummary {
             metadata: span.metadata.clone(),
             provider: span.provider.clone(),
             model: span.response_model.clone().or(span.request_model.clone()),
+            prompt_name: span.prompt_name.clone(),
+            prompt_version: span.prompt_version,
             input_tokens: span.input_tokens,
             output_tokens: span.output_tokens,
             cache_read_tokens: span.cache_read_tokens,
@@ -467,6 +485,8 @@ impl From<Span> for SpanDetail {
             request_model: span.request_model,
             response_model: span.response_model,
             model,
+            prompt_name: span.prompt_name,
+            prompt_version: span.prompt_version,
             operation: span.operation,
             input_tokens: span.input_tokens,
             output_tokens: span.output_tokens,
@@ -748,7 +768,7 @@ pub struct TraceListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.
@@ -770,7 +790,7 @@ pub struct TraceStreamParams {
     /// 1,024 bytes (D-G-39).
     #[serde(default)]
     pub search: Option<String>,
-    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.
@@ -820,7 +840,7 @@ pub struct SpanListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include spans from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment spans. Default false. Spec 05 § Default exclusions.
@@ -878,6 +898,8 @@ mod tests {
             metadata: BTreeMap::new(),
             provider: None,
             model: None,
+            prompt_name: None,
+            prompt_version: None,
             input_tokens: None,
             output_tokens: None,
             cache_read_tokens: None,

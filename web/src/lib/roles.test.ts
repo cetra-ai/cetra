@@ -9,7 +9,9 @@ import {
   canManageDashboards,
   canManageDatasets,
   canManageEvaluation,
+  canManagePrompts,
   canRemoveMember,
+  canRunPlayground,
   grantableRoles,
   overrideLabel,
   roleLabel,
@@ -93,6 +95,22 @@ it("lets members and above manage datasets", () => {
   expect(canManageDatasets("member")).toBe(true);
   expect(canManageDatasets("viewer")).toBe(false);
   expect(canManageDatasets(undefined)).toBe(false);
+});
+
+it("lets members and above manage prompts", () => {
+  expect(canManagePrompts("owner")).toBe(true);
+  expect(canManagePrompts("admin")).toBe(true);
+  expect(canManagePrompts("member")).toBe(true);
+  expect(canManagePrompts("viewer")).toBe(false);
+  expect(canManagePrompts(undefined)).toBe(false);
+});
+
+it("lets members and above run the playground", () => {
+  expect(canRunPlayground("owner")).toBe(true);
+  expect(canRunPlayground("admin")).toBe(true);
+  expect(canRunPlayground("member")).toBe(true);
+  expect(canRunPlayground("viewer")).toBe(false);
+  expect(canRunPlayground(undefined)).toBe(false);
 });
 
 it("overrides only members and viewers", () => {

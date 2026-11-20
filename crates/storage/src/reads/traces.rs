@@ -130,6 +130,8 @@ pub const SPAN_LIST_COLUMNS: &[&str] = &[
     spans::REQUEST_MODEL,
     spans::RESPONSE_MODEL,
     spans::MODEL,
+    spans::PROMPT_NAME,
+    spans::PROMPT_VERSION,
     spans::INPUT_TOKENS,
     spans::OUTPUT_TOKENS,
     spans::CACHE_READ_TOKENS,

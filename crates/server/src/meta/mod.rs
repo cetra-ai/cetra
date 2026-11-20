@@ -30,6 +30,7 @@ pub(crate) mod password_resets;
 pub(crate) mod pending_traces;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
+pub(crate) mod prompts;
 pub(crate) mod rule_spend;
 pub(crate) mod saved_views;
 pub(crate) mod score_definitions;

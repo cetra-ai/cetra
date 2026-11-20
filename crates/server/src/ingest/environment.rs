@@ -6,15 +6,20 @@ use cetra_core::span::Span;
 /// Warning code added to a span whose external `environment` was rewritten.
 const RESERVED_ENVIRONMENT: &str = "reserved_environment";
 
-/// Rewrites `cetra-eval` claims from external data to `cetra-eval-external` and
-/// records the `reserved_environment` warning. Returns how many spans were rewritten.
+/// Rewrites every reserved environment claimed by external data to its `-external` alias
+/// (D-V-33, [`environment::external_alias`]) and records the `reserved_environment` warning.
+/// Returns how many spans were rewritten.
 pub(crate) fn rewrite_reserved_environment(spans: &mut [Span]) -> usize {
     let mut rewritten = 0;
     for span in spans {
-        if span.environment.as_deref() != Some(environment::EVAL) {
+        let Some(alias) = span
+            .environment
+            .as_deref()
+            .and_then(environment::external_alias)
+        else {
             continue;
-        }
-        span.environment = Some(environment::EVAL_EXTERNAL.to_owned());
+        };
+        span.environment = Some(alias.to_owned());
         // The normalizer writes a valid JSON array, so anything else counts as empty.
         let mut codes: Vec<String> = span
             .attributes
@@ -106,6 +111,25 @@ mod tests {
         let mut spans = [span(Some(environment::EVAL), Some("not json"))];
         assert_eq!(rewrite_reserved_environment(&mut spans), 1);
         assert_eq!(warning(&spans[0]), Some("[\"reserved_environment\"]"));
+    }
+
+    #[test]
+    fn playground_claims_are_rewritten_to_their_alias() {
+        let mut spans = [
+            span(Some(environment::PLAYGROUND), None),
+            span(Some(environment::PLAYGROUND_EXTERNAL), None),
+        ];
+        assert_eq!(rewrite_reserved_environment(&mut spans), 1);
+        assert_eq!(
+            spans[0].environment.as_deref(),
+            Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(warning(&spans[0]), Some("[\"reserved_environment\"]"));
+        assert_eq!(
+            spans[1].environment.as_deref(),
+            Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(warning(&spans[1]), None);
     }
 
     #[test]

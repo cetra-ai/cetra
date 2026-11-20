@@ -30,6 +30,8 @@ cetra.flush()
 
 Every span of the block then carries `cetra.session.id`, `cetra.user.id`, `cetra.tags`, `cetra.metadata.plan`, and, when set at `init()`, `cetra.environment` and `cetra.release`. Metadata keys must match `[A-Za-z0-9_.-]+`; a key that does not is skipped (logged at debug level with its length only).
 
+`context(prompt=...)` takes a `Prompt` from `get_prompt` and stamps its name as `cetra.prompt.name` and its version as `cetra.prompt.version` on every span of the block; a fallback prompt has no version, so only the name is written. A nested block without a prompt keeps the outer one, and an inner prompt replaces it. Any other value is ignored and logged at debug level. The [Prompts](/docs/evaluation/prompts/) page shows the whole flow.
+
 `context(..., propagate=True)` additionally writes the session and user ids to W3C **baggage** as `cetra.session.id` and `cetra.user.id`. It is opt-in because baggage is sent as an HTTP header on every outgoing request of the app, to third-party APIs included. Tags and metadata never go into baggage. A downstream service running this SDK picks the ids up from baggage without calling `context()` itself.
 
 ## Threads

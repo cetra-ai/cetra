@@ -352,6 +352,8 @@ fn accept_span(
         provider: fields.provider,
         request_model: fields.request_model,
         response_model: fields.response_model,
+        prompt_name: fields.prompt_name,
+        prompt_version: fields.prompt_version,
         operation: fields.operation,
         input_tokens: counted.input_tokens,
         output_tokens: counted.output_tokens,

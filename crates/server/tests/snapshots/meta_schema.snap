@@ -665,6 +665,66 @@ CREATE TABLE projects (
 index projects_org
 CREATE INDEX projects_org ON projects(org_id)
 
+table prompt_label_events
+CREATE TABLE prompt_label_events (
+  id INTEGER PRIMARY KEY,               -- rowid: the history's order
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  from_version INTEGER,                 -- NULL: the label was new
+  to_version INTEGER,                   -- NULL: the label was removed
+  actor TEXT,
+  at INTEGER NOT NULL
+)
+
+index prompt_label_events_prompt
+CREATE INDEX prompt_label_events_prompt ON prompt_label_events(prompt_id, id)
+
+table prompt_labels
+CREATE TABLE prompt_labels (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, label),
+  FOREIGN KEY (prompt_id, version) REFERENCES prompt_versions(prompt_id, version)
+)
+
+table prompt_settings
+CREATE TABLE prompt_settings (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  protected_labels TEXT NOT NULL,       -- JSON array; no row means ["production"] (D-V-10)
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL
+)
+
+table prompt_versions
+CREATE TABLE prompt_versions (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  template TEXT NOT NULL,               -- JSON: a string (text) or an array (chat)
+  config TEXT NOT NULL DEFAULT '{}',    -- JSON object (D-V-6)
+  commit_message TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, version)
+)
+
+table prompts
+CREATE TABLE prompts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                   -- immutable (D-V-2)
+  type TEXT NOT NULL CHECK (type IN ('text', 'chat')),
+  description TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',      -- JSON array of strings
+  latest_version INTEGER NOT NULL,
+  created_by TEXT,                      -- a user id or key:<key id>
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
 table rule_spend
 CREATE TABLE rule_spend (
   rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
@@ -816,6 +876,16 @@ index sqlite_autoindex_project_members_1
 index sqlite_autoindex_projects_1
 
 index sqlite_autoindex_projects_2
+
+index sqlite_autoindex_prompt_labels_1
+
+index sqlite_autoindex_prompt_settings_1
+
+index sqlite_autoindex_prompt_versions_1
+
+index sqlite_autoindex_prompts_1
+
+index sqlite_autoindex_prompts_2
 
 index sqlite_autoindex_rule_spend_1
 

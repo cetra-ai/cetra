@@ -102,6 +102,10 @@ class CetraSpanProcessor(SpanProcessor):
             span.set_attribute("cetra.environment", self._environment)
         if self._release is not None:
             span.set_attribute("cetra.release", self._release)
+        if values.prompt is not None:
+            span.set_attribute("cetra.prompt.name", values.prompt[0])
+            if values.prompt[1] is not None:
+                span.set_attribute("cetra.prompt.version", values.prompt[1])
 
     def _stamp_metadata(self, span: Span, metadata: Mapping[str, object]) -> None:
         for key, value in metadata.items():

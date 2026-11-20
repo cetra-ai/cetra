@@ -68,7 +68,7 @@ An explicit argument wins over the environment variable, which wins over the def
 - Booleans from the environment accept `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`, case-insensitive.
 - `api_key` must start with `sk-cetra-`. A key with the wrong prefix raises; a missing key does not (see above).
 - `base_url` must be an absolute `http`/`https` URL without query or fragment. A path is allowed (reverse-proxy prefix); trailing slashes are removed.
-- `environment` must not be the reserved evaluation environment `cetra-eval`.
+- `environment` must not be a reserved environment: `cetra-eval` (evaluation) or `cetra-playground` (playground runs).
 - `sample_rate` must be a finite number in `[0, 1]` (a `ParentBased(TraceIdRatioBased)` sampler on our own provider). From the environment it must be a plain decimal (`1`, `0.25`, `.5`).
 - Any other invalid value raises `ConfigError` (a `ValueError` subclass) naming the option or env var, never its value. Resolution stops at the first problem.
 - `init()` is once per process: any later call, whatever the first one did, logs `cetra: init() was already called; this call is ignored` and changes nothing.

@@ -8211,7 +8211,7 @@
           "dashboards"
         ],
         "summary": "Get one widget's data",
-        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation traces (`environment = cetra-eval`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         "operationId": "query_widget",
         "parameters": [
           {
@@ -13745,7 +13745,7 @@
           "traces"
         ],
         "summary": "Get facets",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
         "operationId": "get_facets",
         "parameters": [
           {
@@ -13814,7 +13814,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -16028,6 +16028,1717 @@
         }
       }
     },
+    "/api/v1/projects/{project}/playground/runs": {
+      "post": {
+        "tags": [
+          "playground"
+        ],
+        "summary": "Stream a playground run",
+        "description": "Members and above, through a session or a read-write personal access token. API keys cannot call it. Answers `text/event-stream`: `start` `{trace_id}`, then `text` `{delta}` and `tool_call` `{id, name, arguments}` events, then one last `done` `{finish_reason, usage, cost_usd, latency_ms, ttft_ms, output}` or `error` `{class, message}` (class `retryable`, `pause` or `permanent`). A `ping` comes every 15 seconds. A response format is answered in `text` events. Tools are never run. A tool named `auto`, `none` or `required` cannot be forced by name through `tool_choice`. The run is traced into the reserved environment `cetra-playground`, which is not billed. The connection is used whatever its status, and a failure never marks it failing.",
+        "operationId": "post_playground_run",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlaygroundRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The run's events, as `text/event-stream`.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompt-settings": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Get the prompt settings",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_prompt_settings",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The project's protected labels.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Set the prompt settings",
+        "description": "Project admins (D-V-10).",
+        "operationId": "put_prompt_settings",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PromptSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stored protected labels.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "List prompts",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "list_prompts",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Name contains this text, ignoring case.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "Only prompts with this label.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tag",
+            "in": "query",
+            "description": "Only prompts with this tag.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of prompts to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of prompts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Create a prompt",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).",
+        "operationId": "post_prompt",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePromptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The prompt's first version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Get a prompt",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_prompt",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Delete a prompt",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).",
+        "operationId": "delete_prompt",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Update a prompt",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Changes the description and the tags. The name, the type and the versions never change.",
+        "operationId": "patch_prompt",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePromptRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/label-events": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "List the label history of a prompt",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "list_prompt_label_events",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of label moves, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptLabelEventPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}": {
+      "put": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Move a label",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Points the label at the version, creating it when it is new; a protected label needs a project admin or a `write` key (D-V-10). `latest` is computed and cannot be set.",
+        "operationId": "put_prompt_label",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetLabelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The prompt, with its labels.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Prompt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Remove a label",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). The versions stay; a protected label needs a project admin or a `write` key (D-V-10).",
+        "operationId": "delete_prompt_label",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Label name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/metrics": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Get per-version prompt metrics",
+        "description": "Any project member, or an API key with `read`. Default window: the last 7 days; at most 90 days (D-V-17).",
+        "operationId": "get_prompt_metrics",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Window start, RFC 3339 or epoch milliseconds. Default: `to` minus 7 days.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Window end, RFC 3339 or epoch milliseconds. Default: now.",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/TimeParam"
+            }
+          },
+          {
+            "name": "versions",
+            "in": "query",
+            "description": "Comma-separated version numbers, 1 to 50 distinct. Default: every version.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-version metrics of the prompt over the window.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptMetrics"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/resolve": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Resolve a prompt to a version",
+        "description": "Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12). The tag covers the whole body, including the computed `latest` label, so it changes when a newer version is saved.",
+        "operationId": "get_prompt_resolve",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "query",
+            "description": "A label. Default `production`. `latest` resolves the highest version.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "description": "A version number. Not together with `label`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The resolved version. The `ETag` header holds its strong tag.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersion"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Not modified: the If-None-Match tag matches."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/versions": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "List the versions of a prompt",
+        "description": "Any project member, or an API key with `read`. At most 50 versions per page.",
+        "operationId": "list_prompt_versions",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of items to return (1–1000, default 50).",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/Limit",
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque cursor from a previous page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of versions, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersionPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Create a version",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).",
+        "operationId": "post_prompt_version",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateVersionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}": {
+      "get": {
+        "tags": [
+          "prompts"
+        ],
+        "summary": "Get a version",
+        "description": "Any project member, or an API key with `read`.",
+        "operationId": "get_prompt_version",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prompt",
+            "in": "path",
+            "description": "Prompt name.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "description": "Version number, starting at 1.",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PromptVersion"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/saved-views": {
       "get": {
         "tags": [
@@ -17485,7 +19196,7 @@
           "sessions"
         ],
         "summary": "List sessions",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_sessions",
         "parameters": [
           {
@@ -17564,7 +19275,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -17670,7 +19381,7 @@
           "sessions"
         ],
         "summary": "Get a session",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
         "operationId": "get_session",
         "parameters": [
           {
@@ -17694,7 +19405,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -17800,7 +19511,7 @@
           "spans"
         ],
         "summary": "List spans",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_spans",
         "parameters": [
           {
@@ -17888,7 +19599,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include spans from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -18143,7 +19854,7 @@
           "traces"
         ],
         "summary": "List traces",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_traces",
         "parameters": [
           {
@@ -18231,7 +19942,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -18337,7 +20048,7 @@
           "traces"
         ],
         "summary": "Stream traces",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
         "operationId": "stream_traces",
         "parameters": [
           {
@@ -18370,7 +20081,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -18809,7 +20520,7 @@
           "users"
         ],
         "summary": "List users",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
         "operationId": "list_users",
         "parameters": [
           {
@@ -18888,7 +20599,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -18994,7 +20705,7 @@
           "users"
         ],
         "summary": "Get a user",
-        "description": "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
+        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
         "operationId": "get_user",
         "parameters": [
           {
@@ -19036,7 +20747,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -21402,6 +23113,55 @@
         },
         "additionalProperties": false
       },
+      "CreatePromptRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/prompts` body (D-V-2, D-V-5 to D-V-7).",
+        "required": [
+          "name",
+          "type",
+          "template"
+        ],
+        "properties": {
+          "commit_message": {
+            "type": "string",
+            "description": "The first version's commit message, up to 500 characters."
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, up to 2 000 characters."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels to point at the first version. The API never adds `production` by itself."
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique in the project, 1 to 200 characters: letters, digits, `_`, `.`, `-`, starting with\na letter or digit."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags: at most 20, each 1 to 64 characters."
+          },
+          "template": {
+            "description": "Any JSON value."
+          },
+          "type": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "`text` or `chat`."
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateSavedView": {
         "type": "object",
         "description": "Body of `POST /api/v1/projects/{project}/saved-views`.\n\nSpec 09 § Observability data.",
@@ -21474,6 +23234,34 @@
           "name": {
             "type": "string",
             "description": "Score name, 1 to 255 bytes after trimming."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateVersionRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/prompts/{prompt}/versions` body (D-V-7).",
+        "required": [
+          "template"
+        ],
+        "properties": {
+          "commit_message": {
+            "type": "string",
+            "description": "The commit message, up to 500 characters."
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels to move to the new version. Protected labels need a project admin or a `write`\nkey (D-V-10)."
+          },
+          "template": {
+            "description": "Any JSON value."
           }
         },
         "additionalProperties": false
@@ -26345,6 +28133,226 @@
           "grace"
         ]
       },
+      "PlaygroundParams": {
+        "type": "object",
+        "description": "Sampling parameters and the completion cap. A provider without a field does not get it.",
+        "properties": {
+          "frequency_penalty": {
+            "type": "number",
+            "format": "double",
+            "description": "OpenAI and Gemini."
+          },
+          "max_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Completion cap, including reasoning tokens. From 1 to 65 536. Default 4 096.",
+            "minimum": 0
+          },
+          "presence_penalty": {
+            "type": "number",
+            "format": "double",
+            "description": "OpenAI and Gemini."
+          },
+          "reasoning_effort": {
+            "type": "string",
+            "description": "OpenAI only, sent as given."
+          },
+          "seed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "OpenAI and Gemini."
+          },
+          "stop": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Stop sequences. Default: none."
+          },
+          "temperature": {
+            "type": "number",
+            "format": "double",
+            "description": "Sampling temperature."
+          },
+          "top_p": {
+            "type": "number",
+            "format": "double",
+            "description": "Nucleus sampling."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundResponseFormat": {
+        "type": "object",
+        "description": "The schema an answer must match. `name` is the schema's name in the provider's native mode.",
+        "required": [
+          "name",
+          "schema"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Schema name. `[A-Za-z0-9_-]`, 1 to 64 characters."
+          },
+          "schema": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "Strict schema adherence where the provider supports it. Default: false."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundRunRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/projects/{project}/playground/runs` body.\n\nUnknown fields are refused. Each `messages` entry is a canonical message (spec 01) or a\nplaceholder `{\"type\": \"placeholder\", \"name\": ...}`; a placeholder is replaced, in place, by the\nmessages given under its name in `placeholders`.",
+        "required": [
+          "connection_id",
+          "model",
+          "messages"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "LLM connection of the caller's org to call."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "Canonical messages (spec 01) and placeholder entries, at least one. A text part of a\nmessage written here is rendered with `variables`; a placeholder's messages are not."
+          },
+          "model": {
+            "type": "string",
+            "description": "Provider model id: 1 to 256 bytes, with no whitespace, control character, `/`, `\\`, `%`,\n`?` or `#`."
+          },
+          "params": {
+            "$ref": "#/components/schemas/PlaygroundParams",
+            "description": "Sampling parameters and the completion cap. Default: none."
+          },
+          "placeholders": {
+            "type": "object",
+            "description": "Messages that replace the placeholder entries of `messages`, by name. Default: none."
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/PlaygroundResponseFormat",
+            "description": "The schema the answer must match. The answer is streamed as `text` events."
+          },
+          "source": {
+            "$ref": "#/components/schemas/PlaygroundSource",
+            "description": "Where the messages came from: a prompt version or a span. Recorded on the run's trace."
+          },
+          "tool_choice": {
+            "type": "string",
+            "description": "`auto`, `none`, `required`, or the name of one of `tools`. A tool named `auto`, `none` or\n`required` cannot be forced by name. Default: the provider's choice."
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaygroundTool"
+            },
+            "description": "Tools the model may call. A tool is never run. Default: none."
+          },
+          "variables": {
+            "type": "object",
+            "description": "Values of the `{{name}}` variables in the text parts of `messages`. Default: none.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "PlaygroundSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A prompt version: `{\"prompt\": {\"name\": \"...\", \"version\": 2}}`.",
+            "required": [
+              "prompt"
+            ],
+            "properties": {
+              "prompt": {
+                "type": "object",
+                "description": "A prompt version: `{\"prompt\": {\"name\": \"...\", \"version\": 2}}`.",
+                "required": [
+                  "name",
+                  "version"
+                ],
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Prompt name."
+                  },
+                  "version": {
+                    "type": "integer",
+                    "format": "int64",
+                    "description": "Prompt version number."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A span: `{\"span\": {\"trace_id\": \"...\", \"span_id\": \"...\"}}`.",
+            "required": [
+              "span"
+            ],
+            "properties": {
+              "span": {
+                "type": "object",
+                "description": "A span: `{\"span\": {\"trace_id\": \"...\", \"span_id\": \"...\"}}`.",
+                "required": [
+                  "trace_id",
+                  "span_id"
+                ],
+                "properties": {
+                  "span_id": {
+                    "$ref": "#/components/schemas/SpanId",
+                    "description": "The span, 16 lowercase hex digits."
+                  },
+                  "trace_id": {
+                    "$ref": "#/components/schemas/TraceId",
+                    "description": "Trace of the span, 32 lowercase hex digits."
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "description": "Where a run's messages came from. Recorded as `prompt:<name>@<version>` or\n`span:<trace>:<span>` on the run's trace."
+      },
+      "PlaygroundTool": {
+        "type": "object",
+        "description": "A tool the model may call.",
+        "required": [
+          "name",
+          "parameters"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What the tool does. Default: none."
+          },
+          "name": {
+            "type": "string",
+            "description": "`[A-Za-z0-9_-]`, 1 to 64 characters, unique within the request."
+          },
+          "parameters": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 7807 problem document.\n\nSpec 09 § Conventions.",
@@ -26566,6 +28574,422 @@
           "viewer",
           "none"
         ]
+      },
+      "Prompt": {
+        "type": "object",
+        "description": "A prompt (D-V-2).",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "tags",
+          "latest_version",
+          "labels",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the prompt was created."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "A user id, or `key:<key id>` for an API key. Absent when the user was removed."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free text, up to 2 000 characters."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Prompt id."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabel"
+            },
+            "description": "Stored labels, ordered by label. `latest` is not listed."
+          },
+          "latest_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The highest version. `latest` always resolves to it (D-V-8)."
+          },
+          "name": {
+            "type": "string",
+            "description": "Unique in the project, 1 to 200 characters. Immutable."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Tags, in the order they were given."
+          },
+          "type": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "`text` or `chat`. Immutable."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the prompt was last edited or versioned."
+          }
+        }
+      },
+      "PromptKind": {
+        "type": "string",
+        "description": "`text` or `chat` (D-V-5).",
+        "enum": [
+          "text",
+          "chat"
+        ]
+      },
+      "PromptLabel": {
+        "type": "object",
+        "description": "A label and the version it points at (D-V-8).",
+        "required": [
+          "label",
+          "version",
+          "updated_at"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "The label, `[a-z0-9][a-z0-9_.-]{0,63}`."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the label last moved."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the label points at."
+          }
+        }
+      },
+      "PromptLabelEvent": {
+        "type": "object",
+        "description": "One entry of a label's history (D-V-8).",
+        "required": [
+          "label",
+          "at"
+        ],
+        "properties": {
+          "actor": {
+            "type": "string",
+            "description": "A user id, or `key:<key id>` for an API key. Absent when the user was removed."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the label moved."
+          },
+          "from_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version it pointed at before. Absent when the label was new."
+          },
+          "label": {
+            "type": "string",
+            "description": "The label that moved."
+          },
+          "to_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version it points at now. Absent when the label was removed."
+          }
+        }
+      },
+      "PromptLabelEventPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptLabelEvent"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "PromptMetrics": {
+        "type": "object",
+        "description": "The per-version metrics of a prompt over a window (D-V-17). Versions come newest first.",
+        "required": [
+          "from",
+          "to",
+          "versions"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window start."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window end (exclusive)."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptVersionMetrics"
+            },
+            "description": "One entry per version that has linked spans in the window."
+          }
+        }
+      },
+      "PromptPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "PromptScoreMean": {
+        "type": "object",
+        "description": "The mean of one score name for one version.",
+        "required": [
+          "name",
+          "mean",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Number of scores averaged."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "Average of the numeric and boolean score values."
+          },
+          "name": {
+            "type": "string",
+            "description": "Score name."
+          }
+        }
+      },
+      "PromptSettings": {
+        "type": "object",
+        "description": "The prompt settings of a project, read and written by the settings routes (D-V-10).",
+        "required": [
+          "protected_labels"
+        ],
+        "properties": {
+          "protected_labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels only project admins and `write` keys may move. At most 20 (D-V-10)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PromptVersion": {
+        "type": "object",
+        "description": "One version, as the fetch and the version routes return it (D-V-7, D-V-12).",
+        "required": [
+          "name",
+          "type",
+          "version",
+          "template",
+          "config",
+          "labels",
+          "variables",
+          "placeholders",
+          "created_at"
+        ],
+        "properties": {
+          "commit_message": {
+            "type": "string",
+            "description": "The commit message, up to 500 characters."
+          },
+          "config": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the version was created."
+          },
+          "created_by": {
+            "type": "string",
+            "description": "A user id, or `key:<key id>` for an API key. Absent when the user was removed."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Labels that point at this version, ordered. Includes `latest` when this is the latest\nversion."
+          },
+          "name": {
+            "type": "string",
+            "description": "The prompt's name."
+          },
+          "placeholders": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Placeholder names (chat), in order of first appearance."
+          },
+          "template": {
+            "description": "Any JSON value."
+          },
+          "type": {
+            "$ref": "#/components/schemas/PromptKind",
+            "description": "`text` or `chat`."
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Variable names, in order of first appearance."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version number, 1, 2, …"
+          }
+        }
+      },
+      "PromptVersionMetrics": {
+        "type": "object",
+        "description": "One version's numbers over the window. Span scores count for their span's version; a trace\nscore counts for every version its linked spans carry (D-V-17).",
+        "required": [
+          "version",
+          "span_count",
+          "trace_count",
+          "error_count",
+          "cost_total",
+          "scores"
+        ],
+        "properties": {
+          "cost_avg": {
+            "type": "number",
+            "format": "double",
+            "description": "Average span cost, USD. Omitted when no span has a cost."
+          },
+          "cost_total": {
+            "type": "number",
+            "format": "double",
+            "description": "Sum of span costs, USD."
+          },
+          "error_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Linked spans with status `error`."
+          },
+          "input_tokens_avg": {
+            "type": "number",
+            "format": "double",
+            "description": "Average input tokens. Omitted when no span has them."
+          },
+          "latency_p50_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "Median span duration, milliseconds (approximate). Omitted when there are no spans."
+          },
+          "latency_p95_ms": {
+            "type": "number",
+            "format": "double",
+            "description": "95th percentile span duration, milliseconds (approximate). Omitted when there are no spans."
+          },
+          "output_tokens_avg": {
+            "type": "number",
+            "format": "double",
+            "description": "Average output tokens. Omitted when no span has them."
+          },
+          "scores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptScoreMean"
+            },
+            "description": "Numeric and boolean score means, by name."
+          },
+          "span_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Linked `llm` spans."
+          },
+          "trace_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Distinct traces of those spans."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version, 1 or more."
+          }
+        }
+      },
+      "PromptVersionPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptVersion"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
       },
       "PutOrgSsoProvider": {
         "type": "object",
@@ -27941,6 +30365,21 @@
           }
         }
       },
+      "SetLabelRequest": {
+        "type": "object",
+        "description": "`PUT /api/v1/projects/{project}/prompts/{prompt}/labels/{label}` body (D-V-8).",
+        "required": [
+          "version"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The version the label moves to."
+          }
+        },
+        "additionalProperties": false
+      },
       "SetProjectOverrideRequest": {
         "type": "object",
         "description": "`PUT /api/v1/projects/{project}/members/{user}`.",
@@ -28274,6 +30713,15 @@
             "$ref": "#/components/schemas/SpanId",
             "description": "Parent span. Omitted when this span is a root of the received trace."
           },
+          "prompt_name": {
+            "type": "string",
+            "description": "Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16)."
+          },
+          "prompt_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Prompt version, a number of at least 1, from the convention that named the prompt."
+          },
           "provider": {
             "type": "string",
             "description": "Normalized provider name."
@@ -28584,6 +31032,15 @@
           "parent_span_id": {
             "$ref": "#/components/schemas/SpanId",
             "description": "Parent span. Omitted when this span is a root of the received trace."
+          },
+          "prompt_name": {
+            "type": "string",
+            "description": "Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16)."
+          },
+          "prompt_version": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Prompt version, a number of at least 1, from the convention that named the prompt."
           },
           "provider": {
             "type": "string",
@@ -29201,6 +31658,13 @@
             "format": "int64",
             "description": "Sum of span output tokens. Omitted when every span omitted the field."
           },
+          "prompts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Distinct `name@version` of the prompt versions that this trace's spans link (D-V-15).\nOmitted when no span links a prompt version."
+          },
           "reasoning_tokens": {
             "type": "integer",
             "format": "int64",
@@ -29650,6 +32114,27 @@
         },
         "additionalProperties": false
       },
+      "UpdatePromptRequest": {
+        "type": "object",
+        "description": "`PATCH /api/v1/projects/{project}/prompts/{prompt}` body. An absent field is unchanged.\nThe name, the type and the versions never change (D-V-2, D-V-7).",
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "New description, when present. `null` clears it."
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "New tags, when present. Replaces the whole list. `null` is refused."
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateSavedView": {
         "type": "object",
         "description": "Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.\n\nOmitted fields are left unchanged. Spec 09 § Observability data.",
@@ -30086,7 +32571,7 @@
           },
           "include_eval": {
             "type": "boolean",
-            "description": "Include traces from the evaluation environment. Default false."
+            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false."
           },
           "include_experiments": {
             "type": "boolean",
@@ -30320,6 +32805,14 @@
     {
       "name": "datasets",
       "description": "Versioned datasets and their items."
+    },
+    {
+      "name": "playground",
+      "description": "Playground runs: one model run streamed over SSE, traced in cetra-playground (not billed)."
+    },
+    {
+      "name": "prompts",
+      "description": "The prompt registry: versioned prompts with labels (D-V-2)."
     },
     {
       "name": "experiments",

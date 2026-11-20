@@ -175,7 +175,7 @@ pub struct WidgetQueryRequest {
     /// The dashboard's split. Ignored when the query has its own breakdown, and for scores.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_by: Option<MetricsGroupBy>,
-    /// Include traces from the evaluation environment. Default false.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false.

@@ -30,6 +30,8 @@ label (or `dataType: "text"`). `userId` comes from the active
 `ConfigError` without a key. Unlike tracing and scores, its calls reject on
 failure (see [Errors](#errors)).
 
+`client.prompts` manages prompts over the same client: `get` reads a prompt at a label or a version without the cache, `list` returns the prompt names, `create` and `createVersion` add a prompt and a version, and `setLabel` moves a label to a version. Its calls reject with `ApiError` on failure. Application code reads prompts with the cached `getPrompt()` instead. The [Prompts](/docs/evaluation/prompts/) page shows how the prompts are fetched and linked.
+
 
 ### Datasets
 

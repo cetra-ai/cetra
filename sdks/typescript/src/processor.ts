@@ -135,6 +135,12 @@ function stampContext(span: Span, parentContext: Context | undefined): void {
       span.setAttribute(name, attributeValue(value));
     }
   }
+  if (values.prompt !== undefined) {
+    span.setAttribute("cetra.prompt.name", values.prompt.name);
+    if (values.prompt.version !== undefined) {
+      span.setAttribute("cetra.prompt.version", values.prompt.version);
+    }
+  }
 }
 
 function stampSessionOrUser(

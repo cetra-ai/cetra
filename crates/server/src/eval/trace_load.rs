@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use cetra_core::ids::{ProjectId, SpanId, TraceId};
-use cetra_core::names::environment::EVAL;
+use cetra_core::names::environment::is_reserved;
 use cetra_core::span::Span;
 use cetra_storage::error::QueryError;
 use cetra_storage::{QueryContext, RunError, TraceSpansRequest, trace_spans};
@@ -181,7 +181,7 @@ async fn load_trace_capped(
     }
     if spans
         .iter()
-        .any(|span| span.environment.as_deref() == Some(EVAL))
+        .any(|span| span.environment.as_deref().is_some_and(is_reserved))
     {
         return Err(LoadError::EvaluationTrace);
     }
@@ -293,6 +293,7 @@ fn payload_bytes(span: &Span) -> usize {
 mod tests {
     use std::collections::BTreeMap;
 
+    use cetra_core::names::environment::{EVAL, PLAYGROUND};
     use cetra_storage::{TraceSpansRequest, trace_spans};
 
     use super::*;
@@ -527,6 +528,27 @@ mod tests {
         let mut judge = bare(TRACE, ROOT, None, now - 30);
         judge.environment = Some(EVAL.to_owned());
         app.commit_spans(&seeded.project, vec![judge]).await;
+
+        let result = load_trace(
+            &app.state,
+            seeded.project.id,
+            Visibility::window(&app.state, seeded.org_id),
+            trace_id(),
+            None,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(LoadError::EvaluationTrace)));
+    }
+
+    #[tokio::test]
+    async fn a_playground_trace_is_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let mut run = bare(TRACE, ROOT, None, now - 30);
+        run.environment = Some(PLAYGROUND.to_owned());
+        app.commit_spans(&seeded.project, vec![run]).await;
 
         let result = load_trace(
             &app.state,

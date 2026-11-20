@@ -129,7 +129,7 @@ pub struct SessionListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include traces from the evaluation environment. Default false. Spec 05 § Default exclusions.
+    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.
@@ -215,6 +215,7 @@ mod tests {
                     total_tokens: Some(2600),
                     cost_total: Some(0.00306),
                     models: vec!["claude-sonnet-4-5".to_owned()],
+                    prompts: Vec::new(),
                     scores: Vec::new(),
                 },
                 input: Some(Payload::Text("My order 1234 hasn't arrived.".to_owned())),
