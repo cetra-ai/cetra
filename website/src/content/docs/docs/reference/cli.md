@@ -688,7 +688,7 @@ Options:
           Do not turn on prompt and tool content capture
 
       --print
-          Print the settings, including the key, instead of writing them. The printed key is what makes them work
+          Print the merged settings files (including the key and any other settings in them) instead of writing them
 
   -h, --help
           Print help

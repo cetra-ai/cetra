@@ -57,7 +57,7 @@ it("the coding agents template filters every widget on coding_agent", () => {
   const template = TEMPLATES.find((item) => item.id === "coding_agents");
   expect(template).toBeDefined();
   for (const widget of template?.definition.widgets ?? []) {
-    expect(widget.query.filter, widget.id).toContain("metadata['coding_agent'] IS NOT NULL");
+    expect(widget.query?.filter, widget.id).toContain("metadata['coding_agent'] IS NOT NULL");
   }
 });
 
