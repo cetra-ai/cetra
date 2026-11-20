@@ -9,7 +9,7 @@ use utoipa::{IntoParams, PartialSchema, ToSchema};
 use uuid::Uuid;
 
 use super::common::{Limit, Page, TimeParam};
-use super::online_rules::present;
+use super::online_rules::{BudgetPeriod, present};
 
 /// What an issue source reads. M3 adds kinds (D-IC-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -57,6 +57,125 @@ pub struct IssueSource {
     pub updated_at: i64,
     /// Issues of this source that are open now.
     pub open_issues: u64,
+    /// Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<f64>,
+    /// Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daily_cap: Option<u32>,
+    /// Score names read by a `score` or `feedback` source. Omitted for other kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score_names: Option<Vec<String>>,
+    /// Feedback sources read by a `feedback` source: `end_user` and/or `human`. Omitted for other
+    /// kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_sources: Option<Vec<String>>,
+    /// Connection of the chat model that summarizes and names. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_connection_id: Option<Uuid>,
+    /// Chat model of that connection. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_model: Option<String>,
+    /// Connection of the embedding model. Fixed after create. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_connection_id: Option<Uuid>,
+    /// Embedding model of that connection. Fixed after create. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_model: Option<String>,
+    /// Vector dimension of the embedding model, set once the source first embeds. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_dimension: Option<u32>,
+    /// Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub floor: Option<f64>,
+    /// Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_issue_size: Option<u32>,
+    /// Spend limit per `budget_period`, in USD. Omitted when there is no budget.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
+    /// Period of the budget. Present exactly when `budget_usd` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_period: Option<BudgetPeriod>,
+    /// The provider's error text for a connection pause. Omitted when the source is not paused
+    /// for a connection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paused_detail: Option<String>,
+    /// When the next refit is due. Omitted for other kinds. JSON is RFC 3339.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub next_refit_at: Option<i64>,
+    /// Candidates created in the last 24 hours, by status. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidates_24h: Option<IssueCandidateCounts>,
+    /// Spend of the current UTC day, in USD. LLM kinds only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spent_today_usd: Option<f64>,
+}
+
+/// Candidates of an LLM source created in the last 24 hours, by status (D-IC-12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueCandidateCounts {
+    /// Waiting for a worker, or for their retry time.
+    pub queued: u64,
+    /// Embedded, waiting for the next refit.
+    pub pending: u64,
+    /// Joined an issue.
+    pub assigned: u64,
+    /// Not kept: the trace is gone, or the daily cap was reached.
+    pub dropped: u64,
+    /// Failed after its retries.
+    pub failed: u64,
+    /// Skipped: the source was deleted, paused too long, or the trace was deleted.
+    pub skipped: u64,
+}
+
+/// One refit of an LLM source (D-IC-8).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct IssueRefit {
+    /// Refit id.
+    pub id: Uuid,
+    /// `schedule` (every 6 hours) or `manual` ("Refit now").
+    pub trigger: String,
+    /// When the refit started. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub started_at: i64,
+    /// When the refit finished. Omitted while it runs. JSON is RFC 3339.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub finished_at: Option<i64>,
+    /// Pending candidates the refit read.
+    pub pending: u32,
+    /// Clusters found among them.
+    pub clusters: u32,
+    /// New issues created.
+    pub created: u32,
+    /// Candidates that joined an existing issue.
+    pub joined: u32,
+    /// Candidates left as outliers.
+    pub outliers: u32,
+    /// USD spent on the naming calls.
+    pub cost_usd: f64,
+    /// Why the refit stopped early, such as `busy`, `budget` or `interrupted`. Omitted when it
+    /// finished.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_class: Option<String>,
+}
+
+/// `GET …/issue-sources/{id}/refits` answer: the newest 50 refits, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct IssueRefitPage {
+    /// The refits, newest first.
+    pub data: Vec<IssueRefit>,
 }
 
 /// `GET /api/v1/projects/{project}/issue-sources` answer. It carries the org's enabled-source
@@ -140,6 +259,93 @@ pub struct CreateIssueSourceRequest {
     /// Whether the source runs. Default true.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds
+    /// only. Default 1.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub sample_rate: Option<f64>,
+    /// Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only. Default 500.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub daily_cap: Option<u32>,
+    /// Score names of a `score` or `feedback` source: 1 to 8 names of 1 to 255 bytes. Required
+    /// for those kinds; a `topic` source refuses it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub score_names: Option<Vec<String>>,
+    /// Feedback sources of a `feedback` source: `end_user` and/or `human`. Default both.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub feedback_sources: Option<Vec<String>>,
+    /// Connection of the chat model. Required for LLM kinds.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub chat_connection_id: Option<Uuid>,
+    /// Chat model of that connection. Required for LLM kinds.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub chat_model: Option<String>,
+    /// Connection of the embedding model. Required for LLM kinds. Anthropic cannot embed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub embed_connection_id: Option<Uuid>,
+    /// Embedding model of that connection. Required for LLM kinds. Fixed after create.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub embed_model: Option<String>,
+    /// Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. Default 0.80.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub floor: Option<f64>,
+    /// Smallest group a refit makes into a new issue, 2 to 100. Default 5.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub min_issue_size: Option<u32>,
+    /// Spend limit per `budget_period`, in USD. Needs `budget_period`, and the models must be
+    /// priced.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub budget_usd: Option<f64>,
+    /// Period of the budget. Needed with `budget_usd`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present"
+    )]
+    pub budget_period: Option<BudgetPeriod>,
 }
 
 /// `PATCH /api/v1/projects/{project}/issue-sources/{id}` body. Absent means unchanged.
@@ -159,6 +365,46 @@ pub struct UpdateIssueSourceRequest {
     /// Turns the source on or off.
     #[serde(default, deserialize_with = "present")]
     pub enabled: Option<bool>,
+    /// Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub sample_rate: Option<f64>,
+    /// Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub daily_cap: Option<u32>,
+    /// Replaces the score names of a `score` or `feedback` source.
+    #[serde(default, deserialize_with = "present")]
+    pub score_names: Option<Vec<String>>,
+    /// Replaces the feedback sources of a `feedback` source.
+    #[serde(default, deserialize_with = "present")]
+    pub feedback_sources: Option<Vec<String>>,
+    /// Connection of the chat model. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub chat_connection_id: Option<Uuid>,
+    /// Chat model of that connection. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub chat_model: Option<String>,
+    /// Refused: the embedding connection is fixed after create (400).
+    #[serde(default, deserialize_with = "present")]
+    pub embed_connection_id: Option<Uuid>,
+    /// Refused: the embedding model is fixed after create (400).
+    #[serde(default, deserialize_with = "present")]
+    pub embed_model: Option<String>,
+    /// Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub floor: Option<f64>,
+    /// Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.
+    #[serde(default, deserialize_with = "present")]
+    pub min_issue_size: Option<u32>,
+    /// Spend limit per `budget_period`, in USD. Give it with `budget_period` when the source has
+    /// no budget yet.
+    #[serde(default, deserialize_with = "present")]
+    pub budget_usd: Option<f64>,
+    /// Period of the budget.
+    #[serde(default, deserialize_with = "present")]
+    pub budget_period: Option<BudgetPeriod>,
+    /// Removes the budget. Cannot come with `budget_usd` or `budget_period`.
+    #[serde(default)]
+    pub clear_budget: bool,
 }
 
 /// The state of an issue (D-IC-10). `merged` issues point at their target.

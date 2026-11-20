@@ -1292,7 +1292,6 @@ pub(crate) async fn janitor_once(state: &AppState, now: i64) -> Result<u64, Meta
 /// `cetra.issue-call.v1`, the owner (a candidate or refit id), `claims` and `call`, both as `u32`
 /// big-endian. `call` is 1 for the summary, 2 for the embedding and `3 + index` for a naming call.
 /// A refit uses `claims` 0.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u32) -> TraceId {
     let mut hasher = Sha256::new();
     hasher.update(b"cetra.issue-call.v1");

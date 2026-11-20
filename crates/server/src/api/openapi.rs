@@ -94,9 +94,10 @@ use super::internal::{
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::issues::{
-    CreateIssueSourceRequest, Issue, IssueDay, IssueEvent, IssueEventPage, IssueExample,
-    IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueSource, IssueSourceKind,
-    IssueSourcePage, IssueState, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
+    CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
+    IssueExample, IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueRefit,
+    IssueRefitPage, IssueSource, IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest,
+    UpdateIssueRequest, UpdateIssueSourceRequest,
 };
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -456,6 +457,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<IssueSourceKind>();
     set.insert::<IssueSource>();
     set.insert::<IssueSourcePage>();
+    set.insert::<IssueCandidateCounts>();
+    set.insert::<IssueRefit>();
+    set.insert::<IssueRefitPage>();
     set.insert::<CreateIssueSourceRequest>();
     set.insert::<UpdateIssueSourceRequest>();
     set.insert::<IssueState>();
@@ -2879,6 +2883,36 @@ fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 403, 404, 409, 429],
         ))
         .build();
+    let refit = operation(
+        "post_issue_source_refit",
+        "issues",
+        "Refit an issue source now",
+    )
+        .description(Some(
+            "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source. 409 when a refit started less than 10 minutes ago or one is already due.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses(
+            "202",
+            json_of::<IssueSource>("The source, with `next_refit_at` set to now."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let refits = operation(
+        "list_issue_source_refits",
+        "issues",
+        "List the refits of an issue source",
+    )
+    .description(Some(
+        "Any project member can read. The newest 50 refits of the source, newest first.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<IssueRefitPage>("The refits, newest first."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let delete = operation("delete_issue_source", "issues", "Delete an issue source")
         .description(Some(
             "Project members and above. API keys cannot call it. The source's issues and their events are deleted with it; the occurrence scores stay (D-IC-3).",
@@ -2906,6 +2940,14 @@ fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/issue-sources/{{id}}"),
             PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refit"),
+            PathItem::new(HttpMethod::Post, refit),
+        )
+        .path(
+            format!("{PROJECT}/issue-sources/{{id}}/refits"),
+            PathItem::new(HttpMethod::Get, refits),
         )
         .path(
             format!("{PROJECT}/issue-sources/{{id}}"),

@@ -284,6 +284,11 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/projects/{project}/issue-sources/{id}",
   },
   {
+    operationId: "post_issue_source_refit",
+    method: "post",
+    path: "/api/v1/projects/{project}/issue-sources/{id}/refit",
+  },
+  {
     operationId: "delete_issue_source",
     method: "delete",
     path: "/api/v1/projects/{project}/issue-sources/{id}",
@@ -729,6 +734,8 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }, { status: 201 }),
   patch_issue_source: ({ body }) =>
     HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }),
+  post_issue_source_refit: ({ params }) =>
+    HttpResponse.json({ ...issueSourceDocument, id: params.id }, { status: 202 }),
   delete_issue_source: () => noContent(),
   patch_issue: ({ body, params }) =>
     HttpResponse.json({ ...issueDocument, ...body, id: params.id }),

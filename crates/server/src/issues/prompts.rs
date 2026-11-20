@@ -15,16 +15,12 @@ use serde_json::{Value, json};
 use crate::meta::issues::SourceKind;
 
 /// The version of the summary prompt and schema, stored with each summary.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SUMMARY_PROMPT_VERSION: u32 = 1;
 /// The structured-output name of the summary call.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const SUMMARY_NAME: &str = "issue_summary";
 /// The structured-output name of the naming call.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const NAME_NAME: &str = "issue_name";
 /// Longest text of a payload in a prompt, in characters (D-IC-19).
-#[cfg_attr(not(test), allow(dead_code))]
 const PAYLOAD_CHARS: usize = 4_000;
 /// Stands in for an empty list of titles.
 const NONE: &str = "(none)";
@@ -32,7 +28,6 @@ const NONE: &str = "(none)";
 const SCORE_VALUE_CHARS: usize = 200;
 
 /// The schema of the summary call: a summary and whether the interaction is a real issue.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn summary_schema() -> Value {
     json!({
         "type": "object",
@@ -46,7 +41,6 @@ pub(crate) fn summary_schema() -> Value {
 }
 
 /// The schema of the naming call: a title and a description.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn name_schema() -> Value {
     json!({
         "type": "object",
@@ -61,7 +55,6 @@ pub(crate) fn name_schema() -> Value {
 
 /// The summary prompt of a bad score or a bad feedback score. `reason` prints `(none)` when
 /// absent.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn problem_prompt(
     score_name: &str,
     score_value: &str,
@@ -76,7 +69,6 @@ pub(crate) fn problem_prompt(
 }
 
 /// The summary prompt of a new production trace, from its first user message.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn topic_prompt(user_message: &str) -> String {
     format!(
         "Write what the user wants in this request, in at most 15 generic words, without names, numbers or quotes. If the request is empty or unreadable, set is_issue to false.\n\nRequest:\n{user_message}"
@@ -85,7 +77,6 @@ pub(crate) fn topic_prompt(user_message: &str) -> String {
 
 /// The naming prompt of a refit cluster. `titles` are the titles of the issues the source
 /// already has; an empty list prints `(none)`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn name_prompt(kind: SourceKind, summaries: &[&str], titles: &[&str]) -> String {
     let what = match kind {
         SourceKind::Topic => "recurring user request",
@@ -104,7 +95,6 @@ pub(crate) fn name_prompt(kind: SourceKind, summaries: &[&str], titles: &[&str])
 
 /// The text of a score value in a prompt: a boolean as `true` or `false`, a number as itself, a
 /// category as its label, and text cut to [`SCORE_VALUE_CHARS`] characters.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn score_text(value: &ScoreValue) -> String {
     match value {
         ScoreValue::Boolean(value) => value.to_string(),
@@ -116,7 +106,6 @@ pub(crate) fn score_text(value: &ScoreValue) -> String {
 
 /// The root input and output of a trace, rendered to text and each cut to 4 000 characters
 /// (D-IC-19). Empty when the spans have no root.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn previews(spans: &[Span]) -> (String, String) {
     let Some(root) = root(spans) else {
         return (String::new(), String::new());
@@ -130,7 +119,6 @@ pub(crate) fn previews(spans: &[Span]) -> (String, String) {
 /// The first user message of a trace (D-IC-19), cut to 4 000 characters: the text parts of the
 /// first `user` message of a `messages` input, joined with a newline, else the rendered input.
 /// Empty when the spans have no root.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn first_user_message(spans: &[Span]) -> String {
     let Some(root) = root(spans) else {
         return String::new();

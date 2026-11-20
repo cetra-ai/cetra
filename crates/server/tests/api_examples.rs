@@ -41,8 +41,8 @@ use cetra_server::api::experiments::{
 use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::issues::{
-    CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueSource,
-    IssueSourcePage, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
+    CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueRefitPage,
+    IssueSource, IssueSourcePage, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
 };
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
@@ -458,6 +458,7 @@ fn static_files_match_their_types() {
     roundtrip::<Issue>("static/issue.json");
     roundtrip::<IssueOccurrences>("static/issue-occurrences.json");
     roundtrip::<IssueEventPage>("static/issue-events.json");
+    roundtrip::<IssueRefitPage>("static/issue-refits.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
@@ -488,6 +489,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
     roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create.json");
+    roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create-topic.json");
     roundtrip::<MergeIssueRequest>("requests/issue-merge.json");
     // `UpdateIssueSourceRequest` has no `Serialize`, so it is only deserialized.
     let issue_update_text = fs::read_to_string(api_dir().join("requests/issue-source-update.json"))
@@ -549,6 +551,10 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator_run", "requests/evaluator-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
         ("post_issue_source", "requests/issue-source-create.json"),
+        (
+            "post_issue_source",
+            "requests/issue-source-create-topic.json",
+        ),
         ("patch_issue_source", "requests/issue-source-update.json"),
         ("patch_issue", "requests/issue-update.json"),
         ("post_issue_merge", "requests/issue-merge.json"),
@@ -717,6 +723,7 @@ fn generated_files_roundtrip() {
             "get_issue" => roundtrip::<Issue>(&example.file),
             "get_issue_occurrences" => roundtrip::<IssueOccurrences>(&example.file),
             "get_issue_events" => roundtrip::<IssueEventPage>(&example.file),
+            "list_issue_source_refits" => roundtrip::<IssueRefitPage>(&example.file),
             "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);

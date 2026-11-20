@@ -520,6 +520,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "patch_issue_source",
     ),
     (
+        "post",
+        "/api/v1/projects/{project}/issue-sources/{id}/refit",
+        "post_issue_source_refit",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}/refits",
+        "list_issue_source_refits",
+    ),
+    (
         "delete",
         "/api/v1/projects/{project}/issue-sources/{id}",
         "delete_issue_source",
@@ -1188,12 +1198,14 @@ fn document_lint() {
             || *id == "patch_issue_source"
             || *id == "patch_issue"
             || *id == "post_issue_merge"
+            || *id == "post_issue_source_refit"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
             || *id == "get_issue_source"
             || *id == "delete_issue_source"
             || *id == "get_issue_events"
+            || *id == "list_issue_source_refits"
             || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"

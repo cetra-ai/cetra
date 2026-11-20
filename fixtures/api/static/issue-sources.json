@@ -11,8 +11,41 @@
       "created_at": "2026-01-01T09:00:00.000000000Z",
       "updated_at": "2026-01-01T09:00:00.000000000Z",
       "open_issues": 2
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001c20",
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "name": "Topics",
+      "kind": "topic",
+      "filter": "environment = 'production'",
+      "enabled": true,
+      "created_by": "01900000-0000-7000-8000-000000000100",
+      "created_at": "2026-01-01T09:00:00.000000000Z",
+      "updated_at": "2026-01-01T09:00:00.000000000Z",
+      "open_issues": 0,
+      "sample_rate": 0.5,
+      "daily_cap": 500,
+      "chat_connection_id": "01900000-0000-7000-8000-000000000400",
+      "chat_model": "gpt-5-mini",
+      "embed_connection_id": "01900000-0000-7000-8000-000000000400",
+      "embed_model": "text-embedding-3-small",
+      "embed_dimension": 512,
+      "floor": 0.8,
+      "min_issue_size": 5,
+      "budget_usd": 5.0,
+      "budget_period": "day",
+      "next_refit_at": "2026-01-01T15:00:00.000000000Z",
+      "candidates_24h": {
+        "queued": 12,
+        "pending": 30,
+        "assigned": 4,
+        "dropped": 2,
+        "failed": 0,
+        "skipped": 1
+      },
+      "spent_today_usd": 0.12
     }
   ],
   "next_cursor": null,
-  "org_active_sources": 1
+  "org_active_sources": 2
 }

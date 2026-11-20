@@ -13,32 +13,35 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cetra_core::enums::ScoreSource;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::score::{Score, ScoreTarget};
+use cetra_eval::Adapter;
 use cetra_storage::{
     MAX_COUNT_NAMES, QueryContext, ScoreListRequest, ScoreNameCount, ScoreNameCountsRequest,
     TimeWindow, ViewName,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqliteConnection;
+use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::convert;
 use crate::api::issues::{
-    CreateIssueSourceRequest, Issue, IssueDay, IssueEvent, IssueEventPage, IssueExample,
-    IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssuePage, IssueSource,
-    IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest, UpdateIssueRequest,
-    UpdateIssueSourceRequest,
+    CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
+    IssueExample, IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssuePage, IssueRefit,
+    IssueRefitPage, IssueSource, IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest,
+    UpdateIssueRequest, UpdateIssueSourceRequest,
 };
+use crate::api::online_rules::BudgetPeriod;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
-use crate::eval::budget::DAY_NS;
+use crate::eval::budget::{self, DAY_NS, day_start};
 use crate::eval::rule_check::field_error;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 use crate::issues::source_limit::{self, SourceLimitError};
 use crate::meta::MetaError;
-use crate::meta::issues::{self as store, IssueSort, SourceKind, SourceRow};
+use crate::meta::connections;
+use crate::meta::issues::{self as store, IssueSort, RefitRow, SourceKind, SourceRow};
 
 use super::orgs::page_named;
 use super::read::{READ_TIMEOUT, open_query};
@@ -60,6 +63,26 @@ const MAX_EVENTS: u32 = 100;
 /// Longest title, in characters, and longest description (`PATCH …/issues/{id}`).
 const MAX_TITLE_CHARS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 2_000;
+/// Refits a source's refit list returns, newest first.
+const MAX_REFITS: u32 = 50;
+/// The defaults of an LLM source (D-IC-1, D-IC-7).
+const DEFAULT_SAMPLE_RATE: f64 = 1.0;
+const DEFAULT_DAILY_CAP: u32 = 500;
+const DEFAULT_FLOOR: f64 = 0.80;
+const DEFAULT_MIN_ISSUE_SIZE: u32 = 5;
+/// The filter a new topic source gets when it has none (D-IC-1).
+const TOPIC_FILTER: &str = "environment = 'production'";
+/// The feedback sources a new `feedback` source reads when it names none.
+const FEEDBACK_SOURCES: [&str; 2] = ["end_user", "human"];
+/// Most score names of a `score` or `feedback` source, and the longest one in bytes.
+const MAX_SCORE_NAMES: usize = 8;
+const MAX_SCORE_NAME_BYTES: usize = 255;
+/// Largest budget in USD, as online rules take it.
+const MAX_BUDGET_USD: f64 = 1_000_000.0;
+/// The first refit of a new LLM source comes an hour after its creation (D-IC-8).
+const FIRST_REFIT_DELAY_NS: i64 = 3_600_000_000_000;
+/// "Refit now" is refused when a refit started less than this long ago (D-IC-8).
+const REFIT_COOLDOWN_NS: i64 = 600_000_000_000;
 
 /// Issue routes. Reads need project view; source writes need
 /// [`ProjectPerm::ManageEvaluation`] (D-I-24). Triage (`PATCH` of an issue and its merge) needs a
@@ -115,6 +138,26 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: delete(delete_issue_source),
+        },
+        RouteDef {
+            method: axum::http::Method::POST,
+            path: "/api/v1/projects/{project}/issue-sources/{id}/refit",
+            access: Access::Project {
+                perm: ProjectPerm::ManageEvaluation,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(post_issue_source_refit),
+        },
+        RouteDef {
+            method: axum::http::Method::GET,
+            path: "/api/v1/projects/{project}/issue-sources/{id}/refits",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_issue_source_refits),
         },
         RouteDef {
             method: axum::http::Method::GET,
@@ -208,11 +251,16 @@ async fn list_issue_sources(
         params.limit.get(),
     )?;
     let open = store::open_counts(state.meta.reader(), project).await?;
-    let data = page
-        .data
-        .iter()
-        .map(|row| source_json(row, open_issues(&open, row.id)))
-        .collect();
+    let now = state.clock.now_ns();
+    let mut data = Vec::with_capacity(page.data.len());
+    for row in &page.data {
+        let figures = llm_figures(&state, row, now).await?;
+        data.push(source_json(
+            row,
+            open_issues(&open, row.id),
+            figures.as_ref(),
+        ));
+    }
     let mut conn = state
         .meta
         .reader()
@@ -237,7 +285,12 @@ async fn get_issue_source(
         .await?
         .ok_or(ApiError::NotFound)?;
     let open = store::open_counts(state.meta.reader(), project).await?;
-    Ok(error::Json(source_json(&row, open_issues(&open, id))))
+    let figures = llm_figures(&state, &row, state.clock.now_ns()).await?;
+    Ok(error::Json(source_json(
+        &row,
+        open_issues(&open, id),
+        figures.as_ref(),
+    )))
 }
 
 async fn create_issue_source(
@@ -250,38 +303,10 @@ async fn create_issue_source(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
-    let name = body.name.trim().to_owned();
-    let filter = normalize_filter(body.filter);
-    validate(&state, org, project, &name, filter.as_deref()).await?;
-    let id = Uuid::now_v7();
-    let row = SourceRow {
-        id,
-        project_id: project,
-        name,
-        kind: source_kind(body.kind),
-        filter,
-        enabled: body.enabled,
-        paused_reason: None,
-        paused_at: None,
-        created_by: Some(user.id),
-        created_at: now,
-        updated_at: now,
-        sample_rate: None,
-        daily_cap: None,
-        score_names: Vec::new(),
-        feedback_sources: Vec::new(),
-        chat_connection_id: None,
-        chat_model: None,
-        embed_connection_id: None,
-        embed_model: None,
-        embed_dimension: None,
-        floor: None,
-        min_issue_size: None,
-        budget_usd: None,
-        budget_period: None,
-        paused_detail: None,
-        next_refit_at: None,
-    };
+    let errors = unused(source_kind(body.kind), &create_given(&body));
+    let row = created_row(body, project, user.id, now);
+    validate(&state, org, project, &row, errors, now).await?;
+    let id = row.id;
     let limit = source_limit::limit(&state, org);
     let outcome = state
         .meta
@@ -297,7 +322,12 @@ async fn create_issue_source(
                 "issue source created"
             );
             reload_score_rules(&state).await;
-            Ok((StatusCode::CREATED, error::Json(source_json(&row, 0))))
+            state.issues_wake();
+            let figures = llm_figures(&state, &row, now).await?;
+            Ok((
+                StatusCode::CREATED,
+                error::Json(source_json(&row, 0, figures.as_ref())),
+            ))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
         SourceWrite::Missing => Err(ApiError::NotFound),
@@ -318,6 +348,8 @@ async fn update_issue_source(
     let stored = store::get_source(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    let mut errors = unused(stored.kind, &update_given(&body));
+    errors.extend(update_refusals(&body));
     let name = body
         .name
         .map_or_else(|| stored.name.clone(), |name| name.trim().to_owned());
@@ -325,14 +357,37 @@ async fn update_issue_source(
         Some(text) => normalize_filter(text),
         None => stored.filter.clone(),
     };
-    validate(&state, org, project, &name, filter.as_deref()).await?;
     let row = SourceRow {
         name,
         filter,
         enabled: body.enabled.unwrap_or(stored.enabled),
         updated_at: now,
+        sample_rate: body.sample_rate.or(stored.sample_rate),
+        daily_cap: body.daily_cap.or(stored.daily_cap),
+        score_names: body
+            .score_names
+            .map_or_else(|| stored.score_names.clone(), trimmed),
+        feedback_sources: body
+            .feedback_sources
+            .unwrap_or_else(|| stored.feedback_sources.clone()),
+        chat_connection_id: body.chat_connection_id.or(stored.chat_connection_id),
+        chat_model: body.chat_model.or_else(|| stored.chat_model.clone()),
+        floor: body.floor.or(stored.floor),
+        min_issue_size: body.min_issue_size.or(stored.min_issue_size),
+        budget_usd: match body.clear_budget {
+            true => None,
+            false => body.budget_usd.or(stored.budget_usd),
+        },
+        budget_period: match body.clear_budget {
+            true => None,
+            false => body
+                .budget_period
+                .map(|period| period.as_str().to_owned())
+                .or_else(|| stored.budget_period.clone()),
+        },
         ..stored.clone()
     };
+    validate(&state, org, project, &row, errors, now).await?;
     let limit = source_limit::limit(&state, org);
     let outcome = state
         .meta
@@ -350,8 +405,14 @@ async fn update_issue_source(
                 "issue source updated"
             );
             reload_score_rules(&state).await;
+            state.issues_wake();
             let open = store::open_counts(state.meta.reader(), project).await?;
-            Ok(error::Json(source_json(&row, open_issues(&open, id))))
+            let figures = llm_figures(&state, &row, now).await?;
+            Ok(error::Json(source_json(
+                &row,
+                open_issues(&open, id),
+                figures.as_ref(),
+            )))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
         SourceWrite::Missing => Err(ApiError::NotFound),
@@ -383,7 +444,78 @@ async fn delete_issue_source(
         "issue source deleted"
     );
     reload_score_rules(&state).await;
+    state.issues_wake();
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST …/issue-sources/{id}/refit` (D-IC-8): asks for a refit now. An `error` source has none
+/// (400). Refused with 409 when a refit started less than 10 minutes ago, or when one is already
+/// due. Answers 202 with the source.
+async fn post_issue_source_refit(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+) -> Result<(StatusCode, error::Json<IssueSource>), ApiError> {
+    let user = principal::session_user(&principal)?;
+    let project = access.project.id;
+    let now = state.clock.now_ns();
+    let row = store::get_source(state.meta.reader(), project, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if !row.kind.is_llm() {
+        return Err(bad_request_field("kind", "only LLM sources have refits"));
+    }
+    if let Some(started) = store::last_refit_started(state.meta.reader(), id).await?
+        && now - started < REFIT_COOLDOWN_NS
+    {
+        return Err(ApiError::Conflict {
+            detail: "A refit started less than 10 minutes ago.",
+        });
+    }
+    if row.next_refit_at.is_some_and(|due| due <= now) {
+        return Err(ApiError::Conflict {
+            detail: "A refit is already due.",
+        });
+    }
+    state
+        .meta
+        .write(move |conn| Box::pin(async move { store::set_next_refit(conn, id, now).await }))
+        .await?;
+    tracing::info!(
+        target: "audit",
+        source_id = %id,
+        project_id = %project,
+        user_id = %user.id,
+        "issue source refit requested"
+    );
+    state.issues_wake();
+    let row = SourceRow {
+        next_refit_at: Some(now),
+        ..row
+    };
+    let open = store::open_counts(state.meta.reader(), project).await?;
+    let figures = llm_figures(&state, &row, now).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        error::Json(source_json(&row, open_issues(&open, id), figures.as_ref())),
+    ))
+}
+
+/// `GET …/issue-sources/{id}/refits`: the newest 50 refits of the source, newest first.
+async fn list_issue_source_refits(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+) -> Result<error::Json<IssueRefitPage>, ApiError> {
+    let project = access.project.id;
+    store::get_source(state.meta.reader(), project, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let rows = store::list_refits(state.meta.reader(), id, MAX_REFITS).await?;
+    Ok(error::Json(IssueRefitPage {
+        data: rows.into_iter().map(refit_json).collect(),
+    }))
 }
 
 /// Reloads the score rules after a source write (A11). A failure is logged; the next sweeper tick
@@ -440,30 +572,339 @@ async fn update_checked(
     Ok(SourceWrite::Done(Box::new(row)))
 }
 
-/// Checks a source's name and filter (D-IC-1). The field checks all run and their errors come
-/// back together; the filter is parsed last, by storage.
+/// Checks a source as it would be stored (D-IC-1): the name, the filter and, for LLM kinds, the
+/// LLM fields. `errors` holds the errors the request already has; every check runs and all the
+/// errors come back together. The filter is parsed last, by storage: a traces expression for LLM
+/// kinds, a spans expression for `error` sources.
 async fn validate(
     state: &AppState,
     org: OrgId,
     project: ProjectId,
-    name: &str,
-    filter: Option<&str>,
+    row: &SourceRow,
+    mut errors: Vec<FieldError>,
+    now: i64,
 ) -> Result<(), ApiError> {
-    let mut errors = Vec::new();
-    if !(1..=128).contains(&name.chars().count()) {
+    if !(1..=128).contains(&row.name.chars().count()) {
         errors.push(field_error("name", "name must be 1 to 128 characters"));
     }
-    if filter.is_some_and(|text| text.len() > 4096) {
+    if row.filter.as_deref().is_some_and(|text| text.len() > 4096) {
         errors.push(field_error("filter", "filter must be at most 4096 bytes"));
+    }
+    if row.kind.is_llm() {
+        check_llm(state, org, row, now, &mut errors).await?;
     }
     if !errors.is_empty() {
         return Err(bad_request(errors));
     }
-    if let Some(text) = filter {
+    if let Some(text) = &row.filter {
+        let view = if row.kind.is_llm() {
+            ViewName::Traces
+        } else {
+            ViewName::Spans
+        };
         let ctx = open_query(state, org, project, None).await?;
-        cetra_storage::validate_filter(&ctx, ViewName::Spans, text)?;
+        cetra_storage::validate_filter(&ctx, view, text)?;
     }
     Ok(())
+}
+
+/// The LLM fields of an LLM source (D-IC-1, D-IC-5, D-IC-7, D-IC-8): their ranges, the score
+/// names and feedback sources of their kinds, the connections and the budget with its prices.
+async fn check_llm(
+    state: &AppState,
+    org: OrgId,
+    row: &SourceRow,
+    now: i64,
+    errors: &mut Vec<FieldError>,
+) -> Result<(), ApiError> {
+    if row
+        .sample_rate
+        .is_some_and(|rate| !(rate > 0.0 && rate <= 1.0))
+    {
+        errors.push(field_error(
+            "sample_rate",
+            "sample_rate must be above 0 and at most 1",
+        ));
+    }
+    if row
+        .daily_cap
+        .is_some_and(|cap| !(1..=10_000).contains(&cap))
+    {
+        errors.push(field_error("daily_cap", "daily_cap must be 1 to 10000"));
+    }
+    if row
+        .floor
+        .is_some_and(|floor| !(0.5..=0.99).contains(&floor))
+    {
+        errors.push(field_error("floor", "floor must be 0.5 to 0.99"));
+    }
+    if row
+        .min_issue_size
+        .is_some_and(|size| !(2..=100).contains(&size))
+    {
+        errors.push(field_error(
+            "min_issue_size",
+            "min_issue_size must be 2 to 100",
+        ));
+    }
+    if matches!(row.kind, SourceKind::Score | SourceKind::Feedback) {
+        let names = &row.score_names;
+        let valid = (1..=MAX_SCORE_NAMES).contains(&names.len())
+            && names
+                .iter()
+                .all(|name| !name.is_empty() && name.len() <= MAX_SCORE_NAME_BYTES);
+        if !valid {
+            errors.push(field_error(
+                "score_names",
+                "score_names must be 1 to 8 names of 1 to 255 bytes",
+            ));
+        }
+    }
+    if row.kind == SourceKind::Feedback && !valid_feedback_sources(&row.feedback_sources) {
+        errors.push(field_error(
+            "feedback_sources",
+            "feedback_sources must be end_user, human or both",
+        ));
+    }
+    let chat = connection_adapter(
+        state,
+        org,
+        "chat_connection_id",
+        row.chat_connection_id,
+        errors,
+    )
+    .await?;
+    let embed = connection_adapter(
+        state,
+        org,
+        "embed_connection_id",
+        row.embed_connection_id,
+        errors,
+    )
+    .await?;
+    for (field, model) in [
+        ("chat_model", &row.chat_model),
+        ("embed_model", &row.embed_model),
+    ] {
+        if model.as_deref().is_none_or(|name| name.trim().is_empty()) {
+            errors.push(field_error(field, "required for LLM sources"));
+        }
+    }
+    if embed == Some(Adapter::Anthropic) {
+        errors.push(field_error(
+            "embed_connection_id",
+            "this provider has no embeddings API",
+        ));
+    }
+    if row.budget_usd.is_some() != row.budget_period.is_some() {
+        errors.push(field_error(
+            "budget_usd",
+            "give budget_usd and budget_period together",
+        ));
+    }
+    if let Some(budget) = row.budget_usd
+        && !(budget.is_finite() && budget > 0.0 && budget <= MAX_BUDGET_USD)
+    {
+        errors.push(field_error(
+            "budget_usd",
+            "budget_usd must be above 0 and at most 1000000",
+        ));
+    }
+    if row.budget_usd.is_some() {
+        let prices = state.ingest.prices().for_org(org);
+        if let (Some(adapter), Some(model)) = (chat, row.chat_model.as_deref())
+            && budget::model_price(&prices, model, adapter, now).is_none()
+        {
+            errors.push(field_error(
+                "budget_usd",
+                "the chat model has no price, so the source cannot have a budget; add one under Settings → Model prices",
+            ));
+        }
+        if let (Some(adapter), Some(model)) = (embed, row.embed_model.as_deref()) {
+            let priced = prices
+                .price_for(model, Some(adapter.provider_name()), now)
+                .is_some_and(|price| price.price_input.is_some());
+            if !priced {
+                errors.push(field_error(
+                    "budget_usd",
+                    "the embedding model has no input price, so the source cannot have a budget; add one under Settings → Model prices",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The adapter of the org's connection `id` for `field`. A missing id or an unknown connection
+/// is a field error; so is an unknown stored adapter, which is an internal error.
+async fn connection_adapter(
+    state: &AppState,
+    org: OrgId,
+    field: &str,
+    id: Option<Uuid>,
+    errors: &mut Vec<FieldError>,
+) -> Result<Option<Adapter>, ApiError> {
+    let Some(id) = id else {
+        errors.push(field_error(field, "required for LLM sources"));
+        return Ok(None);
+    };
+    let Some(connection) = connections::get_connection(state.meta.reader(), org, id).await? else {
+        errors.push(field_error(field, "no such connection in this org"));
+        return Ok(None);
+    };
+    Adapter::from_name(&connection.adapter)
+        .map(Some)
+        .map_err(|_| ApiError::Internal("an LLM connection has an unknown adapter".into()))
+}
+
+/// Whether `sources` is one or two different feedback sources, each `end_user` or `human`.
+fn valid_feedback_sources(sources: &[String]) -> bool {
+    let known = sources
+        .iter()
+        .all(|source| FEEDBACK_SOURCES.contains(&source.as_str()));
+    match sources {
+        [one] => known && FEEDBACK_SOURCES.contains(&one.as_str()),
+        [first, second] => known && first != second,
+        _ => false,
+    }
+}
+
+/// Whether a source kind reads the LLM field `field` (D-IC-1). Only the score names and the
+/// feedback sources differ by kind.
+fn uses(kind: SourceKind, field: &str) -> bool {
+    match kind {
+        SourceKind::Error => false,
+        SourceKind::Score => field != "feedback_sources",
+        SourceKind::Feedback => true,
+        SourceKind::Topic => !matches!(field, "score_names" | "feedback_sources"),
+    }
+}
+
+/// One field error per given LLM field that the kind does not read.
+fn unused(kind: SourceKind, given: &[(&str, bool)]) -> Vec<FieldError> {
+    let message = format!("not used by {} sources", kind.as_str());
+    given
+        .iter()
+        .filter(|(field, present)| *present && !uses(kind, field))
+        .map(|(field, _)| field_error(field, &message))
+        .collect()
+}
+
+/// Which LLM fields a create gives.
+fn create_given(body: &CreateIssueSourceRequest) -> Vec<(&'static str, bool)> {
+    vec![
+        ("sample_rate", body.sample_rate.is_some()),
+        ("daily_cap", body.daily_cap.is_some()),
+        ("score_names", body.score_names.is_some()),
+        ("feedback_sources", body.feedback_sources.is_some()),
+        ("chat_connection_id", body.chat_connection_id.is_some()),
+        ("chat_model", body.chat_model.is_some()),
+        ("embed_connection_id", body.embed_connection_id.is_some()),
+        ("embed_model", body.embed_model.is_some()),
+        ("floor", body.floor.is_some()),
+        ("min_issue_size", body.min_issue_size.is_some()),
+        ("budget_usd", body.budget_usd.is_some()),
+        ("budget_period", body.budget_period.is_some()),
+    ]
+}
+
+/// Which LLM fields a PATCH gives. The embedding fields are refused by [`update_refusals`].
+fn update_given(body: &UpdateIssueSourceRequest) -> Vec<(&'static str, bool)> {
+    vec![
+        ("sample_rate", body.sample_rate.is_some()),
+        ("daily_cap", body.daily_cap.is_some()),
+        ("score_names", body.score_names.is_some()),
+        ("feedback_sources", body.feedback_sources.is_some()),
+        ("chat_connection_id", body.chat_connection_id.is_some()),
+        ("chat_model", body.chat_model.is_some()),
+        ("floor", body.floor.is_some()),
+        ("min_issue_size", body.min_issue_size.is_some()),
+        ("budget_usd", body.budget_usd.is_some()),
+        ("budget_period", body.budget_period.is_some()),
+    ]
+}
+
+/// The PATCH errors that come from the body alone: the embedding fields are fixed after create,
+/// and `clear_budget` takes no budget values.
+fn update_refusals(body: &UpdateIssueSourceRequest) -> Vec<FieldError> {
+    let mut errors = Vec::new();
+    if body.embed_connection_id.is_some() {
+        errors.push(field_error(
+            "embed_connection_id",
+            "fixed after create; create a new source",
+        ));
+    }
+    if body.embed_model.is_some() {
+        errors.push(field_error(
+            "embed_model",
+            "fixed after create; create a new source",
+        ));
+    }
+    if body.clear_budget && (body.budget_usd.is_some() || body.budget_period.is_some()) {
+        errors.push(field_error(
+            "budget_usd",
+            "clear_budget cannot come with budget_usd or budget_period",
+        ));
+    }
+    errors
+}
+
+/// The row a create stores: the body's values, and for an LLM kind the defaults, the topic filter
+/// and the first refit time (D-IC-1, D-IC-8). Refused fields are checked before this runs.
+fn created_row(
+    body: CreateIssueSourceRequest,
+    project: ProjectId,
+    user: Uuid,
+    now: i64,
+) -> SourceRow {
+    let kind = source_kind(body.kind);
+    let llm = kind.is_llm();
+    let feedback_sources = match body.feedback_sources {
+        Some(sources) => sources,
+        None if kind == SourceKind::Feedback => FEEDBACK_SOURCES
+            .iter()
+            .map(|source| (*source).to_owned())
+            .collect(),
+        None => Vec::new(),
+    };
+    let filter = normalize_filter(body.filter)
+        .or_else(|| (kind == SourceKind::Topic).then(|| TOPIC_FILTER.to_owned()));
+    SourceRow {
+        id: Uuid::now_v7(),
+        project_id: project,
+        name: body.name.trim().to_owned(),
+        kind,
+        filter,
+        enabled: body.enabled,
+        paused_reason: None,
+        paused_at: None,
+        created_by: Some(user),
+        created_at: now,
+        updated_at: now,
+        sample_rate: llm.then(|| body.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE)),
+        daily_cap: llm.then(|| body.daily_cap.unwrap_or(DEFAULT_DAILY_CAP)),
+        score_names: body.score_names.map_or_else(Vec::new, trimmed),
+        feedback_sources,
+        chat_connection_id: body.chat_connection_id,
+        chat_model: body.chat_model,
+        embed_connection_id: body.embed_connection_id,
+        embed_model: body.embed_model,
+        embed_dimension: None,
+        floor: llm.then(|| body.floor.unwrap_or(DEFAULT_FLOOR)),
+        min_issue_size: llm.then(|| body.min_issue_size.unwrap_or(DEFAULT_MIN_ISSUE_SIZE)),
+        budget_usd: body.budget_usd,
+        budget_period: body.budget_period.map(|period| period.as_str().to_owned()),
+        paused_detail: None,
+        next_refit_at: llm.then_some(now + FIRST_REFIT_DELAY_NS),
+    }
+}
+
+/// Score names as stored: trimmed.
+fn trimmed(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .map(|name| name.trim().to_owned())
+        .collect()
 }
 
 /// The filter as stored: trimmed, and absent when blank.
@@ -1333,8 +1774,65 @@ fn open_issues(counts: &HashMap<Uuid, u64>, id: Uuid) -> u64 {
     counts.get(&id).copied().unwrap_or_default()
 }
 
-/// The source as the API shows it.
-fn source_json(row: &SourceRow, open_issues: u64) -> IssueSource {
+/// The LLM figures of an LLM source: its candidates of the last 24 hours and the spend of the
+/// current UTC day (D-IC-12). `None` for an `error` source.
+struct LlmFigures {
+    candidates: IssueCandidateCounts,
+    spent_today_usd: f64,
+}
+
+async fn llm_figures(
+    state: &AppState,
+    row: &SourceRow,
+    now: i64,
+) -> Result<Option<LlmFigures>, ApiError> {
+    if !row.kind.is_llm() {
+        return Ok(None);
+    }
+    let candidates = candidate_counts(state.meta.reader(), row.id, now - DAY_NS).await?;
+    let today = day_start(now);
+    let spent_today_usd =
+        store::spent_between(state.meta.reader(), row.id, today, today + DAY_NS).await?;
+    Ok(Some(LlmFigures {
+        candidates,
+        spent_today_usd,
+    }))
+}
+
+/// The candidates of `source` created at or after `since`, by status. `running` and `outlier`
+/// candidates are not counted.
+async fn candidate_counts(
+    pool: &SqlitePool,
+    source: Uuid,
+    since: i64,
+) -> Result<IssueCandidateCounts, MetaError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM issue_candidates \
+         WHERE source_id = ? AND created_at >= ? GROUP BY status",
+    )
+    .bind(source.to_string())
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let mut counts = IssueCandidateCounts::default();
+    for (status, count) in rows {
+        let count = u64::try_from(count).unwrap_or_default();
+        match status.as_str() {
+            "queued" => counts.queued = count,
+            "pending" => counts.pending = count,
+            "assigned" => counts.assigned = count,
+            "dropped" => counts.dropped = count,
+            "failed" => counts.failed = count,
+            "skipped" => counts.skipped = count,
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
+/// The source as the API shows it. The LLM fields are set for the LLM kinds, and the score
+/// names for `score` and `feedback`, the feedback sources for `feedback`.
+fn source_json(row: &SourceRow, open_issues: u64, figures: Option<&LlmFigures>) -> IssueSource {
     IssueSource {
         id: row.id,
         project_id: row.project_id.as_uuid(),
@@ -1347,6 +1845,44 @@ fn source_json(row: &SourceRow, open_issues: u64) -> IssueSource {
         created_at: row.created_at,
         updated_at: row.updated_at,
         open_issues,
+        sample_rate: row.sample_rate,
+        daily_cap: row.daily_cap,
+        score_names: matches!(row.kind, SourceKind::Score | SourceKind::Feedback)
+            .then(|| row.score_names.clone()),
+        feedback_sources: (row.kind == SourceKind::Feedback).then(|| row.feedback_sources.clone()),
+        chat_connection_id: row.chat_connection_id,
+        chat_model: row.chat_model.clone(),
+        embed_connection_id: row.embed_connection_id,
+        embed_model: row.embed_model.clone(),
+        embed_dimension: row.embed_dimension,
+        floor: row.floor,
+        min_issue_size: row.min_issue_size,
+        budget_usd: row.budget_usd,
+        budget_period: row
+            .budget_period
+            .as_deref()
+            .and_then(BudgetPeriod::from_name),
+        paused_detail: row.paused_detail.clone(),
+        next_refit_at: row.next_refit_at,
+        candidates_24h: figures.map(|figures| figures.candidates),
+        spent_today_usd: figures.map(|figures| figures.spent_today_usd),
+    }
+}
+
+/// A refit as the API shows it.
+fn refit_json(row: RefitRow) -> IssueRefit {
+    IssueRefit {
+        id: row.id,
+        trigger: row.trigger.to_owned(),
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        pending: row.pending,
+        clusters: row.clusters,
+        created: row.created,
+        joined: row.joined,
+        outliers: row.outliers,
+        cost_usd: row.cost_usd,
+        error_class: row.error_class,
     }
 }
 
@@ -1388,7 +1924,11 @@ mod tests {
     use crate::api::common::ProblemCode;
     use crate::api::scores::ScoreCreate;
     use crate::auth::roles::OrgRole;
-    use crate::meta::issues::{EventKind, EventRow, IssueRow, IssueState};
+    use crate::meta::connections::{ConnectionFields, insert_connection};
+    use crate::meta::issues::{
+        CandidateRow, CandidateStatus, CandidateTarget, EventKind, EventRow, IssueRow, IssueState,
+        RefitRow,
+    };
     use crate::scores::{self as score_writes, Writer};
     use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
@@ -2833,5 +3373,317 @@ mod tests {
         expected.push(target.to_string());
         expected.sort();
         assert_eq!(example_ids, expected);
+    }
+
+    const HOUR_NS: i64 = 3_600_000_000_000;
+
+    /// An LLM connection of the seeded org, named after its adapter.
+    async fn connection(app: &TestApp, seeded: &Seeded, adapter: &'static str) -> Uuid {
+        let id = Uuid::now_v7();
+        let org = seeded.org_id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let fields = ConnectionFields {
+                        name: adapter.to_owned(),
+                        adapter: adapter.to_owned(),
+                        base_url: None,
+                        secret_enc: vec![1],
+                        api_key_hint: "WXYZ".to_owned(),
+                        extra_headers_enc: None,
+                        extra_header_names: Vec::new(),
+                        default_model: None,
+                        structured_output: "native".to_owned(),
+                        max_concurrency: 4,
+                        requests_per_minute: 300,
+                    };
+                    insert_connection(conn, id, org, fields, None, now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    /// A topic source body on `chat` and `embed`, both connections of the same adapter.
+    fn topic_body(name: &str, chat: Uuid, embed: Uuid) -> Value {
+        json!({
+            "name": name,
+            "kind": "topic",
+            "chat_connection_id": chat,
+            "chat_model": "gpt-5-mini",
+            "embed_connection_id": embed,
+            "embed_model": "text-embedding-3-small"
+        })
+    }
+
+    /// A refit of `source` that started at `started_at`, already finished.
+    async fn insert_refit_row(app: &TestApp, source: Uuid, started_at: i64, id: u128) {
+        let row = RefitRow {
+            id: Uuid::from_u128(id),
+            source_id: source,
+            trigger: "manual",
+            started_at,
+            finished_at: Some(started_at),
+            pending: 0,
+            clusters: 0,
+            created: 0,
+            joined: 0,
+            outliers: 0,
+            cost_usd: 0.0,
+            error_class: None,
+        };
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { store::insert_refit(conn, &row).await }))
+            .await
+            .unwrap();
+    }
+
+    /// A queued or other-status candidate of `source`, created at `created_at`.
+    fn candidate(
+        id: u128,
+        project: ProjectId,
+        source: Uuid,
+        status: CandidateStatus,
+        created_at: i64,
+    ) -> CandidateRow {
+        CandidateRow {
+            id: Uuid::from_u128(id),
+            project_id: project,
+            source_id: source,
+            target: CandidateTarget::Trace,
+            trace_id: Some(TraceId::from_slice(&[9; 16]).unwrap()),
+            span_id: None,
+            session_id: None,
+            user_id: None,
+            trace_start: Some(created_at),
+            score_id: None,
+            dedup_key: format!("{source}:{id}"),
+            status,
+            attempts: 0,
+            claims: 0,
+            interruptions: 0,
+            load_retries: 0,
+            not_before: created_at,
+            error_class: None,
+            issue_id: None,
+            summary: None,
+            summary_prompt_version: None,
+            vector: None,
+            embed_model: None,
+            dimension: None,
+            call_trace_id: None,
+            cost_usd: 0.0,
+            created_at,
+            updated_at: created_at,
+        }
+    }
+
+    async fn refit_now(app: &TestApp, seeded: &Seeded, id: Uuid) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/{id}/refit", path(seeded.project.id)),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .send()
+        .await
+    }
+
+    #[tokio::test]
+    async fn a_topic_source_gets_its_defaults_and_its_filter() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        assert_eq!(created["kind"], "topic");
+        assert_eq!(created["filter"], "environment = 'production'");
+        assert_eq!(created["sample_rate"], 1.0);
+        assert_eq!(created["daily_cap"], 500);
+        assert_eq!(created["floor"], 0.8);
+        assert_eq!(created["min_issue_size"], 5);
+        assert_eq!(created["embed_model"], "text-embedding-3-small");
+        assert!(created["next_refit_at"].is_string());
+        assert_eq!(created["candidates_24h"]["queued"], 0);
+        assert_eq!(created["spent_today_usd"], 0.0);
+        assert!(created.get("score_names").is_none());
+        assert!(created.get("feedback_sources").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_feedback_source_reads_both_feedback_sources_by_default() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let mut body = topic_body("Feedback", openai, openai);
+        body["kind"] = json!("feedback");
+        body["score_names"] = json!(["thumbs"]);
+        let created = create_ok(&app, &seeded, &body).await;
+        assert_eq!(created["feedback_sources"], json!(["end_user", "human"]));
+        assert_eq!(created["score_names"], json!(["thumbs"]));
+        assert!(created["filter"].is_null() || created.get("filter").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_score_source_without_score_names_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let mut body = topic_body("Scores", openai, openai);
+        body["kind"] = json!("score");
+        let response = create(&app, &seeded, &body).await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert!(text(&response).contains("score_names"));
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_embedding_connection_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let anthropic = connection(&app, &seeded, "anthropic").await;
+        let response = create(&app, &seeded, &topic_body("Topics", openai, anthropic)).await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert!(text(&response).contains("this provider has no embeddings API"));
+    }
+
+    #[tokio::test]
+    async fn patching_the_embedding_model_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let id = id_of(&created);
+        let response = patch(&app, &seeded, id, &json!({ "embed_model": "other" })).await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert!(text(&response).contains("fixed after create"));
+    }
+
+    #[tokio::test]
+    async fn an_llm_field_on_an_error_source_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let mut body = source_body("Errors");
+        body["floor"] = json!(0.9);
+        let response = create(&app, &seeded, &body).await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert!(text(&response).contains("not used by error sources"));
+    }
+
+    #[tokio::test]
+    async fn refit_now_is_202_and_refused_when_recent_or_for_an_error_source() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let id = id_of(&created);
+        // The first source is not due yet (created an hour ago at the earliest), so the refit is taken.
+        let accepted = refit_now(&app, &seeded, id).await;
+        assert_eq!(accepted.status, 202, "{}", text(&accepted));
+        // Now it is due, so a second request is refused.
+        let again = refit_now(&app, &seeded, id).await;
+        assert_eq!(again.status, 409, "{}", text(&again));
+        // A source whose refit started just now is refused for ten minutes.
+        let fresh = create_ok(&app, &seeded, &topic_body("Fresh", openai, openai)).await;
+        let fresh_id = id_of(&fresh);
+        let now = app.state.clock.now_ns();
+        insert_refit_row(&app, fresh_id, now, 0x1d01).await;
+        let recent = refit_now(&app, &seeded, fresh_id).await;
+        assert_eq!(recent.status, 409, "{}", text(&recent));
+        assert!(text(&recent).contains("less than 10 minutes"));
+        // An error source has no refit.
+        let errors = create_ok(&app, &seeded, &source_body("Errors")).await;
+        let refused = refit_now(&app, &seeded, id_of(&errors)).await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+    }
+
+    #[tokio::test]
+    async fn the_refits_list_is_newest_first() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let id = id_of(&created);
+        let now = app.state.clock.now_ns();
+        insert_refit_row(&app, id, now - 2 * HOUR_NS, 0x1d11).await;
+        insert_refit_row(&app, id, now - HOUR_NS, 0x1d12).await;
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/{id}/refits", path(seeded.project.id)),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        let data = body["data"].as_array().expect("data is an array");
+        assert_eq!(data.len(), 2);
+        assert_eq!(data[0]["id"], Uuid::from_u128(0x1d12).to_string());
+        assert_eq!(data[1]["id"], Uuid::from_u128(0x1d11).to_string());
+        assert_eq!(data[0]["trigger"], "manual");
+    }
+
+    #[tokio::test]
+    async fn candidates_24h_count_the_last_day_by_status() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let openai = connection(&app, &seeded, "openai").await;
+        let created = create_ok(&app, &seeded, &topic_body("Topics", openai, openai)).await;
+        let id = id_of(&created);
+        let now = app.state.clock.now_ns();
+        let rows = [
+            candidate(
+                0x1e01,
+                seeded.project.id,
+                id,
+                CandidateStatus::Queued,
+                now - HOUR_NS,
+            ),
+            candidate(
+                0x1e02,
+                seeded.project.id,
+                id,
+                CandidateStatus::Queued,
+                now - 2 * HOUR_NS,
+            ),
+            candidate(
+                0x1e03,
+                seeded.project.id,
+                id,
+                CandidateStatus::Pending,
+                now - 3 * HOUR_NS,
+            ),
+            // Older than a day: not counted.
+            candidate(
+                0x1e04,
+                seeded.project.id,
+                id,
+                CandidateStatus::Dropped,
+                now - 25 * HOUR_NS,
+            ),
+        ];
+        for row in rows {
+            app.state
+                .meta
+                .write(move |conn| {
+                    Box::pin(async move { store::insert_candidate(conn, &row).await })
+                })
+                .await
+                .unwrap();
+        }
+        let response = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let body: Value = response.json();
+        assert_eq!(body["candidates_24h"]["queued"], 2);
+        assert_eq!(body["candidates_24h"]["pending"], 1);
+        assert_eq!(body["candidates_24h"]["dropped"], 0);
     }
 }

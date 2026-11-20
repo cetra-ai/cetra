@@ -1,0 +1,29 @@
+{
+  "data": [
+    {
+      "id": "01900000-0000-7000-8000-000000001c31",
+      "trigger": "manual",
+      "started_at": "2026-01-01T11:00:00.000000000Z",
+      "finished_at": "2026-01-01T11:00:42.000000000Z",
+      "pending": 30,
+      "clusters": 3,
+      "created": 2,
+      "joined": 25,
+      "outliers": 3,
+      "cost_usd": 0.0123
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001c30",
+      "trigger": "schedule",
+      "started_at": "2026-01-01T09:00:00.000000000Z",
+      "finished_at": "2026-01-01T09:00:05.000000000Z",
+      "pending": 0,
+      "clusters": 0,
+      "created": 0,
+      "joined": 0,
+      "outliers": 0,
+      "cost_usd": 0.0,
+      "error_class": "busy"
+    }
+  ]
+}

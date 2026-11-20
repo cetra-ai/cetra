@@ -14,13 +14,10 @@ use super::{MetaError, unique_or};
 const SOURCES: &str = "issue_sources";
 const ISSUES: &str = "issues";
 const EVENTS: &str = "issue_events";
-#[cfg_attr(not(test), allow(dead_code))]
 const CANDIDATES: &str = "issue_candidates";
-#[cfg_attr(not(test), allow(dead_code))]
 const REFITS: &str = "issue_refits";
 
 /// Interruptions a candidate may take before it fails (D-I-12, as for eval jobs).
-#[cfg_attr(not(test), allow(dead_code))]
 const MAX_CANDIDATE_INTERRUPTIONS: i64 = 3;
 
 /// Shown when a source name is taken in its project.
@@ -52,7 +49,6 @@ impl SourceKind {
     }
 
     /// Whether the kind is an LLM kind (`score`, `feedback` or `topic`, D-IC-1).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn is_llm(self) -> bool {
         !matches!(self, Self::Error)
     }
@@ -852,7 +848,6 @@ pub(crate) async fn list_events(
 
 /// The state of an issue candidate (D-IC-12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum CandidateStatus {
     Queued,
     Running,
@@ -865,7 +860,6 @@ pub(crate) enum CandidateStatus {
 }
 
 impl CandidateStatus {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
@@ -879,7 +873,6 @@ impl CandidateStatus {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn from_db(value: &str) -> Option<Self> {
         match value {
             "queued" => Some(Self::Queued),
@@ -897,7 +890,6 @@ impl CandidateStatus {
 
 /// What a candidate is about: a trace, one span of a trace, or a session (D-IC-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum CandidateTarget {
     Trace,
     Span,
@@ -905,7 +897,6 @@ pub(crate) enum CandidateTarget {
 }
 
 impl CandidateTarget {
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Trace => "trace",
@@ -914,7 +905,6 @@ impl CandidateTarget {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn from_db(value: &str) -> Option<Self> {
         match value {
             "trace" => Some(Self::Trace),
@@ -927,7 +917,6 @@ impl CandidateTarget {
 
 /// One stored issue candidate (D-IC-1, D-IC-12). Times are nanoseconds.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CandidateRow {
     pub(crate) id: Uuid,
     pub(crate) project_id: ProjectId,
@@ -966,7 +955,6 @@ pub(crate) struct CandidateRow {
 /// How a worker leaves a running candidate (A5). The spend is passed to
 /// [`finish_candidate`] separately.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) enum CandidateFinish {
     /// The summary is stored; the candidate stays `running`.
     Summarized {
@@ -1018,7 +1006,6 @@ pub(crate) enum CandidateFinish {
 /// # Errors
 ///
 /// Returns [`MetaError`] when the insert fails, for example when the source does not exist.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn insert_candidate(
     conn: &mut SqliteConnection,
     row: &CandidateRow,
@@ -1071,7 +1058,6 @@ pub(crate) async fn insert_candidate(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the upsert fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn admit_daily(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1099,7 +1085,6 @@ pub(crate) async fn admit_daily(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the upsert fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn add_spend(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1130,7 +1115,6 @@ pub(crate) async fn add_spend(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn spent_between(
     pool: &SqlitePool,
     source: Uuid,
@@ -1156,7 +1140,6 @@ pub(crate) async fn spent_between(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn ready_candidates(
     pool: &SqlitePool,
     now: i64,
@@ -1194,7 +1177,6 @@ pub(crate) async fn ready_candidates(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn claim_candidate(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -1219,7 +1201,6 @@ pub(crate) async fn claim_candidate(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn start_candidate_attempt(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -1247,7 +1228,6 @@ pub(crate) async fn start_candidate_attempt(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn finish_candidate(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -1419,7 +1399,6 @@ pub(crate) async fn finish_candidate(
 ///
 /// Returns [`MetaError`] when the update fails.
 #[allow(clippy::too_many_arguments)] // the candidate, its claim, the resolved trace and its owners, and the time
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn set_candidate_target(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -1455,7 +1434,6 @@ pub(crate) async fn set_candidate_target(
 /// # Errors
 ///
 /// Returns [`MetaError`] when an update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn interrupt_candidates(
     conn: &mut SqliteConnection,
     older_than: i64,
@@ -1491,7 +1469,6 @@ pub(crate) async fn interrupt_candidates(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn source_centroids(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1522,7 +1499,6 @@ pub(crate) async fn source_centroids(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn pending_candidates(
     pool: &SqlitePool,
     source: Uuid,
@@ -1548,7 +1524,6 @@ pub(crate) async fn pending_candidates(
 /// # Errors
 ///
 /// Returns [`MetaError`] when an update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn set_candidates_assigned(
     conn: &mut SqliteConnection,
     ids: &[Uuid],
@@ -1578,7 +1553,6 @@ pub(crate) async fn set_candidates_assigned(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn mark_outliers(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1603,7 +1577,6 @@ pub(crate) async fn mark_outliers(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the source does not exist or the query fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn set_embed_dimension(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1629,7 +1602,6 @@ pub(crate) async fn set_embed_dimension(
 
 /// One stored refit of an LLM source (D-IC-8). Times are nanoseconds.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct RefitRow {
     pub(crate) id: Uuid,
     pub(crate) source_id: Uuid,
@@ -1651,7 +1623,6 @@ pub(crate) struct RefitRow {
 /// # Errors
 ///
 /// Returns [`MetaError`] when the insert fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn insert_refit(
     conn: &mut SqliteConnection,
     row: &RefitRow,
@@ -1683,7 +1654,6 @@ pub(crate) async fn insert_refit(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn finish_refit(
     conn: &mut SqliteConnection,
     row: &RefitRow,
@@ -1711,7 +1681,6 @@ pub(crate) async fn finish_refit(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn list_refits(
     pool: &SqlitePool,
     source: Uuid,
@@ -1734,7 +1703,6 @@ pub(crate) async fn list_refits(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn last_refit_started(
     pool: &SqlitePool,
     source: Uuid,
@@ -1753,7 +1721,6 @@ pub(crate) async fn last_refit_started(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn due_refits(pool: &SqlitePool, now: i64) -> Result<Vec<SourceRow>, MetaError> {
     let records: Vec<SourceRecord> = sqlx::query_as(
         "SELECT s.* FROM issue_sources s \
@@ -1775,7 +1742,6 @@ pub(crate) async fn due_refits(pool: &SqlitePool, now: i64) -> Result<Vec<Source
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn set_next_refit(
     conn: &mut SqliteConnection,
     source: Uuid,
@@ -1795,7 +1761,6 @@ pub(crate) async fn set_next_refit(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the update fails.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn close_open_refits(
     conn: &mut SqliteConnection,
     now: i64,
@@ -1816,7 +1781,6 @@ pub(crate) async fn close_open_refits(
 /// # Errors
 ///
 /// Returns [`MetaError`] when the query fails or a stored value does not decode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn llm_sources(
     pool: &SqlitePool,
 ) -> Result<Vec<(SourceRow, OrgId, Option<i64>)>, MetaError> {
@@ -2228,7 +2192,6 @@ fn event_from(record: EventRecord) -> Result<EventRow, MetaError> {
 }
 
 #[derive(sqlx::FromRow)]
-#[cfg_attr(not(test), allow(dead_code))]
 struct CandidateRecord {
     id: String,
     project_id: String,
@@ -2260,7 +2223,6 @@ struct CandidateRecord {
     updated_at: i64,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn candidate_from(record: CandidateRecord) -> Result<CandidateRow, MetaError> {
     Ok(CandidateRow {
         id: parse_uuid(&record.id, CANDIDATES, "id")?,
@@ -2319,7 +2281,6 @@ fn candidate_from(record: CandidateRecord) -> Result<CandidateRow, MetaError> {
 }
 
 #[derive(sqlx::FromRow)]
-#[cfg_attr(not(test), allow(dead_code))]
 struct RefitRecord {
     id: String,
     source_id: String,
@@ -2335,7 +2296,6 @@ struct RefitRecord {
     error_class: Option<String>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn refit_from(record: RefitRecord) -> Result<RefitRow, MetaError> {
     let trigger = match record.trigger.as_str() {
         "schedule" => "schedule",
@@ -2360,7 +2320,6 @@ fn refit_from(record: RefitRecord) -> Result<RefitRow, MetaError> {
 
 /// An LLM source with the org of its project and the project's completion timeout.
 #[derive(sqlx::FromRow)]
-#[cfg_attr(not(test), allow(dead_code))]
 struct LlmSourceRecord {
     org_id: String,
     completion_timeout_s: Option<i64>,
@@ -2368,7 +2327,6 @@ struct LlmSourceRecord {
     source: SourceRecord,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn u32_from(value: i64, table: &'static str, column: &'static str) -> Result<u32, MetaError> {
     u32::try_from(value).map_err(|_| corrupt(table, column))
 }
