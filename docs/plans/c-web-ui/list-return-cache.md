@@ -123,7 +123,7 @@ Run them one at a time in the same worktree (each commits). Files per phase:
 - **Do not build, type-check, lint or run tests** (machine load rule: checks run once at the end of
   the plan). Write the code and tests carefully, then format only:
   `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH` then from the worktree root
-  `web/node_modules/.bin/biome format --write <your files>` (if `web/node_modules` is missing, run
+  `node_modules/.bin/biome format --write <your files>` (if `web/node_modules` is missing, run
   `cd web && pnpm install --frozen-lockfile` first).
 - AGENTS.md rules: no placeholders, no compatibility shims, tests for each behaviour, no payload
   content in logs.
