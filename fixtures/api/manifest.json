@@ -1055,6 +1055,16 @@
     "file": "static/experiments.json"
   },
   {
+    "operation_id": "list_issue_source_refits",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c20"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-refits.json"
+  },
+  {
     "operation_id": "list_issue_sources",
     "path_params": {},
     "query": {},

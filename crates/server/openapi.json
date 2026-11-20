@@ -14427,6 +14427,202 @@
         }
       }
     },
+    "/api/v1/projects/{project}/issue-sources/{id}/refit": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Refit an issue source now",
+        "description": "Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source. 409 when a refit started less than 10 minutes ago or one is already due.",
+        "operationId": "post_issue_source_refit",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The source, with `next_refit_at` set to now.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueSource"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/projects/{project}/issue-sources/{id}/refits": {
+      "get": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "List the refits of an issue source",
+        "description": "Any project member can read. The newest 50 refits of the source, newest first.",
+        "operationId": "list_issue_source_refits",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue source id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The refits, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssueRefitPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/issues": {
       "get": {
         "tags": [
@@ -22340,21 +22536,84 @@
           "kind"
         ],
         "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Needed with `budget_usd`."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Needs `budget_period`, and the models must be\npriced."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model. Required for LLM kinds."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. Required for LLM kinds."
+          },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only. Default 500.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the embedding model. Required for LLM kinds. Anthropic cannot embed."
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Embedding model of that connection. Required for LLM kinds. Fixed after create."
+          },
           "enabled": {
             "type": "boolean",
             "description": "Whether the source runs. Default true."
+          },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feedback sources of a `feedback` source: `end_user` and/or `human`. Default both."
           },
           "filter": {
             "type": "string",
             "description": "Spans filter. Absent means no filter."
           },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. Default 0.80."
+          },
           "kind": {
             "$ref": "#/components/schemas/IssueSourceKind",
             "description": "What the source reads."
           },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. Default 5.",
+            "minimum": 0
+          },
           "name": {
             "type": "string",
             "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds\nonly. Default 1."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Score names of a `score` or `feedback` source: 1 to 8 names of 1 to 255 bytes. Required\nfor those kinds; a `topic` source refuses it."
           }
         },
         "additionalProperties": false
@@ -25726,7 +25985,7 @@
               "type": "string",
               "format": "uuid"
             },
-            "description": "Issues merged into this one. Their occurrences count here."
+            "description": "Issues merged into this one. Their occurrences count here. Ordered by occurrence count\nover the read's period, most first, then by id."
           },
           "merged_into": {
             "type": "string",
@@ -25782,6 +26041,56 @@
             "type": "integer",
             "format": "int64",
             "description": "Distinct users in the same period: the largest user count of the issue's names, so an\napproximation when merged issues share users.",
+            "minimum": 0
+          }
+        }
+      },
+      "IssueCandidateCounts": {
+        "type": "object",
+        "description": "Candidates of an LLM source created in the last 24 hours, by status (D-IC-12).",
+        "required": [
+          "queued",
+          "pending",
+          "assigned",
+          "dropped",
+          "failed",
+          "skipped"
+        ],
+        "properties": {
+          "assigned": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Joined an issue.",
+            "minimum": 0
+          },
+          "dropped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not kept: the trace is gone, or the daily cap was reached.",
+            "minimum": 0
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Failed after its retries.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Embedded, waiting for the next refit.",
+            "minimum": 0
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Waiting for a worker, or for their retry time.",
+            "minimum": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Skipped: the source was deleted, paused too long, or the trace was deleted.",
             "minimum": 0
           }
         }
@@ -25921,7 +26230,7 @@
             "items": {
               "$ref": "#/components/schemas/IssueExample"
             },
-            "description": "The newest occurrences of the issue and of the issues merged into it, at most 20. Not\nlimited to the period."
+            "description": "The newest occurrences of the issue and of its seven merged issues with the most\noccurrences in the period (eight names in all), at most 20. Not limited to the period."
           }
         }
       },
@@ -25949,6 +26258,97 @@
           }
         }
       },
+      "IssueRefit": {
+        "type": "object",
+        "description": "One refit of an LLM source (D-IC-8).",
+        "required": [
+          "id",
+          "trigger",
+          "started_at",
+          "pending",
+          "clusters",
+          "created",
+          "joined",
+          "outliers",
+          "cost_usd"
+        ],
+        "properties": {
+          "clusters": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Clusters found among them.",
+            "minimum": 0
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "USD spent on the naming calls."
+          },
+          "created": {
+            "type": "integer",
+            "format": "int32",
+            "description": "New issues created.",
+            "minimum": 0
+          },
+          "error_class": {
+            "type": "string",
+            "description": "Why the refit stopped early, such as `busy`, `budget` or `interrupted`. Omitted when it\nfinished."
+          },
+          "finished_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the refit finished. Omitted while it runs. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refit id."
+          },
+          "joined": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidates that joined an existing issue.",
+            "minimum": 0
+          },
+          "outliers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Candidates left as outliers.",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Pending candidates the refit read.",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the refit started. JSON is RFC 3339."
+          },
+          "trigger": {
+            "type": "string",
+            "description": "`schedule` (every 6 hours) or `manual` (\"Refit now\")."
+          }
+        }
+      },
+      "IssueRefitPage": {
+        "type": "object",
+        "description": "`GET …/issue-sources/{id}/refits` answer: the newest 50 refits, newest first.",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IssueRefit"
+            },
+            "description": "The refits, newest first."
+          }
+        }
+      },
       "IssueSource": {
         "type": "object",
         "description": "An issue source. Spec 09 § Issues.",
@@ -25963,6 +26363,28 @@
           "open_issues"
         ],
         "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget. Present exactly when `budget_usd` is."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Omitted when there is no budget."
+          },
+          "candidates_24h": {
+            "$ref": "#/components/schemas/IssueCandidateCounts",
+            "description": "Candidates created in the last 24 hours, by status. LLM kinds only."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model that summarizes and names. LLM kinds only."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. LLM kinds only."
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -25973,13 +26395,46 @@
             "format": "uuid",
             "description": "User who created the source. Omitted when that user is unknown."
           },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the embedding model. Fixed after create. LLM kinds only."
+          },
+          "embed_dimension": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Vector dimension of the embedding model, set once the source first embeds. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Embedding model of that connection. Fixed after create. LLM kinds only."
+          },
           "enabled": {
             "type": "boolean",
             "description": "Whether the source runs. A disabled source counts for no plan limit."
           },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Feedback sources read by a `feedback` source: `end_user` and/or `human`. Omitted for other\nkinds."
+          },
           "filter": {
             "type": "string",
             "description": "Spans filter for `error` sources. Omitted when there is none."
+          },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only."
           },
           "id": {
             "type": "string",
@@ -25990,15 +26445,30 @@
             "$ref": "#/components/schemas/IssueSourceKind",
             "description": "What the source reads. Immutable."
           },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.",
+            "minimum": 0
+          },
           "name": {
             "type": "string",
             "description": "Display name, unique in the project. 1 to 128 characters."
+          },
+          "next_refit_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the next refit is due. Omitted for other kinds. JSON is RFC 3339."
           },
           "open_issues": {
             "type": "integer",
             "format": "int64",
             "description": "Issues of this source that are open now.",
             "minimum": 0
+          },
+          "paused_detail": {
+            "type": "string",
+            "description": "The provider's error text for a connection pause. Omitted when the source is not paused\nfor a connection."
           },
           "paused_reason": {
             "type": "string",
@@ -26008,6 +26478,23 @@
             "type": "string",
             "format": "uuid",
             "description": "The project the source belongs to."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Score names read by a `score` or `feedback` source. Omitted for other kinds."
+          },
+          "spent_today_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend of the current UTC day, in USD. LLM kinds only."
           },
           "updated_at": {
             "type": "string",
@@ -26020,7 +26507,10 @@
         "type": "string",
         "description": "What an issue source reads. M3 adds kinds (D-IC-1).",
         "enum": [
-          "error"
+          "error",
+          "score",
+          "feedback",
+          "topic"
         ]
       },
       "IssueSourcePage": {
@@ -30427,6 +30917,10 @@
         "type": "object",
         "description": "`POST /api/v1/orgs/{org}/llm-connections/{id}/test` body.",
         "properties": {
+          "embedding_model": {
+            "type": "string",
+            "description": "Embedding model to test instead: the test embeds `\"ping\"` and does not ask for a\njudgement. Not for an Anthropic connection, which has no embeddings API."
+          },
           "model": {
             "type": "string",
             "description": "Model to call. Default: the connection's `default_model`."
@@ -31059,9 +31553,53 @@
         "type": "object",
         "description": "`PATCH /api/v1/projects/{project}/issue-sources/{id}` body. Absent means unchanged.\n\nThere is no `kind`: sending it is a 400 (unknown field). Optional fields refuse `null`,\nexcept `filter`, where `null` clears it.",
         "properties": {
+          "budget_period": {
+            "$ref": "#/components/schemas/BudgetPeriod",
+            "description": "Period of the budget."
+          },
+          "budget_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Spend limit per `budget_period`, in USD. Give it with `budget_period` when the source has\nno budget yet."
+          },
+          "chat_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Connection of the chat model. LLM kinds only."
+          },
+          "chat_model": {
+            "type": "string",
+            "description": "Chat model of that connection. LLM kinds only."
+          },
+          "clear_budget": {
+            "type": "boolean",
+            "description": "Removes the budget. Cannot come with `budget_usd` or `budget_period`."
+          },
+          "daily_cap": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.",
+            "minimum": 0
+          },
+          "embed_connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Refused: the embedding connection is fixed after create (400)."
+          },
+          "embed_model": {
+            "type": "string",
+            "description": "Refused: the embedding model is fixed after create (400)."
+          },
           "enabled": {
             "type": "boolean",
             "description": "Turns the source on or off."
+          },
+          "feedback_sources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Replaces the feedback sources of a `feedback` source."
           },
           "filter": {
             "type": [
@@ -31070,9 +31608,32 @@
             ],
             "description": "Spans filter. `null` or `\"\"` clears it."
           },
+          "floor": {
+            "type": "number",
+            "format": "double",
+            "description": "Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only."
+          },
+          "min_issue_size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.",
+            "minimum": 0
+          },
           "name": {
             "type": "string",
             "description": "Display name, 1 to 128 characters after trimming."
+          },
+          "sample_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only."
+          },
+          "score_names": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Replaces the score names of a `score` or `feedback` source."
           }
         },
         "additionalProperties": false

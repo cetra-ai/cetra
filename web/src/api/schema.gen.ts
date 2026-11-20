@@ -2184,6 +2184,46 @@ export interface paths {
         patch: operations["patch_issue_source"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/issue-sources/{id}/refit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refit an issue source now
+         * @description Project members and above. API keys cannot call it. Sets the source's next refit to now, so the next sweep refits it. 400 for an `error` source. 409 when a refit started less than 10 minutes ago or one is already due.
+         */
+        post: operations["post_issue_source_refit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/issue-sources/{id}/refits": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the refits of an issue source
+         * @description Any project member can read. The newest 50 refits of the source, newest first.
+         */
+        get: operations["list_issue_source_refits"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/issues": {
         parameters: {
             query?: never;
@@ -3914,14 +3954,64 @@ export interface components {
          *     Optional fields refuse `null` (spec 09 § Conventions).
          */
         CreateIssueSourceRequest: {
+            /** @description Period of the budget. Needed with `budget_usd`. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Spend limit per `budget_period`, in USD. Needs `budget_period`, and the models must be
+             *     priced.
+             */
+            budget_usd?: number;
+            /**
+             * Format: uuid
+             * @description Connection of the chat model. Required for LLM kinds.
+             */
+            chat_connection_id?: string;
+            /** @description Chat model of that connection. Required for LLM kinds. */
+            chat_model?: string;
+            /**
+             * Format: int32
+             * @description Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only. Default 500.
+             */
+            daily_cap?: number;
+            /**
+             * Format: uuid
+             * @description Connection of the embedding model. Required for LLM kinds. Anthropic cannot embed.
+             */
+            embed_connection_id?: string;
+            /** @description Embedding model of that connection. Required for LLM kinds. Fixed after create. */
+            embed_model?: string;
             /** @description Whether the source runs. Default true. */
             enabled?: boolean;
+            /** @description Feedback sources of a `feedback` source: `end_user` and/or `human`. Default both. */
+            feedback_sources?: string[];
             /** @description Spans filter. Absent means no filter. */
             filter?: string;
+            /**
+             * Format: double
+             * @description Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. Default 0.80.
+             */
+            floor?: number;
             /** @description What the source reads. */
             kind: components["schemas"]["IssueSourceKind"];
+            /**
+             * Format: int32
+             * @description Smallest group a refit makes into a new issue, 2 to 100. Default 5.
+             */
+            min_issue_size?: number;
             /** @description Display name, 1 to 128 characters after trimming. */
             name: string;
+            /**
+             * Format: double
+             * @description Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds
+             *     only. Default 1.
+             */
+            sample_rate?: number;
+            /**
+             * @description Score names of a `score` or `feedback` source: 1 to 8 names of 1 to 255 bytes. Required
+             *     for those kinds; a `topic` source refuses it.
+             */
+            score_names?: string[];
         };
         /** @description `POST /api/v1/orgs/{org}/llm-connections` body. */
         CreateLlmConnectionRequest: {
@@ -5698,7 +5788,10 @@ export interface components {
              * @description Start of the latest occurrence. JSON is RFC 3339.
              */
             last_seen: string;
-            /** @description Issues merged into this one. Their occurrences count here. */
+            /**
+             * @description Issues merged into this one. Their occurrences count here. Ordered by occurrence count
+             *     over the read's period, most first, then by id.
+             */
             merged_from: string[];
             /**
              * Format: uuid
@@ -5746,6 +5839,39 @@ export interface components {
              *     approximation when merged issues share users.
              */
             users: number;
+        };
+        /** @description Candidates of an LLM source created in the last 24 hours, by status (D-IC-12). */
+        IssueCandidateCounts: {
+            /**
+             * Format: int64
+             * @description Joined an issue.
+             */
+            assigned: number;
+            /**
+             * Format: int64
+             * @description Not kept: the trace is gone, or the daily cap was reached.
+             */
+            dropped: number;
+            /**
+             * Format: int64
+             * @description Failed after its retries.
+             */
+            failed: number;
+            /**
+             * Format: int64
+             * @description Embedded, waiting for the next refit.
+             */
+            pending: number;
+            /**
+             * Format: int64
+             * @description Waiting for a worker, or for their retry time.
+             */
+            queued: number;
+            /**
+             * Format: int64
+             * @description Skipped: the source was deleted, paused too long, or the trace was deleted.
+             */
+            skipped: number;
         };
         /** @description One UTC day of an issue's occurrences. */
         IssueDay: {
@@ -5822,8 +5948,8 @@ export interface components {
              */
             days: components["schemas"]["IssueDay"][];
             /**
-             * @description The newest occurrences of the issue and of the issues merged into it, at most 20. Not
-             *     limited to the period.
+             * @description The newest occurrences of the issue and of its seven merged issues with the most
+             *     occurrences in the period (eight names in all), at most 20. Not limited to the period.
              */
             examples: components["schemas"]["IssueExample"][];
         };
@@ -5834,8 +5960,84 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description One refit of an LLM source (D-IC-8). */
+        IssueRefit: {
+            /**
+             * Format: int32
+             * @description Clusters found among them.
+             */
+            clusters: number;
+            /**
+             * Format: double
+             * @description USD spent on the naming calls.
+             */
+            cost_usd: number;
+            /**
+             * Format: int32
+             * @description New issues created.
+             */
+            created: number;
+            /**
+             * @description Why the refit stopped early, such as `busy`, `budget` or `interrupted`. Omitted when it
+             *     finished.
+             */
+            error_class?: string;
+            /**
+             * Format: date-time
+             * @description When the refit finished. Omitted while it runs. JSON is RFC 3339.
+             */
+            finished_at?: string;
+            /**
+             * Format: uuid
+             * @description Refit id.
+             */
+            id: string;
+            /**
+             * Format: int32
+             * @description Candidates that joined an existing issue.
+             */
+            joined: number;
+            /**
+             * Format: int32
+             * @description Candidates left as outliers.
+             */
+            outliers: number;
+            /**
+             * Format: int32
+             * @description Pending candidates the refit read.
+             */
+            pending: number;
+            /**
+             * Format: date-time
+             * @description When the refit started. JSON is RFC 3339.
+             */
+            started_at: string;
+            /** @description `schedule` (every 6 hours) or `manual` ("Refit now"). */
+            trigger: string;
+        };
+        /** @description `GET …/issue-sources/{id}/refits` answer: the newest 50 refits, newest first. */
+        IssueRefitPage: {
+            /** @description The refits, newest first. */
+            data: components["schemas"]["IssueRefit"][];
+        };
         /** @description An issue source. Spec 09 § Issues. */
         IssueSource: {
+            /** @description Period of the budget. Present exactly when `budget_usd` is. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Spend limit per `budget_period`, in USD. Omitted when there is no budget.
+             */
+            budget_usd?: number;
+            /** @description Candidates created in the last 24 hours, by status. LLM kinds only. */
+            candidates_24h?: components["schemas"]["IssueCandidateCounts"];
+            /**
+             * Format: uuid
+             * @description Connection of the chat model that summarizes and names. LLM kinds only.
+             */
+            chat_connection_id?: string;
+            /** @description Chat model of that connection. LLM kinds only. */
+            chat_model?: string;
             /**
              * Format: date-time
              * @description Creation time. JSON is RFC 3339.
@@ -5846,10 +6048,37 @@ export interface components {
              * @description User who created the source. Omitted when that user is unknown.
              */
             created_by?: string;
+            /**
+             * Format: int32
+             * @description Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.
+             */
+            daily_cap?: number;
+            /**
+             * Format: uuid
+             * @description Connection of the embedding model. Fixed after create. LLM kinds only.
+             */
+            embed_connection_id?: string;
+            /**
+             * Format: int32
+             * @description Vector dimension of the embedding model, set once the source first embeds. LLM kinds only.
+             */
+            embed_dimension?: number;
+            /** @description Embedding model of that connection. Fixed after create. LLM kinds only. */
+            embed_model?: string;
             /** @description Whether the source runs. A disabled source counts for no plan limit. */
             enabled: boolean;
+            /**
+             * @description Feedback sources read by a `feedback` source: `end_user` and/or `human`. Omitted for other
+             *     kinds.
+             */
+            feedback_sources?: string[];
             /** @description Spans filter for `error` sources. Omitted when there is none. */
             filter?: string;
+            /**
+             * Format: double
+             * @description Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only.
+             */
+            floor?: number;
             /**
              * Format: uuid
              * @description Source id.
@@ -5857,13 +6086,28 @@ export interface components {
             id: string;
             /** @description What the source reads. Immutable. */
             kind: components["schemas"]["IssueSourceKind"];
+            /**
+             * Format: int32
+             * @description Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.
+             */
+            min_issue_size?: number;
             /** @description Display name, unique in the project. 1 to 128 characters. */
             name: string;
+            /**
+             * Format: date-time
+             * @description When the next refit is due. Omitted for other kinds. JSON is RFC 3339.
+             */
+            next_refit_at?: string;
             /**
              * Format: int64
              * @description Issues of this source that are open now.
              */
             open_issues: number;
+            /**
+             * @description The provider's error text for a connection pause. Omitted when the source is not paused
+             *     for a connection.
+             */
+            paused_detail?: string;
             /** @description Why the sweeper skips the source. Omitted when it runs. */
             paused_reason?: string;
             /**
@@ -5871,6 +6115,18 @@ export interface components {
              * @description The project the source belongs to.
              */
             project_id: string;
+            /**
+             * Format: double
+             * @description Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only.
+             */
+            sample_rate?: number;
+            /** @description Score names read by a `score` or `feedback` source. Omitted for other kinds. */
+            score_names?: string[];
+            /**
+             * Format: double
+             * @description Spend of the current UTC day, in USD. LLM kinds only.
+             */
+            spent_today_usd?: number;
             /**
              * Format: date-time
              * @description Last change time. JSON is RFC 3339.
@@ -5881,7 +6137,7 @@ export interface components {
          * @description What an issue source reads. M3 adds kinds (D-IC-1).
          * @enum {string}
          */
-        IssueSourceKind: "error";
+        IssueSourceKind: "error" | "score" | "feedback" | "topic";
         /** @description One page of issue sources. `next_cursor` is null when there is no next page. */
         IssueSourcePage: {
             /** @description Sources in this page. */
@@ -8300,6 +8556,11 @@ export interface components {
         };
         /** @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. */
         TestLlmConnectionRequest: {
+            /**
+             * @description Embedding model to test instead: the test embeds `"ping"` and does not ask for a
+             *     judgement. Not for an Anthropic connection, which has no embeddings API.
+             */
+            embedding_model?: string;
             /** @description Model to call. Default: the connection's `default_model`. */
             model?: string;
         };
@@ -8656,12 +8917,60 @@ export interface components {
          *     except `filter`, where `null` clears it.
          */
         UpdateIssueSourceRequest: {
+            /** @description Period of the budget. */
+            budget_period?: components["schemas"]["BudgetPeriod"];
+            /**
+             * Format: double
+             * @description Spend limit per `budget_period`, in USD. Give it with `budget_period` when the source has
+             *     no budget yet.
+             */
+            budget_usd?: number;
+            /**
+             * Format: uuid
+             * @description Connection of the chat model. LLM kinds only.
+             */
+            chat_connection_id?: string;
+            /** @description Chat model of that connection. LLM kinds only. */
+            chat_model?: string;
+            /** @description Removes the budget. Cannot come with `budget_usd` or `budget_period`. */
+            clear_budget?: boolean;
+            /**
+             * Format: int32
+             * @description Most candidates admitted per UTC day, 1 to 10 000. LLM kinds only.
+             */
+            daily_cap?: number;
+            /**
+             * Format: uuid
+             * @description Refused: the embedding connection is fixed after create (400).
+             */
+            embed_connection_id?: string;
+            /** @description Refused: the embedding model is fixed after create (400). */
+            embed_model?: string;
             /** @description Turns the source on or off. */
             enabled?: boolean;
+            /** @description Replaces the feedback sources of a `feedback` source. */
+            feedback_sources?: string[];
             /** @description Spans filter. `null` or `""` clears it. */
             filter?: string | null;
+            /**
+             * Format: double
+             * @description Cosine similarity at which a candidate joins an issue, 0.5 to 0.99. LLM kinds only.
+             */
+            floor?: number;
+            /**
+             * Format: int32
+             * @description Smallest group a refit makes into a new issue, 2 to 100. LLM kinds only.
+             */
+            min_issue_size?: number;
             /** @description Display name, 1 to 128 characters after trimming. */
             name?: string;
+            /**
+             * Format: double
+             * @description Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only.
+             */
+            sample_rate?: number;
+            /** @description Replaces the score names of a `score` or `feedback` source. */
+            score_names?: string[];
         };
         /**
          * @description `PATCH …/items/{item_id}` body. An absent field is unchanged; `expected_output: null` clears
@@ -19967,6 +20276,155 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_issue_source_refit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The source, with `next_refit_at` set to now. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueSource"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_issue_source_refits: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue source id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The refits, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssueRefitPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
