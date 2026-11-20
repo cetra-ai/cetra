@@ -14,6 +14,7 @@ Read `STYLE.md` before writing.
 - Marketing pages are plain Astro pages under `src/pages/`, using `src/marketing/layouts/MarketingLayout.astro`. They never use Starlight. Their components, styles and constants are in `src/marketing/`.
 - Every marketing route is listed in `src/marketing/routes.mjs`. `scripts/check-marketing.mjs` checks each one after the build: structure, metadata, `noindex`, internal links, and a 350 KB page-weight cap without fonts.
 - `LAUNCHED` is true since M7: marketing pages are indexable, except the routes in `ALWAYS_NOINDEX`.
+- `public/og.png` is the Open Graph image of every marketing page; regenerate it with `pnpm --dir website exec node scripts/og-image.mjs` after a brand change.
 - URLs and repeated strings live in `src/marketing/site.ts`.
 - `/styleguide/` shows every component. Its source is `src/pages/styleguide.astro`.
 - The design is `docs/website/00-design.md`.
