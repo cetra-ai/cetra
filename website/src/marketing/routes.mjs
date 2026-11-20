@@ -2,16 +2,16 @@
 // check-marketing.mjs and the layout read this file; each milestone adds its routes.
 import { COMPETITORS } from "./data/compare.mjs";
 
-/** False until M7: every marketing page carries `noindex` and `/` is the holding page. */
-export const LAUNCHED = false;
+/** True since M7: marketing pages are indexable and / is the homepage. */
+export const LAUNCHED = true;
 
 /** Routes that always carry `noindex`, launched or not. */
-export const ALWAYS_NOINDEX = ["/styleguide/", "/home/"];
+export const ALWAYS_NOINDEX = ["/styleguide/"];
 
 /** Every marketing route, with a trailing slash. `/docs/` pages are not listed: Starlight owns them. */
 export const MARKETING_ROUTES = [
+  "/",
   "/styleguide/",
-  "/home/",
   "/pricing/",
   "/self-hosting/",
   "/security/",

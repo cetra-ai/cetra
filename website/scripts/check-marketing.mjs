@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isNoindex, LAUNCHED, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
+import { ALWAYS_NOINDEX, isNoindex, LAUNCHED, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
 import { SITE_URL } from "../src/marketing/site.ts";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
@@ -28,12 +28,22 @@ export function decode(text) {
   });
 }
 
-/** Removes script and style contents and comments, so their text is not read as markup. */
+/**
+ * Removes script and style contents and comments, so their text is not read as markup. This only
+ * reads our own build output; it repeats until nothing changes, so a removal cannot leave a new
+ * block behind, and accepts end tags with whitespace before ">".
+ */
 export function stripBlocks(html) {
-  return html
-    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
-    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "");
+  let out = html;
+  let previous;
+  do {
+    previous = out;
+    out = out
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
+      .replace(/<!--[\s\S]*?-->/g, "");
+  } while (out !== previous);
+  return out;
 }
 
 /** Parses an attribute string into a Map. Names are lower-cased; a bare attribute is "". */
@@ -100,7 +110,7 @@ function isNamed(element, html) {
  * The findings for one built page, as messages (without the route).
  * `distFiles` holds the built paths, e.g. "/docs/index.html".
  */
-export function checkPage(route, html, { noindex, distFiles = new Set() }) {
+export function checkPage(route, html, { noindex, distFiles = new Set(), launched = LAUNCHED }) {
   const findings = [];
   const stripped = stripBlocks(html);
 
@@ -158,8 +168,9 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
     const href = a.get("href");
     if (href === "#") findings.push('href="#" not allowed');
     if (href === undefined || !href.startsWith("/") || href.startsWith("//")) continue;
-    // The holding page at / has no anchors until launch.
-    if (!LAUNCHED && (href === "/" || href.startsWith("/#"))) continue;
+    // Before launch, / is the holding page, which has no anchors: its links are skipped.
+    // From launch on, / is the homepage and its links are checked like any other.
+    if (!launched && (href === "/" || href.startsWith("/#"))) continue;
     const path = href.replace(/[?#].*$/, "");
     const built = path.endsWith("/") ? distFiles.has(`${path}index.html`) : distFiles.has(path);
     if (!built) findings.push(`broken internal link: ${href}`);
@@ -201,6 +212,32 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
   for (const m of scanned.matchAll(BANNED_WORD)) findings.push(`banned word: ${m[0]}`);
   findings.push(...Array.from(scanned.matchAll(CETRA_CAPS), () => "write cetra in lower case"));
 
+  const hasOgImage = metas.some(
+    (m) => m.get("property") === "og:image" && (m.get("content") ?? "").startsWith(`${SITE_URL}/`),
+  );
+  if (!hasOgImage) findings.push("og:image missing");
+  if (!distFiles.has("/og.png")) findings.push("og image /og.png not built");
+
+  return findings;
+}
+
+/**
+ * The findings for dist/sitemap-0.xml (without the route). A noindex page must not be listed.
+ * When `launched`, every indexable marketing route must be listed.
+ */
+export function checkSitemap(xml, launched) {
+  const findings = [];
+  const listed = (route) => xml.includes(`<loc>https://cetra.sh${route}</loc>`);
+  for (const route of ALWAYS_NOINDEX) {
+    if (listed(route)) findings.push(`sitemap lists noindex page ${route}`);
+  }
+  if (launched) {
+    for (const route of MARKETING_ROUTES) {
+      if (!ALWAYS_NOINDEX.includes(route) && !listed(route)) {
+        findings.push(`sitemap misses ${route}`);
+      }
+    }
+  }
   return findings;
 }
 
@@ -229,7 +266,7 @@ function assetPath(href = "") {
   return href.replace(/[?#].*$/, "");
 }
 
-/** The routes of the built pages outside /docs/. The holding page's "/" is left out until launch. */
+/** The routes of the built pages outside /docs/. Before launch "/" is the holding page and is left out. */
 export function listedRoutes(distFiles, launched) {
   return [...distFiles]
     .filter((file) => file.endsWith("/index.html") && !file.startsWith("/docs/"))
@@ -253,6 +290,16 @@ function run() {
 
   for (const route of listedRoutes(distFiles, LAUNCHED)) {
     if (!MARKETING_ROUTES.includes(route)) findings.push(`${route}: unlisted marketing page`);
+  }
+
+  if (!distFiles.has("/sitemap-index.xml")) {
+    findings.push("sitemap-index.xml not built");
+  }
+  if (distFiles.has("/sitemap-0.xml")) {
+    const xml = readFileSync(join(DIST, "sitemap-0.xml"), "utf8");
+    for (const message of checkSitemap(xml, LAUNCHED)) findings.push(`sitemap: ${message}`);
+  } else {
+    findings.push("sitemap-0.xml not built");
   }
 
   const readAsset = (path) => readFileSync(join(DIST, path));
