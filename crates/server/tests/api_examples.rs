@@ -47,7 +47,7 @@ use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
     ExperimentResultsRequest, ExperimentSummaries,
 };
-use cetra_server::api::facets::FacetsResponse;
+use cetra_server::api::facets::{FacetsRequest, FacetsResponse};
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::issues::{
     CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueRefitPage,
@@ -574,6 +574,17 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<RunEvaluatorRequest>(&run_text)
         .unwrap_or_else(|error| panic!("requests/evaluator-run.json: {error}"));
+    // `FacetsRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    for file in [
+        "requests/facets-traces.json",
+        "requests/facets-spans.json",
+        "requests/facets-sessions.json",
+    ] {
+        let text =
+            fs::read_to_string(api_dir().join(file)).unwrap_or_else(|error| panic!("{error}"));
+        serde_json::from_str::<FacetsRequest>(&text)
+            .unwrap_or_else(|error| panic!("{file}: {error}"));
+    }
     let document = read_json::<Value>(&contract_document());
     let registry = jsonschema::Registry::new()
         .add(OPENAPI_URI, document.clone())
@@ -664,6 +675,9 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_prompt_version", "requests/prompt-version-create.json"),
         ("put_prompt_label", "requests/prompt-label-set.json"),
         ("put_prompt_settings", "requests/prompt-settings.json"),
+        ("post_facets", "requests/facets-traces.json"),
+        ("post_facets", "requests/facets-spans.json"),
+        ("post_facets", "requests/facets-sessions.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -733,7 +747,7 @@ fn generated_files_roundtrip() {
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
-            "get_facets" => roundtrip::<FacetsResponse>(&example.file),
+            "post_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),

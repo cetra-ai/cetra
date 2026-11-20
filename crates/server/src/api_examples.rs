@@ -571,40 +571,19 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     );
 
     // Every facet the web shows open by default, and every preset field, has an answer here.
-    const FACET_WINDOW: &str = "from=2026-01-01T00:00:00Z&to=2026-01-02T00:00:00Z";
-    const FACETS: &[(&str, &str)] = &[
-        ("traces", "status"),
-        ("traces", "name"),
-        ("traces", "environment"),
-        ("traces", "tags"),
-        ("traces", "models"),
-        ("traces", "metadata"),
-        ("traces", "duration_ms"),
-        ("traces", "cost_total"),
-        ("spans", "span_kind"),
-        ("spans", "status"),
-        ("spans", "name"),
-        ("spans", "model"),
-        ("spans", "duration_ms"),
-        ("spans", "cost_total"),
-        ("sessions", "user_id"),
-        ("sessions", "tags"),
-        ("sessions", "duration_ms"),
-        ("sessions", "cost_total"),
-    ];
-    for (view, field) in FACETS {
-        let facet: FacetsResponse = fetch(
-            &app,
-            cookie,
-            &format!("/facets?view={view}&field={field}&{FACET_WINDOW}"),
-        )
-        .await;
+    for view in ["traces", "spans", "sessions"] {
+        let request: Value = read_json(&api_dir().join(format!("requests/facets-{view}.json")));
+        let facets: FacetsResponse = post_json(&app, cookie, "/facets", &request).await;
+        assert!(
+            facets.results.iter().all(|result| result.facet.is_some()),
+            "{view}: a facet field has no answer"
+        );
         out.add(
-            "get_facets",
+            "post_facets",
             &[],
-            &[("view", view), ("field", field)],
-            &format!("responses/facets-{view}-{field}.json"),
-            &facet,
+            &[],
+            &format!("responses/facets-{view}.json"),
+            &facets,
         );
     }
 
