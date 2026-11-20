@@ -13,8 +13,14 @@ export type AnnotationTarget =
   | { type: "span"; traceId: string; spanId: string }
   | { type: "session"; sessionId: string };
 
-/** Ids copied onto the score, as evaluator scores copy them (D-I-18, D-I-37). */
-export type AnnotationContext = { sessionId?: string; userId?: string };
+/**
+ * Ids copied onto the score, as evaluator scores copy them (D-I-18, D-I-37). `queueId` is the
+ * annotation queue the reviewer is working in, sent as `queue_id` (D-AQ-7).
+ */
+export type AnnotationContext = { sessionId?: string; userId?: string; queueId?: string };
+
+/** What a form exposes to its parent: save the changed rows, and say whether any is changed. */
+export type AnnotationSaveHandle = { save: () => Promise<boolean>; isDirty: () => boolean };
 
 /** One row of the form as typed. `value` is "" when unset; see `draftOf` for each type's text. */
 export type Draft = { value: string; reason: string };
@@ -228,6 +234,9 @@ export function scoreItem(
   }
   if (context.userId !== undefined) {
     item.user_id = context.userId;
+  }
+  if (context.queueId !== undefined) {
+    item.queue_id = context.queueId;
   }
   return item;
 }

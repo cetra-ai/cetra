@@ -802,13 +802,13 @@ fn no_cache_tokens(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<i64> {
     }
 }
 
-enum Read {
+pub(crate) enum Read {
     Value(i64),
     Skip,
     Invalid,
 }
 
-fn take(
+pub(crate) fn take(
     bag: &mut AttrBag<'_>,
     key: &str,
     warnings: &mut Warnings,
@@ -889,7 +889,7 @@ fn read_seconds(value: &AnyValue) -> Read {
     }
 }
 
-fn read_millis(value: &AnyValue) -> Read {
+pub(crate) fn read_millis(value: &AnyValue) -> Read {
     match as_i64(value) {
         Ok(Some(millis)) if millis >= 0 => match millis.checked_mul(1_000_000) {
             Some(nanos) => Read::Value(nanos),

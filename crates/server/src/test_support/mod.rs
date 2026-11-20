@@ -992,6 +992,7 @@ impl TestApp {
                     spans,
                     media: Vec::new(),
                     rejections: cetra_otel::Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1731,6 +1732,7 @@ pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScor
         rule_id: None,
         experiment_id: score.experiment_id,
         dataset_item_id: score.experiment_id.map(|_| Uuid::now_v7()),
+        queue_id: None,
         author_user_id: None,
         metadata: Default::default(),
         created_at: score.created_at,

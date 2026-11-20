@@ -7,3 +7,11 @@ minimumReleaseAge: 10080
 # depends on 1.9.0. One copy has to be the global tracer.
 overrides:
   "@opentelemetry/api": "1.9.0"
+
+# Claude Code's install script only links its native binary from the platform
+# package (@anthropic-ai/claude-code-<platform>) into bin/claude.exe; without it
+# the CLI refuses to start. The other scripts stay off: the agents run without them.
+allowBuilds:
+  "@anthropic-ai/claude-code@2.1.323": true
+  "@github/keytar@7.10.6": false
+  "node-pty@1.0.0": false

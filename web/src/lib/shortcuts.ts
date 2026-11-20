@@ -8,9 +8,10 @@ export const GO_TARGETS = {
   q: { id: "go-sql", to: "/$org/$project/sql" },
   e: { id: "go-evaluators", to: "/$org/$project/evaluators" },
   o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
+  r: { id: "go-annotation-queues", to: "/$org/$project/annotation-queues" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
-  r: { id: "go-prompts", to: "/$org/$project/prompts" },
+  m: { id: "go-prompts", to: "/$org/$project/prompts" },
   l: { id: "go-playground", to: "/$org/$project/playground" },
 } as const;
 
@@ -91,6 +92,18 @@ export const SHORTCUTS: readonly Shortcut[] = [
     keys: "⌘↵",
     description: "Run the query",
     scope: "SQL console",
+    bindings: [],
+  },
+  {
+    keys: "⌘↵",
+    description: "Complete and go to the next item",
+    scope: "Annotation queue",
+    bindings: [],
+  },
+  {
+    keys: "⌘⇧↵",
+    description: "Next item without completing",
+    scope: "Annotation queue",
     bindings: [],
   },
   {

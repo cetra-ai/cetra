@@ -1117,6 +1117,7 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
     let rule_id = strings(batch, scores::RULE_ID)?;
     let experiment_id = strings(batch, scores::EXPERIMENT_ID)?;
     let dataset_item_id = strings(batch, scores::DATASET_ITEM_ID)?;
+    let queue_id = strings(batch, scores::QUEUE_ID)?;
     let author_user_id = strings(batch, scores::AUTHOR_USER_ID)?;
     let metadata = maps(batch, scores::METADATA)?;
     let created_at = times(batch, scores::CREATED_AT)?;
@@ -1172,6 +1173,7 @@ fn score_batch(batch: &RecordBatch, project_id: ProjectId) -> Result<Vec<Score>,
                 scores::DATASET_ITEM_ID,
                 Uuid::parse_str,
             )?,
+            queue_id: opt_parsed(&queue_id, row, scores::QUEUE_ID, Uuid::parse_str)?,
             author_user_id: opt_parsed(
                 &author_user_id,
                 row,

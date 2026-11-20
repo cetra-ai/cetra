@@ -78,7 +78,7 @@ it("opens the shortcut help for every shortcut", async () => {
   await user.keyboard("?");
   const dialog = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
   for (const row of SHORTCUTS) {
-    expect(within(dialog).getByText(row.keys)).toBeInTheDocument();
+    expect(within(dialog).getAllByText(row.keys).length).toBeGreaterThan(0);
     expect(within(dialog).getByText(row.description)).toBeInTheDocument();
   }
 });

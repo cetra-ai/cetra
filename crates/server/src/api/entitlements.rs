@@ -151,6 +151,9 @@ pub struct OrgLimits {
     /// Active online evaluation rules.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_active_online_rules: Option<u64>,
+    /// Annotation queues.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_annotation_queues: Option<u64>,
 }
 
 impl From<Source> for PlanSource {
@@ -197,6 +200,7 @@ impl From<Limits> for OrgLimits {
             max_projects: limits.max_projects,
             max_alert_rules: limits.max_alert_rules,
             max_active_online_rules: limits.max_active_online_rules,
+            max_annotation_queues: limits.max_annotation_queues,
         }
     }
 }

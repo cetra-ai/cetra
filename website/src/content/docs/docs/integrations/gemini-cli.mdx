@@ -1,0 +1,81 @@
+---
+title: Gemini CLI
+description: "Connect Gemini CLI to cetra: each model call and tool batch becomes a trace, with tokens, the session and the prompts and answers."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Gemini CLI's traces to cetra with `cetra agents setup`, and what you see in the UI.
+
+<Backing fixtures={["gemini_cli/shell-tool"]} />
+
+## Connect Gemini CLI
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup gemini-cli --url <CETRA_URL>
+```
+
+3. Run Gemini CLI as usual. Its traces then go to cetra.
+
+`cetra agents setup gemini-cli` writes these files, and keeps every other key in them:
+
+- `~/.gemini/settings.json`: the `telemetry` keys that turn on traces and send them to your server, and two hooks (`SessionStart` and `BeforeAgent`). The hooks send the session's repository, branch and person to cetra. They never send spans.
+- `~/.gemini/.env`, with mode 0600: the `OTEL_EXPORTER_OTLP_HEADERS` line that holds your key. Gemini CLI reads its headers from this file, not from `settings.json`.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
+
+If `.env` already has an `OTEL_EXPORTER_OTLP_HEADERS` line, setup replaces it, and the original file is copied to `.env.cetra-backup`. Setup also copies `settings.json` to `settings.json.cetra-backup` before its first change.
+
+To see the files without writing them, add `--print`. It prints the merged files and writes nothing. To attribute sessions to a person other than your `git config --global user.email`, add `--user <EMAIL>`.
+
+To undo setup, run this. It removes only the keys and hooks that setup wrote:
+
+```bash
+cetra agents remove gemini-cli
+```
+
+Run `cetra agents setup gemini-cli` again after you move or upgrade the `cetra` binary. The hooks hold the binary's path.
+
+## What you get
+
+Gemini CLI does not group a prompt under one trace. Each model call is a trace of its own, and each batch of tool calls is another trace. So one prompt that calls a tool makes several traces, all in one session.
+
+- a model call is an `llm` span, with the model and its input and output tokens. This includes the routing call that Gemini CLI makes;
+- a tool batch is a `chain` span, and each tool call inside it is a `tool` span named after the tool, such as `run_shell_command`;
+- the user prompt and the agent call are `agent` spans.
+
+Each trace has these fields:
+
+- the session, from Gemini CLI's conversation id;
+- the person and the repository and branch, from the hook. Gemini CLI puts no person on its spans;
+- `metadata.coding_agent` set to `gemini-cli`.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
+
+## Content
+
+Setup writes `logPrompts: true`, and Gemini CLI sends the prompts and the model's answers on its spans. With `--no-content`, setup writes `logPrompts: false`, which drops the prompts; whether Gemini CLI also drops the answers was not tested.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. Gemini CLI does not report a cost.
+
+Gemini CLI's spans carry only input and output token counts. Cache and reasoning tokens are not on the spans, so cetra does not count them.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay.
+
+## Limits
+
+- Tested with Gemini CLI 0.68.0.
+- Every model call is its own trace, so a prompt is several traces of one session. Group them by session to see the whole prompt.
+- Gemini CLI also sends logs and metrics. Setup does not turn them off, and cetra accepts and drops them. Setup prints this when it finishes.
+- `cetra agents setup` does not run on Windows. There, Gemini CLI can still export spans if you set its telemetry settings yourself, but no hooks run.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the calls of one Gemini CLI session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

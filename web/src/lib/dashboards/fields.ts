@@ -48,7 +48,16 @@ const SOURCES: Record<WidgetSource, SourceFields> = {
       "total_tokens",
       "cost_total",
     ],
-    breakdown: ["name", "status", "environment", "release", "user_id", "tags", "models"],
+    breakdown: [
+      "name",
+      "status",
+      "environment",
+      "release",
+      "user_id",
+      "session_id",
+      "tags",
+      "models",
+    ],
     maps: ["metadata"],
   },
   spans: {

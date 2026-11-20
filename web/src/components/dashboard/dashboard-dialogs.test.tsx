@@ -80,7 +80,7 @@ it.each(TEMPLATES)("creates a dashboard from the $name template", async (templat
   expect(created).not.toBe(template.definition);
 });
 
-it("lists Blank and the three templates under Start from", () => {
+it("lists Blank and the four templates under Start from", () => {
   renderWith(
     <NewDashboardDialog
       org={ORG}
@@ -97,6 +97,7 @@ it("lists Blank and the three templates under Start from", () => {
     "Cost",
     "Latency",
     "Quality",
+    "Coding agents",
   ]);
   expect(screen.getByRole("radio", { name: "Blank" })).toBeChecked();
 });

@@ -10,7 +10,9 @@ import {
   canManageDatasets,
   canManageEvaluation,
   canManagePrompts,
+  canManageQueues,
   canRemoveMember,
+  canReview,
   canRunPlayground,
   grantableRoles,
   overrideLabel,
@@ -125,4 +127,14 @@ it("lets members and above manage evaluation", () => {
   expect(canManageEvaluation("member")).toBe(true);
   expect(canManageEvaluation("viewer")).toBe(false);
   expect(canManageEvaluation(undefined)).toBe(false);
+});
+
+it("lets members and above manage and review queues", () => {
+  for (const check of [canManageQueues, canReview]) {
+    expect(check("owner")).toBe(true);
+    expect(check("admin")).toBe(true);
+    expect(check("member")).toBe(true);
+    expect(check("viewer")).toBe(false);
+    expect(check(undefined)).toBe(false);
+  }
 });

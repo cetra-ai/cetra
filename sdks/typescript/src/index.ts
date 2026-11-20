@@ -1,4 +1,15 @@
 export { type AiTelemetry, type AiTelemetryOptions, aiTelemetry } from "./ai.js";
+export type {
+  AddedQueueItems,
+  AnnotationQueue,
+  AnnotationQueueItem,
+  AnnotationQueues,
+  QueueCounts,
+  QueueItemStatus,
+  QueueTarget,
+  QueueTargets,
+  SkippedQueueItem,
+} from "./annotation-queues.js";
 export { ApiError, Client, type ClientOptions } from "./client.js";
 export { type CetraOptions, ConfigError } from "./config.js";
 export { type ContextOptions, withContext } from "./context.js";

@@ -115,6 +115,7 @@ fn merge_limits(claim: &LimitsClaim, defaults: &Limits) -> Limits {
             claim.max_active_online_rules,
             defaults.max_active_online_rules,
         ),
+        max_annotation_queues: merge(claim.max_annotation_queues, defaults.max_annotation_queues),
     }
 }
 
@@ -125,11 +126,11 @@ fn merge(claim: Option<Option<u64>>, default: Option<u64>) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use cetra_core::ids::OrgId;
-    use cetra_token::TokenError;
+    use cetra_token::{LimitsClaim, TokenError};
     use serde_json::json;
     use uuid::Uuid;
 
-    use super::{OrgTokenError, grant_from_token};
+    use super::{OrgTokenError, grant_from_token, merge_limits};
     use crate::config::PublicUrl;
     use crate::entitlements::Limits;
     use crate::test_support::{control_plane_token, license_key, org_token, sign_token};
@@ -162,6 +163,34 @@ mod tests {
         assert_eq!(grant.limits.units_included, None);
         assert_eq!(grant.plan.id, "pro");
         assert_eq!(grant.plan.add_ons, vec!["teams".to_owned()]);
+    }
+
+    #[test]
+    fn merge_limits_takes_the_claim_or_the_default() {
+        let defaults = Limits {
+            max_annotation_queues: Some(3),
+            ..Limits::default()
+        };
+        let claim_value = LimitsClaim {
+            max_annotation_queues: Some(Some(1)),
+            ..LimitsClaim::default()
+        };
+        let claim_null = LimitsClaim {
+            max_annotation_queues: Some(None),
+            ..LimitsClaim::default()
+        };
+        assert_eq!(
+            merge_limits(&claim_value, &defaults).max_annotation_queues,
+            Some(1)
+        );
+        assert_eq!(
+            merge_limits(&claim_null, &defaults).max_annotation_queues,
+            None
+        );
+        assert_eq!(
+            merge_limits(&LimitsClaim::default(), &defaults).max_annotation_queues,
+            Some(3)
+        );
     }
 
     #[test]

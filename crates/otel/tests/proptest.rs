@@ -81,6 +81,30 @@ const PROMOTED: &[&str] = &[
     "lmnr.span.release",
 ];
 
+/// Coding-agent keys. Only the random key pick draws them; the over-limit strategy does not.
+const AGENT_KEYS: &[&str] = &[
+    "codex.tool.phase",
+    "tool_name",
+    "turn.id",
+    "input_tokens",
+    "codex.turn.token_usage.input_tokens",
+];
+
+/// Span names the coding-agent rules act on (spec 02 § Coding agents).
+const AGENT_SPAN_NAMES: &[&str] = &[
+    "claude_code.interaction",
+    "claude_code.llm_request",
+    "claude_code.tool",
+    "session_task.turn",
+    "fs.get_metadata",
+    "exec_command",
+    "llm_call",
+    "tool_call",
+];
+
+/// Service names of the coding agents' resources (D-CA-3).
+const AGENT_SERVICE_NAMES: &[&str] = &["codex_exec", "gemini-cli", "claude-code"];
+
 const GENAI_EVENTS: &[&str] = &[
     "gen_ai.system.message",
     "gen_ai.user.message",
@@ -195,7 +219,7 @@ fn key() -> impl Strategy<Value = String> {
         2 => Just("output.value".to_owned()),
         2 => Just(SENTINEL.to_owned()),
         2 => "[a-zA-Z0-9._]{1,24}",
-        4 => prop::sample::select(PROMOTED).prop_map(str::to_owned),
+        4 => prop::sample::select([PROMOTED, AGENT_KEYS].concat()).prop_map(str::to_owned),
     ]
 }
 
@@ -268,14 +292,49 @@ fn attributes() -> impl Strategy<Value = Vec<KeyValue>> {
     (
         prop::collection::vec(kv(generated_value().boxed()), 0..6),
         prop::collection::vec(promoted_kv(), 0..3),
+        prop::option::of(dispatch_kv()),
     )
-        .prop_map(|(mut items, promoted)| {
+        .prop_map(|(mut items, promoted, dispatch)| {
             items.extend(promoted);
+            items.extend(dispatch);
             if let Some(first) = items.first().cloned() {
                 items.push(first);
             }
             items
         })
+}
+
+/// A Codex tool dispatch phase, so a Codex span is kept and its rules run.
+fn dispatch_kv() -> impl Strategy<Value = KeyValue> {
+    Just(KeyValue {
+        key: "codex.tool.phase".to_owned(),
+        value: Some(string_value("dispatch".to_owned())),
+        key_strindex: 0,
+    })
+}
+
+/// The resource attributes, with a coding agent's service name in about half the cases.
+fn resource_attributes() -> impl Strategy<Value = Vec<KeyValue>> {
+    (
+        attributes(),
+        prop::option::of(prop::sample::select(AGENT_SERVICE_NAMES)),
+    )
+        .prop_map(|(mut items, service)| {
+            items.extend(service.map(|name| KeyValue {
+                key: "service.name".to_owned(),
+                value: Some(string_value(name.to_owned())),
+                key_strindex: 0,
+            }));
+            items
+        })
+}
+
+/// A span name: mostly the sentinel text, and sometimes a coding agent's name.
+fn span_name() -> impl Strategy<Value = String> {
+    prop_oneof![
+        3 => text().prop_map(|name| format!("{SENTINEL} {name}")),
+        1 => prop::sample::select(AGENT_SPAN_NAMES).prop_map(str::to_owned),
+    ]
 }
 
 /// A promoted column key with a value over `LIMIT`, so the column must be cut.
@@ -353,7 +412,7 @@ fn otlp_span() -> impl Strategy<Value = OtlpSpan> {
         id_bytes(16),
         id_bytes(8),
         id_bytes(8),
-        text(),
+        span_name(),
         timestamp(),
         timestamp(),
         attributes(),
@@ -365,7 +424,7 @@ fn otlp_span() -> impl Strategy<Value = OtlpSpan> {
                 trace_id,
                 span_id,
                 parent_span_id: parent,
-                name: format!("{SENTINEL} {name}"),
+                name,
                 start_time_unix_nano: start,
                 end_time_unix_nano: end,
                 attributes,
@@ -383,7 +442,7 @@ fn otlp_span() -> impl Strategy<Value = OtlpSpan> {
 fn request() -> impl Strategy<Value = ExportTraceServiceRequest> {
     prop::collection::vec(
         (
-            attributes(),
+            resource_attributes(),
             scope_text(),
             scope_text(),
             prop::collection::vec(otlp_span(), 0..=2),
@@ -566,11 +625,11 @@ proptest! {
     #[test]
     fn normalize_holds_the_span_invariants(request in request()) {
         let ctx = context();
-        let first = normalize(&request, &ctx, prices());
-        let second = normalize(&request, &ctx, prices());
+        let first = normalize(&request, &ctx, prices(), &cetra_otel::AgentContexts::default());
+        let second = normalize(&request, &ctx, prices(), &cetra_otel::AgentContexts::default());
         prop_assert_eq!(&first, &second);
         prop_assert_eq!(
-            first.spans.len() as u64 + first.rejections.total(),
+            first.spans.len() as u64 + first.rejections.total() + first.discarded,
             input_span_count(&request)
         );
         let hashes: Vec<String> = first.media.iter().map(|blob| blob.sha256.clone()).collect();

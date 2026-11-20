@@ -1,5 +1,6 @@
 import {
   BellRing,
+  ClipboardCheck,
   Database,
   FileText,
   FlaskConical,
@@ -39,6 +40,12 @@ export const projectNav = [
     to: "/$org/$project/online-rules",
     label: "Online rules",
     icon: ListChecks,
+  },
+  {
+    section: "Evaluate",
+    to: "/$org/$project/annotation-queues",
+    label: "Annotation queues",
+    icon: ClipboardCheck,
   },
   { section: "Evaluate", to: "/$org/$project/datasets", label: "Datasets", icon: Table2 },
   {

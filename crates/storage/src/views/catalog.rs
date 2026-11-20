@@ -701,6 +701,12 @@ const SCORES: &[ColumnInfo] = &[
         "Dataset item the score belongs to.",
     ),
     col(
+        "queue_id",
+        ColumnKind::String,
+        true,
+        "Annotation queue the score was written from.",
+    ),
+    col(
         "author_user_id",
         ColumnKind::String,
         true,

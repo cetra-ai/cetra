@@ -28,6 +28,7 @@ use cetra_storage::{MediaBlob, Storage};
 use futures::{StreamExt, stream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+use crate::agent_context::AgentContextStore;
 use crate::config::{IngestConfig, MediaConfig};
 use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
@@ -50,6 +51,7 @@ pub(crate) struct Ingest {
     max_spans_per_request: usize,
     limits: IngestLimits,
     commits: Arc<Commits>,
+    contexts: Arc<AgentContextStore>,
 }
 
 /// Budget held by one request from before its body is read until it is answered.
@@ -169,12 +171,18 @@ impl Ingest {
                 .unwrap_or(usize::MAX),
             limits: config.limits(media),
             commits: Arc::default(),
+            contexts: Arc::new(AgentContextStore::default()),
         }
     }
 
     /// The price tables (D-T-9). Callers pick the table of their project or org.
     pub(crate) fn prices(&self) -> &crate::prices::Prices {
         &self.prices
+    }
+
+    /// Coding-agent session contexts (D-CA-9).
+    pub(crate) fn contexts(&self) -> &Arc<AgentContextStore> {
+        &self.contexts
     }
 
     pub(crate) fn max_request_bytes(&self) -> usize {
@@ -358,6 +366,7 @@ impl Ingest {
         let prices: Arc<PriceTable> = self.prices.for_project(project.org_id, project.id);
         let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
+        let contexts = self.contexts.project(project.id);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
                 .resource_spans
@@ -369,7 +378,13 @@ impl Ingest {
             if spans > max_spans {
                 return Err(IngestError::TooManySpans);
             }
-            let mut normalized = normalize(&request, &ctx, &prices);
+            let empty = cetra_otel::AgentContexts::default();
+            let guard = contexts.as_ref().map(|lock| {
+                lock.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+            let agents = guard.as_deref().unwrap_or(&empty);
+            let mut normalized = normalize(&request, &ctx, &prices, agents);
             let rewritten = rewrite_reserved_environment(&mut normalized.spans);
             Ok((normalized, rewritten))
         });
@@ -700,7 +715,7 @@ mod tests {
             retention_days: project.retention_days,
             limits: app.state.config.ingest.limits(&app.state.config.media),
         };
-        normalize(request, &ctx, prices)
+        normalize(request, &ctx, prices, &cetra_otel::AgentContexts::default())
     }
 
     /// The commit target of `project` at the app's clock, with no request bytes.
@@ -1299,6 +1314,7 @@ mod tests {
                     spans: Vec::new(),
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1383,6 +1399,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1439,6 +1456,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
         };

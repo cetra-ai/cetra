@@ -18,6 +18,7 @@ import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { QueuesChip } from "@/components/annotation-queues/queues-chip";
 import { forgetTrace } from "@/components/command/recent-traces";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { CopyButton } from "@/components/copy-button";
@@ -288,6 +289,7 @@ export function TraceHeader({
               <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
           ))}
+          <QueuesChip traceId={trace.trace_id} />
         </div>
       </section>
       <ConfirmDialog

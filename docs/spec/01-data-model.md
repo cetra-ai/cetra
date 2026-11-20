@@ -58,7 +58,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `environment` | Utf8 (dict), nullable | P | e.g. `production`. Reserved: `cetra-eval` (evaluator executions, 06), `cetra-playground` (playground runs, D-V-22), `experiment` default for experiment runs. The reserved set is `cetra_core::names::environment::RESERVED` (D-V-33); each reserved value is hidden by default, not an online-rule target, not a trace an evaluator can load, rewritten when received over OTLP, and not billed (D-V-34). |
 | `release` | Utf8 (dict), nullable | P | Git SHA / version string. |
 | `tags` | List(Utf8) | P | |
-| `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. |
+| `metadata` | Map(Utf8, Utf8) | P | User metadata; values are JSON-encoded scalars or strings. Coding-agent spans carry `coding_agent`, `repository` and `branch` (02 § Coding agents). |
 | `provider` | Utf8 (dict), nullable | P | Normalized lowercase: `openai`, `anthropic`, `gcp.gemini`, `aws.bedrock`, … |
 | `request_model` | Utf8 (dict), nullable | P | |
 | `response_model` | Utf8 (dict), nullable | P | |
@@ -86,7 +86,7 @@ Type notation in this document: "Utf8 (dict)" means a `Utf8` column in memory th
 | `output_preview` | Utf8, nullable | P | Same. |
 | `system_instructions` | Utf8 (JSON), nullable | | |
 | `tool_definitions` | Utf8 (JSON), nullable | | |
-| `attributes` | Map(Utf8, Utf8) | | All span attributes not consumed by normalization; values JSON-encoded. Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`. |
+| `attributes` | Map(Utf8, Utf8) | | All span attributes not consumed by normalization; values JSON-encoded. Includes `cetra.normalize_warning` (02 rule 18) and `cetra.normalize_error`, and `cetra.span_name`, the original name of a coding-agent tool span that was renamed (02 § Coding agents). |
 | `resource_attributes` | Map(Utf8, Utf8) | | Minus `service.name`. |
 | `scope_name` | Utf8 (dict), nullable | | Instrumentation scope. |
 | `scope_version` | Utf8 (dict), nullable | | |
@@ -204,6 +204,7 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `rule_id` | Utf8, nullable | online rule that produced it |
 | `experiment_id` | Utf8, nullable | |
 | `dataset_item_id` | Utf8, nullable | |
+| `queue_id` | Utf8, nullable | annotation queue the score was written from (D-AQ-6); not part of the derived id |
 | `author_user_id` | Utf8, nullable | for `human` |
 | `metadata` | Map(Utf8, Utf8) | |
 | `created_at` | Timestamp | partition day |

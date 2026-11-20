@@ -1,0 +1,114 @@
+---
+title: Claude Code
+description: "Connect Claude Code to cetra: each prompt becomes a trace with its model calls and tools, tagged with the person, repository and branch."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send Claude Code's traces to cetra with `cetra agents setup`, and what you see in the UI.
+
+<Backing fixtures={["claude_code/bash-tool"]} />
+
+## Connect Claude Code
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Install the `cetra` binary and run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup claude-code --url <CETRA_URL>
+```
+
+3. Start a new Claude Code session to apply the settings.
+
+`cetra agents setup claude-code` writes these files, and keeps every other key in them:
+
+- `~/.claude/settings.json`: the `env` keys that turn on Claude Code's traces and send them to your server, and three hooks (`SessionStart`, `UserPromptSubmit` and `CwdChanged`). The hooks send the session's repository, branch and person to cetra. They never send spans.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
+
+Before the first change, setup copies the original `settings.json` to `settings.json.cetra-backup`.
+
+To see the settings without writing them, add `--print`. It prints the merged `settings.json` and writes nothing. To attribute sessions to a person other than your `git config --global user.email`, add `--user <EMAIL>`.
+
+To undo setup, run this. It removes only the keys and hooks that setup wrote:
+
+```bash
+cetra agents remove claude-code
+```
+
+Run `cetra agents setup claude-code` again after you move or upgrade the `cetra` binary. The hooks hold the binary's path.
+
+## What you get
+
+A prompt makes one trace. Its root is the turn, and under it are the model calls and the tool calls:
+
+- the root span is an `agent` span, with the prompt as its input when content is on;
+- each model call is an `llm` span, with the model and its token counts;
+- each tool call is a `tool` span named after the tool, such as `Bash`, with the tool's input and output;
+- the tool's two child spans, `claude_code.tool.blocked_on_user` and `claude_code.tool.execution`, stay as plain spans.
+
+A run of one Bash tool call makes 6 spans: the turn, two model calls, the tool and its two child spans. Every span counts as a unit.
+
+Each trace has these fields:
+
+- the session, from Claude Code's `session.id`;
+- the person: the account email Claude Code sends when you sign in to a Claude account, else the email the hook sent, else your account id. Claude Code's anonymous install id is used only when no other source is set;
+- `metadata.coding_agent` set to `claude-code`, and `metadata.repository` and `metadata.branch` when they are known. The repository comes from the hook, or from Claude Code's own repository attribute. The branch comes from the hook only.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage. Every cost in it is labelled API-equivalent cost (see API-equivalent cost below).
+
+## Content
+
+By default, setup turns on three of Claude Code's content settings:
+
+- `OTEL_LOG_USER_PROMPTS`: the prompt text, on the turn span;
+- `OTEL_LOG_TOOL_DETAILS`: the tool's command or file path, on the tool span;
+- `OTEL_LOG_TOOL_CONTENT`: the tool's output, on the tool span.
+
+Setup never turns on raw API request and response bodies.
+
+Claude Code does not send the answer text on spans. It sends that text only as log events, and cetra drops log events. So a turn shows the prompt and the tools, not the answer.
+
+With `--no-content`, setup leaves all three settings off. The turn then shows no prompt, and the tools show no input or output.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. It does not read Claude Code's own cost figure.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a subscription plan, it is not what you pay. Use it to compare sessions, people and repositories with each other.
+
+## Claude Agent SDK
+
+The Claude Agent SDK runs Claude Code with the same settings. When your application starts a turn inside its own OpenTelemetry span, the SDK passes that span's context to Claude Code. The Claude Code turn then nests under your application's span, in one trace.
+
+Set the same variables in the SDK's `env` option:
+
+{/* untested: needs the Claude Agent SDK and a model */}
+```python
+from claude_agent_sdk import ClaudeAgentOptions
+
+options = ClaudeAgentOptions(
+    env={
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "<CETRA_URL>",
+        "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer%20<SK_CETRA_KEY>",
+    },
+)
+```
+
+Replace `<CETRA_URL>` with your server's URL and `<SK_CETRA_KEY>` with your `sk-cetra-…` key. These variables do not run the hooks, so a turn that starts this way has no branch from the hook.
+
+## Limits
+
+- Tested with Claude Code 2.1.323. Claude Code's span names and attributes are in beta, and they can change between versions. A changed shape needs a new capture before cetra reads it.
+- Claude Code exports spans only when `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA` is set. Setup sets it.
+- Claude Code also sends logs and metrics. Setup turns them off, and cetra drops them anyway.
+- `cetra agents setup` does not run on Windows. There, Claude Code can still export spans if you set the variables yourself, but no hooks run, so traces have no repository or branch.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the turns of one Claude Code session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

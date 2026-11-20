@@ -1,0 +1,16 @@
+{
+  "description": "Claude Code 2.1.323 in -p mode runs one Bash tool call; beta trace export with prompt and tool content.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@anthropic-ai/claude-code",
+    "instrumentation_version": "2.1.323",
+    "language": "typescript",
+    "libraries": {
+      "@anthropic-ai/claude-code": "2.1.323"
+    },
+    "captured_at": "2026-11-20T09:45:01Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ]
+}
