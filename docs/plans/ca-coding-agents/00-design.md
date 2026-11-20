@@ -103,10 +103,10 @@ Four parts change:
 
 The first rule that matches wins.
 
-| Agent | Detected when (M1 confirms or corrects these from the captures) |
+| Agent | Detected when (verified by the M1 spike on 2026-11-20, research § 6) |
 |---|---|
-| Claude Code | the span name starts with `claude_code.` |
-| Codex | the resource `service.name` starts with `codex` (M1 pins the exact value and the scope) |
+| Claude Code | the span name starts with `claude_code.` (resource `service.name = claude-code`, scope `com.anthropic.claude_code.tracing`) |
+| Codex | the resource `service.name` starts with `codex` (`codex_exec` for `codex exec`; the interactive name is unverified) |
 | Gemini CLI | `gen_ai.agent.name = gemini-cli`, or the resource `service.name` is `gemini-cli` |
 | Copilot | the scope name starts with `github.copilot` or `copilot`, the resource `service.name` is `github-copilot` or `copilot-chat`, or any attribute key starts with `github.copilot.` (it still matches when a user renames `OTEL_SERVICE_NAME`) |
 
@@ -145,9 +145,9 @@ These keys are written only on spans detected as a coding agent. On such a span,
 ### Person (D-CA-5)
 
 On a coding-agent span, `user_id` is the person, taken from the first source that has a value:
-1. the agent's account email on the span: Claude Code `user.email`, and Codex or Gemini CLI `user.email` if M1 finds it on their spans (the research saw it on their logs only);
+1. the agent's account email on the span: Claude Code `user.email` (present when signed in to a Claude account; the spike, with an API key, had none). Codex and Gemini CLI put no person on their spans;
 2. the session context's `user` (D-CA-9);
-3. the agent's account id on the span: Claude Code `user.account_uuid`, and Codex `user.account_id` if M1 finds it on spans;
+3. the agent's account id on the span: Claude Code `user.account_uuid`;
 4. the generic sources of spec 02 § Context fields. These include Claude Code's anonymous `user.id`, and Copilot's `enduser.pseudo.id`, which is added there.
 
 An email is lowercased and trimmed wherever it comes from. This is an agent-specific override of the generic precedence. Today `user.id` would win, and for Claude Code that is a random install id. The users page then lists people, and "cost per person" is the existing `user_id` breakdown.
@@ -158,15 +158,20 @@ An email is lowercased and trimmed wherever it comes from. This is an agent-spec
 
 | Agent | Turn (trace root) | Model call | Tool |
 |---|---|---|---|
-| Claude Code | `claude_code.interaction` → kind `agent`; `user_prompt` → `input` (`text`) when not `<REDACTED>` | `claude_code.llm_request` → `llm`; tokens from `input_tokens` (exclusive of cache, D110), `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`; `ttft_ms` → `ttft_ns` | `claude_code.tool` → `tool`, **named after `tool_name`**; `tool_input` → `input` (`json`) and the `tool.output` event's `output` → `output` when present |
-| Codex | the turn span → `agent` (exact span names pinned by M1); `thread.id` (or what M1 finds) → `session_id` | the response span with `gen_ai.usage.*` → `llm`; model from its own attributes, else the session context's `model` (D-CA-9) | tool spans → `tool` |
-| Gemini CLI | `user_prompt` / `agent_call` → `agent` | `llm_call` → `llm` | `tool_call` → `tool`, named after `gen_ai.tool.name`; `gen_ai.tool.call_id` read as the call id |
+| Claude Code | `claude_code.interaction` (already `agent` through `gen_ai.operation.name = invoke_agent`); `user_prompt` → `input` (`text`) when not `<REDACTED>` | `claude_code.llm_request` → `llm` (no messages on the span); tokens from `input_tokens` (exclusive of cache, D110), `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`; `ttft_ms` → `ttft_ns` | `claude_code.tool` (already `tool` through `execute_tool`), **named after `gen_ai.tool.name`**; `input` (`json`) is the object of the detail attributes present (`full_command`, `file_path`, `skill_name`, `subagent_type`); `output` (`text`) is the `tool.output` event's `output`, else its `diff`, else its `content`. Its children `claude_code.tool.blocked_on_user` and `claude_code.tool.execution` stay `span` |
+| Codex | `session_task.turn` is the trace root and the turn's **only `llm` span**: it carries `model` and the turn's totals (`codex.turn.token_usage.*`, input inclusive of cache, output inclusive of reasoning). Codex puts no model on its per-call usage spans, so per-call spans cannot be priced. Session: `conversation.id`, else the turn's `thread.id`. | — (the turn span) | the dispatch span of each tool (`codex.tool.phase = dispatch`, named after `tool_name`, with `call_id`) |
+| Gemini CLI | none: every `llm_call` and every `schedule_tool_calls` is its own trace, so a prompt is several traces of one session | `llm_call` → `llm`, including the model-routing call; `gen_ai.input.messages` / `gen_ai.output.messages` hold **Gemini-native** contents (`parts` of `text`, `functionCall`, `functionResponse`, `thought`; the output is an object or an array), converted to the canonical format | `schedule_tool_calls` → `chain`, `tool_call` → `tool`, named after `gen_ai.tool.name`; `gen_ai.tool.call_id` read as the call id; its input and output messages → `input` / `output` (`json`) |
 | Copilot | `invoke_agent` → `agent` (works today) | `chat` → `llm` (works today) | `execute_tool` → `tool` (works today) |
 
 Rules that apply to every agent:
 - **Usage only on `llm` spans.** Rule 3 already keeps a turn's own totals (Copilot `invoke_agent`, Codex `codex.turn.token_usage.*`) out of the token columns.
 - **A tool span takes its tool's name.** The span's original name moves to `attributes['cetra.span_name']`.
 - **Placeholders mean no content.** `<REDACTED>` (Claude Code) and `[REDACTED]` (Codex) read as uncaptured content, like OpenInference's `__REDACTED__` (D-B1-10).
+- **Codex's internal spans are discarded.** Codex exports every `tracing` span of the process: about 700 for a one-tool prompt (`fs.get_metadata`, `auth`, `append_items`, …), with no setting to filter them.
+  - On spans detected as Codex, `normalize` keeps only the turn span and the tool dispatch spans, and discards the rest. Discarded spans are neither stored nor rejected: they do not appear in `partial_success`, and they are not units.
+  - Kept spans are re-linked by rule, because their real parents are discarded. The turn span's `span_id` becomes the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ `turn.id`), and its parent is cleared. A tool span's parent becomes that same value, computed from its own `turn.id`. This needs no other span of the batch.
+  - The turn span ends after its tools, so it is usually exported in a later batch. The rule above still links them.
+- **Gemini CLI's process attributes are dropped.** Gemini puts the whole command line, prompt included, in the resource (`process.command_args`, `process.command`), even with `logPrompts` off. On its spans those keys, and `process.owner`, are removed from `resource_attributes`.
 - **A subagent stays where the agent put it.** Claude Code nests a subagent's spans under the Agent tool's span. It is not split into its own trace.
 
 The exact attribute names for Codex, and the open points for Gemini (the root span, the trace structure), are pinned by M1's captures. The M2 plan writes them into spec 02. Anything M1 contradicts here goes back to this document first.
@@ -189,8 +194,7 @@ The exact attribute names for Codex, and the open points for Gemini (the root sp
   "session_id": "…",                      // 1–256 chars, the id the agent puts on its spans
   "repository": "https://github.com/o/r.git", // optional, the origin URL without user-info; the server canonicalizes it (D-CA-4)
   "branch": "main",                       // optional, 1–256 chars
-  "user": "dev@example.com",              // optional, 1–256 chars, lowercased by the server
-  "model": "gpt-5.5-codex"                // optional, 1–256 chars: the model from the hook payload (Codex, Gemini CLI)
+  "user": "dev@example.com"               // optional, 1–256 chars, lowercased by the server
 }
 ```
 
@@ -208,7 +212,7 @@ The exact attribute names for Codex, and the open points for Gemini (the root sp
   - The server passes the project's `AgentContexts` as `normalize`'s fourth argument (§ Normalization API). `normalize` stays pure: the lookup is an input, like the price table. `IngestContext` stays `Copy` and unchanged.
   - For every span detected as an agent and with a `session_id`, `normalize` looks up `(coding_agent, session_id)`.
   - The context fills `repository` and `branch` over the span's own values (a hook knows the current branch).
-  - It fills `user_id` at its D-CA-5 rank, and the model of an `llm` span that has none.
+  - It fills `user_id` at its D-CA-5 rank.
   - In-process commits (judge traces) pass an empty lookup.
   - Spans that arrive before the context are not rewritten later.
 - **Deletion.**
@@ -219,7 +223,7 @@ The exact attribute names for Codex, and the open points for Gemini (the root sp
 - **Tests.** The fixture format cannot carry contexts (`case.json` § `context`), so the stamp is tested by Rust unit tests in `cetra-otel` and integration tests in the server.
 
 **Hook.** `cetra agents hook <agent>` is a hidden subcommand.
-- It reads the agent's hook JSON on stdin: `session_id`, `cwd`, `model` when present, and the event name.
+- It reads the agent's hook JSON on stdin: `session_id`, `cwd` and `hook_event_name`. All three agents send these, as the spike verified.
 - It runs `git -C <cwd> remote get-url origin` and `git -C <cwd> rev-parse --abbrev-ref HEAD`, each with a 1 s timeout.
   - It removes the user-info from the URL before sending it.
   - It sends `null` for `repository` when there is no `origin`, for `branch` on a detached HEAD (`HEAD`), and for both outside a git repository or when git fails. A stale value is never kept.
@@ -230,7 +234,7 @@ The exact attribute names for Codex, and the open points for Gemini (the root sp
 
 It runs at:
 - **Claude Code:** `SessionStart`, `UserPromptSubmit` and `CwdChanged`.
-- **Codex:** `SessionStart` and `UserPromptSubmit`.
+- **Codex:** `SessionStart` and `UserPromptSubmit`, in `~/.codex/hooks.json`. Hooks in `config.toml` tables did not run in the spike. Codex runs a hook only once the user has trusted it (`[hooks.state]` with a hash Codex computes). So the docs tell the user to approve the cetra hook in Codex once, and until then Codex traces have no repository or branch.
 - **Gemini CLI:** `SessionStart` and `BeforeAgent`.
 - **Copilot:** none in the MVP. VS Code already sends `github.copilot.git.*`, and Copilot CLI's hooks are unverified.
 
@@ -249,8 +253,8 @@ cetra agents remove <agent>
 | Agent | File | Contents |
 |---|---|---|
 | Claude Code | `~/.claude/settings.json` | `env`: `CLAUDE_CODE_ENABLE_TELEMETRY=1`, `CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`, `OTEL_TRACES_EXPORTER=otlp`, `OTEL_LOGS_EXPORTER=none`, `OTEL_METRICS_EXPORTER=none`, `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS` (`Authorization=Bearer%20<key>`), and `OTEL_METRICS_INCLUDE_REPOSITORY=true` only if M1 finds `vcs.*` on spans; with content: `OTEL_LOG_USER_PROMPTS=1`, `OTEL_LOG_TOOL_DETAILS=1`, `OTEL_LOG_TOOL_CONTENT=1`. `hooks`: the three events above |
-| Codex | `~/.codex/config.toml` | `[otel]` `trace_exporter = { otlp-http = … }`, `exporter = "none"`, `metrics_exporter = "none"`, `log_user_prompt` per content; hooks |
-| Gemini CLI | `~/.gemini/settings.json` | `telemetry`: `enabled`, `traces`, `otlpEndpoint`, `otlpProtocol`, `otlpHeaders`, `logPrompts` per content; hooks |
+| Codex | `~/.codex/config.toml` and `~/.codex/hooks.json` | `[otel]` `trace_exporter = { otlp-http = { endpoint = "<url>/v1/traces", protocol = "binary", headers = { authorization = "Bearer <key>" } } }` (the full path), `exporter = "none"`, `metrics_exporter = "none"`; content is not on Codex spans, so `--no-content` changes nothing here; the hooks in `hooks.json` |
+| Gemini CLI | `~/.gemini/settings.json` | `telemetry`: `enabled`, `traces`, `target = "local"`, `otlpEndpoint = "<url>"` (a base URL: Gemini appends `/v1/traces`, `/v1/logs` and `/v1/metrics`), `otlpProtocol = "http"` (sends JSON), `otlpHeaders`, `logPrompts` per content; hooks. Gemini always sends logs and metrics too, which cetra drops |
 | Copilot | none | prints the environment variables for the shell profile and the VS Code settings, including `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY` with content |
 
 **Switching off logs and metrics.** Setup sends no logs or metrics. cetra drops them (D-G-40), so sending them would only cost the developer's bandwidth. For Codex, this also stops the default metrics export to OpenAI's Statsig.
@@ -327,19 +331,18 @@ The decisions are recorded in `docs/mvp-decisions.md` § Track CA. Here are the 
 ## Risks and what M1 must settle
 
 - **Beta span shapes.** Claude Code's spans are beta, and the docs say names may change. Codex spans come from `tracing` and are undocumented. A capture pins one version of each. The docs page names the versions tested, and a changed shape is a new capture plus a rule. These conventions get no compatibility code for older agent versions (AGENTS.md § Rules): the fixtures cover the pinned versions only.
-- **Session ids.** The hook's `session_id` must equal the id on the agent's spans. For Claude Code the docs suggest that both are `session.id`, and M1 verifies it. M1 checks Codex (`thread.id` / `conversation.id` against the hook's `session_id`) and Gemini CLI (`gen_ai.conversation.id` / `session.id`). If one differs, that agent's hook is dropped from the MVP, and its context comes only from its own attributes.
-- **Trace boundaries.** Claude Code makes one trace per prompt. M1 checks that Codex and Gemini CLI do not keep one span open for the whole session, which would make a single trace that never ends. If one does, M2 decides with the user, through this document, before any rule is written.
+- **Session ids.** Verified for Claude Code (`session.id`) and Gemini CLI (`gen_ai.conversation.id`): they equal the hook's `session_id`. For Codex, `conversation.id` equals the session id that `codex exec` prints, but its hooks did not run untrusted, so the equality with the hook payload is unverified. M1 checks Codex (`thread.id` / `conversation.id` against the hook's `session_id`) and Gemini CLI (`gen_ai.conversation.id` / `session.id`). If one differs, that agent's hook is dropped from the MVP, and its context comes only from its own attributes.
+- **Trace boundaries.**
+  - Claude Code: one trace per prompt.
+  - Codex (`codex exec`): one trace per turn, rooted at the `turn/start` request.
+  - Gemini CLI: one trace per model call or tool batch.
+  - Interactive Codex was not captured. If its turns share one long trace, the re-linking rule still gives one root span per turn, but the trace holds the whole session. The docs name the tested modes.
 - **Protocols.**
   - Gemini CLI's `otlpProtocol=http` is either protobuf or JSON, and cetra accepts both.
   - Copilot CLI refuses `http://` endpoints, and `cetra serve` has no TLS. A self-hosted cetra therefore needs TLS in front of it for Copilot CLI, which the docs page says. VS Code Copilot and cetra cloud are not affected.
-- **Codex's model.** If the usage span carries no model, the session context's `model` gives it (D-CA-9).
-  - Reading the model from the parent turn span cannot work: spans are exported when they end, so the parent arrives in a later batch.
-  - Without a context, such a span has tokens but `cost_source = none`.
-- **What M1 must also settle.** For each agent:
-  - which person and session attributes are on the spans (not only on logs);
-  - how its exporter builds the endpoint path (Codex `trace_exporter`, Gemini `otlpEndpoint`);
-  - which auxiliary model calls it makes (title generation, `count_tokens`, …), so the mock answers them;
-  - for Codex, whether its hooks in `config.toml` need a feature flag.
+- **Codex's cost is per turn.** Pricing the turn's summed tokens differs from pricing each call only when a long-context tier applies to some calls and not others. This is accepted.
+- **Gemini's output tokens.** Its spans carry only `gen_ai.usage.input_tokens` and `output_tokens`. Whether `output_tokens` includes the thoughts is unverified, since the mock's thoughts did not show on the span. Cache and reasoning counts are absent.
+
 
 ## Milestones
 
@@ -347,7 +350,7 @@ The milestones are cut so that four can start at once, each in its own worktree 
 
 | M | Delivers | Depends on | Owns | Leaves out |
 |---|---|---|---|---|
-| **M1 Captures** | Delivers:<ul><li>A new scenario kind in `tools/capture` that runs a pinned agent CLI (Claude Code `-p`, `codex exec`, `gemini -p`) headless against the mock provider, with a scripted tool call. The pins are npm packages in `tools/capture/ts`'s lockfile.</li><li>Mock routes for each agent's auxiliary calls (title generation, `count_tokens`, …), answered with fixed replies outside the scripted turns.</li><li>`GROUPS` (scenario.rs, `fixtures/otlp/README.md`, `crates/otel/tests/support`) and `ENV_PREFIXES` gain the agents.</li><li>The scrubber replaces emails, account and organization ids, host names and home paths with fixed values, so no real identity lands in a fixture.</li><li>Fixture inputs awaiting bless, in the groups `claude_code`, `codex`, `gemini_cli`, within the 256 KiB and 10 s limits.</li><li>The Copilot case, hand-written in `genai` (D-CA-12).</li><li>`docs/research/coding-agents.md` § 6, with the answers to § Risks.</li></ul>`just check-capture` includes the agent scenarios. If an agent cannot run headless without a real account, M1 stops and reports. | — | `tools/capture/`, `fixtures/otlp/` (`input.json`, `case.json`, README), `crates/otel/tests/support` (`GROUPS` only), the research doc | Normalization: no `expected.json` for the new groups |
+| **M1 Captures** | The spike is done (research § 6). Delivers:<ul><li>A TypeScript scenario per agent whose `main.ts` runs a pinned agent CLI (Claude Code `-p`, `codex exec`, `gemini -p`) headless against the mock provider, with a scripted tool call. The pins are npm packages in `tools/capture/ts`'s lockfile.</li><li>Scripted turns that cover every model call the agent makes, in order: Claude Code 2 (`?beta=true`), Codex 2 (Responses, tool `exec_command`), Gemini CLI 3 (a JSON routing reply, then 2 streamed calls).</li><li>A scenario option `span_names`: an allowlist applied by the capture tool before writing, so that Codex's ~700 spans fit in 256 KiB. It keeps the turn, the tool dispatch spans and a few named noise spans, to exercise the discard rule.</li><li>`GROUPS` (scenario.rs, `fixtures/otlp/README.md`, `crates/otel/tests/support`) and `ENV_PREFIXES` gain the agents.</li><li>The scrubber replaces emails, account and organization ids, host names and home paths with fixed values, so no real identity lands in a fixture.</li><li>Fixture inputs awaiting bless, in the groups `claude_code`, `codex`, `gemini_cli`, within the 256 KiB and 10 s limits.</li><li>The Copilot case, hand-written in `genai` (D-CA-12).</li><li>`docs/research/coding-agents.md` § 6, with the answers to § Risks.</li></ul>`just check-capture` includes the agent scenarios. If an agent cannot run headless without a real account, M1 stops and reports. | — | `tools/capture/`, `fixtures/otlp/` (`input.json`, `case.json`, README), `crates/otel/tests/support` (`GROUPS` only), the research doc | Normalization: no `expected.json` for the new groups |
 | **M2 Normalization** | Spec 02 (and spec 01's `metadata` keys and `cetra.span_name`) rules for the four agents: detection, kinds, tokens, tool names, payloads, placeholders, the person override, the D-CA-4 keys from the agents' own attributes, and the stamp from an `AgentContexts` lookup (§ Normalization API). `schema_version` is bumped. Every caller of `normalize` passes the lookup; the server passes an empty one until M3. The M1 fixtures are blessed and reviewed. | M1 | `crates/otel/`, the callers' one-line changes in `crates/eval` and `crates/server/src/ingest`, `fixtures/otlp/` (`expected.json`), spec 02 | The server store |
 | **M3 Session context** | Phases 1–n (no M2 needed): the `agent_contexts` migration, the store with expiry and the per-project cap, `POST /v1/agent-context`, the deletion cascade (delete by user, project drop), spec 04 and spec 09. Specs 04 (table), 08 (`ingest` scope), 09 (route) and 12 (startup load). Last phase (after M2 merges): the store keeps one `AgentContexts` per project, `accept_request` passes it to `normalize`, the route canonicalizes `repository` with `cetra_otel::canonical_repository`, and a server test shows a context stamped onto later spans with the D-CA-5 order. | design; M2 for the last phase | `crates/server/` (not `ingest/` before the last phase), `crates/server/migrations/`, specs 04 and 09 | The CLI |
 | **M4 CLI** | `cetra agents hook`, `setup` and `remove` for the four agents (D-CA-8, D-CA-10), `agents.toml`, in-place JSON and TOML edits with the backup, `--print` and `--no-content`, tests on temporary home directories and against a stub HTTP server, the regenerated CLI reference, spec 09 § CLI, `CETRA_INGEST_KEY` in the configuration reference. `toml_edit` is pinned in the root `[workspace.dependencies]` after `cargo info`. | the route contract in this document | `crates/cli/`, the root `Cargo.toml` and `Cargo.lock`, the CLI reference page | — |
@@ -366,8 +369,6 @@ pub struct AgentContext {
     pub repository: Option<String>,
     pub branch: Option<String>,
     pub user: Option<String>,
-    /// The agent's model from the hook payload, used when an `llm` span has none (Codex).
-    pub model: Option<String>,
     /// Last write, ns since the Unix epoch. `normalize` ignores it; the server's expiry and cap use it.
     pub updated_at: i64,
 }

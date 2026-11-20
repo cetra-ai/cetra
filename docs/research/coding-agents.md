@@ -427,3 +427,89 @@ These are inputs to the design doc, not decisions.
    - work without the beta flag, by reading the transcript.
 
    The price is coupling to unversioned payloads and transcripts, and a package to ship and maintain per agent.
+
+## 6. Spike: what the pinned agents actually sent (2026-11-20)
+
+**Setup.** Each CLI ran headless:
+- under an empty `HOME`, in a git repository with `origin = https://tok@github.com/Acme/Widgets.git` on branch `feature/x`;
+- against a logging mock of the provider API and an OTLP sink;
+- with hooks that dumped their stdin;
+- prompt: "Run echo hello", answered with one shell tool call, then text.
+
+Versions: Claude Code 2.1.323, Codex 0.167.2, Gemini CLI 0.68.0. These were the newest releases at least 7 days old (D74).
+
+### Claude Code
+
+**Model calls.** Exactly two, to `POST /v1/messages?beta=true` (streamed), plus a `HEAD /api/hello`. `-p` made no auxiliary model calls.
+
+**Spans.** Six per prompt, all in one trace, scope `com.anthropic.claude_code.tracing`, resource `service.name = claude-code`:
+
+```
+claude_code.interaction  gen_ai.operation.name=invoke_agent, user_prompt (with OTEL_LOG_USER_PROMPTS)
+├─ claude_code.llm_request ×2  model, gen_ai.request.model, gen_ai.system=anthropic, input_tokens (excl. cache),
+│                               output_tokens, cache_read_tokens, cache_creation_tokens, ttft_ms, stop_reason,
+│                               gen_ai.response.finish_reasons; no messages
+└─ claude_code.tool        gen_ai.operation.name=execute_tool, gen_ai.tool.name=Bash, tool_name, gen_ai.tool.call.id,
+   │                       full_command (OTEL_LOG_TOOL_DETAILS); event tool.output {bash_command, output} (OTEL_LOG_TOOL_CONTENT)
+   ├─ claude_code.tool.blocked_on_user  decision, source
+   └─ claude_code.tool.execution        success
+```
+
+**Attributes on every span:**
+- `session.id`, which equals `gen_ai.conversation.id` and the hooks' `session_id`;
+- `user.id` (anonymous), `terminal.type`, `gen_ai.provider.name=anthropic`;
+- with `OTEL_METRICS_INCLUDE_REPOSITORY=true`: `vcs.repository.url.full` (`https://github.com/acme/widgets`, lowercased, token stripped), `vcs.owner.name`, `vcs.repository.name`, `vcs.provider.name`.
+
+There is no branch, and no `user.email` with API-key auth.
+
+**Hooks.** `SessionStart`, `UserPromptSubmit` and `Stop` ran, each with `session_id`, `cwd` and `hook_event_name`.
+
+### Codex
+
+**Model calls.** Two `POST /v1/responses` (streamed). The tool is `exec_command` with `{"cmd": …}`. Requests carry the `x-codex-turn-metadata` and `x-codex-window-id` headers.
+
+**Spans.** **694** for the one prompt, resource `service.name = codex_exec`, every `tracing` span of the process. Codex has no setting to filter its trace export: its filter only drops `h2`, `tokio` and `runtime` targets (`codex-rs/otel/src/provider.rs`, `trace_export_filter`).
+
+The prompt's trace is rooted at `turn/start` and has 391 spans. The useful ones:
+- `session_task.turn`:
+  - `model`, `turn.id`, `thread.id` (the conversation id here);
+  - `codex.turn.token_usage.{input_tokens 800, cached_input_tokens 600, output_tokens 60, reasoning_output_tokens 20, total_tokens 860, …}`: the sum of both calls.
+- `codex.sampling`, one per call: `conversation.id`, `turn.id`.
+- `handle_responses`, one per call: `gen_ai.usage.input_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.output_tokens`, `codex.usage.reasoning_output_tokens`. No model, and no conversation or turn id.
+- `exec_command`: `tool_name`, `call_id`, `conversation.id`, `turn.id`, `codex.tool.phase=dispatch`.
+
+**Other attributes.** `thread.id` is also the OS thread number on most spans. The other traces (`auth`, `fs.read_file`, `thread/start`, `session_loop`, …) are not part of any prompt. There is no prompt or tool content on spans.
+
+**Hooks.** Hooks in `config.toml` (`[[hooks.SessionStart]]`) and in `$CODEX_HOME/hooks.json` both did not run under `codex exec`.
+- The feature (`hooks`, alias `codex_hooks`) is on by default.
+- Hooks need a trust entry: `[hooks.state."<key>"]` with a `trusted_hash` that Codex computes (`codex-rs/hooks/src/config_rules.rs`).
+- So the hook payload's `session_id` could not be compared with `conversation.id`.
+
+### Gemini CLI
+
+**Trust.** It refuses to run in an untrusted folder unless `GEMINI_CLI_TRUST_WORKSPACE=true` or `--skip-trust` is given. `--yolo` is downgraded to `default` in an untrusted folder.
+
+**Model calls.** Three:
+- one `generateContent` to `gemini-3.5-flash-lite`: a routing call that expects a JSON reply;
+- two `streamGenerateContent?alt=sse` to `gemini-3.8-flash`.
+
+**Protocol.** `otlpProtocol = "http"` sends OTLP/JSON to `<otlpEndpoint>/v1/traces`, `/v1/logs` and `/v1/metrics`. Logs and metrics are always sent.
+
+**Spans.** Scope `gemini-cli`, resource `service.name = gemini-cli`. Every model call is its own trace, and so is every tool batch:
+- `llm_call`: `gen_ai.operation.name=llm_call`, `gen_ai.request.model`, `gen_ai.conversation.id` (equals the hooks' `session_id`), `gen_ai.agent.name=gemini-cli`, `gen_ai.system_instructions`, `gen_ai.tool.definitions`, `gen_ai.input.messages`, `gen_ai.output.messages`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`.
+  - The messages are **Gemini-native**: `{"role":"model","parts":[{"text":…}|{"functionCall":…}]}`. The output is an object for the routing call and an array otherwise.
+- `schedule_tool_calls` → `tool_call`: `gen_ai.tool.name=run_shell_command`, `gen_ai.tool.call_id` (*sic*), input and output messages as JSON.
+
+**Resource.** It carries `host.name`, `process.owner`, `process.command_args` (including the `-p` prompt), `process.executable.path` and `session.id`. `service.version` is the Node version.
+
+**Usage.** Usage from the mock had 100 cached and 5 thought tokens. The spans showed only `input_tokens` 400 and `output_tokens` 20.
+
+**Hooks.** `SessionStart` and `BeforeAgent` ran, each with `session_id`, `cwd`, `hook_event_name` and `timestamp`.
+
+### Consequences (in the design doc)
+
+- **Claude Code:** most rules already apply, since `invoke_agent` and `execute_tool` are semconv operation names. The missing pieces are its token names, the tool name, the tool input and output, and the prompt.
+- **Codex:** keep the turn and tool dispatch spans, discard the rest, re-link by `turn.id`, and price the turn's totals.
+- **Gemini CLI:** convert the native message parts, and drop the process attributes that carry the prompt.
+- **Copilot:** stays hand-written.
+- **Captures:** Codex needs a `span_names` allowlist to fit 256 KiB.
