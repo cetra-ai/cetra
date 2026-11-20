@@ -13,6 +13,8 @@ import { useState } from "react";
 import { problemOf } from "@/api/problem";
 import { sessionQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddToQueueButton } from "@/components/annotation-queues/add-to-queue-dialog";
+import { QueuesChip } from "@/components/annotation-queues/queues-chip";
 import { AnnotationForm } from "@/components/annotation/annotation-form";
 import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { CopyButton } from "@/components/copy-button";
@@ -186,7 +188,7 @@ function SessionHeader({
             {session.user_id}
           </Link>
         ) : null}
-        <div className="ml-auto flex shrink-0 items-center">
+        <div className="ml-auto flex shrink-0 items-center gap-2">
           <DisabledReason reason={canAnnotateSession ? undefined : "Only members can annotate"}>
             <Button
               type="button"
@@ -200,6 +202,7 @@ function SessionHeader({
               Annotate
             </Button>
           </DisabledReason>
+          <AddToQueueButton target="session" items={[{ session_id: session.session_id }]} />
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-2 text-body text-muted-foreground">
@@ -251,6 +254,7 @@ function SessionHeader({
               <ScoreBadge name={score.name} value={score.value} text={badgeValue(score.value)} />
             </Badge>
           ))}
+        <QueuesChip sessionId={session.session_id} />
       </div>
       <Sheet open={annotating} onOpenChange={setAnnotating}>
         <SheetContent side="right" className="overflow-y-auto">
