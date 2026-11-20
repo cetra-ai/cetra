@@ -57,10 +57,13 @@ Out of scope:
 | D97 | At most 8 score names per filter |
 
 **Decided while writing this plan** (added to `00-design.md` and the decision log as D-IC-18 in M1.1):
-- **The occurrence score id is a UUIDv7** whose 48-bit millisecond timestamp is the trace's start and whose other bits come from SHA-256(`cetra.issue-occurrence.v1` ‖ project id (16 bytes) ‖ trace id (16) ‖ issue id (16)), with the version and variant bits set. `scores::write` then takes `created_at` from the id (the existing D-G-26 path) and a rewrite of the same (trace, issue) replaces the same row.
+- **The occurrence score id is a UUIDv7** whose 48-bit millisecond timestamp is the occurrence time and whose other bits come from SHA-256(`cetra.issue-occurrence.v1` ‖ project id (16 bytes) ‖ trace id (16) ‖ issue id (16)), with the version and variant bits set. `scores::write` then takes `created_at` from the id (the existing D-G-26 path) and a rewrite of the same (trace, issue) replaces the same row.
+- **The occurrence time of an error issue is the `start_time` of the trace's earliest error span with that fingerprint**, clamped to `now`. It is stable across re-sweeps. When a late span of the same fingerprint starts earlier still, a second row is written for the trace, and the count is one too high (accepted, rare). Occurrences older than the project's retention are not written (`scores::write` refuses them).
+- **Occurrences carry the trace's user and session**: from the first error span of the group (in `(start_time, span_id)` order) with a non-null `user_id`, and likewise for `session_id`.
 - **`latest_scores` and the users' `scores_of` leave out source `issue`.** The list columns and briefs never see issue scores. The trace view gets its chips from `GET …/scores?trace_id=…&source=issue`, and the scores tab hides rows of source `issue`. The dashboard scores source leaves out source `issue` too.
 - **No `occurrence_count` column.** Counts come from storage (`score_name_counts`), so deletions are reflected.
 - **`issue_sources.kind` has no SQL CHECK**, so M3 adds kinds without rebuilding the table. The Rust enum is the only gate.
+- **Regression compares trace times.** A trace that started before `resolved_at` but completes after it does not reopen the issue.
 
 ## Versions
 
@@ -75,10 +78,14 @@ No new dependency.
 | M1.3 Tables and store | migration `0023_issues.sql`, `meta/issues.rs`, `meta/mod.rs`, schema snapshot, spec 04 | — |
 | M1.4 Plan limit | entitlements, config, token, CLI, OpenAPI, web plan page, docs | — |
 | M1.5 Issue writer | `scores.rs` | M1.1 |
-| M1.6 Error sweep | new `issues/{mod,errors,sources}.rs`, `eval/trigger.rs`, `http/mod.rs` (state), `lib.rs`, `deletion/mod.rs` | M1.2, M1.3, M1.5 |
+| M1.6a Tracked set | new `issues/sources.rs`, `issues/mod.rs`, `eval/trigger.rs` | M1.3 |
+| M1.6b Fingerprints to issues | new `issues/errors.rs`, `issues/mod.rs`, `eval/trigger.rs` | M1.2, M1.6a |
+| M1.6c Occurrence writes | `issues/errors.rs`, `eval/trigger.rs` | M1.5, M1.6b |
 | M1.7 Sources API | `api/issues.rs`, `routes/issues.rs` (sources half), routes registration, openapi, fixtures, web mocks | M1.3, M1.4, M1.6 |
-| M1.8 Issues API | `api/issues.rs`, `routes/issues.rs` (issues half), openapi, fixtures, web mocks | M1.7 |
-| M1.9 Web: Issues pages | `web/src/routes/$org/$project/issues/**`, `web/src/components/issues/**`, `web/src/api/queries-issues.ts`, nav, shortcuts | M1.8 |
+| M1.8a Issues reads | `api/issues.rs`, `routes/issues.rs`, `routes/alert_rules.rs`, openapi, fixtures | M1.7 |
+| M1.8b Issues writes | `api/issues.rs`, `routes/issues.rs`, web mocks, and the dead-code attributes removed | M1.8a |
+| M1.9a Web: Issues list | `web/src/routes/$org/$project/issues/index.tsx`, queries, search, nav, shortcuts | M1.8b |
+| M1.9b Web: issue page | `web/src/routes/$org/$project/issues/$issueId.tsx`, `web/src/components/issues/**` | M1.9a |
 | M1.10 Web: Issue sources pages | `web/src/routes/$org/$project/issue-sources/**`, `web/src/components/issue-sources/**` | M1.8 |
 | M1.11 Web: trace chips and filter | trace view, scores tab, preset chips | M1.8 |
 | M1.12 Docs and closeout | specs, website page, CHANGELOG, roadmap | all |
@@ -92,6 +99,7 @@ The phases run one after another, in one worktree.
 - Rust: compile and test only right before the commit, once. Web: while iterating, run only the touched tests: `pnpm --dir web exec vitest run <paths> --maxWorkers=8`.
 - Before `just check` or any web command: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`.
 - Commit once, with the given subject, when **Done when** passes. Stage only the phase's files (`git add <paths>`), never `git add -A`.
+- **Dead code.** A new `pub(crate)` item that no non-test code uses yet fails clippy. Put `#![cfg_attr(not(test), allow(dead_code))]` at the top of a new module that is not used yet (`meta/issues.rs` in M1.3, `issues/source_limit.rs` in M1.4), and `#[cfg_attr(not(test), allow(dead_code))]` on a new item (`Writer::Issue`, `occurrence_id` in M1.5). M1.8b removes every such attribute added by M1 (grep `allow(dead_code)` in the files M1 created or changed), and its `just check-rust` proves nothing is left unused.
 
 ---
 
@@ -167,7 +175,7 @@ pub struct ErrorSpansRequest<'a> {
 /// The columns `error_spans` returns, in this order.
 pub const ERROR_SPAN_COLUMNS: &[&str] = &[
     spans::TRACE_ID, spans::SPAN_ID, spans::START_TIME, spans::SERVICE_NAME, spans::NAME,
-    spans::STATUS_MESSAGE, spans::EVENTS,
+    spans::STATUS_MESSAGE, spans::EVENTS, spans::USER_ID, spans::SESSION_ID,
 ];
 
 pub async fn error_spans(ctx: &QueryContext, request: ErrorSpansRequest<'_>)
@@ -225,7 +233,7 @@ Re-export all of them from `reads/mod.rs` and the crate root, next to `span_refr
 3. Errors: `RunError::Timeout` on timeout, and DataFusion errors through `classify`/`ctx.fail`, as the neighbours do.
 
 **Tests** (in the reads' test modules, using the existing helpers that append spans and scores):
-- `error_spans_returns_only_error_spans_with_their_fields`: one trace with an `ok` and an `error` span, where the error span has `service_name`, `status_message` and one `exception` event. Exactly one row comes back, with all seven columns set.
+- `error_spans_returns_only_error_spans_with_their_fields`: one trace with an `ok` and an `error` span, where the error span has `service_name`, `status_message`, `user_id`, `session_id` and one `exception` event. Exactly one row comes back, with all nine columns set.
 - `error_spans_applies_the_filter`: `name = 'b'` keeps only span `b` of two error spans.
 - `error_spans_caps_per_trace`: 60 error spans give 50, the earliest.
 - `error_spans_excludes_eval_traces`: an error span with environment `cetra-eval` is not returned.
@@ -339,7 +347,10 @@ pub(crate) async fn merged_ids(pool, project, into: Uuid) -> Result<Vec<Uuid>, M
 pub(crate) async fn retarget_merged(conn, from: Uuid, to: Uuid) -> Result<u64, MetaError>;     // UPDATE … SET merged_into = to WHERE merged_into = from
 pub(crate) async fn titles(pool, project, ids: &[Uuid]) -> Result<Vec<(Uuid, String, IssueState)>, MetaError>;
 pub(crate) struct IssueListQuery<'a> { states: &'a [IssueState], source: Option<Uuid>, q: Option<&'a str>,
+    /// When set, only these ids (at most 100).
+    ids: Option<&'a [Uuid]>,
     sort: IssueSort, cursor: Option<(i64, Uuid)>, limit: u32 }
+pub(crate) async fn open_counts(pool, project) -> Result<HashMap<Uuid, u64>, MetaError>;   // open issues per source
 pub(crate) enum IssueSort { LastSeen, FirstSeen }   // both DESC, ties by id DESC
 pub(crate) async fn list_issues(pool, project, &IssueListQuery) -> Result<Vec<IssueRow>, MetaError>; // limit + 1 rows
 // events
@@ -353,7 +364,8 @@ pub(crate) async fn list_events(pool, issue, limit: u32) -> Result<Vec<EventRow>
 - `count_enabled_sources` counts enabled sources of active projects only;
 - `sweep_sources` leaves out disabled, paused and inactive-project sources;
 - `issue_by_fingerprint` finds by (source, fingerprint), and the unique index refuses a second issue with the same fingerprint;
-- `list_issues` filters by state, source and `q` (`q = "50%"` matches the literal `50%` only), sorts by last seen with id ties, and pages with the cursor;
+- `list_issues` filters by state, source, `ids` and `q` (`q = "50%"` matches the literal `50%` only), sorts by last seen with id ties, and pages with the cursor;
+- `open_counts` counts open issues per source;
 - `retarget_merged` moves chains;
 - deleting a project cascades to sources, issues and events, and deleting a source cascades to its issues and events.
 
@@ -374,6 +386,7 @@ pub(crate) async fn list_events(pool, issue, limit: u32) -> Result<Vec<EventRow>
 - new `crates/server/src/issues/source_limit.rs` (with a new `crates/server/src/issues/mod.rs` holding only `pub(crate) mod source_limit;`) and `crates/server/src/lib.rs` (`pub(crate) mod issues;`);
 - `web/src/routes/$org/settings/plan.tsx`;
 - `website/src/content/docs/docs/self-hosting/configuration-reference.md`, `website/src/content/docs/docs/platform/plans-and-licence.mdx`;
+- `fixtures/license/payloads/org-pro.json` (add the key next to `max_active_online_rules`, only if that key is there; then rerun whatever test reads the payload);
 - `docs/spec/12-operations.md`, `docs/mvp-decisions.md` (D-P-13's row: append "; `max_active_issue_sources` added by D-IC-13");
 - regenerated openapi and `schema.gen.ts`.
 
@@ -424,7 +437,7 @@ pub(crate) async fn list_events(pool, issue, limit: u32) -> Result<Vec<EventRow>
    /// trace's start (milliseconds, clamped at 0) and whose random bits come from SHA-256.
    pub(crate) fn occurrence_id(project: ProjectId, trace: TraceId, issue: Uuid, trace_start_ns: i64) -> Uuid
    ```
-   1. `ms = max(trace_start_ns, 0) / 1_000_000` as `u64`, keeping its low 48 bits.
+   1. `ms = max(trace_start_ns, 0) / 1_000_000` as `u64`, keeping its low 48 bits. (The caller clamps `trace_start_ns` to `now`, M1.6c.)
    2. `digest = SHA-256(b"cetra.issue-occurrence.v1" ‖ project.as_uuid().as_bytes() ‖ trace.as_bytes() ‖ issue.as_bytes())`.
    3. Bytes 0–5 are `ms` big-endian; bytes 6–15 are `digest[0..10]`.
    4. Set the version nibble: `bytes[6] = (bytes[6] & 0x0F) | 0x70`. Set the variant: `bytes[8] = (bytes[8] & 0x3F) | 0x80`.
@@ -445,100 +458,146 @@ pub(crate) async fn list_events(pool, issue, limit: u32) -> Result<Vec<EventRow>
 
 ---
 
-### M1.6 Error sweep
+### M1.6a Tracked set
 
-**Goal:** completed traces of projects with an enabled error source get their error spans fingerprinted into issues, with occurrence scores (D-IC-2, D-IC-10, D-IC-11).
+**Goal:** projects with an enabled error source are tracked and swept even without online rules, and the sweep has a hook for them.
 
-**Edit:**
-- new `crates/server/src/issues/errors.rs`, new `crates/server/src/issues/sources.rs`;
-- `crates/server/src/issues/mod.rs`;
-- `crates/server/src/eval/trigger.rs`;
-- `crates/server/src/deletion/mod.rs` (only if step 7 needs it).
+**Edit:** new `crates/server/src/issues/sources.rs`; `crates/server/src/issues/mod.rs`; `crates/server/src/eval/trigger.rs`.
 
 **Steps:**
 1. `issues/sources.rs`:
    ```rust
    /// Error sources of one project, as the sweeper sees them.
+   #[derive(Debug, Clone, PartialEq)]
    pub(crate) struct ProjectSources { pub(crate) org: OrgId, pub(crate) timeout_ns: i64, pub(crate) sources: Vec<SweepSource> }
    pub(crate) async fn refresh(state: &AppState) -> Result<HashMap<ProjectId, ProjectSources>, MetaError>
    ```
-   It reads `meta::issues::sweep_sources` and groups by project. `timeout_ns` uses `eval::trigger::timeout_ns(completion_timeout_s)`; make that fn `pub(crate)`.
-2. `eval/trigger.rs`. The tracked set becomes the union of rule projects and error-source projects:
-   - `refresh_rules` no longer calls `set_tracked`;
-   - a new `pub(crate) async fn refresh_tracked(state) -> Result<(HashMap<ProjectId, ProjectRules>, HashMap<ProjectId, ProjectSources>), MetaError>` calls `refresh_rules`, then `issues::sources::refresh`, then `state.pending.set_tracked(union of both key sets)`. Either read failing returns the error and leaves the set as it was.
-   - `load` and `sweep_once` call `refresh_tracked` where they called `refresh_rules`. Update every other caller of `refresh_rules` (grep) the same way, including tests.
-3. `sweep_once` iterates the union of project ids, in ascending order for determinism:
-   - `rules`: the project's rules or an empty slice;
+   It reads `meta::issues::sweep_sources`, groups by project in id order, and sets `timeout_ns` with `eval::trigger::timeout_ns(completion_timeout_s)` (make that fn `pub(crate)`). Add `pub(crate) mod sources;` to `issues/mod.rs`.
+2. `eval/trigger.rs`:
+   - Split `refresh_rules` into a private `read_rules(state) -> Result<HashMap<ProjectId, ProjectRules>, MetaError>` (everything but `set_tracked`), and `refresh_rules` = `read_rules` + `set_tracked(keys)`, unchanged for its callers and tests.
+   - Add `pub(crate) async fn refresh_tracked(state) -> Result<(HashMap<ProjectId, ProjectRules>, HashMap<ProjectId, ProjectSources>), MetaError>`: `read_rules`, then `issues::sources::refresh`, then `state.pending.set_tracked(union of both key sets)`. Either error returns it before `set_tracked`, so the set stays as it was.
+   - `load` and `sweep_once` call `refresh_tracked` instead of `refresh_rules`. The test faults hook `faults::take_refresh()` moves into `read_rules`, so it still fails both.
+3. `sweep_once` iterates the union of project ids in ascending order:
+   - `rules`: the project's rules, or an empty `Vec`;
    - `org` and `timeout_ns`: from `ProjectRules` when present, else from `ProjectSources`;
-   - `sources`: the project's error sources or empty.
+   - `sources`: the project's sources, or empty.
 
-   `SweepCtx` gains `sources: &'a [SweepSource]`. In `sweep_batch`, after the rules' read and enqueue (unchanged, and skipped entirely when `rules` is empty), call `crate::issues::errors::sweep_batch(ctx.state, ctx.org, ctx.project, ctx.sources, around, batch, ctx.now).await?` when `sources` is non-empty. Its `Err(())` fails the batch like a rule read, so `settle` counts a failed read.
-4. `issues/errors.rs`:
-   ```rust
-   pub(crate) async fn sweep_batch(state: &AppState, org: OrgId, project: ProjectId,
-       sources: &[SweepSource], around: i64, batch: &[Completed], now: i64) -> Result<(), ()>
-   ```
-   1. Open the query context like `read_candidates` does (same `query_options(Visibility::window(state, org), Some(around))`; failure → warn with the project id, `Err(())`).
-   2. For each source, in id order, call `cetra_storage::error_spans` with the source's filter, the batch's ids and `READ_TIMEOUT`. `RunError::Invalid | InvalidRequest` (a bad stored filter) skips this source with a warning at most once per source per hour: reuse `state.eval.filter_warning_due(source.id, now)`. Any other error returns `Err(())`.
-   3. Decode each row into `ErrorSpan { trace_id, span_id, start_time, service_name: Option<String>, name: String, exception_type: Option<String>, message: Option<String> }`:
-      - the exception comes from the **last** element of `events` whose `name == "exception"`. Its `attributes` is a JSON object text: `exception.type` and `exception.message` are its string values; missing, non-string or unparsable means `None`.
-      - `message` is `exception.message`, else `status_message`;
-      - empty strings are `None`.
-   4. For each `ErrorSpan`:
-      - `normalized = message.map(normalize_message)`;
-      - `fp = fingerprint_hex(&ErrorFields { service_name, span_name: &name, exception_type, message: normalized.as_deref() })`;
-      - the title is `format!("{}: {}", exception_type.unwrap_or(&name), normalized.unwrap_or("(no message)"))`, cut to 200 characters.
+   `SweepCtx` gains `sources: &'a [SweepSource]`. `sweep_batch` becomes:
+   1. if `ctx.sources` is not empty: `crate::issues::errors::sweep_batch(ctx, around, batch).await?` (the error sweep goes first: it is idempotent, so a later rule failure that retries the batch repeats nothing that costs a cap);
+   2. if `ctx.rules` is not empty: the existing rule read and enqueue.
 
-      Group the spans by `fp`, keeping per group the earliest span of each trace (the occurrence is per trace and issue).
-   5. One meta write per source batch (`state.meta.write`), for each fingerprint group in `fp` order:
+   In this phase `issues::errors::sweep_batch` does not exist yet. Add it in `issues/errors.rs` as `pub(crate) async fn sweep_batch(ctx: &SweepCtx<'_>, around: i64, batch: &[Completed]) -> Result<(), ()> { Ok(()) }`, with the doc comment `/// Error issues for one batch (D-IC-2). Filled in by M1.6b.`, and `pub(crate) mod errors;` in `issues/mod.rs`. It is replaced in the next phase, which is the only time a body is left empty in this plan. Make `SweepCtx` and its fields `pub(crate)`, and also `READ_TIMEOUT`, `query_options` and `Completed` if they are not, so `issues/errors.rs` can use them.
+4. Tests (in `trigger.rs`'s `mod tests`, using its helpers):
+   - `project_with_only_an_error_source_is_tracked`: insert an enabled error source with the meta helper (`meta::issues::insert_source` inside `state.meta.write`), run `refresh_tracked`, and `pending.observe` keeps the project's spans.
+   - `a_disabled_source_untracks_its_project`.
+   - `rules_only_projects_still_work`: the existing tests pass unchanged.
+
+**Done when:** `just check-rust` passes.
+
+**Commit:** `Track projects with error issue sources`
+
+---
+
+### M1.6b Fingerprints to issues
+
+**Goal:** the error sweep reads error spans and creates, routes and regresses issues (no scores yet).
+
+**Edit:** `crates/server/src/issues/errors.rs`, `crates/server/src/eval/trigger.rs` (tests only).
+
+**Steps:**
+1. Replace `sweep_batch`'s body in `issues/errors.rs`:
+   1. Open the query context like `read_candidates` does (`ctx.state.storage.query(ctx.project, query_options(Visibility::window(ctx.state, ctx.org), Some(around)))`, then `QueryContext::new(source, None)`). On failure, warn with the project id and return `Err(())`.
+   2. For each source in `ctx.sources`, in id order, call `cetra_storage::error_spans` with:
+      - the source's filter;
+      - the batch's ids (hex strings, as `read_candidates` builds them);
+      - `READ_TIMEOUT`.
+
+      `RunError::Invalid | RunError::InvalidRequest` skips this source; log a warning at most once per source per hour with `ctx.state.eval.filter_warning_due(source.id, ctx.now)`. Any other error returns `Err(())`.
+   3. Decode the batches into
+      ```rust
+      struct ErrorSpan { trace_id: TraceId, span_id: SpanId, start_time: i64, service_name: Option<String>,
+          name: String, exception_type: Option<String>, message: Option<String>,
+          user_id: Option<String>, session_id: Option<String> }
+      ```
+      Use the Arrow downcasting helpers `api::convert` uses for span rows (`match_rows` is the model). A row that cannot be decoded is skipped, with a counter in the debug log.
+      - Exception: the **last** element of `events` whose `name` is `exception`. Its `attributes` is JSON object text: `exception.type` and `exception.message` are its string values, and missing, non-string or unparsable means `None`.
+      - `message`: the exception's message, else `status_message`.
+      - Empty strings are `None`.
+   4. Per span:
+      - `normalized = message.as_deref().map(normalize_message)`;
+      - `fp = fingerprint_hex(&ErrorFields { service_name: service_name.as_deref(), span_name: &name, exception_type: exception_type.as_deref(), message: normalized.as_deref() })`;
+      - `title` = `format!("{}: {}", exception_type.as_deref().unwrap_or(&name), normalized.as_deref().unwrap_or("(no message)"))`, cut to 200 characters.
+
+      Group by `fp`. Within a group, keep one entry per trace: its earliest span by `(start_time, span_id)`, as the occurrence span. Its user and session are those of the first span of the group's spans in that trace (same order) that has one.
+   5. One `ctx.state.meta.write` per source, for each group in `fp` order:
       1. `issue_by_fingerprint(conn, source.id, &fp)`.
       2. If there is none, insert an issue:
-         - id `Uuid::now_v7()`, state `open`;
-         - `first_seen` and `last_seen` are the group's min and max trace start;
+         - `id = Uuid::now_v7()`, the title, state `open`;
+         - `first_seen` and `last_seen`: the min and max occurrence time (step 6);
          - `created_at = updated_at = now`;
-         - plus a `created` event with no actor and `to_value = "open"`.
-      3. If the issue is `merged`, follow `merged_into` once (chains are one level deep, D-IC-9) to the target issue. A missing target means: keep the merged issue as the occurrence's issue, and log a warning with the ids.
-      4. Regression: if the issue is `resolved` and any trace in the group started after `resolved_at`, set `state = open`, `regressed = true`, `resolved_at = resolved_by = NULL`, `updated_at = now`, and insert a `regressed` event (no actor, `from_value = "resolved"`, `to_value = "open"`).
-      5. `last_seen = max(last_seen, max trace start)`, and `first_seen = min(...)`. Update the issue when anything changed.
-      6. Collect the occurrences `(issue_id, trace_id, trace_start, span_id, normalized message)`.
-   6. Deletion guard: drop the occurrences whose trace `state.deletions.guard.blocking(project, trace, &[], now)` reports, as `eval/execute.rs` does before its score write. Read that call there and use the same arguments, with no users.
-   7. Write the occurrences with `scores::write(state, &project_row, Writer::Issue { source_id }, items)`, in chunks of at most 1 000. Each item:
-      - `score_id: Some(occurrence_id(project, trace, issue, trace_start))`;
-      - `target: ScoreTarget::Trace { trace_id }`;
-      - `name: format!("issue:{issue_id}")`, `value: ScoreValue::Boolean(true)`;
-      - `reason`: the normalized message;
-      - `source: None`;
-      - `metadata`: `{"cetra.issue.source_id": source_id, "cetra.issue.span_id": span hex}`; build the keys with the `cetra_name!` macro the server uses for other metadata keys, else the literal strings;
-      - the session and user are left `None`.
-
-      `project_row` is loaded once per call (`meta::projects::get_project` or the function `execute.rs` uses). A write error logs a warning with the project id and the count, then returns `Err(())`, so the batch is retried. Rewrites are idempotent.
-   8. Ignored issues get occurrences like the others (D-IC-10).
-5. Logging: one `debug!` per batch with `project_id`, `sources`, `error_spans`, `issues_created`, `occurrences`. Never the title or the message.
-6. `issues/mod.rs`: `pub(crate) mod errors; pub(crate) mod sources; pub(crate) mod source_limit;`.
-7. A project or org drop needs nothing new: tables cascade, and nothing per project is cached in memory.
-
-**Tests** (in `issues/errors.rs`, with the end-to-end helpers that `eval/trigger.rs`'s tests use to ingest spans and run `sweep_once`):
-- `error_span_becomes_an_issue_and_an_occurrence`: ingest a completed trace with one error span (an exception event of type `ValueError`, message `bad id 42`), create an error source, and run `sweep_once`:
-  - one issue, titled `ValueError: bad id <n>`, state `open`, with a `created` event;
-  - one score `issue:<id>`, source `issue`, whose `created_at` is the trace start.
-- `same_error_in_two_traces_is_one_issue_two_occurrences` (messages differ only in the number).
-- `different_exception_types_are_two_issues`.
-- `two_error_spans_of_one_issue_in_one_trace_give_one_occurrence`.
-- `resolved_issue_regresses_on_a_newer_trace`: an older trace's error does not reopen it, and a newer one does, with `regressed = true` and a `regressed` event.
-- `merged_issue_routes_to_its_target`.
-- `ignored_issue_still_gets_occurrences`.
-- `filter_limits_the_spans`: a filter `service_name = 'api'`.
-- `project_without_rules_is_tracked_for_an_error_source`: no online rule, and the trace is still swept.
-- `rules_and_sources_share_a_batch`: a project with a rule and a source enqueues the job and writes the issue.
-- `a_bad_stored_filter_skips_the_source_only`.
-- `a_failed_error_read_retries_the_batch` (use the trigger faults module if it can inject a read error, else a closed storage).
-- `occurrences_bill_no_units`.
-- `deletion_guard_blocks_occurrences`.
-- `eval_traces_are_never_issues`: an error in `cetra-eval` creates nothing.
+         - and a `created` event: no actor, `to_value = "open"`.
+      3. If the issue is `merged`, follow `merged_into` once (chains are one level deep, D-IC-9). If the target is missing, keep the merged issue and log a warning with both ids.
+      4. Regression: if the issue is `resolved` and any occurrence time in the group is greater than `resolved_at`, then:
+         - `state = open`, `regressed = true`, `resolved_at = resolved_by = None`;
+         - record a `regressed` event: no actor, `from_value = "resolved"`, `to_value = "open"`.
+      5. `first_seen = min(first_seen, group min)`, `last_seen = max(last_seen, group max)`. Write with `update_issue` when anything changed, setting `updated_at = now`.
+      6. Produce `Occurrence { source_id, issue_id, trace_id, span_id, at, user_id, session_id, reason: normalized }` for each trace of the group. `at = min(span start_time, ctx.now)`.
+   6. Return the occurrences to the caller in this phase (`sweep_batch` keeps them in a local variable that M1.6c writes). Log one `debug!` per batch with `project_id`, `sources`, `error_spans`, `issues_created` and `occurrences`, never a title or message.
+2. Tests, in `trigger.rs`'s `mod tests`, which has the span, trace and clock helpers:
+   - `error_span_becomes_an_issue`: an exception `ValueError`, `bad id 42`. One issue titled `ValueError: bad id <n>`, `open`, with a `created` event.
+   - `same_error_in_two_traces_is_one_issue` (the messages differ only in the number).
+   - `different_exception_types_are_two_issues`.
+   - `resolved_issue_regresses_on_a_newer_trace`: an older trace does not reopen it. A newer one does, with `regressed` and a `regressed` event.
+   - `merged_issue_routes_to_its_target`: the target's `last_seen` moves.
+   - `filter_limits_the_spans`: `service_name = 'api'`.
+   - `a_bad_stored_filter_skips_the_source_only` (write the bad filter directly into the table).
+   - `rules_and_sources_share_a_batch`: a rule's job is enqueued and the issue is created.
+   - `eval_traces_are_never_issues`.
+   - `a_failed_error_read_retries_the_batch`: use `faults::fail_next_read()` (or its equivalent in the faults module) if `error_spans` goes through the same fault hook. If it does not, make the hook in `issues/errors.rs` call `#[cfg(test)] crate::eval::trigger::faults::take_read()` the way `read_candidates` does, and make `faults` `pub(crate)` under `cfg(test)`.
 
 **Done when:** `just check-rust` passes, including every existing `eval::trigger` test.
 
 **Commit:** `Turn error spans into issues`
+
+---
+
+### M1.6c Occurrence writes
+
+**Goal:** each (trace, issue) gets its occurrence score, guarded against deletions (D-IC-11, D-IC-18).
+
+**Edit:** `crates/server/src/issues/errors.rs`, `crates/server/src/eval/trigger.rs` (tests only).
+
+**Steps:**
+1. Read `eval/execute.rs`'s score write path first: `write_score_unless_deleted`, `borrowed_users`, the guard check before the write, `after_commit` and `deletion::follow_up` (around lines 228–260 and 1468). Occurrences use the same sequence:
+   1. Drop the occurrences that `state.deletions.guard.blocking(project, trace, &users, now)` blocks, where `users` is the occurrence's user, built as `borrowed_users` builds it.
+   2. Write the rest.
+   3. Run the same after-commit check, which files `deletion::follow_up` for any blocked trace that appeared meanwhile.
+
+   If the function signatures there differ from these words, follow the code and report the difference.
+2. Load the project row once per call with `meta::projects::project_by_id`. Drop occurrences whose `at` is older than `now − retention_days × DAY_NS` when `retention_days` is set: `scores::write` would refuse the whole chunk. Count them in the debug log.
+3. Write the occurrences with `scores::write(state, &project_row, Writer::Issue { source_id }, items)`, one call per source, in chunks of at most 1 000. Each `ScoreCreate`:
+   - `score_id: Some(occurrence_id(project, trace_id, issue_id, at))`;
+   - `target: ScoreTarget::Trace { trace_id }`, plus `session_id` and `user_id` from the occurrence;
+   - `name: format!("issue:{issue_id}")`, `value: ScoreValue::Boolean(true)`;
+   - `reason`: the normalized message, `source: None`;
+   - `metadata`: `{"cetra.issue.source_id": source_id, "cetra.issue.span_id": span hex}` (literal keys);
+   - `experiment_id: None`, `dataset_item_id: None`.
+
+   A write error logs a warning with the project id and the count, then returns `Err(())`: the batch is retried, and rewrites are idempotent.
+4. Ignored issues get occurrences like the others (D-IC-10).
+
+**Tests** (in `trigger.rs`'s `mod tests`):
+- `error_span_becomes_an_occurrence`: one score `issue:<id>`, source `issue`, whose `created_at` is the span's start (ms), with the trace's user.
+- `two_error_spans_of_one_issue_in_one_trace_give_one_occurrence`.
+- `a_resweep_writes_no_second_occurrence`: sweep, add a later span to the same trace, sweep again: still one live score.
+- `a_future_span_start_is_clamped_to_now`, and `an_occurrence_older_than_retention_is_skipped` (the rest of the batch is written).
+- `ignored_issue_still_gets_occurrences`.
+- `occurrences_bill_no_units`.
+- `deletion_guard_blocks_occurrences`: a trace under deletion gets no score.
+
+**Done when:** `just check-rust` passes.
+
+**Commit:** `Write issue occurrences for error spans`
 
 ---
 
@@ -547,6 +606,7 @@ pub(crate) async fn list_events(pool, issue, limit: u32) -> Result<Vec<EventRow>
 **Goal:** CRUD for sources, with validation and the plan limit.
 
 **Edit:**
+- `crates/server/src/meta/issues.rs` (only if a helper is missing);
 - new `crates/server/src/api/issues.rs`, `crates/server/src/api/mod.rs`;
 - new `crates/server/src/routes/issues.rs`, `crates/server/src/routes/mod.rs`, `crates/server/src/http/access.rs` (registration);
 - `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`;
@@ -606,7 +666,7 @@ Copy `OnlineRulePage`'s hand-written `PartialSchema` pattern for `IssueSourcePag
    - answer `201` with the `IssueSource`.
 3. Update: enabling a disabled source runs the same limit check, inside the write. A PATCH cannot change `kind` (not in the body). Audit `"issue source updated"`.
 4. Delete: `delete_source`; `404` when it does not exist. Audit `"issue source deleted"`. The cascade deletes its issues and events. The occurrence scores stay (D-IC-3).
-5. List: `page_named` by name. `open_issues` is one grouped count: add `pub(crate) async fn open_counts(pool, project) -> HashMap<Uuid, u64>` to `meta/issues.rs` (`SELECT source_id, count(*) … WHERE state = 'open' GROUP BY source_id`). `org_active_sources` comes from `count_enabled_sources`.
+5. List: `page_named` by name. `open_issues` comes from `open_counts` (M1.3). `org_active_sources` comes from `count_enabled_sources`.
 6. OpenAPI: register the types; add `issue_source_paths`, copied from `online_rule_paths` with the five operations; add the rows to `tests/openapi.rs`.
 7. Fixtures:
    - fixed ids: source `01900000-0000-7000-8000-000000000900`, issue `…-000000000901`, merged issue `…-000000000902`, events `…-000000000910` and up; add them to the README table;
@@ -634,11 +694,23 @@ Copy `OnlineRulePage`'s hand-written `PartialSchema` pattern for `IssueSourcePag
 
 ---
 
-### M1.8 Issues API
+### M1.8a Issues API: reads
 
-**Goal:** list, read, update state and title, merge, occurrences and events.
+**Goal:** list (with an id filter), read, occurrences and events. Steps 1, 2, 3, 6 and 7 below, with their types, routes, OpenAPI, fixtures and tests.
 
-**Edit:** `crates/server/src/api/issues.rs`, `crates/server/src/routes/issues.rs`, `meta/issues.rs` (only the helpers named below), `api/openapi.rs`, `tests/openapi.rs`, `api_examples.rs`, `tests/api_examples.rs`, fixtures (`static/issues.json`, `static/issue.json`, `static/issue-occurrences.json`, `static/issue-events.json`, `requests/issue-update.json`, `requests/issue-merge.json`), `web/src/mocks/writes.ts`, and the regenerated files.
+**Edit:** `crates/server/src/api/issues.rs`, `crates/server/src/routes/issues.rs`, `crates/server/src/routes/alert_rules.rs` (only to make `encode_cursor`/`decode_cursor` `pub(crate)` if they are private), `meta/issues.rs` (only the helpers named below), `api/openapi.rs`, `tests/openapi.rs`, `api_examples.rs`, `tests/api_examples.rs`, fixtures (`static/issues.json`, `static/issue.json`, `static/issue-occurrences.json`, `static/issue-events.json`), and the regenerated files.
+
+**Commit (8a):** `Add the issues read API`
+
+### M1.8b Issues API: writes
+
+**Goal:** patch and merge (steps 4, 5 and 8 below), and the removal of every M1 dead-code attribute.
+
+**Edit:** `crates/server/src/api/issues.rs`, `crates/server/src/routes/issues.rs`, `meta/issues.rs` (only to remove its dead-code attribute), `issues/source_limit.rs`, `scores.rs` (attribute removal only), `api/openapi.rs`, `tests/openapi.rs`, fixtures (`requests/issue-update.json`, `requests/issue-merge.json`), `web/src/mocks/writes.ts`, and the regenerated files.
+
+**Commit (8b):** `Add issue triage and merge`
+
+The two parts share the contracts below. Their tests are split the same way: reads in 8a, writes in 8b.
 
 **API types:**
 ```rust
@@ -670,8 +742,11 @@ pub struct IssueListParams {
     #[serde(default)] pub q: Option<String>,
     /// `last_seen` (default) or `first_seen`, newest first.
     #[serde(default)] pub sort: Option<String>,
-    /// Period of `count` and `users`: `[from, to)`, default the last 24 h.
-    #[serde(default)] pub from: Option<i64>, #[serde(default)] pub to: Option<i64>,
+    /// Period of `count` and `users`: `[from, to)`, default the last 24 h. Same type and
+    /// parsing as `ScoreListParams`'s `from`/`to` (`TimeParam`: RFC 3339 or epoch ms).
+    #[serde(default)] pub from: Option<TimeParam>, #[serde(default)] pub to: Option<TimeParam>,
+    /// Comma-separated issue ids, at most 100; only these are listed.
+    #[serde(default)] pub ids: Option<String>,
     #[serde(default)] pub limit: Limit, #[serde(default)] pub cursor: Option<String>,
 }
 pub struct UpdateIssueRequest { #[serde(default)] pub title: Option<String>,
@@ -710,7 +785,8 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 1. **Name sets.** An issue's names are `issue:<id>` plus `issue:<m>` for each `m` in `merged_ids(pool, project, id)`. For a list page, gather the names of every listed issue and its merged ones (one `merged_ids` query per issue is fine at ≤ 100 issues; or add a grouped `merged_by_target(pool, project, ids)` to `meta/issues.rs`). Call `score_name_counts` once with `by_day: false` over the period. Sum the counts back per issue. `users` is the maximum of the issue's names' user counts, documented as approximate when the issue has merged ones.
 2. **List.**
    - Parse `state` (unknown is a 400 with field `state`) and `sort`.
-   - Read a page with `list_issues`. The cursor is `"<sort value>:<id>"`, opaque base64 as other cursors; follow the helper the trace list or `page_named` uses for opaque cursors.
+   - Parse `ids` (each a UUID, at most 100, else a 400 with field `ids`) into `IssueListQuery.ids`.
+   - Read a page with `list_issues`. The cursor is `"<sort value>:<id>"`, encoded with `encode_cursor` and read with `decode_cursor` from `routes/alert_rules.rs` (about lines 470–476; make them `pub(crate)` if they are not). A bad cursor is a 400 with field `cursor`.
    - Join the source names (`list_sources`, mapped by id), then the counts (step 1).
    - The read context comes from `open_query(state, org, project, None)`. A storage timeout is a `422 query_timeout`, as other reads.
 3. **Get.** Like one list row, with counts over the last 24 h, `merged_from`, and 404 when the issue does not exist in the project.
@@ -743,14 +819,15 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
    - `days`: `score_name_counts` with `by_day: true` over the issue's names, summed per day.
    - `examples`: `cetra_storage::score_list` with `source = Issue`, a name filter and newest first, limit 20, for each name of the set (at most 8 names, the issue first, then merged ones by most recent `last_seen`). Merge them and keep the 20 newest.
 
-     `score_list` must take a name. Check `ScoreListRequest`: if it has no `name` field, add `name: Option<&str>` as an equality conjunct. That edit to `crates/storage/src/reads/scores.rs` belongs to this phase. Map each score to `IssueExample`, with `span_id` from the metadata key `cetra.issue.span_id` and `issue_id` parsed from the name.
+     `ScoreListRequest` already has `name: Option<&str>` (`reads/scores.rs:52`). Map each score to `IssueExample`, with `span_id` from the metadata key `cetra.issue.span_id` and `issue_id` parsed from the name.
 7. **Events:** `list_events(pool, id, 100)`.
 8. OpenAPI paths, test rows, fixtures (ids from M1.7), `api_examples` for the 4 GET operations, and the `writes.ts` handlers:
    - patch answers the issue fixture merged with the body;
    - merge answers the target fixture.
 
 **Tests:**
-- `list_defaults_to_open_and_counts_occurrences`: two occurrences from M1.6's sweep, `count == 2`.
+- `list_defaults_to_open_and_counts_occurrences`: two occurrences written with `scores::write(Writer::Issue …)`, `count == 2`.
+- `list_by_ids`, and `list_rejects_101_ids`.
 - `list_filters_state_source_and_q`, and `list_pages_with_a_cursor`.
 - `patch_resolve_records_an_event_and_sets_resolved_at`, `patch_reopen_clears_resolved_at`, `patch_title_records_renamed`, `patch_state_merged_is_400`, `patch_merged_issue_is_409`.
 - `merge_moves_counts_to_the_target`: after a merge, the target's `count` includes the merged issue's occurrences.
@@ -765,9 +842,9 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 
 ---
 
-### M1.9 Web: Issues pages
+### M1.9a and M1.9b Web: Issues pages
 
-**Goal:** the Issues list and the issue page (D-IC-16).
+**Goal:** the Issues list (M1.9a: steps 1–4, its tests, commit `Add the Issues list page`) and the issue page (M1.9b: steps 5–6, its tests, commit `Add the issue page`) (D-IC-16). M1.9a creates `queries-issues.ts` with every query and mutation of step 2, so M1.9b only adds components and its route.
 
 **Edit:**
 - new `web/src/api/queries-issues.ts`;
@@ -778,7 +855,7 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 - `web/src/lib/shortcuts.ts` and `web/src/lib/shortcuts.test.ts`.
 
 **Steps:**
-1. `nav.ts`: add `{ section: "Monitor", to: "/$org/$project/issues", label: "Issues", icon: Bug }` after Alerts (lucide `Bug`). In `shortcuts.ts` `GO_TARGETS`, add `y` → Issues. The sidebar tooltip follows from `goKeyOf`.
+1. `nav.ts`: add `{ section: "Monitor", to: "/$org/$project/issues", label: "Issues", icon: Bug }` after Alerts (lucide `Bug`). In `shortcuts.ts` `GO_TARGETS`, add `y` → Issues, and add its row to `SHORTCUTS` (the help dialog list) next to the other `g` rows. The sidebar tooltip follows from `goKeyOf`.
 2. Queries, following `queries-online-rules.ts`:
    - `issuesInfiniteQuery(org, project, search)` on `GET …/issues` with `state`, `source_id`, `q`, `sort`, and `from`/`to` = the last 24 h, fixed when the page opens;
    - `issueQuery`, `issueOccurrencesQuery` (last 14 days), `issueEventsQuery`, and `issueSourcesQuery` (for the source filter);
@@ -818,7 +895,7 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 
 **Done when:** `just check-web` passes.
 
-**Commit:** `Add the Issues pages`
+**Commits:** M1.9a `Add the Issues list page`; M1.9b `Add the issue page`.
 
 ---
 
@@ -863,16 +940,13 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 **Edit:** `web/src/components/trace/trace-header.tsx` (or the component under it that holds header chips: put the chips row there), new `web/src/components/issues/issue-chips.tsx` (+ test), `web/src/api/queries-issues.ts`, `web/src/components/facets/preset-chips.tsx` (+ its test).
 
 **Steps:**
-1. `traceIssuesQuery(org, project, traceId)`: `GET …/scores?trace_id=<id>&source=issue`, using the same scores query parameters `scoresQuery` uses, plus `source`, with limit 100. The issue ids come from the names (`issue:` prefix), and their titles and states from one `GET …/issues?state=all&…`. The list endpoint has no id filter, so:
-   - add to M1.8's list params, in this phase, `ids` (comma-separated, at most 100), filtering `id IN (…)`;
-   - this edits `api/issues.rs`, `routes/issues.rs` and `meta/issues.rs` (`IssueListQuery.ids`) and regenerates openapi;
-   - add a route test `list_by_ids`.
+1. `traceIssuesQuery(org, project, traceId)`: `GET …/scores?trace_id=<id>&source=issue`, using the same scores query parameters `scoresQuery` uses, plus `source`, with limit 100. The issue ids come from the names (`issue:` prefix), and their titles and states from one `GET …/issues?state=all&ids=<ids>` (M1.8a). A merged issue's chip links to the issue page, which shows the merge banner.
 2. `issue-chips.tsx`: one chip per issue (state colour: open red, resolved green, ignored grey), with the title truncated to 40 characters and a link to the issue page. It renders nothing when there are no issues. It sits in the trace header's chip row.
 3. `preset-chips.tsx`: a "Has issue" menu next to "Has score". It lists the 20 most recent open issues (`GET …/issues?state=open&limit=20`), and picking one appends `has_score('issue:<id>')` to the filter, the same way "Has score" appends its call.
 
-**Tests:** chips render from mocked scores and issues, and link; no chips without issue scores; the "Has issue" menu adds the filter text; `list_by_ids` (Rust).
+**Tests:** chips render from mocked scores and issues, and link; no chips without issue scores; the "Has issue" menu adds the filter text.
 
-**Done when:** `just check-rust` and `just check-web` pass.
+**Done when:** `just check-web` passes.
 
 **Commit:** `Show issues on traces and filter traces by issue`
 
