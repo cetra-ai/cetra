@@ -30,6 +30,30 @@ pub async fn merge(
     sort_key: &[&str],
     config: Config,
 ) -> Result<(Vec<u8>, FileSummary)> {
+    merge_with(inputs, sort_key, config, true).await
+}
+
+/// Writes `file` again under `config`, sorted by `sort_key` (column names), with every column
+/// decoded and encoded again, payload stores included. Compaction rewrites a cold file with
+/// [`Config::cold`] this way: the writer's zstd levels apply to the whole file, which a merge's
+/// copied payload stores would not get. The cost is the merge's, with the payload columns
+/// decoded too.
+pub async fn rewrite(
+    file: &Arc<StrataFile>,
+    sort_key: &[&str],
+    config: Config,
+) -> Result<(Vec<u8>, FileSummary)> {
+    merge_with(std::slice::from_ref(file), sort_key, config, false).await
+}
+
+/// [`merge`], which copies the payload stores when the inputs allow it and `copy_payloads` is
+/// set, else decodes the payload columns and writes them again.
+async fn merge_with(
+    inputs: &[Arc<StrataFile>],
+    sort_key: &[&str],
+    config: Config,
+    copy_payloads: bool,
+) -> Result<(Vec<u8>, FileSummary)> {
     let Some(first) = inputs.first() else {
         return Err(schema_error("no input"));
     };
@@ -107,13 +131,16 @@ pub async fn merge(
 
     let live: &[Arc<StrataFile>] = &kept;
     let config_ref: &Config = &config;
-    // Payload stores are copied when every input groups the same payload columns the same way;
-    // otherwise the payload columns are decoded and written again like the others.
-    let copy = same_stores(live).map(|stores| MergeCopy {
-        inputs: live,
-        sources: &sources,
-        stores,
-    });
+    // Payload stores are copied when every input groups the same payload columns the same way
+    // and copying is asked; otherwise the payload columns are decoded and written again like
+    // the others.
+    let copy = same_stores(live)
+        .filter(|_| copy_payloads)
+        .map(|stores| MergeCopy {
+            inputs: live,
+            sources: &sources,
+            stores,
+        });
     let sources = Arc::new(sources.clone());
     write_file(
         &schema,
@@ -244,6 +271,36 @@ mod tests {
             assert_eq!(input.directory()[column].layer, Layer::Payload, "{name}");
         }
         assert_merged_columns_equal_one_go(config).await;
+    }
+
+    /// Rewriting a file under the cold configuration gives the bytes of writing its rows cold,
+    /// payload stores included, and a smaller file that reads back the same.
+    #[tokio::test]
+    async fn a_cold_rewrite_equals_a_cold_write_and_is_smaller() {
+        let hot = Config {
+            payload_min_avg: 0,
+            ..Config::default()
+        };
+        let cold = Config {
+            payload_min_avg: 0,
+            ..Config::cold()
+        };
+        let rows = wide_batch(8_000);
+        let (hot_bytes, _) = write(&rows, &SORT, hot);
+        let hot_file = open(hot_bytes.clone()).await;
+        let (rewritten, summary) = rewrite(&hot_file, &SORT, cold.clone()).await.unwrap();
+        assert_eq!(summary.rows, 8_000);
+        let (expected, _) = write(&rows, &SORT, cold);
+        assert!(
+            rewritten == expected,
+            "the rewrite differs from a cold write"
+        );
+        assert!(rewritten.len() < hot_bytes.len());
+        let cold_file = open(rewritten).await;
+        for column in 0..rows.num_columns() {
+            let got = read_column(&cold_file, column).await.unwrap();
+            assert_same(got.as_ref(), rows.column(column).as_ref());
+        }
     }
 
     #[tokio::test]

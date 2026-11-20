@@ -1,7 +1,8 @@
 //! The narrow layer: one column stored as chunks, each with one of the S3 encodings and
 //! described by a 56-byte block-table entry.
 //!
-//! M1.3 adds Utf8 and List(Utf8) through file-level sorted dictionaries.
+//! M1.3 adds Utf8 and List(Utf8) through file-level sorted dictionaries; Float64 columns whose
+//! values repeat use them too (`FloatDict`).
 //! [`encode_chunk`] and [`decode_chunk`] are inverses of each other.
 
 mod bitpack;
@@ -13,7 +14,7 @@ mod lengths;
 
 pub use chunker::chunk_ranges;
 pub use decode::{decode_chunk, decode_chunk_view};
-pub use dict::{Dictionary, for_column};
+pub use dict::{DictKind, Dictionary, for_column};
 #[cfg(test)]
 pub use encode::encode_chunk;
 pub use encode::{EncodedChunk, encode_chunk_candidates};
@@ -53,7 +54,13 @@ pub enum Encoding {
     /// `Map<Utf8, Utf8>`: lengths blocks of the entry counts, the key lengths and the value
     /// lengths, with the key and value bytes and a value-validity bitmap when a value is null.
     Map = 11,
+    /// Codes into the column's Float64 dictionary: a width byte, then one packed code per row.
+    /// The zone holds the float values, as a `Plain` chunk's does.
+    FloatDict = 12,
 }
+
+/// The number of encodings, so `Encoding as usize` indexes an array of this length.
+pub const ENCODINGS: usize = 13;
 
 impl Encoding {
     /// The encoding for a stored byte, or `None` if the value is unknown.
@@ -71,6 +78,7 @@ impl Encoding {
             9 => Some(Self::Bool),
             10 => Some(Self::Ipc),
             11 => Some(Self::Map),
+            12 => Some(Self::FloatDict),
             _ => None,
         }
     }

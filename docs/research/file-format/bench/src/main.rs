@@ -119,11 +119,21 @@ async fn run() -> R<()> {
             let dir = PathBuf::from(&args[2]);
             payload_cmd(&dir)
         }
+        Some("fineweb") => {
+            let dir = PathBuf::from(args.get(2).ok_or(USAGE)?);
+            let spans: usize = args.get(3).ok_or(USAGE)?.parse()?;
+            let per_file: usize = args.get(4).ok_or(USAGE)?.parse()?;
+            let paths: Vec<PathBuf> = args.get(5..).unwrap_or_default().iter().map(PathBuf::from).collect();
+            if paths.is_empty() {
+                return Err(USAGE.into());
+            }
+            fineweb_cmd(&dir, spans, per_file, paths).await
+        }
         _ => Err(USAGE.into()),
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
 
 // ------------------------------------------------------------------ generate
 
@@ -253,18 +263,7 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(bool, us
         let t = Instant::now();
         let mut bytes = 0u64;
         for (i, b) in slices.iter().enumerate() {
-            let path = sub.join(format!("{i:03}.parquet"));
-            let f = std::fs::File::create(&path)?;
-            let mut w = ArrowWriter::try_new(f, b.schema(), Some(parquet_props(variant, &b.schema(), b.num_rows())))?;
-            let rg_rows = if *variant == "pq_cetra" { 100_000 } else { usize::MAX };
-            for off in (0..b.num_rows()).step_by(8192) {
-                w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
-                if (*variant == "pq_cetra" && w.in_progress_size() >= 64 << 20) || w.in_progress_rows() >= rg_rows {
-                    w.flush()?;
-                }
-            }
-            w.close()?;
-            bytes += std::fs::metadata(&path)?.len();
+            bytes += write_parquet(variant, b, &sub.join(format!("{i:03}.parquet")))?;
         }
         let el = t.elapsed();
         println!("{variant:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, el, raw as f64 / 1048576.0 / el.as_secs_f64());
@@ -273,27 +272,10 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(bool, us
     for variant in VX_VARIANTS {
         let sub = dir.join(variant);
         std::fs::create_dir_all(&sub)?;
-        let session = VortexSession::default().with_tokio();
         let t = Instant::now();
         let mut bytes = 0u64;
         for (i, b) in slices.iter().enumerate() {
-            let b = for_vortex(b)?;
-            let path = sub.join(format!("{i:03}.vortex"));
-            let chunks: Vec<_> = (0..b.num_rows())
-                .step_by(8192)
-                .map(|off| vortex_arrow::convert::from_arrow_batch(&b.slice(off, 8192.min(b.num_rows() - off)), false))
-                .collect::<Result<_, _>>()?;
-            let arr = ChunkedArray::from_iter(chunks).into_array();
-            let mut f = tokio::fs::File::create(&path).await?;
-            let mut opts = session.write_options();
-            if *variant == "vx_compact" {
-                let strategy = vortex::file::WriteStrategyBuilder::from_session(&session)
-                    .with_btrblocks_builder(vortex::compressor::BtrBlocksCompressorBuilder::from_session(&session).with_compact())
-                    .build();
-                opts = opts.with_strategy(strategy);
-            }
-            opts.write(&mut f, arr.to_array_stream()).await?;
-            bytes += std::fs::metadata(&path)?.len();
+            bytes += write_vortex(variant, b, &sub.join(format!("{i:03}.vortex"))).await?;
         }
         let el = t.elapsed();
         println!("{variant:12} {:>6} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes >> 20, el, raw as f64 / 1048576.0 / el.as_secs_f64());
@@ -305,13 +287,8 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(bool, us
     let mut bytes = 0u64;
     let mut summaries = Vec::new();
     for (i, b) in slices.iter().enumerate() {
-        let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
-        for off in (0..b.num_rows()).step_by(8192) {
-            w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
-        }
-        let (file, summary) = w.finish()?;
-        std::fs::write(st_dir.join(format!("{i:03}.strata")), &file)?;
-        bytes += file.len() as u64;
+        let (len, summary) = write_strata(b, &st_dir.join(format!("{i:03}.strata")))?;
+        bytes += len;
         summaries.push(summary);
     }
     let el = t.elapsed();
@@ -319,6 +296,56 @@ async fn generate(dir: &Path, traces: usize, files: usize, swe: Option<(bool, us
 
     payload_table(dir, &summaries)?;
     Ok(())
+}
+
+/// Writes `b` as the Parquet file of `variant` at `path`, 8,192 rows per write call. Returns
+/// the file's size.
+fn write_parquet(variant: &str, b: &RecordBatch, path: &Path) -> R<u64> {
+    let f = std::fs::File::create(path)?;
+    let mut w = ArrowWriter::try_new(f, b.schema(), Some(parquet_props(variant, &b.schema(), b.num_rows())))?;
+    let rg_rows = if variant == "pq_cetra" { 100_000 } else { usize::MAX };
+    for off in (0..b.num_rows()).step_by(8192) {
+        w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+        if (variant == "pq_cetra" && w.in_progress_size() >= 64 << 20) || w.in_progress_rows() >= rg_rows {
+            w.flush()?;
+        }
+    }
+    w.close()?;
+    Ok(std::fs::metadata(path)?.len())
+}
+
+/// Writes `b` as the Vortex file of `variant` at `path`, in chunks of 8,192 rows. Returns the
+/// file's size.
+async fn write_vortex(variant: &str, b: &RecordBatch, path: &Path) -> R<u64> {
+    let session = VortexSession::default().with_tokio();
+    let b = for_vortex(b)?;
+    let chunks: Vec<_> = (0..b.num_rows())
+        .step_by(8192)
+        .map(|off| vortex_arrow::convert::from_arrow_batch(&b.slice(off, 8192.min(b.num_rows() - off)), false))
+        .collect::<Result<_, _>>()?;
+    let arr = ChunkedArray::from_iter(chunks).into_array();
+    let mut f = tokio::fs::File::create(path).await?;
+    let mut opts = session.write_options();
+    if variant == "vx_compact" {
+        let strategy = vortex::file::WriteStrategyBuilder::from_session(&session)
+            .with_btrblocks_builder(vortex::compressor::BtrBlocksCompressorBuilder::from_session(&session).with_compact())
+            .build();
+        opts = opts.with_strategy(strategy);
+    }
+    opts.write(&mut f, arr.to_array_stream()).await?;
+    Ok(std::fs::metadata(path)?.len())
+}
+
+/// Writes `b`, sorted by (trace_id, start_time), as a Strata file at `path` with the default
+/// config, 8,192 rows per write call. Returns the file's size and summary.
+fn write_strata(b: &RecordBatch, path: &Path) -> R<(u64, strata::FileSummary)> {
+    let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
+    for off in (0..b.num_rows()).step_by(8192) {
+        w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
+    }
+    let (file, summary) = w.finish()?;
+    std::fs::write(path, &file)?;
+    Ok((file.len() as u64, summary))
 }
 
 /// Payload columns: Strata bytes and their parts beside the Parquet column bytes, then the
@@ -944,7 +971,8 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
     let ts = |ns: i64| format!("to_timestamp_nanos({ns})");
     // FMT_LIST_COLS=a,b: the list query's columns, to see what each one costs.
     let list_cols = std::env::var("FMT_LIST_COLS").map_or_else(|_| LIST_COLS.join(", "), |v| v.replace(',', ", "));
-    let queries = vec![
+    let braintrust = std::env::var("FMT_QUERYSET").is_ok_and(|v| v == "braintrust");
+    let queries = if braintrust { braintrust_queries() } else { vec![
         Query { name: "count_errors_6h", kind: Kind::Sql, sql: format!(
             "SELECT count(*) FROM t WHERE status = 'error' AND start_time >= {} AND start_time < {}", ts(t0 + 10 * h), ts(t0 + 16 * h)) },
         Query { name: "model_rollup_day", kind: Kind::Sql, sql: "SELECT model, count(*), sum(total_tokens), sum(cost_total), avg(duration_ns) FROM t WHERE span_kind = 'llm' GROUP BY model ORDER BY model".to_owned() },
@@ -956,7 +984,7 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
         Query { name: "trace_lookup_light", kind: Kind::TraceLight, sql: String::new() },
         Query { name: "substring_input", kind: Kind::Sql, sql: "SELECT count(*) FROM t WHERE input LIKE '%zqxjneedle%'".to_owned() },
         Query { name: "scan_all_payload", kind: Kind::Sql, sql: "SELECT sum(length(input)) + sum(length(output)) FROM t".to_owned() },
-    ];
+    ] };
     let only = only.as_deref();
     let needle_runs: usize = std::env::var("FMT_NEEDLE_RUNS").ok().map(|s| s.parse()).transpose()?.unwrap_or(runs);
     println!("{:16} {:20} {:>9} {:>9} {:>12} {:>6}  {:>8} {:>10}  {:>10} {:>10}", "variant", "query", "median", "min", "cpu med", "rows", "reqs", "KiB", "waves_max", "waves_sum");
@@ -972,6 +1000,9 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
         }
         let ctx = new_ctx(&loc, None)?;
         let files = table(&ctx, &loc, variant).await?;
+        if braintrust {
+            braintrust_counts(&ctx, variant).await?;
+        }
         measure(&loc, variant, &Runner::Sql(ctx, files), &queries, &ids, runs, only).await?;
         dirs.push(variant);
     }
@@ -1000,6 +1031,146 @@ async fn query(dir: &str, runs: usize, only: Option<String>) -> R<()> {
         trace_lookup_cold(&loc, &ids, runs).await?;
     }
     println!("loadavg after: {}", profile::loadavg());
+    Ok(())
+}
+
+// ------------------------------------------------------------------ Braintrust's search benchmark
+
+/// Braintrust's search benchmark (blog post "Nitro", 2026-09-24) on FineWeb: 4 million spans of
+/// 10 KB, a rare phrase planted in 4,000 of them and a longer one in one span. These are its
+/// phrases; `BT_NONE` occurs nowhere.
+const BT_RARE: &str = "red car under the yellow bridge";
+const BT_SINGLE: &str = "when the red car slowly went under the yellow bridge";
+const BT_NONE: &str = "under the red bridge the yellow car slowly went home";
+/// Bytes of FineWeb text per span.
+const BT_SPAN_BYTES: usize = 10_000;
+/// The spans' start times are spread evenly over this many days.
+const BT_DAYS: i64 = 3;
+/// The formats written for the comparison.
+const BT_VARIANTS: [&str; 3] = ["pq_default", "vx_compact", "st"];
+
+/// The queries of Braintrust's post that it gives numbers for: four searches and one dashboard
+/// aggregate. Its phrase search matches words; `LIKE` matches bytes, so `help me` also counts
+/// `help meet` and not `Help me`.
+fn braintrust_queries() -> Vec<Query> {
+    let like = |phrase: &str| format!("input LIKE '%{phrase}%'");
+    vec![
+        Query { name: "bt_phrase_none", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like(BT_NONE)) },
+        Query { name: "bt_help_me", kind: Kind::Sql, sql: format!("SELECT count(*) FROM t WHERE {}", like("help me")) },
+        Query { name: "bt_newest_rare", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_RARE)) },
+        Query { name: "bt_single", kind: Kind::Sql, sql: format!("SELECT input FROM t WHERE {} ORDER BY start_time DESC LIMIT 100", like(BT_SINGLE)) },
+        Query { name: "bt_spans_per_hour", kind: Kind::Sql, sql: "SELECT date_trunc('hour', start_time) AS h, count(*) FROM t GROUP BY h ORDER BY h".to_owned() },
+    ]
+}
+
+/// Prints the match counts of `variant` for every phrase, so the variants can be checked
+/// against each other.
+async fn braintrust_counts(ctx: &SessionContext, variant: &str) -> R<()> {
+    let mut counts = Vec::new();
+    for phrase in [BT_NONE, "help me", BT_RARE, BT_SINGLE] {
+        let batches = ctx.sql(&format!("SELECT count(*) FROM t WHERE input LIKE '%{phrase}%'")).await?.collect().await?;
+        let n = batches
+            .first()
+            .and_then(|b| b.column(0).as_any().downcast_ref::<arrow::array::Int64Array>())
+            .map_or(-1, |a| a.value(0));
+        counts.push(format!("{phrase:?} {n}"));
+    }
+    println!("braintrust counts {variant}: {}", counts.join(", "));
+    Ok(())
+}
+
+/// Inserts ` phrase` after the first space past the middle of `text`, or at its end.
+fn plant(text: &mut String, phrase: &str) {
+    let mid = text.floor_char_boundary(text.len() / 2);
+    let at = text[mid..].find(' ').map_or(text.len(), |p| mid + p);
+    text.insert_str(at, &format!(" {phrase}"));
+}
+
+/// Writes Braintrust's benchmark data: `spans` spans of `BT_SPAN_BYTES` of FineWeb text from
+/// `paths`, one trace each, with start times spread over `BT_DAYS` days, as files of `per_file`
+/// spans in `BT_VARIANTS`. The files are time slices, each sorted by (trace_id, start_time),
+/// like `gen`'s. Spans are made and written one file at a time, so memory holds one file.
+async fn fineweb_cmd(dir: &Path, spans: usize, per_file: usize, paths: Vec<PathBuf>) -> R<()> {
+    let world = datagen::World::new(7);
+    let mut rng = datagen::Rng::new(42);
+    let mut pieces = fmt_testdata::fineweb::Pieces::new(paths, BT_SPAN_BYTES);
+    let step = BT_DAYS * 86_400 * datagen::NS / spans.max(1) as i64;
+    let single = spans * 2 / 3;
+    for v in BT_VARIANTS {
+        std::fs::create_dir_all(dir.join(v))?;
+    }
+    let (mut bytes, mut times) = ([0u64; 3], [std::time::Duration::ZERO; 3]);
+    let (mut made, mut file, mut raw) = (0usize, 0usize, 0usize);
+    let mut ids = Vec::new();
+    let mut planted = 0usize;
+    let t0 = Instant::now();
+    'files: while made < spans {
+        let mut out: Vec<Span> = Vec::with_capacity(per_file);
+        while out.len() < per_file && made < spans {
+            let Some(mut text) = pieces.next_piece()? else {
+                if out.is_empty() {
+                    break 'files;
+                }
+                break;
+            };
+            if made % 1000 == 500 {
+                plant(&mut text, BT_RARE);
+                planted += 1;
+            }
+            if made == single {
+                plant(&mut text, BT_SINGLE);
+            }
+            let mut trace = Vec::new();
+            fmt_testdata::swe::trace_spans(made, &world, &mut rng, Some(text), None, Vec::new(), &mut trace);
+            let mut s = trace.swap_remove(0);
+            s.system_instructions = None;
+            s.tool_definitions = None;
+            let duration = s.end_time - s.start_time;
+            s.start_time = datagen::DAY_START + made as i64 * step;
+            s.end_time = s.start_time + duration;
+            if made % (spans / 100).max(1) == 0 {
+                ids.push(hex(s.trace_id.as_bytes()));
+            }
+            out.push(s);
+            made += 1;
+        }
+        let short = out.len() < per_file && made < spans;
+        let mut batches = Vec::new();
+        for c in out.chunks(8192) {
+            batches.push(spans_to_record_batch(c)?);
+        }
+        drop(out);
+        let b = concat_batches(&batches[0].schema(), &batches)?;
+        drop(batches);
+        let idx = lexsort_to_indices(
+            &[
+                SortColumn { values: b.column_by_name("trace_id").ok_or("no trace_id")?.clone(), options: None },
+                SortColumn { values: b.column_by_name("start_time").ok_or("no start_time")?.clone(), options: None },
+            ],
+            None,
+        )?;
+        let b = take_record_batch(&b, &idx)?;
+        raw += b.get_array_memory_size();
+        for (k, v) in BT_VARIANTS.iter().enumerate() {
+            let t = Instant::now();
+            bytes[k] += match *v {
+                "st" => write_strata(&b, &dir.join(v).join(format!("{file:03}.strata")))?.0,
+                "vx_compact" => write_vortex(v, &b, &dir.join(v).join(format!("{file:03}.vortex"))).await?,
+                _ => write_parquet(v, &b, &dir.join(v).join(format!("{file:03}.parquet")))?,
+            };
+            times[k] += t.elapsed();
+        }
+        file += 1;
+        println!("file {file}: {made} spans, {:.0?}", t0.elapsed());
+        if short {
+            break;
+        }
+    }
+    std::fs::write(dir.join("trace_ids.txt"), ids.join("\n"))?;
+    println!("fineweb: {made} spans in {file} files ({BT_RARE:?} in {planted}, {BT_SINGLE:?} in span {single}), arrow {} MiB", raw >> 20);
+    for (k, v) in BT_VARIANTS.iter().enumerate() {
+        println!("{v:12} {:>7} MiB  write {:>8.2?}  ({:.0} MiB/s of arrow)", bytes[k] >> 20, times[k], raw as f64 / 1048576.0 / times[k].as_secs_f64());
+    }
     Ok(())
 }
 
@@ -1227,7 +1398,8 @@ async fn lookup_cols(dir: &str) -> R<()> {
 
 /// Rewrites the Strata files of a dataset from its `pq_default` files, which hold the same
 /// slices, into `<dir>/<out>`. Used to measure a format change without regenerating the
-/// other variants.
+/// other variants. `FMT_COLD=1` writes them with `Config::cold()`, as compaction would rewrite
+/// cold files.
 fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("pq_default"))?
@@ -1253,7 +1425,8 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
         let mut last_pq_len = 0u64;
         for _ in 0..repeat {
             let t = Instant::now();
-            let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], Config::default())?;
+            let config = if std::env::var_os("FMT_COLD").is_some() { Config::cold() } else { Config::default() };
+            let mut w = StrataWriter::new(b.schema(), &["trace_id", "start_time"], config)?;
             for off in (0..b.num_rows()).step_by(8192) {
                 w.write(&b.slice(off, 8192.min(b.num_rows() - off)))?;
             }
@@ -1307,14 +1480,14 @@ fn restrata_cmd(dir: &Path, out: &str) -> R<()> {
 /// The narrow columns of the Strata files: bytes, key-filter bytes, chunks and chunks per
 /// encoding, summed over the files, largest first.
 fn narrow_table(summaries: &[strata::FileSummary]) {
-    const ENCODINGS: [&str; 12] = ["const", "null", "for", "plain", "fsb", "fsb_rle", "dict", "varbin", "list_dict", "bool", "ipc", "map"];
-    let mut columns: Vec<(String, u64, u64, u32, [u32; 12])> = Vec::new();
+    const ENCODINGS: [&str; 13] = ["const", "null", "for", "plain", "fsb", "fsb_rle", "dict", "varbin", "list_dict", "bool", "ipc", "map", "float_dict"];
+    let mut columns: Vec<(String, u64, u64, u32, [u32; 13])> = Vec::new();
     for s in summaries {
         for c in s.columns.iter().filter(|c| c.payload.is_none()) {
             let i = match columns.iter().position(|e| e.0 == c.name) {
                 Some(i) => i,
                 None => {
-                    columns.push((c.name.clone(), 0, 0, 0, [0; 12]));
+                    columns.push((c.name.clone(), 0, 0, 0, [0; 13]));
                     columns.len() - 1
                 }
             };

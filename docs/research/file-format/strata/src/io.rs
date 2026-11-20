@@ -5,6 +5,12 @@
 
 use std::ops::Range;
 
+use object_store::path::Path;
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
+use tokio::sync::Semaphore;
+
+use crate::error::Result;
+
 /// How reads are coalesced (design S7 § I/O).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScanKind {
@@ -37,6 +43,47 @@ pub(crate) const SCAN_MAX_RANGE: u64 = 16 * 1024 * 1024;
 
 /// Most ranged GET requests of one wave that are in flight at once.
 pub(crate) const MAX_CONCURRENT_GETS: usize = 64;
+
+/// Most ranged GET requests in flight in the process, across every file, wave and query. A
+/// local store opens a file descriptor for each request, so this also bounds the descriptors
+/// reads hold: a search over 20 files once issued 2,560 at a time and passed the default soft
+/// limit of 1,024 (`real-data.md` § Braintrust's search benchmark).
+pub(crate) const MAX_GETS_IN_FLIGHT: usize = 256;
+
+static GETS_IN_FLIGHT: Semaphore = Semaphore::const_new(MAX_GETS_IN_FLIGHT);
+
+/// Fetches `range` of `path`, holding one of the process's [`MAX_GETS_IN_FLIGHT`] permits
+/// while the request runs. Every ranged read of a file goes through here.
+pub(crate) async fn get_range(
+    store: &dyn ObjectStore,
+    path: &Path,
+    range: Range<u64>,
+) -> Result<bytes::Bytes> {
+    // `acquire` fails only on a closed semaphore, and this one is never closed.
+    let _permit = GETS_IN_FLIGHT.acquire().await.ok();
+    Ok(store.get_range(path, range).await?)
+}
+
+/// Fetches the last `n` bytes of `path` (all of it if shorter) under the same limit. Returns
+/// the object's size, the offset of the first byte returned, and the bytes.
+pub(crate) async fn get_suffix(
+    store: &dyn ObjectStore,
+    path: &Path,
+    n: u64,
+) -> Result<(u64, u64, bytes::Bytes)> {
+    let _permit = GETS_IN_FLIGHT.acquire().await.ok();
+    let read = store
+        .get_opts(
+            path,
+            GetOptions {
+                range: Some(GetRange::Suffix(n)),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let (size, start) = (read.meta.size, read.range.start);
+    Ok((size, start, read.bytes().await?))
+}
 
 /// Merged byte ranges covering `ranges`, plus for each input the index of the merged range
 /// holding it. Inputs may overlap or repeat; output ranges are sorted and disjoint.

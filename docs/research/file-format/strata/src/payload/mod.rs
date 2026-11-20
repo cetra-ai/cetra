@@ -55,29 +55,3 @@ pub(crate) const REFS_MAX_DEPTH: u8 = 15;
 /// Longest needle `payload_contains` accepts: one that starts in a chunk then ends within
 /// `gram::WINDOW_HEAD` bytes of the next.
 pub(crate) const MAX_NEEDLE: usize = gram::WINDOW_HEAD + 1;
-
-/// How a payload store is written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StoreRole {
-    /// The store shared by a file's payload columns: zstd level 3 frames, with the run's
-    /// dictionary when it has one.
-    Shared,
-    /// A column's own store (previews): zstd level 1 frames and no dictionary. Its texts are
-    /// short and outside the payload size target, and a dictionary costs a training per file.
-    Own,
-}
-
-impl StoreRole {
-    /// The zstd level of the store's frames.
-    pub(crate) fn level(self) -> i32 {
-        match self {
-            Self::Shared => 3,
-            Self::Own => 1,
-        }
-    }
-
-    /// Whether a large enough store trains a zstd dictionary.
-    pub(crate) fn trained(self) -> bool {
-        self == Self::Shared
-    }
-}

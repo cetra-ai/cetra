@@ -19,14 +19,15 @@ use crate::hot::{
     DirectoryRecord, HotTail, Layer, MapKey, MapLayout, PageRef, Postscript, write_file_header,
 };
 use crate::index::{KeyFilter, key_bytes};
+use crate::narrow::Encoding;
 use crate::narrow::{
-    BlockEntry, Class, EncodedChunk, chunk_ranges, encode_chunk_candidates, for_column,
+    BlockEntry, Class, ENCODINGS, EncodedChunk, chunk_ranges, encode_chunk_candidates, for_column,
     is_utf8_map, numeric_of,
 };
 use crate::payload::{self, PayloadStats};
 use crate::postings::ChunkPostings;
 use crate::segment::{
-    Codec, Kind, SegmentCodec, SegmentRef, compress_for, encode_segment, write_body,
+    Codec, Kind, SegmentCodec, SegmentRef, compress_for, encode_segment, write_body, write_segment,
 };
 use crate::shred::{Shredded, shred};
 
@@ -44,6 +45,95 @@ struct PendingMap {
 /// 19% slower, since they are decompressed on every scan.
 fn replaces(stored: usize, best: usize) -> bool {
     stored * 100 <= best * 70
+}
+
+/// Directory-record flag bit of a narrow column with a chunk dictionary.
+pub(crate) const FLAG_CHUNK_DICT: u8 = 2;
+/// A narrow column trains a chunk dictionary when its `Varbin`, `Map` and `Ipc` chunks hold at
+/// least this many raw body bytes …
+const CHUNK_DICT_MIN_RAW: usize = 1 << 20;
+/// … on whole bodies of evenly spread chunks, about this many bytes in all.
+const CHUNK_DICT_SAMPLE_BYTES: usize = 1 << 20;
+/// The chunk dictionary is kept only when the chunks it compresses, plus the dictionary, take
+/// at most this share (in percent) of what they take without it.
+const CHUNK_DICT_MAX_SHARE: usize = 95;
+
+/// One encoded chunk of a narrow column: its rows, its chunk and the zstd form of its body that
+/// the writer stores when it has no chunk dictionary.
+type Encoded = (std::ops::Range<usize>, EncodedChunk, Option<Vec<u8>>);
+
+/// A chunk dictionary, and each chunk's body compressed with it (`None` for a chunk stored
+/// without it).
+type ChunkDict = (Vec<u8>, Vec<Option<Vec<u8>>>);
+
+/// The chunk dictionary of a narrow column whose chunks are `chunks`, and each chunk's body
+/// compressed with it at zstd `level` (`None` for a chunk stored as before). Text-like chunks
+/// (`Varbin`, `Map`, `Ipc`) are short, so zstd finds little to match within one; a dictionary
+/// trained on the column gives it the column's common strings. `None` when those chunks are
+/// too small to train on, or when the dictionary does not save `CHUNK_DICT_MAX_SHARE`.
+fn chunk_dictionary(chunks: &[Encoded], level: i32) -> Result<Option<ChunkDict>> {
+    let bodies: Vec<(usize, &[u8])> = chunks
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, chunk, _))| {
+            matches!(
+                chunk.encoding,
+                Encoding::Varbin | Encoding::Map | Encoding::Ipc
+            )
+        })
+        .filter_map(|(i, (_, chunk, _))| Some((i, chunk.body.as_deref()?)))
+        .collect();
+    let raw_total: usize = bodies.iter().map(|(_, body)| body.len()).sum();
+    if raw_total < CHUNK_DICT_MIN_RAW {
+        return Ok(None);
+    }
+    let step = raw_total.div_ceil(CHUNK_DICT_SAMPLE_BYTES).max(1);
+    let samples: Vec<&[u8]> = bodies.iter().step_by(step).map(|(_, body)| *body).collect();
+    // A failed training (too few or too uniform samples) means no dictionary.
+    let Ok(raw) = zstd::dict::from_samples(&samples, payload::DICT_MAX) else {
+        return Ok(None);
+    };
+    let zstd_error = |source| StrataError::Io {
+        action: "zstd init",
+        source,
+    };
+    let encoder = zstd::dict::EncoderDictionary::copy(&raw, level);
+    let mut compressor =
+        zstd::bulk::Compressor::with_prepared_dictionary(&encoder).map_err(zstd_error)?;
+    // Attach the dictionary's tables instead of copying them into every chunk.
+    compressor
+        .set_parameter(zstd::zstd_safe::CParameter::ForceAttachDict(
+            zstd::zstd_safe::DictAttachPref::ForceAttach,
+        ))
+        .map_err(zstd_error)?;
+    let mut packed: Vec<Option<Vec<u8>>> = vec![None; chunks.len()];
+    let (mut with, mut without) = (raw.len(), 0usize);
+    for (i, body) in bodies {
+        let stored = chunks
+            .get(i)
+            .and_then(|(_, _, compressed)| compressed.as_ref())
+            .map_or(body.len(), Vec::len);
+        without += stored;
+        let c = compressor
+            .compress(body)
+            .map_err(|source| StrataError::Io {
+                action: "zstd compress",
+                source,
+            })?;
+        // The same 30% bar as zstd without a dictionary, and smaller than that.
+        if c.len() * 100 <= body.len() * 70 && c.len() < stored {
+            with += c.len();
+            if let Some(slot) = packed.get_mut(i) {
+                *slot = Some(c);
+            }
+        } else {
+            with += stored;
+        }
+    }
+    if with * 100 > without * CHUNK_DICT_MAX_SHARE {
+        return Ok(None);
+    }
+    Ok(Some((raw, packed)))
 }
 
 /// Writes one Strata file. Batches are checked as they arrive and kept until
@@ -65,7 +155,7 @@ pub struct ColumnSummary {
     /// The column name.
     pub name: String,
     /// Chunks per encoding, indexed by the encoding's value (0 to 11).
-    pub encoding_counts: [u32; 12],
+    pub encoding_counts: [u32; ENCODINGS],
     /// Bytes of the column's segments, block-table pages included.
     pub bytes: u64,
     /// Number of chunks.
@@ -294,7 +384,7 @@ fn payload_record(
     };
     let summary = ColumnSummary {
         name: field.name().clone(),
-        encoding_counts: [0; 12],
+        encoding_counts: [0; ENCODINGS],
         bytes: stats.bytes,
         chunks: 0,
         filter_bytes: 0,
@@ -383,22 +473,24 @@ where
                     .get(i)
                     .is_some_and(|f| config.own_store_columns.iter().any(|n| n == f.name()))
             };
-            // Each store's role, and its columns with their parts.
+            // The stores, each with its columns and their parts: one shared store, then one
+            // store per own-store column.
             type Columns = Vec<(usize, Vec<ArrayRef>)>;
-            let mut stores: Vec<(payload::StoreRole, Columns)> = Vec::new();
+            let mut stores: Vec<Columns> = Vec::new();
             let (own, shared): (Vec<_>, Vec<_>) =
                 group.into_iter().partition(|(i, _)| own_store(*i));
             if !shared.is_empty() {
-                stores.push((payload::StoreRole::Shared, shared));
+                stores.push(shared);
             }
-            stores.extend(
-                own.into_iter()
-                    .map(|column| (payload::StoreRole::Own, vec![column])),
-            );
-            for (role, store) in stores {
+            stores.extend(own.into_iter().map(|column| vec![column]));
+            for store in stores {
                 let refs: Vec<&[ArrayRef]> = store.iter().map(|(_, a)| a.as_slice()).collect();
-                let (store_seg, written) =
-                    payload::write_payload_columns(&refs, role, &mut codec, &mut out)?;
+                let (store_seg, written) = payload::write_payload_columns(
+                    &refs,
+                    config.payload_zstd_level,
+                    &mut codec,
+                    &mut out,
+                )?;
                 for ((i, parts), (header, stats)) in store.iter().zip(written) {
                     let nulls = parts.iter().map(|a| a.null_count() as u64).sum();
                     payloads.insert(*i, (store_seg, header, stats, nulls));
@@ -446,7 +538,7 @@ where
             });
             summaries.push(ColumnSummary {
                 name: field.name().clone(),
-                encoding_counts: [0; 12],
+                encoding_counts: [0; ENCODINGS],
                 bytes: 0,
                 chunks: 0,
                 filter_bytes: 0,
@@ -594,8 +686,8 @@ where
     Ok((out.0, summary))
 }
 
-/// Writes a narrow column: its dictionary, its chunks and its block-table pages, in that
-/// order. The record has `layer = Narrow` and `parent = u32::MAX`; a caller that stores the
+/// Writes a narrow column: its dictionary, its chunk dictionary, its chunks and its
+/// block-table pages, in that order. The record has `layer = Narrow` and `parent = u32::MAX`; a caller that stores the
 /// column as a map child or residual sets both. The summary's name is empty, for the caller
 /// to set.
 fn write_narrow(
@@ -623,8 +715,10 @@ fn write_narrow(
         dict.is_some(),
     )?;
     let mut entries = Vec::with_capacity(ranges.len());
-    let mut counts = [0u32; 12];
+    let mut counts = [0u32; ENCODINGS];
     let mut bytes = u64::from(dict_len);
+    // Every chunk is encoded first: the chunk dictionary is trained on their bodies.
+    let mut encoded: Vec<Encoded> = Vec::with_capacity(ranges.len());
     for range in ranges {
         let slice = array.slice(range.start, range.len());
         // The first candidate decodes fastest; a later one must save at least 30% to replace it.
@@ -650,6 +744,19 @@ fn write_narrow(
                 what: "a chunk without an encoding".to_string(),
             });
         };
+        encoded.push((range, chunk, compressed));
+    }
+    let chunk_dict = chunk_dictionary(&encoded, config.zstd_level)?;
+    let (chunk_dict_offset, chunk_dict_len, mut packed) = match chunk_dict {
+        Some((raw, packed)) => {
+            let seg = write_segment(Kind::ChunkDictionary, Codec::Raw, raw.len(), &raw, out)?;
+            bytes += u64::from(seg.len);
+            (seg.offset, seg.len, packed)
+        }
+        None => (0, 0, Vec::new()),
+    };
+    for (i, (range, chunk, compressed)) in encoded.into_iter().enumerate() {
+        let with_dict = packed.get_mut(i).and_then(Option::take);
         let EncodedChunk {
             encoding,
             flags,
@@ -658,12 +765,17 @@ fn write_narrow(
             max,
             body,
         } = chunk;
-        let (segment_offset, segment_len) = match body {
-            Some(body) => {
+        let (segment_offset, segment_len) = match (body, with_dict) {
+            (Some(body), Some(packed)) => {
+                let seg =
+                    write_segment(Kind::NarrowChunk, Codec::ZstdDict, body.len(), &packed, out)?;
+                (seg.offset, seg.len)
+            }
+            (Some(body), None) => {
                 let seg = write_body(Kind::NarrowChunk, &body, compressed.as_deref(), out)?;
                 (seg.offset, seg.len)
             }
-            None => (0, 0),
+            (None, _) => (0, 0),
         };
         bytes += u64::from(segment_len);
         if let Some(count) = counts.get_mut(encoding as usize) {
@@ -715,14 +827,19 @@ fn write_narrow(
         parent: u32::MAX,
         layer: Layer::Narrow,
         // Bit 0 says the column has a dictionary.
-        flags: u8::from(dict.is_some()),
+        flags: u8::from(dict.is_some())
+            | if chunk_dict_len > 0 {
+                FLAG_CHUNK_DICT
+            } else {
+                0
+            },
         pages_offset,
         n_pages,
         n_chunks,
         dict_offset,
         dict_len,
-        payload_offset: 0,
-        payload_len: 0,
+        payload_offset: chunk_dict_offset,
+        payload_len: chunk_dict_len,
         null_count: array.null_count() as u64,
     };
     let summary = ColumnSummary {
@@ -1014,6 +1131,143 @@ mod tests {
         }
     }
 
+    /// Writes `batch` with `config` and no sort key, and opens it. Returns the file, its bytes
+    /// and its summary.
+    async fn written(batch: &RecordBatch, config: Config) -> (StrataFile, Vec<u8>, FileSummary) {
+        let mut w = StrataWriter::new(batch.schema(), &[], config).unwrap();
+        w.write(batch).unwrap();
+        let (bytes, summary) = w.finish().unwrap();
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let path = Path::from("written.strata");
+        store
+            .put(&path, PutPayload::from(bytes.clone()))
+            .await
+            .unwrap();
+        let file = StrataFile::open(store, path, None, &Config::default())
+            .await
+            .unwrap();
+        (file, bytes, summary)
+    }
+
+    /// Rows of a number and two sentences out of 400, which a chunk of 2 KiB holds only a few
+    /// of: a chunk dictionary trained on the column holds most of them. The rows are distinct
+    /// and too many for a value dictionary, so the chunks are `Varbin`.
+    fn sentences(n: usize) -> arrow::array::StringArray {
+        let sentence = |k: usize| {
+            format!(
+                "Sentence {k} of the shared set talks about topic {} with the words {} and {}. ",
+                k * 7 % 13,
+                ["alpha", "bravo", "charlie", "delta", "echo"][k % 5],
+                ["red", "green", "blue", "orange"][k % 4],
+            )
+        };
+        arrow::array::StringArray::from_iter_values(
+            (0..n)
+                .map(|i| format!("Row {i}. ") + &sentence(i * 17 % 400) + &sentence(i * 29 % 400)),
+        )
+    }
+
+    /// `n` pseudo-random Binary values of 150 bytes, which no dictionary compresses.
+    fn noise(n: usize) -> arrow::array::BinaryArray {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let values: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                (0..150)
+                    .map(|_| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        x as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        arrow::array::BinaryArray::from_iter_values(values.iter())
+    }
+
+    /// A text column of small chunks gets a chunk dictionary, its chunks are stored with it and
+    /// read back; a column of random bytes gets none. At zstd level 19 the text takes less.
+    #[tokio::test]
+    async fn a_text_column_gets_a_chunk_dictionary_and_noise_does_not() {
+        let n = 16_000;
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("noise", DataType::Binary, false),
+        ]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(sentences(n)), Arc::new(noise(n))]).unwrap();
+        let small_chunks = Config {
+            chunk_max_bytes: 2 * 1024,
+            ..Config::default()
+        };
+        let (file, bytes, summary) = written(&batch, small_chunks.clone()).await;
+        let text = &file.directory()[0];
+        assert_ne!(text.flags & FLAG_CHUNK_DICT, 0);
+        assert!(text.payload_offset > 0 && text.payload_len > 0);
+        assert_eq!(file.directory()[1].flags & FLAG_CHUNK_DICT, 0);
+        // Byte 3 of a segment header is its codec.
+        let entries = file.block_entries(0).await.unwrap();
+        assert!(entries.iter().all(|e| {
+            bytes[e.segment_offset as usize + 3] == crate::segment::Codec::ZstdDict as u8
+        }));
+        for column in 0..2 {
+            let decoded = crate::reader::read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), batch.column(column).as_ref());
+        }
+
+        let cold = Config {
+            chunk_max_bytes: 2 * 1024,
+            ..Config::cold()
+        };
+        let (cold_file, _, cold_summary) = written(&batch, cold).await;
+        assert!(cold_summary.columns[0].bytes < summary.columns[0].bytes);
+        let decoded = crate::reader::read_column(&cold_file, 0).await.unwrap();
+        assert_same(decoded.as_ref(), batch.column(0).as_ref());
+    }
+
+    /// A text column under `CHUNK_DICT_MIN_RAW` gets no chunk dictionary.
+    #[tokio::test]
+    async fn a_small_text_column_gets_no_chunk_dictionary() {
+        let schema = Arc::new(Schema::new(vec![Field::new("text", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(sentences(1_000))]).unwrap();
+        let (file, _, _) = written(&batch, Config::default()).await;
+        assert_eq!(file.directory()[0].flags & FLAG_CHUNK_DICT, 0);
+        assert_eq!(file.directory()[0].payload_offset, 0);
+    }
+
+    /// The `cost` column of `batch` repeats 500 values, so it is stored as dictionary codes;
+    /// floats that never repeat are stored plain. Both read back bit for bit.
+    #[tokio::test]
+    async fn a_float_column_whose_values_repeat_is_stored_as_codes() {
+        let rows = batch(20_000);
+        let unique = arrow::array::Float64Array::from_iter_values(
+            (0..20_000).map(|i| f64::from(i) * 1.000_001),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("cost", DataType::Float64, true),
+            Field::new("unique", DataType::Float64, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::clone(rows.column_by_name("cost").unwrap()),
+                Arc::new(unique),
+            ],
+        )
+        .unwrap();
+        let (file, _, summary) = written(&batch, Config::default()).await;
+        let cost = summary.columns[0].encoding_counts;
+        assert!(cost[Encoding::FloatDict as usize] > 0, "{cost:?}");
+        assert_ne!(file.directory()[0].flags & 1, 0);
+        let unique = summary.columns[1].encoding_counts;
+        assert_eq!(unique[Encoding::FloatDict as usize], 0, "{unique:?}");
+        assert_eq!(file.directory()[1].flags & 1, 0);
+        for column in 0..2 {
+            let decoded = crate::reader::read_column(&file, column).await.unwrap();
+            assert_same(decoded.as_ref(), batch.column(column).as_ref());
+        }
+    }
+
     #[tokio::test]
     async fn an_empty_sort_key_keeps_unsorted_rows_in_the_order_given() {
         let sorted = wide_batch(5_000);
@@ -1046,8 +1300,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after the 30% bar for plain integer chunks. A change to this value means the output changed.
-    const GOLDEN: u64 = 0x5d6c_4d57_c42a_d126;
+    /// Recorded after float dictionaries, chunk dictionaries and trained own stores. A change to
+    /// this value means the output changed.
+    const GOLDEN: u64 = 0x223d_e5fd_73fc_641d;
 
     #[test]
     fn golden_output_hash() {

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use arrow::array::{
     Array, ArrayData, ArrayRef, AsArray, BooleanArray, FixedSizeBinaryArray, RecordBatch,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use arrow::ipc::writer::StreamWriter;
 
 use super::bitpack::{pack, width_for};
@@ -87,6 +87,7 @@ pub fn encode_chunk(
             }
         }
         DataType::Map(..) if is_utf8_map(dt) => encode_map(values),
+        DataType::Float64 if let Some(dict) = dict => encode_float_dict(values, dict),
         _ => match numeric_of(dt) {
             Some(num) => encode_numeric(values, num),
             None => encode_ipc(array),
@@ -95,21 +96,28 @@ pub fn encode_chunk(
 }
 
 /// The candidate encodings of one chunk, fastest to decode first; the writer stores a later one
-/// only when its stored segment is at least 30% smaller. An integer chunk has two: `ForBitpack`, and `Plain`, whose values zstd can still
-/// compress (bit-packing hides repeated values from it). Every other chunk has the one
-/// [`encode_chunk`] gives.
+/// only when its stored segment is at least 30% smaller. An integer chunk has two: `ForBitpack`,
+/// and `Plain`, whose values zstd can still compress (bit-packing hides repeated values from
+/// it). A `FloatDict` chunk has `Plain` as its second, for a chunk whose values zstd compresses
+/// better than their codes. Every other chunk has the one [`encode_chunk`] gives.
 pub fn encode_chunk_candidates(
     array: &ArrayRef,
     dict: Option<&Dictionary>,
     config: &Config,
 ) -> Result<Vec<EncodedChunk>> {
     let chunk = encode_chunk(array, dict, config)?;
-    if chunk.encoding != Encoding::ForBitpack {
-        return Ok(vec![chunk]);
+    let num = || numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()));
+    match chunk.encoding {
+        Encoding::ForBitpack => {
+            let plain = plain_int(array.as_ref(), num()?, &chunk)?;
+            Ok(vec![chunk, plain])
+        }
+        Encoding::FloatDict => {
+            let plain = encode_numeric(array.as_ref(), num()?)?;
+            Ok(vec![chunk, plain])
+        }
+        _ => Ok(vec![chunk]),
     }
-    let num = numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()))?;
-    let plain = plain_int(array.as_ref(), num, &chunk)?;
-    Ok(vec![chunk, plain])
 }
 
 /// The `Plain` encoding of the integer chunk that `bitpacked` encodes: the same validity,
@@ -344,6 +352,46 @@ fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
     chunk.flags = chunk_flags;
     chunk.body = Some(body);
     Ok(chunk)
+}
+
+/// A Float64 chunk with a dictionary: the `Const` chunk [`encode_numeric`] gives when every
+/// value is equal and non-null, else `FloatDict` with that function's validity, zone and flags,
+/// and one packed code per row. Null rows hold code 0.
+fn encode_float_dict(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
+    let floats = array
+        .as_primitive_opt::<Float64Type>()
+        .ok_or_else(|| unsupported(array.data_type()))?;
+    let num = numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()))?;
+    let plain = encode_numeric(array, num)?;
+    if plain.encoding != Encoding::Plain {
+        return Ok(plain);
+    }
+    let mut codes: Vec<u64> = Vec::with_capacity(floats.len());
+    let mut hi = 0u32;
+    for i in 0..floats.len() {
+        if floats.is_valid(i) {
+            let code = code_of(dict, &floats.value(i).to_bits().to_le_bytes())?;
+            hi = hi.max(code);
+            codes.push(u64::from(code));
+        } else {
+            codes.push(0);
+        }
+    }
+    let mut body = Vec::new();
+    if plain.flags & flags::HAS_NULLS != 0 {
+        body.extend(validity_bitmap(array));
+    }
+    let width = width_for(u64::from(hi));
+    body.push(width);
+    pack(&codes, width, &mut body);
+    Ok(EncodedChunk {
+        encoding: Encoding::FloatDict,
+        flags: plain.flags,
+        const_len: plain.const_len,
+        min: plain.min,
+        max: plain.max,
+        body: Some(body),
+    })
 }
 
 fn encode_bool(array: &dyn Array) -> Result<EncodedChunk> {
@@ -851,6 +899,20 @@ mod tests {
     use crate::narrow::BlockEntry;
     use arrow::array::{Float32Array, Float64Array, Int64Array, new_null_array};
     use std::sync::Arc;
+
+    #[test]
+    fn a_float_dict_chunk_has_a_plain_candidate() {
+        let array: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..64).map(|i| f64::from(i % 4) * 0.5),
+        ));
+        let dict = crate::narrow::for_column(array.as_ref(), &Config::default()).unwrap();
+        let candidates = encode_chunk_candidates(&array, Some(&dict), &Config::default()).unwrap();
+        let encodings: Vec<Encoding> = candidates.iter().map(|c| c.encoding).collect();
+        assert_eq!(encodings, vec![Encoding::FloatDict, Encoding::Plain]);
+        assert_eq!(candidates[0].min, candidates[1].min);
+        assert_eq!(candidates[0].max, candidates[1].max);
+        assert_eq!(candidates[0].flags, candidates[1].flags);
+    }
 
     #[test]
     fn an_integer_chunk_has_bitpacked_and_plain_candidates_that_decode_alike() {

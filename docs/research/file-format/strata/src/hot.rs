@@ -147,7 +147,8 @@ pub struct DirectoryRecord {
     pub parent: u32,
     /// How the column is stored.
     pub layer: Layer,
-    /// Bit 0: a sorted dictionary is present.
+    /// Bit 0: a sorted dictionary is present. Bit 1 (narrow columns): the column has a chunk
+    /// dictionary, a zstd dictionary that its `ZstdDict` chunk segments need.
     pub flags: u8,
     /// Byte offset of this column's page list within hot-tail section 7.
     pub pages_offset: u32,
@@ -160,9 +161,10 @@ pub struct DirectoryRecord {
     pub dict_offset: u64,
     /// Length of the dictionary (or payload store) segment.
     pub dict_len: u32,
-    /// Offset of the payload header segment, 0 unless the layer is payload.
+    /// Offset of the payload header segment for a payload column; of the chunk dictionary
+    /// segment for a narrow column with one (flags bit 1); else 0.
     pub payload_offset: u64,
-    /// Length of the payload header segment.
+    /// Length of the payload header (or chunk dictionary) segment.
     pub payload_len: u32,
     /// Number of null values in the column.
     pub null_count: u64,

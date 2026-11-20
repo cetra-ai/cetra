@@ -19,6 +19,8 @@ xorf = { version = "0.13.0", default-features = false, features = ["binary-fuse"
 datafusion = { version = "55.2", default-features = false, features = ["sql", "nested_expressions"] }
 async-trait = "0.1.92"
 simdutf8 = "0.1.5"
+# The process-wide limit on reads in flight (`io.rs`); DataFusion already depends on tokio.
+tokio = { version = "1.54", default-features = false, features = ["sync"] }
 
 # cargo-fuzz sets `--cfg fuzzing` (fuzz/).
 [lints.rust]

@@ -24,6 +24,8 @@ pub struct Counting {
     reqs: AtomicU64,
     bytes: AtomicU64,
     gets: AtomicU64,
+    in_flight: AtomicU64,
+    max_in_flight: AtomicU64,
 }
 
 impl Counting {
@@ -33,6 +35,8 @@ impl Counting {
             reqs: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             gets: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
+            max_in_flight: AtomicU64::new(0),
         }
     }
     pub fn reset(&self) {
@@ -45,6 +49,10 @@ impl Counting {
             self.reqs.load(Ordering::Relaxed),
             self.bytes.load(Ordering::Relaxed),
         )
+    }
+    /// Most `get_opts` calls that were running at once.
+    pub fn max_in_flight(&self) -> u64 {
+        self.max_in_flight.load(Ordering::Relaxed)
     }
     /// Number of `get_opts` calls so far.
     pub fn gets(&self) -> u64 {
@@ -72,8 +80,14 @@ impl ObjectStore for Counting {
     }
     async fn get_opts(&self, l: &Path, o: GetOptions) -> Result<GetResult> {
         self.gets.fetch_add(1, Ordering::Relaxed);
+        let now = self.in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+        self.max_in_flight.fetch_max(now, Ordering::Relaxed);
+        // One yield, so that concurrent requests overlap as they would on a real store.
+        tokio::task::yield_now().await;
         let head = o.head;
-        let r = self.inner.get_opts(l, o).await?;
+        let r = self.inner.get_opts(l, o).await;
+        self.in_flight.fetch_sub(1, Ordering::Relaxed);
+        let r = r?;
         if !head {
             self.reqs.fetch_add(1, Ordering::Relaxed);
             self.bytes

@@ -9,7 +9,6 @@ use arrow::array::{Array, ArrayRef, BinaryArray, StringArray};
 use arrow::datatypes::DataType;
 use xxhash_rust::xxh3::xxh3_128;
 
-use super::StoreRole;
 use super::chunk::{Chunk, chunk_value_from};
 use super::header::{RefPage, encode_header};
 use super::refs::{RowRefs, encode_page};
@@ -171,10 +170,11 @@ fn chunk_with_reuse(value: &[u8], previous: Option<&Previous<'_>>) -> (Vec<Chunk
 ///
 /// Segments are written in this order: the frames, the index pages and the store segment, then
 /// per column its refs pages and its header. Returns the store segment and, per column, the
-/// header segment and the statistics. The store's bytes count in the first column.
+/// header segment and the statistics. The store's bytes count in the first column. The frames
+/// use zstd `level`.
 pub(crate) fn write_payload_columns(
     columns: &[&[ArrayRef]],
-    role: StoreRole,
+    level: i32,
     codec: &mut SegmentCodec,
     out: &mut Out,
 ) -> Result<(SegmentRef, Vec<(SegmentRef, PayloadStats)>)> {
@@ -258,7 +258,7 @@ pub(crate) fn write_payload_columns(
     for refs in &chunk_refs {
         check_chunk_refs(*refs)?;
     }
-    let (store_seg, store_stats) = store.write(role, codec, out)?;
+    let (store_seg, store_stats) = store.write(level, codec, out)?;
 
     let n_rows_u32 = u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
         rows: n_rows as u64,
@@ -534,22 +534,43 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_a_shared_store_trains_a_dictionary() {
-        // Over `DICT_MIN_RAW` of distinct text: the shared store trains a dictionary, a
-        // column's own store does not.
+    async fn shared_and_own_stores_train_a_dictionary_from_dict_min_raw() {
+        // Over `DICT_MIN_RAW` of distinct text, the shared store and a column's own store both
+        // train a dictionary, and the column reads back. Under it, neither does.
+        for (rows, trained) in [(150, true), (20, false)] {
+            let values: Vec<Option<String>> =
+                (0..rows).map(|k| Some(prose(5_000, k + 1))).collect();
+            let batch = table(&values);
+            for own in [vec![], vec!["v".to_string()]] {
+                let config = Config {
+                    own_store_columns: own,
+                    ..Config::default()
+                };
+                let (file, summary) = write_and_open(&batch, config).await;
+                let stats = summary.columns[1].payload.as_ref().unwrap();
+                assert_eq!(stats.dict_bytes > 0, trained, "{rows} rows");
+                let decoded = read_column(&file, 1).await.unwrap();
+                assert_same(decoded.as_ref(), batch.column(1).as_ref());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_higher_payload_level_writes_smaller_frames_that_read_back() {
         let values: Vec<Option<String>> = (0..150).map(|k| Some(prose(5_000, k + 1))).collect();
         let batch = table(&values);
-        for (own, trained) in [(vec![], true), (vec!["v".to_string()], false)] {
+        let mut frames = Vec::new();
+        for level in [3, 19] {
             let config = Config {
-                own_store_columns: own,
+                payload_zstd_level: level,
                 ..Config::default()
             };
             let (file, summary) = write_and_open(&batch, config).await;
-            let stats = summary.columns[1].payload.as_ref().unwrap();
-            assert_eq!(stats.dict_bytes > 0, trained);
+            frames.push(summary.columns[1].payload.as_ref().unwrap().frame_bytes);
             let decoded = read_column(&file, 1).await.unwrap();
             assert_same(decoded.as_ref(), batch.column(1).as_ref());
         }
+        assert!(frames[1] < frames[0], "{frames:?}");
     }
 
     #[tokio::test]

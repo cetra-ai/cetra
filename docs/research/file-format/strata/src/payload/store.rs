@@ -23,7 +23,7 @@ use zstd::dict::{DecoderDictionary, EncoderDictionary};
 use super::gram::{
     GRAM, IndexBuilder, MAX_ROWS, WINDOW_HEAD, estimate_distinct, rows_for, rows_per_page, window,
 };
-use super::{DICT_MAX, DICT_MIN_RAW, DICT_SAMPLE, DICT_SAMPLE_BYTES, FRAME_MAX_RAW, StoreRole};
+use super::{DICT_MAX, DICT_MIN_RAW, DICT_SAMPLE, DICT_SAMPLE_BYTES, FRAME_MAX_RAW};
 use crate::error::{Result, StrataError};
 use crate::format::{Cursor, Out};
 use crate::segment::{Codec, Kind, SegmentCodec, SegmentRef, encode_segment, write_segment};
@@ -56,7 +56,7 @@ pub(crate) struct Dict {
 static NEXT_DICT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 impl Dict {
-    fn new(raw: Vec<u8>) -> Self {
+    pub(crate) fn new(raw: Vec<u8>) -> Self {
         let decoder = DecoderDictionary::copy(&raw);
         let id = NEXT_DICT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Self { raw, decoder, id }
@@ -493,11 +493,12 @@ impl StoreBuilder {
     }
 
     /// Writes the frames, the index pages and the store segment, in that order. Returns the
-    /// store segment and what was written. A store of at least `DICT_MIN_RAW` bytes trains a
-    /// dictionary of its own: one trained on another store's text fits it badly, and is slower.
+    /// store segment and what was written. The frames use zstd `level`. A store of at least
+    /// `DICT_MIN_RAW` bytes trains a dictionary of its own: one trained on another store's text
+    /// fits it badly, and is slower.
     pub(crate) fn write(
         self,
-        role: StoreRole,
+        level: i32,
         codec: &mut SegmentCodec,
         out: &mut Out,
     ) -> Result<(SegmentRef, StoreStats)> {
@@ -529,7 +530,7 @@ impl StoreBuilder {
         };
 
         // The dictionary, trained on the first `DICT_SAMPLE` bytes of evenly spread frames.
-        let dict = if role.trained() && self.data.len() >= DICT_MIN_RAW {
+        let dict = if self.data.len() >= DICT_MIN_RAW {
             let step = (frame_chunks.len() * DICT_SAMPLE / DICT_SAMPLE_BYTES).max(1);
             let samples: Vec<&[u8]> = frame_chunks
                 .iter()
@@ -552,7 +553,7 @@ impl StoreBuilder {
         };
         let encoder = dict
             .as_ref()
-            .map(|d| EncoderDictionary::copy(&d.raw, role.level()));
+            .map(|d| EncoderDictionary::copy(&d.raw, level));
         let mut compressor = match &encoder {
             Some(e) => {
                 let mut c =
@@ -564,7 +565,7 @@ impl StoreBuilder {
                 .map_err(zstd_error)?;
                 c
             }
-            None => zstd::bulk::Compressor::new(role.level()).map_err(zstd_error)?,
+            None => zstd::bulk::Compressor::new(level).map_err(zstd_error)?,
         };
         let packed_codec = if dict.is_some() {
             Codec::ZstdDict
@@ -724,7 +725,7 @@ mod tests {
         }
         let mut out = Out(Vec::new());
         let mut codec = SegmentCodec::new(3).unwrap();
-        let (seg, stats) = b.write(StoreRole::Shared, &mut codec, &mut out).unwrap();
+        let (seg, stats) = b.write(3, &mut codec, &mut out).unwrap();
         let bytes = &out.0[seg.offset as usize..(seg.offset + u64::from(seg.len)) as usize];
         let body = crate::segment::decode_segment(bytes, seg.offset, Kind::PayloadStore).unwrap();
         let store = PayloadStore::decode(&body, seg.offset).unwrap();

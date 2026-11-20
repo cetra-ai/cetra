@@ -70,7 +70,7 @@ pub use error::{Result, StrataError};
 pub use fast::{trace_detail, trace_list};
 pub use file::StrataFile;
 pub use io::{IoStats, ScanKind};
-pub use merge::merge;
+pub use merge::{merge, rewrite};
 pub use payload::PayloadStats;
 pub use predicate::{CmpOp, Lit, Predicate};
 pub use reader::read_column;

@@ -4,9 +4,10 @@
 #[derive(Debug, Clone)]
 pub struct Config {
     /// zstd level for narrow, refs, header and table segments. Default 3.
-    /// Payload frames use the fixed level of their store's role (`payload::StoreRole`),
-    /// with a trained dictionary.
     pub zstd_level: i32,
+    /// zstd level for payload frames, shared store and own stores alike. Each store of at least
+    /// 4 MiB of unique chunks also trains a dictionary. Default 3.
+    pub payload_zstd_level: i32,
     /// Maximum rows per narrow chunk. Default 2,048: a trace lookup reads one chunk per column.
     /// The writer rejects values above 65,535 (the `FSB_RLE` run lengths are `u16`).
     pub chunk_max_rows: u32,
@@ -35,10 +36,24 @@ pub struct Config {
     pub open_default_suffix: u64,
 }
 
+impl Config {
+    /// The configuration for rewriting cold files, those no longer ingested into: every zstd
+    /// level at 19. It writes at about 10 MB/s, so it belongs in background compaction, never in
+    /// ingestion. It reads back about 10% slower, and the files are 10 to 30% smaller.
+    pub fn cold() -> Self {
+        Self {
+            zstd_level: 19,
+            payload_zstd_level: 19,
+            ..Self::default()
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             zstd_level: 3,
+            payload_zstd_level: 3,
             chunk_max_rows: 2_048,
             chunk_max_bytes: 32 * 1024,
             page_max_entries: 64,

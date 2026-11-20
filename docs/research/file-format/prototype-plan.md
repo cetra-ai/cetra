@@ -127,6 +127,7 @@ What these add:
 - `MAX_PREDICATE_DEPTH` (64) and `MAX_PREDICATE_NODES` (4,096) bound a predicate: each `In` literal counts as one node. A larger predicate fails with `Unsupported` before any recursion.
 - `MAX_READ_IDS` (2²⁸) bounds the chunk ids one read of a payload column returns, summed over its rows. Above it the read fails with `Corrupt`; the writer refuses a column with more chunk references.
 - `MAX_CONCURRENT_GETS` (64) bounds the ranged GETs of one wave that are in flight at once. Counters and waves do not change.
+- `MAX_GETS_IN_FLIGHT` (256) bounds the GETs in flight in the whole process, across files, waves and queries: every read takes a permit of one static semaphore while its request runs. A local store opens a descriptor per request, so this also keeps reads under the default limit of 1,024 open files.
 - With a predicate, `limit` does not bound the bytes fetched: the filter wave still fetches every surviving predicate chunk. `limit` bounds the evaluation (per window of 65,536 rows) and the output.
 
 ## Design decisions for v0
@@ -162,6 +163,7 @@ bytes[stored_len]
 | 7 | column block-table page (≤ 64 entries, raw) |
 | 8 | dictionary |
 | 9 | file key filter (binary fuse) |
+| 10 | chunk dictionary: the zstd dictionary of a narrow column's chunks (S3, stored raw) |
 
 **Hot tail.** Seven sections in this order, each prefixed by a `u32` length. A section may be empty (length 0); every section exists from phase 1 on and is empty until its phase fills it.
 
@@ -210,7 +212,7 @@ u32 column_id · u32 parent (u32::MAX = none; for a layer-3 child, the map's col
 u8 layer · u8 flags · u16 reserved
 u32 pages_offset (byte offset of this column's page list within hot-tail section 7) · u32 n_pages · u32 n_chunks
 u64 dict_offset (kind 8 segment; 0 = none) · u32 dict_len
-u64 payload_offset (kind 4 segment; 0 unless layer = 1) · u32 payload_len
+u64 payload_offset (layer 1: kind 4 segment; narrow layers with flags bit 1: kind 10 segment; else 0) · u32 payload_len
 u64 null_count · u64 reserved2 (zero)
 ```
 
@@ -224,7 +226,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 | 3 | shredded map child (narrow rules) |
 | 4 | residual map (narrow rules, `MAP` encoding) |
 
-`flags`: bit 0 = sorted dictionary present.
+`flags`: bit 0 = sorted dictionary present; bit 1 = chunk dictionary present (narrow layers only; `payload_offset`/`payload_len` locate it).
 
 ### S3. Narrow layer
 
@@ -256,7 +258,7 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 
 **Zone values:**
 - Integers (Int8–Int64, UInt8–UInt32) and timestamps: i64 in `min[0..8]` and `max[0..8]`. UInt64 has no zone.
-- Floats: f64 over non-NaN values, with −0.0 stored as 0.0. NaN sets flag bit 2.
+- Floats: f64 over non-NaN values, with −0.0 stored as 0.0. NaN sets flag bit 2. `FLOAT_DICT` chunks keep this float zone, not codes.
 - Dictionary columns: the minimum and maximum code, as u32.
 - FixedSizeBinary(w), w ≤ 16: the minimum and maximum values, zero-padded. They are exact, so comparisons are inclusive.
 - `VARBIN` chunks (Utf8 or Binary without a dictionary), from the lowest and highest valid value in byte order. There are two forms:
@@ -280,6 +282,7 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 | 9 | `BOOL` | Boolean | Arrow bitmap, `ceil(n/8)` bytes. |
 | 10 | `IPC` | every other type (events, links, maps other than Map<Utf8, Utf8>) | Arrow IPC stream (`StreamWriter`) of a one-column batch holding the chunk. |
 | 11 | `MAP` | `Map<Utf8, Utf8>` with the shape below | lengths block of the entry count of each map (null maps 0) · lengths block of the key lengths · key bytes · `u8 value_nulls` (0, or 1 and a value-validity bitmap of E bits) · lengths block of the value lengths · value bytes. `E` is the number of entries. |
+| 12 | `FLOAT_DICT` | Float64 with a file dictionary (below), when bit-packed codes beat plain values by the writer's 30% rule | `u8 width`, then the codes packed like `DICT`. Null slots hold code 0. The decoder copies each code's eight bytes, so NaN payloads and −0.0 come back bit for bit. |
 
 **Lengths block.** `u32 base · u8 width · packed (len − base)`, where `base` is the minimum length (0 when there is a null, since null slots have length 0) and `width` is the bit width of the largest `len − base`. `width` above 32 is corrupt. The packed values use the `FOR_BITPACK` bit layout. Storing lengths instead of cumulative offsets keeps the bodies small and repetitive, so zstd compresses them well. **Null rule:** in `VARBIN`, `LIST_DICT` and `MAP`, a null slot has length 0, and a decoder rejects any other length there as corrupt.
 
@@ -296,6 +299,9 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 **Dictionaries** (kind 8 segment):
 - Layout: `u32 n` · `u32 offsets[n+1]` · bytes, values sorted bytewise (b#4, a#11). A code is the value's rank.
 - Built when a Utf8 column (or a List(Utf8)'s values) has ≤ 65,535 distinct values **and** the dictionary is ≤ 1 MiB. Otherwise `VARBIN`. (v0 used 64 KiB; the M8 speed work raised it so that `user_id` gets a dictionary.)
+- A Float64 column gets one too when its valid values average at least 8 rows per distinct value (`FLOAT_DICT_MIN_REPEAT`), within the same limits. Its values are the eight little-endian bytes of each distinct bit pattern, sorted bytewise; codes are not in value order, so predicates use the chunks' float zones and the decoded values, never codes. Each chunk then stores `FLOAT_DICT` first and `PLAIN` second, and keeps `PLAIN` only when it is 30% smaller after zstd. Costs computed from token counts repeat: on `light` this cut the three cost columns from 16.7 to 8.5 MB (`real-data.md` § Smaller files).
+
+**Chunk dictionaries** (kind 10 segment, flag bit 1). A narrow column whose `VARBIN`, `MAP` and `IPC` chunks hold at least 1 MiB of raw bodies trains a 64 KiB zstd dictionary on whole bodies of evenly spread chunks (about 1 MiB in all). Each of those chunks is compressed with it at the column's zstd level; a chunk keeps the dictionary form only when it passes the 30% rule and is smaller than its plain zstd form, and is then stored with codec 2 (`ZstdDict`). The dictionary is kept only when those chunks plus the dictionary take at most 95% of what they take without it. Short text chunks are where it pays: zstd finds little to match within one 32 KiB chunk, and the dictionary gives it the column's common strings. The reader loads the dictionary with the column's block-table pages, in the same metadata wave, and decodes a chunk segment with it when the segment's codec asks for it.
 - A predicate on a dictionary column is evaluated once against the dictionary, which turns it into a set or range of codes.
 - A scan decodes a dictionary column's chunks as `Dictionary(UInt32, Utf8)` arrays that share the file dictionary's values, so no row's string is copied. Comparisons run on the codes: the dictionary is sorted bytewise, so the literal's position in it turns `=`, `<>`, `<`, `<=`, `>` and `>=` into comparisons of codes. Through DataFusion the columns come out as `Utf8View` built over the same values.
 
@@ -415,9 +421,9 @@ Strata v2 replaces the payload layer's frames table, filters, edge groups and ro
 
 **Reuse of the previous value.** A value that equals the previous non-null value of its column reuses its chunk ids. A value that starts with the previous one, up to a chunk ending at a top-level cut (a conversation that grew by some messages), reuses those chunk ids and only cuts the rest. The prefix is checked byte for byte, so the result equals chunking from scratch. A value of 256 B or more is also remembered by its `xxh3_128`, so a value seen earlier anywhere in the store (a system prompt or tool list shared by many traces) reuses its chunk ids without being cut again. On `payload` it cuts the bytes that go through the chunker from 477 to 325 MiB per file (185 MiB end up unique). Comparing a value with the last 8 values of its column instead of the last one was tried and dropped: 10% fewer bytes to cut, no time saved, and slower writes on `swe`.
 
-**Stores and runs.** A payload store (kind 6, `PayloadStore`) holds the unique chunks of one or more payload columns: one shared store per file, plus one per `own_store_columns` column. The two roles are written differently (`StoreRole`): the shared store gets zstd level 3 frames and a dictionary; an own store (the previews) gets level 1 frames and none, since its texts are short and a dictionary costs one training per store. Every store with frames gets a gram index. The directory record of a payload column points to its store with `dict_offset`/`dict_len`, and to its header with `payload_offset`/`payload_len`. The store body: `u32 n_chunks · u32 n_frames · u32 n_runs`, then per run `u32 first_frame · u32 dict_len · dict · u32 index_rows · u32 index_frames · u32 rows_per_page · u32 n_pages · n_pages × (u64 offset · u32 len)`, then per frame `u64 offset · u32 len · u32 raw_len · u32 n_chunks`. A write makes one run; a merge copies the runs of its inputs. The column header keeps only `u32 n_rows · u32 n_pages · n_pages × (u64 offset · u32 len)`.
+**Stores and runs.** A payload store (kind 6, `PayloadStore`) holds the unique chunks of one or more payload columns: one shared store per file, plus one per `own_store_columns` column. Every store is written the same way: frames at `Config::payload_zstd_level` (3 by default, 19 in `Config::cold()`), and a trained dictionary once it holds 4 MiB of unique chunks. (Own stores used level 1 and no dictionary until the size work of 2026-11-19: a dictionary made wildchat's preview frames about 17% smaller for one training per store.) Every store with frames gets a gram index. The directory record of a payload column points to its store with `dict_offset`/`dict_len`, and to its header with `payload_offset`/`payload_len`. The store body: `u32 n_chunks · u32 n_frames · u32 n_runs`, then per run `u32 first_frame · u32 dict_len · dict · u32 index_rows · u32 index_frames · u32 rows_per_page · u32 n_pages · n_pages × (u64 offset · u32 len)`, then per frame `u64 offset · u32 len · u32 raw_len · u32 n_chunks`. A write makes one run; a merge copies the runs of its inputs. The column header keeps only `u32 n_rows · u32 n_pages · n_pages × (u64 offset · u32 len)`.
 
-**Frames.** A frame closes once it holds 64 KiB of raw chunk bytes (the compressed-size estimate is gone). It is compressed at its store's level and, for a shared store of at least 4 MiB of unique chunks, with a 64 KiB dictionary trained on 4 KiB samples of evenly spread frames (256 KiB in all) and attached (`ForceAttachDict`), not copied, per frame. Such frames use codec 2 (`ZstdDict`): `decode_segment` checks them, and the reader decompresses them with the run's dictionary, which is loaded with the store, in the metadata wave. A dictionary trained on one store is not reused by another: it fits another store's text badly and slows zstd down.
+**Frames.** A frame closes once it holds 64 KiB of raw chunk bytes (the compressed-size estimate is gone). It is compressed at the store's level and, for a store of at least 4 MiB of unique chunks, with a 64 KiB dictionary trained on 4 KiB samples of evenly spread frames (256 KiB in all) and attached (`ForceAttachDict`), not copied, per frame. Such frames use codec 2 (`ZstdDict`): `decode_segment` checks them, and the reader decompresses them with the run's dictionary, which is loaded with the store, in the metadata wave. A dictionary trained on one store is not reused by another: it fits another store's text badly and slows zstd down.
 
 **Gram index** (kind 5, `PayloadIndex`, raw). Per run, one bit per frame and per row: row `r` of frame `f` is set when a 5-gram of `f`'s chunks hashes to `r` (`h = ((x & 0xFF_FFFF_FFFF) × 0x9E3779B97F4A7C15) >> 32` over the gram's 5 bytes, little-endian; `r = (h × rows) >> 32`). Grams that cross a chunk boundary are covered by windows, each the last 4 bytes of a chunk and the first 63 bytes of the chunk that follows it in some value, added to the left chunk's frame: for every chunk and the chunk with the next id (only the 4 crossing grams when both are in one frame), and for every other pair seen in a value. So every gram of a needle of ≤ 64 B lies in the frame of the chunk where an occurrence starts. `rows` is about the distinct grams of a frame ÷ 0.8 (estimated by linear counting on the first, middle and last frames), so about 55% of the bits are set. The matrix is stored bit-sliced, row-major, in pages of about 1 KiB. The writer sets one byte per row for the frame being indexed and packs it into the frame's bitmap when the frame ends, then transposes the bitmaps eight frames at a time with an 8×8 bit-matrix transpose: OR-ing into a bitmap word made each gram wait on the last store to that word.
 

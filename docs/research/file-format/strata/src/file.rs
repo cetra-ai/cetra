@@ -1,6 +1,6 @@
 //! Opening a Strata file from an object store with one suffix read (S1 open).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use arrow::array::{Array, FixedSizeBinaryArray};
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use futures::{StreamExt, TryStreamExt};
+use object_store::ObjectStore;
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 
 use crate::config::Config;
 use crate::error::{Result, StrataError};
@@ -20,10 +20,11 @@ use crate::format::{
 use crate::hot::{DirectoryRecord, HotTail, Layer, PageRef, Postscript};
 use crate::index::{KeyFilter, merge_rows, zone_may_hold};
 use crate::io::{IoStats, MAX_CONCURRENT_GETS, ScanKind, coalesce};
-use crate::narrow::{BlockEntry, Dictionary, decode_chunk, is_utf8_map};
-use crate::payload::{PayloadHeader, PayloadStore, decode_header};
+use crate::narrow::{BlockEntry, DictKind, Dictionary, decode_chunk, is_utf8_map};
+use crate::payload::{Dict, PayloadHeader, PayloadStore, decode_header};
 use crate::postings::ChunkPostings;
 use crate::segment::{Kind, SegmentRef, decode_segment, decode_segment_with};
+use crate::writer::FLAG_CHUNK_DICT;
 
 /// Fewest stored bytes in one wave for its segments to be decoded on every core. A lookup's
 /// wave stays under it; a scan's frames go over it.
@@ -185,6 +186,8 @@ pub(crate) struct MetadataPlan {
     pub entries: Vec<(usize, Vec<PageRef>, Range<usize>)>,
     /// A column with a dictionary, and the position of its body in the wave.
     pub dicts: Vec<(usize, usize)>,
+    /// A narrow column with a chunk dictionary, and the position of its body in the wave.
+    pub chunk_dicts: Vec<(usize, usize)>,
     /// A payload column, and the position of its header body in the wave.
     pub headers: Vec<(usize, usize)>,
     /// A payload store not cached yet: its offset, and the position of its body in the wave.
@@ -236,6 +239,9 @@ pub struct StrataFile {
     payload_headers: Mutex<HashMap<usize, Arc<PayloadHeader>>>,
     /// Payload stores, read with the first header that uses them, by segment offset.
     payload_stores: Mutex<HashMap<u64, Arc<PayloadStore>>>,
+    /// Chunk dictionaries of the narrow columns read so far, by the offset of the column's
+    /// first chunk segment: the end of its last chunk segment, and the dictionary.
+    chunk_dicts: Mutex<BTreeMap<u64, (u64, Arc<Dict>)>>,
     /// Ranged GET requests issued by `fetch`.
     requests: AtomicU64,
     /// Bytes fetched by `fetch`.
@@ -261,18 +267,7 @@ impl StrataFile {
         let n = hot_len_hint
             .map(|h| u64::from(h) + POSTSCRIPT_LEN)
             .unwrap_or(config.open_default_suffix);
-        let read = store
-            .get_opts(
-                &path,
-                GetOptions {
-                    range: Some(GetRange::Suffix(n)),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        let size = read.meta.size;
-        let start = read.range.start;
-        let tail = read.bytes().await?;
+        let (size, start, tail) = crate::io::get_suffix(store.as_ref(), &path, n).await?;
 
         let too_small = || StrataError::Corrupt {
             what: "file too small",
@@ -319,7 +314,8 @@ impl StrataFile {
             offset: postscript.hot_offset,
         };
         let hot: Vec<u8> = if postscript.hot_offset < start {
-            let head = store.get_range(&path, postscript.hot_offset..start).await?;
+            let head =
+                crate::io::get_range(store.as_ref(), &path, postscript.hot_offset..start).await?;
             let body = tail.get(..ps_start).ok_or_else(hot_corrupt)?;
             let mut joined = Vec::with_capacity(head.len() + body.len());
             joined.extend_from_slice(&head);
@@ -437,6 +433,7 @@ impl StrataFile {
             dicts: Mutex::new(HashMap::new()),
             payload_headers: Mutex::new(HashMap::new()),
             payload_stores: Mutex::new(HashMap::new()),
+            chunk_dicts: Mutex::new(BTreeMap::new()),
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
@@ -554,6 +551,9 @@ impl StrataFile {
             if k == Kind::PayloadFrame {
                 let dict = self.frame_dict(r.offset);
                 decode_segment_with(slice, r.offset, k, dict.as_deref())
+            } else if k == Kind::NarrowChunk {
+                let dict = self.chunk_dict(r.offset);
+                decode_segment_with(slice, r.offset, k, dict.as_deref())
             } else {
                 decode_segment(slice, r.offset, k)
             }
@@ -598,7 +598,7 @@ impl StrataFile {
         let (merged, owner) = coalesce(&ranges, kind);
         // At most `MAX_CONCURRENT_GETS` requests in flight; `buffered` keeps the order.
         let parts: Vec<bytes::Bytes> = futures::stream::iter(merged.iter().cloned())
-            .map(|range| self.store.get_range(&self.path, range))
+            .map(|range| crate::io::get_range(self.store.as_ref(), &self.path, range))
             .buffered(MAX_CONCURRENT_GETS)
             .try_collect()
             .await?;
@@ -657,7 +657,7 @@ impl StrataFile {
             });
         }
         let len = range.end - range.start;
-        let bytes = self.store.get_range(&self.path, range).await?;
+        let bytes = crate::io::get_range(self.store.as_ref(), &self.path, range).await?;
         self.requests.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(len, Ordering::Relaxed);
         self.waves.fetch_add(1, Ordering::Relaxed);
@@ -810,6 +810,20 @@ impl StrataFile {
                             }
                         }
                     }
+                    if record.flags & FLAG_CHUNK_DICT != 0 {
+                        if record.payload_offset == 0 {
+                            return Err(StrataError::Corrupt {
+                                what: "chunk dictionary flag",
+                                offset: 0,
+                            });
+                        }
+                        let segment = SegmentRef {
+                            offset: record.payload_offset,
+                            len: record.payload_len,
+                        };
+                        segments.push((segment, Kind::ChunkDictionary));
+                        plan.chunk_dicts.push((column, segments.len() - 1));
+                    }
                     plan.entries.push((column, pages, pages_range));
                 }
             }
@@ -834,8 +848,36 @@ impl StrataFile {
         for &(column, at) in &plan.dicts {
             let record = self.hot.directory.get(column).ok_or_else(corrupt)?;
             let body = bodies.get(at).ok_or_else(corrupt)?;
-            let dict = Dictionary::decode(body, record.dict_offset)?;
+            let kind =
+                DictKind::of(self.field_of(column)?.data_type()).ok_or(StrataError::Corrupt {
+                    what: "dictionary for type",
+                    offset: record.dict_offset,
+                })?;
+            let dict = Dictionary::decode(body, record.dict_offset, kind)?;
             dicts.push((column, Arc::new(dict)));
+        }
+        // Each chunk dictionary serves the chunk segments of its column, which lie between the
+        // first and the last of them.
+        let mut chunk_dicts = Vec::with_capacity(plan.chunk_dicts.len());
+        for &(column, at) in &plan.chunk_dicts {
+            let body = bodies.get(at).ok_or_else(corrupt)?;
+            let (_, column_entries) = entries
+                .iter()
+                .find(|(c, _)| *c == column)
+                .ok_or_else(corrupt)?;
+            let mut chunks = column_entries
+                .iter()
+                .filter(|entry| entry.segment_len > 0)
+                .map(|entry| {
+                    entry.segment_offset
+                        ..entry
+                            .segment_offset
+                            .saturating_add(u64::from(entry.segment_len))
+                });
+            if let Some(first) = chunks.next() {
+                let end = chunks.fold(first.end, |end, chunk| end.max(chunk.end));
+                chunk_dicts.push((first.start, end, Arc::new(Dict::new(body.clone()))));
+            }
         }
         for &(offset, at) in &plan.stores {
             let body = bodies.get(at).ok_or_else(corrupt)?;
@@ -877,7 +919,25 @@ impl StrataFile {
         for (column, header) in headers {
             cached_headers.insert(column, header);
         }
+        let mut cached_chunk_dicts = self
+            .chunk_dicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for (start, end, dict) in chunk_dicts {
+            cached_chunk_dicts.insert(start, (end, dict));
+        }
         Ok(())
+    }
+
+    /// The chunk dictionary of the narrow column whose chunk segment starts at `offset`, if that
+    /// column's metadata is cached and it has one.
+    pub(crate) fn chunk_dict(&self, offset: u64) -> Option<Arc<Dict>> {
+        let dicts = self
+            .chunk_dicts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (_, (end, dict)) = dicts.range(..=offset).next_back()?;
+        (offset < *end).then(|| Arc::clone(dict))
     }
 
     /// The dictionary of the payload run whose frame starts at `offset`, if a cached store holds
@@ -1188,8 +1248,8 @@ mod tests {
     use arrow::datatypes::{Field, Schema};
     use cetra_core::schema::spans_schema;
     use counting::Counting;
-    use object_store::PutPayload;
     use object_store::memory::InMemory;
+    use object_store::{ObjectStoreExt, PutPayload};
     use proptest::prelude::*;
     use xxhash_rust::xxh3::xxh3_128;
 
@@ -2035,6 +2095,56 @@ mod tests {
         w.write(batch).unwrap();
         let (bytes, _) = w.finish().unwrap();
         open_patched(bytes).await.unwrap()
+    }
+
+    #[test]
+    fn concurrent_fetches_share_the_process_limit_on_requests_in_flight() {
+        runtime().block_on(async {
+            let counting = Arc::new(Counting::new());
+            let store: Arc<dyn ObjectStore> = counting.clone();
+            let rows = batch(20_000);
+            let mut w = StrataWriter::new(
+                rows.schema(),
+                &["trace_id", "start_time"],
+                Config::default(),
+            )
+            .unwrap();
+            w.write(&rows).unwrap();
+            let (bytes, _) = w.finish().unwrap();
+            put(store.as_ref(), bytes).await;
+            let file = StrataFile::open(store, path(), None, &Config::default())
+                .await
+                .unwrap();
+            let column = file.schema().index_of("input_tokens").unwrap();
+            let segments: Vec<(SegmentRef, Kind)> = file
+                .block_entries(column)
+                .await
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    let segment = SegmentRef {
+                        offset: e.segment_offset,
+                        len: e.segment_len,
+                    };
+                    (segment, Kind::NarrowChunk)
+                })
+                .collect();
+            // 1,000 waves of one request each, all started together: each wave alone stays
+            // under `MAX_CONCURRENT_GETS`, together they would hold 1,000 requests.
+            let waves = (0..1_000).map(|i| {
+                let one = [segments[i % segments.len()]];
+                let file = &file;
+                async move { file.fetch(&one, ScanKind::Point).await }
+            });
+            let bodies = futures::future::try_join_all(waves).await.unwrap();
+            assert_eq!(bodies.len(), 1_000);
+            let max = counting.max_in_flight();
+            assert!(
+                max <= crate::io::MAX_GETS_IN_FLIGHT as u64,
+                "{max} in flight"
+            );
+            assert!(max > MAX_CONCURRENT_GETS as u64, "only {max} in flight");
+        });
     }
 
     #[test]

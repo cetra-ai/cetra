@@ -68,7 +68,8 @@ pub(crate) fn batch(n: usize) -> RecordBatch {
         } else if i.is_multiple_of(997) {
             Some(f64::NAN)
         } else {
-            Some(i as f64 * 0.001)
+            // 500 values, so a batch of 6,000 rows or more stores them as a float dictionary.
+            Some((i % 500) as f64 * 0.001)
         }
     }));
     let flag = BooleanArray::from((0..n).map(|i| i.is_multiple_of(3)).collect::<Vec<bool>>());

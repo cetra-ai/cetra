@@ -59,6 +59,8 @@ pub enum Kind {
     Dictionary = 8,
     /// A file key filter.
     KeyFilter = 9,
+    /// The zstd dictionary of a narrow column's chunks.
+    ChunkDictionary = 10,
 }
 
 impl Kind {
@@ -74,6 +76,7 @@ impl Kind {
             7 => Some(Self::BlockTablePage),
             8 => Some(Self::Dictionary),
             9 => Some(Self::KeyFilter),
+            10 => Some(Self::ChunkDictionary),
             _ => None,
         }
     }

@@ -19,7 +19,9 @@ use arrow::datatypes::{DataType, Field, UInt32Type};
 use crate::error::{Result, StrataError};
 use crate::file::StrataFile;
 use crate::hot::Layer;
-use crate::narrow::{BlockEntry, Dictionary, Encoding, SHARED_SUFFIX, flags, prefix_hash};
+use crate::narrow::{
+    BlockEntry, DictKind, Dictionary, Encoding, SHARED_SUFFIX, flags, prefix_hash,
+};
 use crate::payload::MAX_NEEDLE;
 
 /// A literal in a predicate.
@@ -693,7 +695,8 @@ pub(crate) fn matching_codes(
     column: usize,
     dict: Option<&Dictionary>,
 ) -> Result<Option<BTreeSet<u32>>> {
-    let Some(dict) = dict else {
+    // Only a Utf8 dictionary's codes prune: `chunk_may_match` reads them from `Dict` zones.
+    let Some(dict) = dict.filter(|dict| dict.kind() == DictKind::Utf8) else {
         return Ok(None);
     };
     let terms = pruning_terms(b, column);

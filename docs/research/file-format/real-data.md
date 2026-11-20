@@ -23,12 +23,14 @@ The bench had one real dataset: `swe`, from 2 shards of `nebius/SWE-agent-trajec
 
 ## Size (MiB, 4 files)
 
-| Dataset | **Strata** | pq_default | pq_tuned | pq_cetra | vx_default | vx_compact |
-|---|---|---|---|---|---|---|
-| openswe | **29** | 47 | 149 | 48 | 702 | 158 |
-| toucan | **195** | 246 | 295 | 247 | 770 | 233 |
-| wildchat | 590 | 592 | 655 | 596 | 1,429 | **584** |
-| swe (existing) | **25** | 36 | 65 | 36 | 560 | 31 |
+| Dataset | **Strata** | Strata cold | pq_default | pq_tuned | pq_cetra | vx_default | vx_compact |
+|---|---|---|---|---|---|---|---|
+| openswe | **30** | 26 | 47 | 149 | 48 | 702 | 158 |
+| toucan | **190** | 167 | 246 | 295 | 247 | 770 | 233 |
+| wildchat | **564** | 493 | 592 | 655 | 596 | 1,429 | 584 |
+| swe (existing) | **25** | 21 | 36 | 65 | 36 | 560 | 31 |
+
+Strata is the default configuration after the size work of 2026-11-19 (§ Smaller files); Strata cold is the same rows rewritten with `Config::cold()`, as compaction would. Before that work Strata took 29, 195, 590 and 25 MiB. The text below describes the sizes before it.
 
 - **Agent data:**
   - Strata is 38% smaller than the best Parquet on openswe and 20% smaller on toucan. Against Vortex compact it is 82% and 16% smaller.
@@ -212,6 +214,63 @@ DataFusion drops its `SortExec` and merges the partitions with its `SortPreservi
 - Strata now wins `list_llm_1h` on all six datasets.
 - The bytes fetched barely moved (toucan 5,729 → 5,566 KiB) because of the merged ranges. On S3 that is the intended trade; locally, the gain is the decoding saved.
 - Each partition keeps its own top rows, so a table of many partitions decodes `fetch` rows per partition, not `fetch` in all. A bound shared between partitions would cut that further; not done.
+
+## Smaller files
+
+Customers pay S3 for every byte, so three changes target size (2026-11-19). A breakdown of the files first (`restrata`'s tables): on the four agent and chat datasets, payload frames and their gram index are 85–90% of each file (wildchat: 317 MB of shared frames, 54 MB of their gram index, 136 MB of preview frames, 67 MB of narrow columns). On `light`, which has no payloads, the gap to Vortex was in the narrow columns: the float costs took 16.7 MB against Parquet's 6.1, and the previews 54 MB.
+
+**What changed:**
+1. **Previews.** Their payload stores (`own_store_columns`) used zstd level 1 and no dictionary; they now use the shared store's level and a trained dictionary. Narrow text columns (`VARBIN`, `MAP`, `IPC` chunks, at least 1 MiB) train a 64 KiB zstd *chunk dictionary*, kept when it saves at least 5% (prototype-plan § S3, kind 10). On wildchat text, measured first in Python: 64 KiB frames at level 1 gave ratio 2.70, level 3 with a dictionary 3.24.
+2. **Cold files.** `Config::cold()` sets every zstd level to 19, and `strata::rewrite` writes a file again under a config, payload stores included (a merge copies them as they are). A test checks that rewriting a file cold gives the bytes of writing its rows cold.
+3. **Float dictionaries.** A Float64 column whose values repeat at least 8 times on average gets a file dictionary, and its chunks store bit-packed codes (`FLOAT_DICT`). Costs computed from token counts repeat: on one `light` file, `cost_total` has 15,719 distinct values in 397,726 rows. Two other ideas were measured and dropped: decimal encoding (ALP) failed on every chunk, since costs are not short decimals, and byte-stream split made zstd do worse (1.99 against 1.58 MB).
+
+**Sizes** (MiB, 4 files; `bench4` before, `bench5` after with the default config, `bench6` cold):
+
+| Dataset | Before | After | Cold | vx_compact | pq_default |
+|---|---|---|---|---|---|
+| light | 174 | 159 (−9%) | 146 (−16%) | **137** | 152 |
+| payload | 260 | 253 (−3%) | **225** (−13%) | 317 | 333 |
+| swe | 26 | 25 (−4%) | **21** (−19%) | 33 | 37 |
+| openswe | 30 | 30 (−0%) | **26** (−13%) | 159 | 48 |
+| toucan | 196 | 190 (−3%) | **167** (−15%) | 234 | 247 |
+| wildchat | 591 | 564 (−5%) | **493** (−17%) | 585 | 593 |
+
+- On `light` the three cost columns went from 16.7 to 8.5 MB and the previews from 54.3 to 47.2 MB. It is still 16% larger than Vortex compact (7% cold).
+- Strata is now the smallest on wildchat too, 4% under Vortex compact; cold files are 13–19% smaller than before on every dataset.
+
+**Write time** (`restrata`, one run): the default config writes 10–30% slower, from the dictionary training and the second compression of text chunks: light 8.9 → 11.6 s, wildchat 15.0 → 17.1 s, toucan 7.1 → 8.1 s. Cold writes run at 9–21 MiB/s of Arrow on the large datasets (wildchat 335 s): only background compaction can afford them.
+
+**Queries** (min of the medians of two rounds of 20 runs, all three read by the new binary):
+- The default config is within the run-to-run noise (±10%) on every query, except the cold trace lookup, 6–11% slower: a lookup now also reads the chunk dictionaries of text columns in its metadata wave.
+- Cold files read 2–6% slower on full payload scans, 6–9% slower on substring search on toucan and wildchat, and 14–21% slower on cold trace lookups (wildchat 9.8 → 11.6 ms). Narrow queries do not change beyond the noise.
+
+## Braintrust's search benchmark
+
+Braintrust published a search benchmark of Brainstore against two unnamed vendors (blog post "Nitro", 2026-09-24): 4 million spans of 10 KB of FineWeb text, 40 GB, a rare phrase in 4,000 spans and a longer one in one span, on a 16-vCPU machine with the data on S3 and a local NVMe cache. `fmtbench fineweb` rebuilds it (2026-11-20) and `FMT_QUERYSET=braintrust fmtbench query` runs its five published queries.
+
+**Differences from theirs:**
+- Six files of `HuggingFaceFW/fineweb` `sample/10BT` (12.9 GB) hold 1,936,962 spans of 10,000 bytes (19.4 GB), half of theirs. The rare phrase is in 1,937 spans (one in 1,000, as theirs), the long one in one.
+- Each span is one trace whose `input` is the text as an OTel GenAI message; start times are spread over 3 days; 20 files of 100,000 spans each, sorted by (trace_id, start_time).
+- Local disk, OS page cache warm, 12 cores, median of 5 runs. Their numbers are cold (process restarted, NVMe cache cleared, S3 behind it), so ours compare with each other, not with theirs.
+- `LIKE '%…%'` matches bytes; their phrase search matches words, so "help me" counts differ (49,835 here; 490,217 in their 40 GB).
+
+**Sizes:** Parquet default 7,892 MiB, Vortex compact 7,775 MiB, Strata 9,444 MiB (+21%). Unique web text gives dedup nothing, and the gram index and previews add their bytes. Strata wrote at 96 MiB/s of Arrow, Parquet at 155, Vortex compact at 170.
+
+**Queries** (ms, median of 5; Braintrust's published cold numbers for comparison of shapes only):
+
+| Query | Strata | Parquet | Vortex compact | Brainstore (theirs) | Vendor A | Vendor B |
+|---|---|---|---|---|---|---|
+| Count matches of a phrase found nowhere | **90** | 6,401 | 5,777 | 698 | 36,223 | 2,253 |
+| Count matches of "help me" | 3,390 | 6,531 | 5,831 | 1,301 | 23,795 | wrong count |
+| Newest 100 matches of the rare phrase | **272** | 7,724 | 9,732 | 3,528 | 38,637 | 4,403 |
+| Newest matches of the long phrase (1 match) | **84** | 6,403 | 5,848 | 2,248 | 39,296 | 3,180 |
+| Spans per hour (aggregate) | 80 | 88 | **78** | 718 | 432 | 1,343 |
+| Cold trace lookup (ours only) | **11.7** | 29.5 | 124.9 | | | |
+
+- Every format returns the same counts and rows (0; 49,835; 1,937; 1).
+- Rare and absent phrases: the gram index leaves Strata 16–36 MiB of frames to read, against 7.4 GB for Parquet and Vortex: 70–100× faster.
+- A common phrase is Strata's weak case: nearly every frame is a candidate, so it decompresses 2.4 GB of frames (3.4 s), only 2× faster than a Parquet scan. Brainstore counts it from posting lists without reading text.
+- **Bug found and fixed:** the "help me" scan issued 64,561 range reads over 20 files with up to 2,560 in flight (64 per wave, two waves per file at once). It failed with "Too many open files" under the default limit of 1,024 descriptors, so the run above raised the limit to 65,536. Strata now holds at most 256 reads in flight in the whole process (`MAX_GETS_IN_FLIGHT`). Rerun under the default limit, every query passes with the same counts, and the times stay within 2% ("help me" 3,434 ms, phrase none 87 ms, cold lookup 12.0 ms).
 
 ## Reproduce
 

@@ -172,7 +172,7 @@ pub fn spans(
 }
 
 /// One step of a trajectory, after the root. Steps are numbered in message order.
-pub(crate) enum Step {
+pub enum Step {
     /// An assistant message: the LLM call that produced it. `text` is its preview source.
     Llm { input: String, output: String, system_instructions: Option<String>, tool_definitions: Option<String>, text: String },
     /// A tool result `text`, called with the JSON arguments `input` when known.
@@ -180,7 +180,7 @@ pub(crate) enum Step {
 }
 
 /// Appends one trace: the root, then one span per step, in order.
-pub(crate) fn trace_spans(
+pub fn trace_spans(
     index: usize,
     world: &datagen::World,
     rng: &mut datagen::Rng,

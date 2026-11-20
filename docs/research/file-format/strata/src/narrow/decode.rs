@@ -80,6 +80,9 @@ pub fn decode_chunk(
             let width = usize::try_from(*w).map_err(|_| unsupported(dt))?;
             decode_fsb(entry, &mut c, n, width, nulls, dt, at)
         }
+        DataType::Float64 if entry.encoding == Encoding::FloatDict => {
+            decode_float_dict(&mut c, n, nulls, dict, dt, at)
+        }
         _ => {
             let num = numeric_of(dt).ok_or_else(|| corrupt("encoding for type"))?;
             decode_numeric(entry, num, &mut c, n, nulls, dt, at)
@@ -464,7 +467,36 @@ pub fn decode_chunk_view(
     )?))
 }
 
-/// The dictionary a `Dict` or `ListDict` chunk needs.
+/// A `FloatDict` chunk of Float64: a width byte, then one packed code per row. Null rows hold a
+/// code too, which must be in the dictionary.
+fn decode_float_dict(
+    c: &mut Cursor<'_>,
+    n: usize,
+    nulls: Option<NullBuffer>,
+    dict: Option<&Dictionary>,
+    dt: &DataType,
+    at: u64,
+) -> Result<ArrayRef> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let floats = require_dict(dict, at)?
+        .floats()
+        .ok_or_else(|| corrupt("chunk dictionary"))?;
+    let width = c.u8("dictionary width")?;
+    let rest = c.remaining();
+    let packed = c.bytes(rest, "dictionary codes")?;
+    expect_end(c, at)?;
+    let codes = unpack_u32(packed, n, width).map_err(|_| corrupt("dictionary codes"))?;
+    let mut values: Vec<u8> = Vec::with_capacity(n * 8);
+    for code in codes {
+        let value = floats
+            .get(code as usize)
+            .ok_or_else(|| corrupt("dictionary code"))?;
+        values.extend_from_slice(value);
+    }
+    build_array(dt, n, nulls, Buffer::from(values), at)
+}
+
+/// The dictionary a `Dict`, `ListDict` or `FloatDict` chunk needs.
 fn require_dict(dict: Option<&Dictionary>, at: u64) -> Result<&Dictionary> {
     dict.ok_or_else(|| StrataError::Corrupt {
         what: "chunk dictionary",
@@ -797,6 +829,68 @@ mod tests {
     use arrow::datatypes::{Fields, TimeUnit};
     use proptest::prelude::*;
     use std::sync::Arc;
+
+    /// The block entry of `chunk`, for `n` rows.
+    fn entry_of(chunk: &EncodedChunk, n: usize) -> BlockEntry {
+        BlockEntry {
+            first_row: 0,
+            n_rows: n as u32,
+            segment_offset: 8,
+            segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        }
+    }
+
+    #[test]
+    fn a_float_chunk_with_a_dictionary_is_float_dict_with_a_float_zone() {
+        // Nulls, -0.0, 0.0, NaN and 1.25, each repeated; the decoded bits must match.
+        let values: Vec<Option<f64>> = (0..64)
+            .map(|i| [None, Some(-0.0), Some(0.0), Some(f64::NAN), Some(1.25)][i % 5])
+            .collect();
+        let array: ArrayRef = Arc::new(Float64Array::from(values));
+        let dict = dict_of(&array).unwrap();
+        let chunk = round_trip_with(Arc::clone(&array), Some(&dict));
+        assert_eq!(chunk.encoding, Encoding::FloatDict);
+        assert_ne!(chunk.flags & flags::HAS_NAN, 0);
+        assert_ne!(chunk.flags & flags::HAS_NULLS, 0);
+        assert_eq!(f64::from_le_bytes(chunk.min[..8].try_into().unwrap()), 0.0);
+        assert_eq!(f64::from_le_bytes(chunk.max[..8].try_into().unwrap()), 1.25);
+        // A constant chunk stays `Const`.
+        let constant: ArrayRef = Arc::new(Float64Array::from(vec![2.5; 16]));
+        let chunk = round_trip_with(constant, Some(&dict));
+        assert_eq!(chunk.encoding, Encoding::Const);
+    }
+
+    #[test]
+    fn a_float_dict_chunk_needs_its_float_dictionary() {
+        let array: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..64).map(|i| f64::from(i % 3)),
+        ));
+        let dict = dict_of(&array).unwrap();
+        let chunk = encode_chunk(&array, Some(&dict), &Config::default()).unwrap();
+        assert_eq!(chunk.encoding, Encoding::FloatDict);
+        let entry = entry_of(&chunk, 64);
+        let field = Field::new("c", DataType::Float64, true);
+        let body = chunk.body.as_deref();
+        let corrupt_what =
+            |dict: Option<&Dictionary>| match decode_chunk(&entry, body, &field, dict) {
+                Err(StrataError::Corrupt { what, .. }) => what,
+                other => panic!("{other:?}"),
+            };
+        assert_eq!(corrupt_what(None), "chunk dictionary");
+        // A Utf8 dictionary is not a float dictionary.
+        let strings: ArrayRef = Arc::new(StringArray::from(vec!["a"; 8]));
+        assert_eq!(corrupt_what(dict_of(&strings).as_ref()), "chunk dictionary");
+        // A smaller float dictionary leaves a code out of range.
+        let two: ArrayRef = Arc::new(Float64Array::from_iter_values(
+            (0..64).map(|i| f64::from(i % 2)),
+        ));
+        assert_eq!(corrupt_what(dict_of(&two).as_ref()), "dictionary code");
+    }
 
     /// The dictionary of all rows of `array`. The codec tests lift the writer's size limits,
     /// so that random arrays of any size have one.

@@ -23,7 +23,7 @@ use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 
 use crate::format::Cursor;
 use crate::hot::Layer;
-use crate::narrow::{BlockEntry, Dictionary, decode_chunk, decode_chunk_view};
+use crate::narrow::{BlockEntry, DictKind, Dictionary, decode_chunk, decode_chunk_view};
 use crate::payload::{FrameBodies, PayloadHeader, PayloadStore, build_payload_values};
 use crate::{Config, Predicate, ScanKind, ScanRequest, StrataFile, read_column};
 
@@ -178,7 +178,10 @@ fn narrow_chunk_decodes(data: &[u8]) -> bool {
     let dict_len = input.u32() as usize;
     let dict_bytes = input.bytes(dict_len);
     let dict = if flags & 1 != 0 {
-        match Dictionary::decode(dict_bytes, 0) {
+        let Some(kind) = DictKind::of(field.data_type()) else {
+            return false;
+        };
+        match Dictionary::decode(dict_bytes, 0, kind) {
             Ok(dict) => Some(dict),
             Err(_) => return false,
         }
