@@ -1540,11 +1540,11 @@ mod tests {
             })
             .await
             .unwrap();
-        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        crate::eval::trigger::refresh_tracked(&state).await.unwrap();
         // A sweep that read the rules before the insert may still hold a stale tracked set. Every
         // tick that starts after this sleep tracks the project, so refreshing again is enough.
         tokio::time::sleep(crate::eval::EvalTiming::DEFAULT.sweep_every * 2).await;
-        crate::eval::trigger::refresh_rules(&state).await.unwrap();
+        crate::eval::trigger::refresh_tracked(&state).await.unwrap();
         // An unrooted span: the trace stays pending for the 60 s timeout, so nothing completes it.
         let mut span = crate::test_support::dataset_span(0);
         span.parent_span_id = Some(SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1]).unwrap());

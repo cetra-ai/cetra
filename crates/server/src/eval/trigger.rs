@@ -76,23 +76,6 @@ async fn read_rules(state: &AppState) -> Result<HashMap<ProjectId, ProjectRules>
     Ok(projects)
 }
 
-/// Reads the enabled, unpaused rules, groups them by project, and sets the tracked set to their
-/// projects (D-I-8). A project's timeout is its stored `trace_completion_timeout_s` when that is
-/// in range, else the default.
-///
-/// # Errors
-///
-/// [`MetaError`] when the read fails; the tracked set is then left as it was.
-pub(crate) async fn refresh_rules(
-    state: &AppState,
-) -> Result<HashMap<ProjectId, ProjectRules>, MetaError> {
-    let projects = read_rules(state).await?;
-    state
-        .pending
-        .set_tracked(projects.keys().copied().collect());
-    Ok(projects)
-}
-
 /// Reads the rules and the error sources, and sets the tracked set to the union of their
 /// projects (D-I-8, D-IC-2). Either read failing returns its error before the tracked set is
 /// set, so the set stays as it was.
@@ -875,9 +858,9 @@ mod tests {
             let seeded = app.seed().await;
             let project = seeded.project.id;
             add_rule(&app, project, false).await;
-            assert!(refresh_rules(&app.state).await.unwrap().is_empty());
+            assert!(refresh_tracked(&app.state).await.unwrap().0.is_empty());
             add_rule(&app, project, true).await;
-            let tracked = refresh_rules(&app.state).await.unwrap();
+            let tracked = refresh_tracked(&app.state).await.unwrap().0;
             assert_eq!(tracked.len(), 1);
             assert_eq!(tracked[&project].rules.len(), 1);
             assert_eq!(tracked[&project].timeout_ns, 60 * SECOND);
@@ -900,7 +883,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let tracked = refresh_rules(&app.state).await.unwrap();
+                let tracked = refresh_tracked(&app.state).await.unwrap().0;
                 assert_eq!(tracked[&project].timeout_ns, seconds * SECOND);
             }
         }
@@ -984,7 +967,7 @@ mod tests {
             );
 
             // The first refresh that works tracks no project (no rules exist), and drops the row.
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap().0;
             assert_eq!(app.state.pending.len(), 0);
             assert_eq!(
                 flush_once(&app.state).await.unwrap(),
@@ -1163,7 +1146,7 @@ mod tests {
         }
 
         /// A rule of `target` on `project` (no evaluation runs: the sweeper only enqueues), created
-        /// in one write, then `refresh_rules`, so the project is tracked before any commit.
+        /// in one write, then `refresh_tracked`, so the project is tracked before any commit.
         async fn rule(
             app: &TestApp,
             project: ProjectId,
@@ -1223,7 +1206,7 @@ mod tests {
                 })
                 .await
                 .unwrap();
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap().0;
             rule
         }
 
@@ -2015,7 +1998,7 @@ mod tests {
             let connection = http_connection(&app, &seeded, &mock).await;
             let evaluator = http_judge(&app, &seeded, connection).await;
             let rule_id = http_rule(&app, &seeded, evaluator).await;
-            refresh_rules(&app.state).await.unwrap();
+            refresh_tracked(&app.state).await.unwrap().0;
             let tasks = crate::eval::spawn(&app.state, EvalTiming::TEST);
 
             let now = app.state.clock.now_ns();
@@ -2576,12 +2559,12 @@ mod tests {
 
         /// The id of the issue titled `title`.
         async fn issue_id_of(app: &TestApp, title: &str) -> Uuid {
-            let (id,): (Uuid,) = sqlx::query_as("SELECT id FROM issues WHERE title = ?")
+            let (id,): (String,) = sqlx::query_as("SELECT id FROM issues WHERE title = ?")
                 .bind(title)
                 .fetch_one(app.state.meta.reader())
                 .await
                 .unwrap();
-            id
+            Uuid::parse_str(&id).unwrap()
         }
 
         #[tokio::test]
