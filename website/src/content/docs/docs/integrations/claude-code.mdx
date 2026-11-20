@@ -24,7 +24,7 @@ cetra agents setup claude-code --url <CETRA_URL>
 `cetra agents setup claude-code` writes these files, and keeps every other key in them:
 
 - `~/.claude/settings.json`: the `env` keys that turn on Claude Code's traces and send them to your server, and three hooks (`SessionStart`, `UserPromptSubmit` and `CwdChanged`). The hooks send the session's repository, branch and person to cetra. They never send spans.
-- `~/.config/cetra/agents.toml`, with mode 0600: the server, the key and the person that the hooks use.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
 
 Before the first change, setup copies the original `settings.json` to `settings.json.cetra-backup`.
 

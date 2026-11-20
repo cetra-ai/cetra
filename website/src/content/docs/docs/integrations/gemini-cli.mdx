@@ -25,7 +25,7 @@ cetra agents setup gemini-cli --url <CETRA_URL>
 
 - `~/.gemini/settings.json`: the `telemetry` keys that turn on traces and send them to your server, and two hooks (`SessionStart` and `BeforeAgent`). The hooks send the session's repository, branch and person to cetra. They never send spans.
 - `~/.gemini/.env`, with mode 0600: the `OTEL_EXPORTER_OTLP_HEADERS` line that holds your key. Gemini CLI reads its headers from this file, not from `settings.json`.
-- `~/.config/cetra/agents.toml`, with mode 0600: the server, the key and the person that the hooks use.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
 
 If `.env` already has an `OTEL_EXPORTER_OTLP_HEADERS` line, setup replaces it, and the original file is copied to `.env.cetra-backup`. Setup also copies `settings.json` to `settings.json.cetra-backup` before its first change.
 
@@ -57,7 +57,7 @@ Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to 
 
 ## Content
 
-Setup writes `logPrompts: true`, so Gemini CLI sends the prompts and the model's answers on its spans. With `--no-content`, setup writes `logPrompts: false`, and the spans carry no prompts or answers.
+Setup writes `logPrompts: true`, and Gemini CLI sends the prompts and the model's answers on its spans. With `--no-content`, setup writes `logPrompts: false`, which drops the prompts; whether Gemini CLI also drops the answers was not tested.
 
 ## Cost
 

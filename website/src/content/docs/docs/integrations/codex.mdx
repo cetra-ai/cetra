@@ -25,7 +25,7 @@ cetra agents setup codex --url <CETRA_URL>
 
 - `~/.codex/config.toml`: the `[otel]` table. It sends spans to your server and turns off Codex's log and metric exporters. Comments in the file are kept.
 - `~/.codex/hooks.json`: the cetra hook on `SessionStart` and `UserPromptSubmit`. The hooks send the session's repository, branch and person to cetra. They never send spans.
-- `~/.config/cetra/agents.toml`, with mode 0600: the server, the key and the person that the hooks use.
+- `agents.toml`, with mode 0600, next to the credentials file of `cetra login` (`~/.config/cetra/` on Linux, `~/Library/Application Support/cetra/` on macOS): the server, the key and the person that the hooks use.
 
 Before the first change, setup copies each original file to `<file>.cetra-backup`.
 
