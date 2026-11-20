@@ -19,7 +19,8 @@ use crate::api::convert;
 use crate::api::issues::{
     CreateIssueSourceRequest, Issue, IssueDay, IssueEvent, IssueEventPage, IssueExample,
     IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssuePage, IssueSource,
-    IssueSourceKind, IssueSourcePage, IssueState, UpdateIssueSourceRequest,
+    IssueSourceKind, IssueSourcePage, IssueState, MergeIssueRequest, UpdateIssueRequest,
+    UpdateIssueSourceRequest,
 };
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
@@ -49,6 +50,9 @@ const EXAMPLES_PER_NAME: usize = 20;
 const MAX_EXAMPLES: usize = 20;
 /// Events an issue read returns, newest first.
 const MAX_EVENTS: u32 = 100;
+/// Longest title, in characters, and longest description (`PATCH …/issues/{id}`).
+const MAX_TITLE_CHARS: usize = 200;
+const MAX_DESCRIPTION_CHARS: usize = 2_000;
 
 /// Issue routes. Reads need project view; source writes need
 /// [`ProjectPerm::ManageEvaluation`] (D-I-24). Not session-only.
@@ -143,6 +147,26 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             },
             documented: true,
             handler: get(get_issue_events),
+        },
+        RouteDef {
+            method: axum::http::Method::PATCH,
+            path: "/api/v1/projects/{project}/issues/{id}",
+            access: Access::Project {
+                perm: ProjectPerm::Annotate,
+                session_only: false,
+            },
+            documented: true,
+            handler: patch(patch_issue),
+        },
+        RouteDef {
+            method: axum::http::Method::POST,
+            path: "/api/v1/projects/{project}/issues/{id}/merge",
+            access: Access::Project {
+                perm: ProjectPerm::Annotate,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(post_issue_merge),
         },
     ]
 }
@@ -632,22 +656,372 @@ async fn get_issue(
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<error::Json<Issue>, ApiError> {
     let project = access.project.id;
+    let row = issue_or_missing(&state, project, id).await?;
+    Ok(error::Json(
+        read_issue(&state, access.project.org_id, project, row).await?,
+    ))
+}
+
+/// `PATCH …/issues/{id}`: renames, describes, resolves, ignores or reopens an issue (D-IC-10).
+/// Answers the issue as `get` does.
+async fn patch_issue(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+    error::Json(body): error::Json<UpdateIssueRequest>,
+) -> Result<error::Json<Issue>, ApiError> {
+    let user = principal::session_user(&principal)?;
+    let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
-    let row = issue_or_missing(&state, project, id).await?;
+    let user_id = user.id;
+    let update = UpdateIssueRequest {
+        title: body.title.map(|title| title.trim().to_owned()),
+        description: body.description.map(normalize_filter),
+        state: body.state,
+    };
+    check_update(&update)?;
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { patch_checked(conn, project, id, update, now, user_id).await })
+        })
+        .await?;
+    match outcome {
+        IssueWrite::Done { row, changed } => {
+            if changed {
+                tracing::info!(
+                    target: "audit",
+                    issue_id = %id,
+                    project_id = %project,
+                    user_id = %user_id,
+                    "issue updated"
+                );
+            }
+            Ok(error::Json(read_issue(&state, org, project, *row).await?))
+        }
+        IssueWrite::Missing => Err(ApiError::NotFound),
+        IssueWrite::Merged => Err(ApiError::Conflict {
+            detail: "a merged issue cannot change",
+        }),
+    }
+}
+
+/// `POST …/issues/{id}/merge`: folds the issue into `into`, one level deep (D-IC-9). Answers
+/// the target issue.
+async fn post_issue_merge(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(IdPath { id }): error::Path<IdPath>,
+    error::Json(body): error::Json<MergeIssueRequest>,
+) -> Result<error::Json<Issue>, ApiError> {
+    let user = principal::session_user(&principal)?;
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
+    let user_id = user.id;
+    let into = body.into;
+    if into == id {
+        return Err(ApiError::Conflict {
+            detail: "an issue cannot merge into itself",
+        });
+    }
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move { merge_checked(conn, project, id, into, now, user_id).await })
+        })
+        .await?;
+    match outcome {
+        MergeWrite::Done(target) => {
+            tracing::info!(
+                target: "audit",
+                issue_id = %id,
+                into = %into,
+                project_id = %project,
+                user_id = %user_id,
+                "issue merged"
+            );
+            Ok(error::Json(
+                read_issue(&state, org, project, *target).await?,
+            ))
+        }
+        MergeWrite::Missing => Err(ApiError::NotFound),
+        MergeWrite::Refused(detail) => Err(ApiError::Conflict { detail }),
+    }
+}
+
+/// What a PATCH transaction did.
+enum IssueWrite {
+    /// The issue as it is now. `changed` is false when the body changed nothing.
+    Done {
+        row: Box<store::IssueRow>,
+        changed: bool,
+    },
+    /// The issue is missing.
+    Missing,
+    /// The issue is merged, and the body would change it.
+    Merged,
+}
+
+/// What a merge transaction did.
+enum MergeWrite {
+    /// The target issue after the merge.
+    Done(Box<store::IssueRow>),
+    /// The issue or the target is missing.
+    Missing,
+    /// The merge is not allowed (D-IC-9).
+    Refused(&'static str),
+}
+
+/// Checks a PATCH body before the write: the title and description lengths, and that `state`
+/// is not `merged`. Every failure is reported together.
+fn check_update(update: &UpdateIssueRequest) -> Result<(), ApiError> {
+    let mut errors = Vec::new();
+    if update
+        .title
+        .as_deref()
+        .is_some_and(|title| !(1..=MAX_TITLE_CHARS).contains(&title.chars().count()))
+    {
+        errors.push(field_error("title", "title must be 1 to 200 characters"));
+    }
+    if update
+        .description
+        .as_ref()
+        .and_then(Option::as_deref)
+        .is_some_and(|text| text.chars().count() > MAX_DESCRIPTION_CHARS)
+    {
+        errors.push(field_error(
+            "description",
+            "description must be at most 2000 characters",
+        ));
+    }
+    if update.state == Some(IssueState::Merged) {
+        errors.push(field_error(
+            "state",
+            "state must be open, resolved or ignored; merge an issue with the merge operation",
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(bad_request(errors))
+    }
+}
+
+/// The PATCH's write. The issue is read in the same transaction it changes. A merged issue
+/// takes no change (409), and a body that changes nothing writes nothing.
+async fn patch_checked(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    id: Uuid,
+    update: UpdateIssueRequest,
+    now: i64,
+    user: Uuid,
+) -> Result<IssueWrite, MetaError> {
+    let Some(mut row) = store::get_issue_tx(conn, project, id).await? else {
+        return Ok(IssueWrite::Missing);
+    };
+    let renamed = update
+        .title
+        .as_ref()
+        .is_some_and(|title| *title != row.title);
+    let described = update
+        .description
+        .as_ref()
+        .is_some_and(|description| *description != row.description);
+    let restated = update
+        .state
+        .is_some_and(|state| store_state(state) != row.state);
+    if row.state == store::IssueState::Merged {
+        if renamed || described || restated {
+            return Ok(IssueWrite::Merged);
+        }
+        return Ok(IssueWrite::Done {
+            row: Box::new(row),
+            changed: false,
+        });
+    }
+
+    let mut changed = false;
+    let mut events = Vec::new();
+    if let Some(title) = update.title.filter(|title| *title != row.title) {
+        events.push(user_event(
+            id,
+            store::EventKind::Renamed,
+            user,
+            Some(row.title.clone()),
+            Some(title.clone()),
+            now,
+        ));
+        row.title = title;
+        changed = true;
+    }
+    if let Some(description) = update
+        .description
+        .filter(|description| *description != row.description)
+    {
+        row.description = description;
+        changed = true;
+    }
+    if let Some(next) = update
+        .state
+        .map(store_state)
+        .filter(|next| *next != row.state)
+    {
+        let from = row.state;
+        match next {
+            store::IssueState::Resolved => {
+                row.resolved_at = Some(now);
+                row.resolved_by = Some(user);
+                row.regressed = false;
+            }
+            store::IssueState::Open | store::IssueState::Ignored => {
+                row.resolved_at = None;
+                row.resolved_by = None;
+            }
+            // `check_update` refuses `merged` before the write; a merge is never a PATCH.
+            store::IssueState::Merged => return Ok(IssueWrite::Merged),
+        }
+        events.push(user_event(
+            id,
+            store::EventKind::StateChanged,
+            user,
+            Some(from.as_str().to_owned()),
+            Some(next.as_str().to_owned()),
+            now,
+        ));
+        row.state = next;
+        changed = true;
+    }
+    if changed {
+        row.updated_at = now;
+        store::update_issue(conn, &row).await?;
+        for event in &events {
+            store::insert_event(conn, event).await?;
+        }
+    }
+    Ok(IssueWrite::Done {
+        row: Box::new(row),
+        changed,
+    })
+}
+
+/// The merge's write (D-IC-9). Both issues are read in the same transaction that changes them.
+/// The merged issue's own merged issues point at the target, so chains stay one level deep.
+async fn merge_checked(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    id: Uuid,
+    into: Uuid,
+    now: i64,
+    user: Uuid,
+) -> Result<MergeWrite, MetaError> {
+    let Some(mut issue) = store::get_issue_tx(conn, project, id).await? else {
+        return Ok(MergeWrite::Missing);
+    };
+    let Some(mut target) = store::get_issue_tx(conn, project, into).await? else {
+        return Ok(MergeWrite::Missing);
+    };
+    if issue.source_id != target.source_id {
+        return Ok(MergeWrite::Refused(
+            "issues merge only within one issue source",
+        ));
+    }
+    if issue.state == store::IssueState::Merged {
+        return Ok(MergeWrite::Refused("the issue is already merged"));
+    }
+    if target.state == store::IssueState::Merged {
+        return Ok(MergeWrite::Refused("the target issue is merged"));
+    }
+
+    issue.state = store::IssueState::Merged;
+    issue.merged_into = Some(into);
+    issue.updated_at = now;
+    store::update_issue(conn, &issue).await?;
+    store::retarget_merged(conn, id, into).await?;
+
+    target.first_seen = target.first_seen.min(issue.first_seen);
+    target.last_seen = target.last_seen.max(issue.last_seen);
+    target.updated_at = now;
+    store::update_issue(conn, &target).await?;
+
+    store::insert_event(
+        conn,
+        &user_event(
+            id,
+            store::EventKind::Merged,
+            user,
+            None,
+            Some(into.to_string()),
+            now,
+        ),
+    )
+    .await?;
+    store::insert_event(
+        conn,
+        &user_event(
+            into,
+            store::EventKind::Merged,
+            user,
+            Some(id.to_string()),
+            None,
+            now,
+        ),
+    )
+    .await?;
+    Ok(MergeWrite::Done(Box::new(target)))
+}
+
+/// An event a user caused, at `at`.
+fn user_event(
+    issue: Uuid,
+    kind: store::EventKind,
+    actor: Uuid,
+    from: Option<String>,
+    to: Option<String>,
+    at: i64,
+) -> store::EventRow {
+    store::EventRow {
+        id: Uuid::now_v7(),
+        issue_id: issue,
+        kind,
+        actor_user_id: Some(actor),
+        from_value: from,
+        to_value: to,
+        at,
+    }
+}
+
+/// The store's state of an API state.
+fn store_state(state: IssueState) -> store::IssueState {
+    match state {
+        IssueState::Open => store::IssueState::Open,
+        IssueState::Resolved => store::IssueState::Resolved,
+        IssueState::Ignored => store::IssueState::Ignored,
+        IssueState::Merged => store::IssueState::Merged,
+    }
+}
+
+/// The issue as the API shows it: its source, its merged issues and its counts over the last 24
+/// hours (the read of `get`).
+async fn read_issue(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+    row: store::IssueRow,
+) -> Result<Issue, ApiError> {
+    let now = state.clock.now_ns();
     let source = store::get_source(state.meta.reader(), project, row.source_id)
         .await?
         .ok_or_else(missing_source)?;
-    let merged = store::merged_ids(state.meta.reader(), project, id).await?;
-    let names = names_of(id, &merged);
+    let merged = store::merged_ids(state.meta.reader(), project, row.id).await?;
+    let names = names_of(row.id, &merged);
     let window = TimeWindow::new(now.saturating_sub(DAY_NS), now)?;
-    let counts = tallies(&state, org, project, &names, window).await?;
-    Ok(error::Json(issue_json(
-        &row,
-        &source,
-        merged,
-        total(&names, &counts),
-    )))
+    let counts = tallies(state, org, project, &names, window).await?;
+    Ok(issue_json(&row, &source, merged, total(&names, &counts)))
 }
 
 /// `GET …/issues/{id}/occurrences`: the days of the period with occurrences, and the newest
@@ -1712,5 +2086,389 @@ mod tests {
             .send()
             .await;
         assert_eq!(listed.status, 200, "{}", text(&listed));
+    }
+
+    fn issue_url(project: ProjectId, id: Uuid) -> String {
+        format!("{}/{id}", issues(project))
+    }
+
+    async fn patch_issue_request(
+        app: &TestApp,
+        seeded: &Seeded,
+        id: Uuid,
+        body: &Value,
+    ) -> TestResponse {
+        app.request(Method::PATCH, &issue_url(seeded.project.id, id))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(body)
+            .send()
+            .await
+    }
+
+    async fn merge_request(app: &TestApp, seeded: &Seeded, id: Uuid, into: Uuid) -> TestResponse {
+        app.request(
+            Method::POST,
+            &format!("{}/merge", issue_url(seeded.project.id, id)),
+        )
+        .header(header::COOKIE.as_str(), &seeded.cookie)
+        .json(&json!({ "into": into }))
+        .send()
+        .await
+    }
+
+    /// The events of `id`, newest first.
+    async fn events_of(app: &TestApp, seeded: &Seeded, id: Uuid) -> Vec<Value> {
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/events", issue_url(seeded.project.id, id)),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        response.json::<Value>()["data"].as_array().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn patch_resolve_records_an_event_and_sets_resolved_at() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let issue = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, issue, "boom", IssueState::Open, now),
+        )
+        .await;
+
+        let resolved =
+            patch_issue_request(&app, &seeded, issue, &json!({"state": "resolved"})).await;
+        assert_eq!(resolved.status, 200, "{}", text(&resolved));
+        let body: Value = resolved.json();
+        assert_eq!(body["state"], "resolved");
+        assert_eq!(body["resolved_by"], seeded.user_id.to_string());
+        assert!(body["resolved_at"].is_string());
+        let events = events_of(&app, &seeded, issue).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "state_changed");
+        assert_eq!(events[0]["from_value"], "open");
+        assert_eq!(events[0]["to_value"], "resolved");
+        assert_eq!(events[0]["actor_user_id"], seeded.user_id.to_string());
+
+        // The same state again changes nothing and writes no event.
+        let again = patch_issue_request(&app, &seeded, issue, &json!({"state": "resolved"})).await;
+        assert_eq!(again.status, 200, "{}", text(&again));
+        assert_eq!(events_of(&app, &seeded, issue).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn patch_reopen_clears_resolved_at() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let issue = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, issue, "boom", IssueState::Open, now),
+        )
+        .await;
+        let resolved =
+            patch_issue_request(&app, &seeded, issue, &json!({"state": "resolved"})).await;
+        assert_eq!(resolved.status, 200, "{}", text(&resolved));
+
+        let reopened = patch_issue_request(&app, &seeded, issue, &json!({"state": "open"})).await;
+        assert_eq!(reopened.status, 200, "{}", text(&reopened));
+        let body: Value = reopened.json();
+        assert_eq!(body["state"], "open");
+        assert!(body.get("resolved_at").is_none(), "omitted once reopened");
+        assert!(body["resolved_by"].is_null());
+        let events = events_of(&app, &seeded, issue).await;
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["from_value"], "resolved");
+        assert_eq!(events[0]["to_value"], "open");
+    }
+
+    #[tokio::test]
+    async fn patch_title_records_renamed_and_description_records_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let issue = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, issue, "boom", IssueState::Open, now),
+        )
+        .await;
+
+        let renamed =
+            patch_issue_request(&app, &seeded, issue, &json!({"title": "  Renamed  "})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        assert_eq!(renamed.json::<Value>()["title"], "Renamed");
+        let events = events_of(&app, &seeded, issue).await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["kind"], "renamed");
+        assert_eq!(events[0]["from_value"], "boom");
+        assert_eq!(events[0]["to_value"], "Renamed");
+
+        let described =
+            patch_issue_request(&app, &seeded, issue, &json!({"description": "Seen twice"})).await;
+        assert_eq!(described.status, 200, "{}", text(&described));
+        assert_eq!(described.json::<Value>()["description"], "Seen twice");
+        let cleared =
+            patch_issue_request(&app, &seeded, issue, &json!({"description": null})).await;
+        assert_eq!(cleared.status, 200, "{}", text(&cleared));
+        assert!(cleared.json::<Value>()["description"].is_null());
+        assert_eq!(events_of(&app, &seeded, issue).await.len(), 1);
+
+        let unknown =
+            patch_issue_request(&app, &seeded, Uuid::now_v7(), &json!({"title": "x"})).await;
+        assert_eq!(unknown.status, 404, "{}", text(&unknown));
+    }
+
+    #[tokio::test]
+    async fn patch_refuses_merged_state_and_blank_title() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let issue = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, issue, "boom", IssueState::Open, now),
+        )
+        .await;
+
+        let merged = patch_issue_request(&app, &seeded, issue, &json!({"state": "merged"})).await;
+        assert_eq!(merged.status, 400, "{}", text(&merged));
+        assert_eq!(merged.problem().errors[0].field, "state");
+
+        let blank = patch_issue_request(&app, &seeded, issue, &json!({"title": "   "})).await;
+        assert_eq!(blank.status, 400, "{}", text(&blank));
+        assert_eq!(blank.problem().errors[0].field, "title");
+
+        let unknown_field =
+            patch_issue_request(&app, &seeded, issue, &json!({"kind": "error"})).await;
+        assert_eq!(unknown_field.status, 400, "{}", text(&unknown_field));
+    }
+
+    #[tokio::test]
+    async fn patch_of_a_merged_issue_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let target = Uuid::now_v7();
+        let merged = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, target, "target", IssueState::Open, now),
+        )
+        .await;
+        put_issue(
+            &app,
+            issue_row(project, source, merged, "merged", IssueState::Open, now),
+        )
+        .await;
+        let folded = merge_request(&app, &seeded, merged, target).await;
+        assert_eq!(folded.status, 200, "{}", text(&folded));
+
+        let renamed = patch_issue_request(&app, &seeded, merged, &json!({"title": "Other"})).await;
+        assert_eq!(renamed.status, 409, "{}", text(&renamed));
+        assert_eq!(renamed.problem().code, ProblemCode::Conflict);
+        let reopened = patch_issue_request(&app, &seeded, merged, &json!({"state": "open"})).await;
+        assert_eq!(reopened.status, 409, "{}", text(&reopened));
+
+        let target_renamed =
+            patch_issue_request(&app, &seeded, target, &json!({"title": "Renamed"})).await;
+        assert_eq!(target_renamed.status, 200, "{}", text(&target_renamed));
+    }
+
+    #[tokio::test]
+    async fn merge_moves_counts_to_the_target() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let target = Uuid::now_v7();
+        let merged = Uuid::now_v7();
+        put_issue(
+            &app,
+            issue_row(project, source, target, "target", IssueState::Open, now),
+        )
+        .await;
+        put_issue(
+            &app,
+            issue_row(project, source, merged, "merged", IssueState::Open, now),
+        )
+        .await;
+        occurrence(&app, &seeded, source, target, TRACE_A, 1, Some("u1")).await;
+        occurrence(&app, &seeded, source, merged, TRACE_B, 2, Some("u2")).await;
+        occurrence(&app, &seeded, source, merged, TRACE_C, 3, Some("u3")).await;
+
+        let response = merge_request(&app, &seeded, merged, target).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let read: Value = response.json();
+        assert_eq!(read["id"], target.to_string());
+        assert_eq!(read["count"], 3);
+        assert_eq!(read["users"], 2);
+        assert_eq!(read["merged_from"], json!([merged.to_string()]));
+
+        let shown = get_issues(&app, &seeded, &format!("/{merged}"))
+            .await
+            .json::<Value>();
+        assert_eq!(shown["state"], "merged");
+        assert_eq!(shown["merged_into"], target.to_string());
+
+        let open = get_issues(&app, &seeded, "").await.json::<Value>();
+        assert_eq!(ids_in(&open), vec![target.to_string()]);
+        assert_eq!(open["data"][0]["count"], 3);
+
+        let merged_events = events_of(&app, &seeded, merged).await;
+        assert_eq!(merged_events[0]["kind"], "merged");
+        assert_eq!(merged_events[0]["to_value"], target.to_string());
+        let target_events = events_of(&app, &seeded, target).await;
+        assert_eq!(target_events[0]["kind"], "merged");
+        assert_eq!(target_events[0]["from_value"], merged.to_string());
+    }
+
+    #[tokio::test]
+    async fn merge_flattens_chains() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let (a, b, c) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        for (id, title) in [(a, "a"), (b, "b"), (c, "c")] {
+            put_issue(
+                &app,
+                issue_row(project, source, id, title, IssueState::Open, now),
+            )
+            .await;
+        }
+
+        let first = merge_request(&app, &seeded, a, b).await;
+        assert_eq!(first.status, 200, "{}", text(&first));
+        let second = merge_request(&app, &seeded, b, c).await;
+        assert_eq!(second.status, 200, "{}", text(&second));
+
+        let read_a = get_issues(&app, &seeded, &format!("/{a}"))
+            .await
+            .json::<Value>();
+        assert_eq!(read_a["merged_into"], c.to_string());
+        let read_b = get_issues(&app, &seeded, &format!("/{b}"))
+            .await
+            .json::<Value>();
+        assert_eq!(read_b["merged_into"], c.to_string());
+        let read_c = get_issues(&app, &seeded, &format!("/{c}"))
+            .await
+            .json::<Value>();
+        let from = read_c["merged_from"].as_array().unwrap();
+        assert_eq!(from.len(), 2, "{read_c}");
+        assert!(from.contains(&json!(a.to_string())));
+        assert!(from.contains(&json!(b.to_string())));
+    }
+
+    #[tokio::test]
+    async fn merge_refuses_self_another_source_a_merged_issue_and_a_merged_target() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let mut other_body = source_body("Other");
+        other_body["enabled"] = json!(false);
+        let other = id_of(&create_ok(&app, &seeded, &other_body).await);
+        let now = app.state.clock.now_ns();
+        let (a, b, c, x) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        for (id, owner, title) in [
+            (a, source, "a"),
+            (b, source, "b"),
+            (c, source, "c"),
+            (x, other, "x"),
+        ] {
+            put_issue(
+                &app,
+                issue_row(project, owner, id, title, IssueState::Open, now),
+            )
+            .await;
+        }
+
+        let itself = merge_request(&app, &seeded, a, a).await;
+        assert_eq!(itself.status, 409, "{}", text(&itself));
+        assert_eq!(itself.problem().code, ProblemCode::Conflict);
+        let elsewhere = merge_request(&app, &seeded, a, x).await;
+        assert_eq!(elsewhere.status, 409, "{}", text(&elsewhere));
+        assert_eq!(elsewhere.problem().code, ProblemCode::Conflict);
+
+        let folded = merge_request(&app, &seeded, a, b).await;
+        assert_eq!(folded.status, 200, "{}", text(&folded));
+        let again = merge_request(&app, &seeded, a, c).await;
+        assert_eq!(again.status, 409, "{}", text(&again));
+        let into_merged = merge_request(&app, &seeded, c, a).await;
+        assert_eq!(into_merged.status, 409, "{}", text(&into_merged));
+
+        let missing = merge_request(&app, &seeded, c, Uuid::now_v7()).await;
+        assert_eq!(missing.status, 404, "{}", text(&missing));
+    }
+
+    #[tokio::test]
+    async fn viewer_can_read_but_not_triage() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        put_issue(
+            &app,
+            issue_row(project, source, a, "a", IssueState::Open, now),
+        )
+        .await;
+        put_issue(
+            &app,
+            issue_row(project, source, b, "b", IssueState::Open, now),
+        )
+        .await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+
+        let renamed = app
+            .request(Method::PATCH, &issue_url(project, a))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&json!({"title": "Mine"}))
+            .send()
+            .await;
+        assert_eq!(renamed.status, 403, "{}", text(&renamed));
+        let folded = app
+            .request(Method::POST, &format!("{}/merge", issue_url(project, a)))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&json!({"into": b}))
+            .send()
+            .await;
+        assert_eq!(folded.status, 403, "{}", text(&folded));
+
+        let read = app
+            .request(Method::GET, &issue_url(project, a))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .send()
+            .await;
+        assert_eq!(read.status, 200, "{}", text(&read));
+        assert_eq!(read.json::<Value>()["title"], "a");
     }
 }

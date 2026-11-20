@@ -1,7 +1,5 @@
 //! The active issue source limit of an org (D-IC-13).
 
-#![cfg_attr(not(test), allow(dead_code))] // no non-test caller until the sources API lands (M1.7)
-
 use cetra_core::ids::OrgId;
 
 use crate::http::AppState;

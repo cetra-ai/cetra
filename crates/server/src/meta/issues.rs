@@ -1,7 +1,6 @@
 //! `issue_sources`, `issues` and `issue_events` rows (spec 04 § Issues, D-IC-1, D-IC-3,
 //! D-IC-10). `kind`, `state` and the event kind are stored as text; a stored value outside
 //! its list is corrupt.
-#![cfg_attr(not(test), allow(dead_code))] // M1.6 onward read and write these rows
 
 use std::collections::HashMap;
 

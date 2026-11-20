@@ -96,7 +96,7 @@ use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::issues::{
     CreateIssueSourceRequest, Issue, IssueDay, IssueEvent, IssueEventPage, IssueExample,
     IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueSource, IssueSourceKind,
-    IssueSourcePage, IssueState, UpdateIssueSourceRequest,
+    IssueSourcePage, IssueState, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
 };
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -459,6 +459,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateIssueSourceRequest>();
     set.insert::<UpdateIssueSourceRequest>();
     set.insert::<IssueState>();
+    set.insert::<UpdateIssueRequest>();
+    set.insert::<MergeIssueRequest>();
     set.insert_page::<Issue>("IssuePage");
     set.insert::<IssueDay>();
     set.insert::<IssueExample>();
@@ -644,6 +646,7 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
     ("UpdateIssueSourceRequest", "filter"),
+    ("UpdateIssueRequest", "description"),
 ];
 
 /// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
@@ -2930,6 +2933,30 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
         .parameters(Some(vec![project_param(), id.clone()]))
         .responses(responses("200", json_of::<Issue>("The issue."), READ_ERRORS))
         .build();
+    let patch = operation("patch_issue", "issues", "Update an issue")
+        .description(Some(
+            "Project members and above. `title` renames the issue and records a `renamed` event. `description` records no event; `null` clears it. `state` resolves, ignores or reopens the issue and records a `state_changed` event; a resolved issue that recurs is reopened as regressed. `merged` is refused: merge with the merge operation. Setting a value it already has changes nothing. A merged issue cannot change (409).",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("UpdateIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The updated issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
+    let merge = operation("post_issue_merge", "issues", "Merge an issue into another")
+        .description(Some(
+            "Project members and above. Folds the issue into `into`, an issue of the same source that is not merged. The issues merged into it move to `into` too, so chains stay one level deep. Its occurrences count on `into`. Answers the target issue. 409 when both are the same issue, the issues are in different sources, this issue is already merged, or the target is merged.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .request_body(Some(json_body("MergeIssueRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Issue>("The target issue, with its counts over the last 24 hours."),
+            &[400, 401, 403, 404, 409, 429],
+        ))
+        .build();
     let occurrences = operation(
         "get_issue_occurrences",
         "issues",
@@ -2967,6 +2994,14 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/issues/{{id}}"),
             PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/merge"),
+            PathItem::new(HttpMethod::Post, merge),
         )
         .path(
             format!("{PROJECT}/issues/{{id}}/occurrences"),

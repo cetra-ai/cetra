@@ -537,6 +537,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_issue_events",
     ),
     (
+        "patch",
+        "/api/v1/projects/{project}/issues/{id}",
+        "patch_issue",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/merge",
+        "post_issue_merge",
+    ),
+    (
         "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
@@ -1176,6 +1186,8 @@ fn document_lint() {
             || *id == "post_backfill"
             || *id == "post_issue_source"
             || *id == "patch_issue_source"
+            || *id == "patch_issue"
+            || *id == "post_issue_merge"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
@@ -1544,6 +1556,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
             &["description", "input_schema", "expected_schema"],
         ),
         ("UpdateIssueSourceRequest", &["filter"]),
+        ("UpdateIssueRequest", &["description"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()

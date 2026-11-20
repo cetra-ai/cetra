@@ -349,6 +349,32 @@ pub struct IssueEventPage {
     pub data: Vec<IssueEvent>,
 }
 
+/// `PATCH …/issues/{id}` body. Absent means unchanged (spec 09 § Issues).
+///
+/// Optional fields refuse `null`, except `description`, where `null` clears it.
+#[derive(Debug, Clone, PartialEq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateIssueRequest {
+    /// New title, 1 to 200 characters after trimming. A change records a `renamed` event.
+    #[serde(default, deserialize_with = "present")]
+    pub title: Option<String>,
+    /// New description, at most 2000 characters. `null` or `""` clears it. Records no event.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
+    /// `open`, `resolved` or `ignored`. `merged` is refused: merge with the merge operation.
+    #[serde(default, deserialize_with = "present")]
+    pub state: Option<IssueState>,
+}
+
+/// `POST …/issues/{id}/merge` body (spec 09 § Issues).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MergeIssueRequest {
+    /// The issue to merge into. It must be an issue of the same source that is not merged.
+    pub into: Uuid,
+}
+
 fn yes() -> bool {
     true
 }

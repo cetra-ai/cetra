@@ -27,6 +27,7 @@ import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-
 import experimentDocument from "../../../fixtures/api/static/experiment.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
 import issueSourceDocument from "../../../fixtures/api/static/issue-source.json";
+import issueDocument from "../../../fixtures/api/static/issue.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
@@ -286,6 +287,16 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_issue_source",
     method: "delete",
     path: "/api/v1/projects/{project}/issue-sources/{id}",
+  },
+  {
+    operationId: "patch_issue",
+    method: "patch",
+    path: "/api/v1/projects/{project}/issues/{id}",
+  },
+  {
+    operationId: "post_issue_merge",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/merge",
   },
   {
     operationId: "post_online_rule_resume",
@@ -719,6 +730,9 @@ const RESPONSES: Record<string, Respond> = {
   patch_issue_source: ({ body }) =>
     HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }),
   delete_issue_source: () => noContent(),
+  patch_issue: ({ body, params }) =>
+    HttpResponse.json({ ...issueDocument, ...body, id: params.id }),
+  post_issue_merge: () => HttpResponse.json(issueDocument),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),

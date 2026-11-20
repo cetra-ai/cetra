@@ -57,7 +57,6 @@ pub(crate) enum Writer {
         rule_id: Option<Uuid>,
     },
     /// An issue source writing occurrences (D-IC-11). Not billed and not capped.
-    #[cfg_attr(not(test), allow(dead_code))]
     Issue { source_id: Uuid },
 }
 
@@ -600,7 +599,6 @@ const OCCURRENCE_TAG: &[u8] = b"cetra.issue-occurrence.v1";
 /// The id of the occurrence of `issue` on `trace` (D-IC-18): a UUIDv7 whose time is the
 /// trace's start (milliseconds, clamped at 0) and whose random bits come from SHA-256.
 /// The caller clamps `trace_start_ns` to `now`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn occurrence_id(
     project: ProjectId,
     trace: TraceId,
