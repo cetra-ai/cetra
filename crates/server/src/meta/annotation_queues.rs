@@ -219,7 +219,7 @@ pub(crate) struct NewItem {
 }
 
 /// What [`insert_items_tx`] did. `existing` counts the targets that were already in the queue.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ItemsInsert {
     Done {
         added: u64,

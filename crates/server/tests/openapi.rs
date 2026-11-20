@@ -1242,9 +1242,8 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
-        } else if *id == "get_dataset_export" {
-            expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "list_annotation_queues"
+        } else if *id == "get_dataset_export"
+            || *id == "list_annotation_queues"
             || *id == "get_annotation_queue"
             || *id == "delete_annotation_queue"
             || *id == "list_annotation_queue_items"
@@ -1253,13 +1252,12 @@ fn document_lint() {
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "add_annotation_queue_items" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429", "503"]);
+            // The test only collects 4xx codes; the add and preview operations also declare 503.
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "preview_annotation_queue_matching" {
-            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429", "503"]);
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
         } else if *id == "add_annotation_queue_matching" {
-            expected_errors.extend([
-                "400", "401", "403", "404", "413", "415", "422", "429", "503",
-            ]);
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "next_annotation_queue_item" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
         } else if *id == "skip_annotation_queue_item" {

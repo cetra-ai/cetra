@@ -2334,10 +2334,7 @@ mod tests {
         .await;
         let ((), logs) = capture_logs(async { worker(&app).await }).await;
 
-        assert!(
-            !logs.contains("deletion removed dataset and experiment copies"),
-            "{logs}"
-        );
+        assert!(!logs.contains("deletion removed derived copies"), "{logs}");
         assert_eq!(
             count_rows(
                 &app,

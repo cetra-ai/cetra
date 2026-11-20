@@ -330,6 +330,41 @@ mod tests {
         assert_eq!(body["code"], "bad_request");
     }
 
+    /// A trace annotation queue of the seeded project, created now. Returns its id.
+    async fn queue(app: &TestApp, seeded: &Seeded) -> Uuid {
+        use crate::meta::annotation_queues::{NewQueue, QueueCreate, Target, insert_queue_tx};
+        let now = app.state.clock.now_ns();
+        let (org, project) = (seeded.org_id, seeded.project.id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let created = insert_queue_tx(
+                        conn,
+                        project,
+                        org,
+                        NewQueue {
+                            name: "Review".to_owned(),
+                            description: None,
+                            instructions: None,
+                            target: Target::Trace,
+                            definition_ids: Vec::new(),
+                            created_by: None,
+                        },
+                        None,
+                        now,
+                    )
+                    .await?;
+                    let QueueCreate::Created(row) = created else {
+                        panic!("the queue is created");
+                    };
+                    Ok(row.id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
     /// A human trace score named `name` on the trace `trace`, with no `score_id` (derived),
     /// written to `queue_id` when given.
     fn trace_score(trace: &str, name: &str, queue_id: Option<Uuid>) -> ScoreCreate {
@@ -355,7 +390,7 @@ mod tests {
     async fn scores_store_and_filter_by_queue_id() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
-        let queue: Uuid = "01900000-0000-7000-8000-0000000000a1".parse().unwrap();
+        let queue = queue(&app, &seeded).await;
         let batch = ScoreBatch {
             scores: vec![
                 trace_score("a1000000000000000000000000000001", "tone", Some(queue)),
@@ -388,7 +423,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let trace = "a1000000000000000000000000000001";
-        let queue: Uuid = "01900000-0000-7000-8000-0000000000a1".parse().unwrap();
+        let queue = queue(&app, &seeded).await;
 
         let without = ScoreBatch {
             scores: vec![trace_score(trace, "tone", None)],

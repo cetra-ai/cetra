@@ -136,7 +136,7 @@ pub(super) async fn resolve(
             dataset_item_revisions = cascade.dataset_item_revisions,
             experiment_items = cascade.experiment_items,
             queue_items = queue_items,
-            "deletion removed dataset and experiment copies"
+            "deletion removed derived copies"
         );
     }
     Ok(stored)

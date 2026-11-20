@@ -491,7 +491,11 @@ async fn list_items(
     error::Query(params): error::Query<AnnotationQueueItemListParams>,
 ) -> Result<error::Json<Page<AnnotationQueueItem>>, ApiError> {
     ensure_queue(&state, access.project.id, path.id).await?;
-    let after = params.cursor.as_deref().map(decode_item_cursor).transpose()?;
+    let after = params
+        .cursor
+        .as_deref()
+        .map(decode_item_cursor)
+        .transpose()?;
     let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
     let (rows, next) = store::list_items(
         state.meta.reader(),
@@ -1305,7 +1309,14 @@ async fn skip_item(
         .and_then(|text| checked_text(text, "reason", MAX_REASON_CHARS, &mut errors))
         .flatten();
     refuse_if_any(errors)?;
-    finish(&state, &principal, &access, path, store::Finish::Skip(reason)).await
+    finish(
+        &state,
+        &principal,
+        &access,
+        path,
+        store::Finish::Skip(reason),
+    )
+    .await
 }
 
 /// `POST /annotation-queues/{id}/items/{item_id}/reopen`: sets a completed or skipped item back to
@@ -1316,7 +1327,7 @@ async fn reopen_item(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<ItemPath>,
 ) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
-    let user = reviewer(&principal)?;
+    reviewer(&principal)?;
     let project = access.project.id;
     let (queue_id, item_id) = (path.id, path.item_id);
     ensure_queue(&state, project, queue_id).await?;
@@ -1325,9 +1336,9 @@ async fn reopen_item(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move {
-                store::reopen_tx(conn, queue_id, item_id, visible_from, now).await
-            })
+            Box::pin(
+                async move { store::reopen_tx(conn, queue_id, item_id, visible_from, now).await },
+            )
         })
         .await?;
     let answer = review_answer(outcome, now)?;
@@ -1985,12 +1996,7 @@ mod tests {
     }
 
     /// Adds `body` to the queue `queue` as the owner.
-    async fn add(
-        app: &TestApp,
-        seeded: &Seeded,
-        queue: Uuid,
-        body: Value,
-    ) -> TestResponse {
+    async fn add(app: &TestApp, seeded: &Seeded, queue: Uuid, body: Value) -> TestResponse {
         let path = format!("{}/{queue}/items", base(seeded));
         send(app, Method::POST, &path, &seeded.cookie, Some(body)).await
     }
@@ -2011,8 +2017,10 @@ mod tests {
         let definition = define(&app, seeded.project.id, "relevance", false).await;
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now)
+            .await;
         let body = json!({"items": [
             {"trace_id": trace_id(1).to_hex()},
             {"trace_id": trace_id(2).to_hex()},
@@ -2041,10 +2049,18 @@ mod tests {
 
         let items = items_of(&app, &seeded, queue.id).await;
         assert_eq!(items.len(), 2);
-        assert!(items.iter().all(|item| item.status == QueueItemStatus::Pending));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.status == QueueItemStatus::Pending)
+        );
         assert!(items.iter().all(|item| item.target_time == now));
         assert!(items.iter().all(|item| item.span_id.is_none()));
-        assert!(items.iter().all(|item| item.added_by == QueueItemAddedBy::User));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.added_by == QueueItemAddedBy::User)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2054,7 +2070,8 @@ mod tests {
         let definition = define(&app, seeded.project.id, "relevance", false).await;
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
 
         let wrong = add(
             &app,
@@ -2105,8 +2122,26 @@ mod tests {
         let spans = create_of(&app, &seeded, "Spans", "span", definition).await;
         let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
         commit_span(&app, &seeded, trace_id(1), 1, now, Some("s-1"), false).await;
-        commit_span(&app, &seeded, trace_id(2), 2, now + 5_000_000_000, Some("s-1"), false).await;
-        commit_span(&app, &seeded, trace_id(3), 3, now + 1_000_000_000, Some("s-1"), false).await;
+        commit_span(
+            &app,
+            &seeded,
+            trace_id(2),
+            2,
+            now + 5_000_000_000,
+            Some("s-1"),
+            false,
+        )
+        .await;
+        commit_span(
+            &app,
+            &seeded,
+            trace_id(3),
+            3,
+            now + 1_000_000_000,
+            Some("s-1"),
+            false,
+        )
+        .await;
 
         let span_added = add(
             &app,
@@ -2189,8 +2224,8 @@ mod tests {
         let traces = create(&app, &seeded, "Traces", definition).await;
         let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now)
+            .await;
         commit_span(&app, &seeded, trace_id(1), 1, now, Some("s-guard"), false).await;
         app.state.deletions.guard.add_traces(
             seeded.project.id,
@@ -2256,7 +2291,8 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
         for n in 1..=3 {
-            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now)
+                .await;
         }
         let added = add(
             &app,
@@ -2360,7 +2396,8 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let other = create(&app, &seeded, "Other", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
         add(
             &app,
             &seeded,
@@ -2395,8 +2432,10 @@ mod tests {
         let first = create(&app, &seeded, "First", definition).await;
         let second = create(&app, &seeded, "Second", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now)
+            .await;
         add(
             &app,
             &seeded,
@@ -2412,11 +2451,7 @@ mod tests {
         )
         .await;
 
-        let path = format!(
-            "{}?target_trace_id={}",
-            base(&seeded),
-            trace_id(1).to_hex()
-        );
+        let path = format!("{}?target_trace_id={}", base(&seeded), trace_id(1).to_hex());
         let response = send(&app, Method::GET, &path, &seeded.cookie, None).await;
         assert_eq!(response.status, StatusCode::OK);
         let page: Page<AnnotationQueue> = response.json();
@@ -2433,7 +2468,8 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
         for n in 1..=4 {
-            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now)
+                .await;
         }
         let viewer = app
             .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
@@ -2544,7 +2580,8 @@ mod tests {
         let now = app.state.clock.now_ns();
         let mut targets = Vec::new();
         for trace in 1..=n {
-            app.commit_trace_at(&seeded.project, trace_id(trace), 0, now).await;
+            app.commit_trace_at(&seeded.project, trace_id(trace), 0, now)
+                .await;
             targets.push(json!({"trace_id": trace_id(trace).to_hex()}));
         }
         let added = add(app, seeded, queue.id, json!({"items": targets})).await;
@@ -2579,6 +2616,7 @@ mod tests {
     }
 
     /// A claimed item from a `200` answer.
+    #[allow(clippy::needless_pass_by_value)]
     fn claimed(response: TestResponse) -> AnnotationQueueItem {
         assert_eq!(response.status, StatusCode::OK);
         response.json()
@@ -2589,18 +2627,34 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 3).await;
-        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
-        let carol = app.add_member(&seeded, "carol@example.com", OrgRole::Member).await;
-        let dan = app.add_member(&seeded, "dan@example.com", OrgRole::Member).await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
+        let carol = app
+            .add_member(&seeded, "carol@example.com", OrgRole::Member)
+            .await;
+        let dan = app
+            .add_member(&seeded, "dan@example.com", OrgRole::Member)
+            .await;
 
         let first = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
         let second = claimed(
-            claim(&app, &seeded, queue.id, &seeded.cookie, json!({"after": first.id})).await,
+            claim(
+                &app,
+                &seeded,
+                queue.id,
+                &seeded.cookie,
+                json!({"after": first.id}),
+            )
+            .await,
         );
         // Ada moved on, and her first lease is gone.
         assert_ne!(second.id, first.id);
         let items = items_of(&app, &seeded, queue.id).await;
-        let released = items.iter().find(|item| item.id == first.id).expect("first item");
+        let released = items
+            .iter()
+            .find(|item| item.id == first.id)
+            .expect("first item");
         assert_eq!(released.leased_by_user_id, None);
 
         let bobs = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
@@ -2619,14 +2673,34 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 1).await;
-        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
         let item = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
 
-        let held = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "lease", None).await;
+        let held = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "lease",
+            None,
+        )
+        .await;
         assert_eq!(held.status, StatusCode::CONFLICT);
 
         app.state.clock.advance(Duration::from_secs(301));
-        let taken = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "lease", None).await;
+        let taken = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "lease",
+            None,
+        )
+        .await;
         assert_eq!(taken.status, StatusCode::OK);
         let taken: AnnotationQueueItem = taken.json();
         assert_eq!(taken.leased_by_user_id, Some(seeded.user_id));
@@ -2637,17 +2711,37 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 1).await;
-        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
         let first = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
         let first_expiry = first.lease_expires_at.expect("a live lease");
 
         app.state.clock.advance(Duration::from_secs(60));
-        let renewed = act(&app, &seeded, queue.id, first.id, &seeded.cookie, "lease", None).await;
+        let renewed = act(
+            &app,
+            &seeded,
+            queue.id,
+            first.id,
+            &seeded.cookie,
+            "lease",
+            None,
+        )
+        .await;
         assert_eq!(renewed.status, StatusCode::OK);
         let renewed: AnnotationQueueItem = renewed.json();
         assert!(renewed.lease_expires_at.expect("renewed") > first_expiry);
 
-        let refused = act(&app, &seeded, queue.id, first.id, &bob.cookie, "lease", None).await;
+        let refused = act(
+            &app,
+            &seeded,
+            queue.id,
+            first.id,
+            &bob.cookie,
+            "lease",
+            None,
+        )
+        .await;
         assert_eq!(refused.status, StatusCode::CONFLICT);
         let body: Value = refused.json();
         assert_eq!(body["errors"][0]["field"], "leased_by_user_id");
@@ -2657,7 +2751,16 @@ mod tests {
         let released = send(&app, Method::DELETE, &path, &seeded.cookie, None).await;
         assert_eq!(released.status, StatusCode::NO_CONTENT);
 
-        let taken = act(&app, &seeded, queue.id, first.id, &bob.cookie, "lease", None).await;
+        let taken = act(
+            &app,
+            &seeded,
+            queue.id,
+            first.id,
+            &bob.cookie,
+            "lease",
+            None,
+        )
+        .await;
         assert_eq!(taken.status, StatusCode::OK);
         let taken: AnnotationQueueItem = taken.json();
         assert_eq!(taken.leased_by_user_id, Some(bob.id));
@@ -2670,24 +2773,60 @@ mod tests {
         let queue = queue_of(&app, &seeded, "Review", 1).await;
         let item = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
 
-        let done = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        let done = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
         assert_eq!(done.status, StatusCode::OK);
         let done: AnnotationQueueItem = done.json();
         assert_eq!(done.status, QueueItemStatus::Completed);
         assert_eq!(done.done_by_user_id, Some(seeded.user_id));
         assert_eq!(done.leased_by_user_id, None);
 
-        let again = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        let again = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
         assert_eq!(again.status, StatusCode::CONFLICT);
         let body: Value = again.json();
         assert_eq!(body["detail"], "the item is not pending");
 
-        let reopened = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "reopen", None).await;
+        let reopened = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "reopen",
+            None,
+        )
+        .await;
         assert_eq!(reopened.status, StatusCode::OK);
         let reopened: AnnotationQueueItem = reopened.json();
         assert_eq!(reopened.status, QueueItemStatus::Pending);
 
-        let pending = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "reopen", None).await;
+        let pending = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "reopen",
+            None,
+        )
+        .await;
         assert_eq!(pending.status, StatusCode::CONFLICT);
         let body: Value = pending.json();
         assert_eq!(body["detail"], "the item is pending");
@@ -2713,10 +2852,21 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 2).await;
-        let bob = app.add_member(&seeded, "bob@example.com", OrgRole::Member).await;
+        let bob = app
+            .add_member(&seeded, "bob@example.com", OrgRole::Member)
+            .await;
         let held = claimed(claim(&app, &seeded, queue.id, &bob.cookie, json!({})).await);
 
-        let refused = act(&app, &seeded, queue.id, held.id, &seeded.cookie, "complete", None).await;
+        let refused = act(
+            &app,
+            &seeded,
+            queue.id,
+            held.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
         assert_eq!(refused.status, StatusCode::CONFLICT);
         let body: Value = refused.json();
         assert_eq!(body["code"], "conflict");
@@ -2729,7 +2879,16 @@ mod tests {
             .into_iter()
             .find(|item| item.id != held.id)
             .expect("the free item");
-        let done = act(&app, &seeded, queue.id, free.id, &seeded.cookie, "complete", None).await;
+        let done = act(
+            &app,
+            &seeded,
+            queue.id,
+            free.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
         assert_eq!(done.status, StatusCode::OK);
     }
 
@@ -2738,7 +2897,14 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 2).await;
-        let strange = claim(&app, &seeded, queue.id, &seeded.cookie, json!({"unknown": 1})).await;
+        let strange = claim(
+            &app,
+            &seeded,
+            queue.id,
+            &seeded.cookie,
+            json!({"unknown": 1}),
+        )
+        .await;
         assert_eq!(strange.status, StatusCode::BAD_REQUEST);
 
         let claimed_item = claimed(claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await);
@@ -2772,7 +2938,9 @@ mod tests {
             .await;
         assert_eq!(by_key.status, StatusCode::FORBIDDEN);
 
-        let member = app.add_member(&seeded, "member@example.com", OrgRole::Member).await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
         let read_pat = app.personal_token(member.id, false).await;
         let by_read_pat = app
             .request(Method::POST, &path)
@@ -2799,7 +2967,9 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let queue = queue_of(&app, &seeded, "Review", 1).await;
-        let viewer = app.add_member(&seeded, "viewer@example.com", OrgRole::Viewer).await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
         let response = claim(&app, &seeded, queue.id, &viewer.cookie, json!({})).await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
     }
@@ -2851,7 +3021,16 @@ mod tests {
             "2026-01-01T00:00:01Z",
             &json!({"data_access_days": 30}),
         );
-        let done = act(&app, &seeded, queue.id, item.id, &seeded.cookie, "complete", None).await;
+        let done = act(
+            &app,
+            &seeded,
+            queue.id,
+            item.id,
+            &seeded.cookie,
+            "complete",
+            None,
+        )
+        .await;
         assert_eq!(done.status, StatusCode::NOT_FOUND);
         let none = claim(&app, &seeded, queue.id, &seeded.cookie, json!({})).await;
         assert_eq!(none.status, StatusCode::NO_CONTENT);
@@ -2903,10 +3082,16 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
         for n in 1..=3 {
-            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now)
+                .await;
         }
-        app.commit_trace_at(&seeded.project, trace_id(4), 0, now - 2 * DAY_MS * 1_000_000)
-            .await;
+        app.commit_trace_at(
+            &seeded.project,
+            trace_id(4),
+            0,
+            now - 2 * DAY_MS * 1_000_000,
+        )
+        .await;
 
         let preview = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
         assert_eq!(preview.status, StatusCode::OK);
@@ -2947,7 +3132,8 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
         commit_named(&app, &seeded, trace_id(1), "needle", now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now)
+            .await;
 
         let mut body = window(now);
         body["filter"] = json!("name = 'needle'");
@@ -3038,9 +3224,15 @@ mod tests {
             serde_json::from_value(window(now)).expect("a matching body");
 
         for queue in [traces.id, spans.id, sessions.id] {
-            let Ok(matching) =
-                matching_targets(&app.state, seeded.org_id, seeded.project.id, queue, &body, 2)
-                    .await
+            let Ok(matching) = matching_targets(
+                &app.state,
+                seeded.org_id,
+                seeded.project.id,
+                queue,
+                &body,
+                2,
+            )
+            .await
             else {
                 panic!("the matching targets of a queue");
             };
@@ -3056,8 +3248,10 @@ mod tests {
         let definition = define(&app, seeded.project.id, "relevance", false).await;
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now)
+            .await;
         app.state.deletions.guard.add_traces(
             seeded.project.id,
             &[trace_id(1)],
@@ -3089,7 +3283,8 @@ mod tests {
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
         commit_span(&app, &seeded, trace_id(5), 5, now, None, true).await;
-        app.commit_trace_at(&seeded.project, trace_id(6), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(6), 0, now)
+            .await;
 
         let preview = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
         let counted: QueueMatchingPreview = preview.json();
@@ -3114,9 +3309,15 @@ mod tests {
         let definition = define(&app, seeded.project.id, "relevance", false).await;
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
-        app.commit_trace_at(&seeded.project, trace_id(2), 0, now - 60 * DAY_MS * 1_000_000)
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
             .await;
+        app.commit_trace_at(
+            &seeded.project,
+            trace_id(2),
+            0,
+            now - 60 * DAY_MS * 1_000_000,
+        )
+        .await;
 
         // The window reaches back 90 days; the data window shows 30.
         let mut body = window(now);
@@ -3136,12 +3337,20 @@ mod tests {
         let definition = define(&app, seeded.project.id, "relevance", false).await;
         let queue = create(&app, &seeded, "Review", definition).await;
         let now = app.state.clock.now_ns();
-        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
         let viewer = app
             .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
             .await;
 
-        let denied = matching(&app, &seeded, queue.id, "/preview", window(now)).await;
+        let denied = send(
+            &app,
+            Method::POST,
+            &format!("{}/{}/items/matching/preview", base(&seeded), queue.id),
+            &viewer.cookie,
+            Some(window(now)),
+        )
+        .await;
         assert_eq!(denied.status, StatusCode::FORBIDDEN);
         let denied = send(
             &app,
@@ -3202,14 +3411,7 @@ mod tests {
         let response = matching(&app, &seeded, queue.id, "", empty_window).await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
 
-        let missing = matching(
-            &app,
-            &seeded,
-            Uuid::now_v7(),
-            "/preview",
-            window(now),
-        )
-        .await;
+        let missing = matching(&app, &seeded, Uuid::now_v7(), "/preview", window(now)).await;
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
     }
 }
