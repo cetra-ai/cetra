@@ -1,0 +1,230 @@
+import { screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
+import { expect, it } from "vitest";
+import { server } from "@/mocks/node";
+import { problemResponse } from "@/test/problem";
+import { recordRequests } from "@/test/requests";
+import { renderApp } from "@/test/render";
+import projectFixture from "../../../../../../fixtures/api/static/project.json";
+import labelEventsFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/label-events.json";
+import promptFixture from "../../../../../../fixtures/api/responses/prompts/support-reply.json";
+import versionOneFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
+import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
+
+/** Answers the project read with `role`, so the page sees the signed-in user's role. */
+function asRole(role: "member" | "viewer") {
+  server.use(
+    http.get("/api/v1/projects/:project", () => HttpResponse.json({ ...projectFixture, role })),
+  );
+}
+
+/** The row of a version in the Versions list. */
+function rowOf(list: HTMLElement, text: string): HTMLElement {
+  const row = within(list).getByText(text).closest("li");
+  if (row === null) {
+    throw new Error(`no row for ${text}`);
+  }
+  return row;
+}
+
+it("shows the latest version", async () => {
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  expect(
+    await screen.findByRole("heading", { level: 2, name: "support-reply" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Chat")).toBeInTheDocument();
+  expect(await screen.findByText(/friendly support agent for/)).toBeInTheDocument();
+  const labels = screen.getByRole("group", { name: "Labels of v2" });
+  expect(within(labels).getByText("latest")).toBeInTheDocument();
+  expect(within(labels).getByText("staging")).toBeInTheDocument();
+  expect(screen.getByText("language")).toBeInTheDocument();
+  expect(screen.getByText("Placeholder: history")).toBeInTheDocument();
+});
+
+it("shows an older version, and goes back to the latest", async () => {
+  const user = userEvent.setup();
+  const { router } = await renderApp("/acme/support-bot/prompts/support-reply?version=1");
+
+  expect(await screen.findByText("Viewing version 1.")).toBeInTheDocument();
+  const labels = screen.getByRole("group", { name: "Labels of v1" });
+  expect(within(labels).getByText("production")).toBeInTheDocument();
+
+  await user.click(screen.getByRole("button", { name: "Go to latest" }));
+  await waitFor(() => expect(screen.queryByText("Viewing version 1.")).not.toBeInTheDocument());
+  expect((router.state.location.search as Record<string, unknown>).version).toBeUndefined();
+});
+
+it("answers not found for an unknown prompt", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/prompts/:prompt", () =>
+      problemResponse(404, "not_found"),
+    ),
+  );
+  await renderApp("/acme/support-bot/prompts/nope");
+
+  expect(await screen.findByRole("heading", { name: "Page not found" })).toBeInTheDocument();
+});
+
+it("saves a new version with the edited template and the chosen label", async () => {
+  const user = userEvent.setup();
+  const requests = recordRequests();
+  let latestVersion = 2;
+  const savedVersion = {
+    ...versionTwoFixture,
+    version: 3,
+    commit_message: "Shorter",
+    labels: ["latest", "production"],
+    template: [
+      { role: "system", content: "You help the support team." },
+      { type: "placeholder", name: "history" },
+      { role: "user", content: "{{ question }}" },
+    ],
+  };
+  server.use(
+    http.post("/api/v1/projects/:project/prompts/:prompt/versions", () => {
+      latestVersion = 3;
+      return HttpResponse.json(savedVersion, { status: 201 });
+    }),
+    http.get("/api/v1/projects/:project/prompts/:prompt", () =>
+      HttpResponse.json({ ...promptFixture, latest_version: latestVersion }),
+    ),
+    http.get("/api/v1/projects/:project/prompts/:prompt/versions/:version", ({ params }) =>
+      HttpResponse.json(params.version === "3" ? savedVersion : versionTwoFixture),
+    ),
+  );
+
+  await renderApp("/acme/support-bot/prompts/support-reply");
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  const system = screen.getByLabelText("Content of message 1");
+  await user.clear(system);
+  await user.type(system, "You help the support team.");
+  await user.click(screen.getByRole("button", { name: "Save as new version…" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "Save as new version" });
+  await user.type(within(dialog).getByLabelText("Commit message"), "Shorter");
+  await user.click(within(dialog).getByRole("checkbox", { name: "production" }));
+  await user.click(within(dialog).getByRole("button", { name: "Save version" }));
+
+  await waitFor(() =>
+    expect(requests.calls.find((call) => call.method === "POST")?.body).toBeDefined(),
+  );
+  expect(requests.calls.find((call) => call.method === "POST")?.body).toMatchObject({
+    template: [
+      { role: "system", content: "You help the support team." },
+      { type: "placeholder", name: "history" },
+      { role: "user", content: "{{ question }}" },
+    ],
+    commit_message: "Shorter",
+    labels: ["production"],
+  });
+  expect(await screen.findByText("You help the support team.")).toBeInTheDocument();
+  requests.stop();
+});
+
+it("lets a member save, with production disabled and the reason shown", async () => {
+  const user = userEvent.setup();
+  asRole("member");
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Save as new version…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Save as new version" });
+  expect(within(dialog).getByRole("checkbox", { name: "production" })).toBeDisabled();
+  expect(
+    within(dialog).getByText("Only project admins can move protected labels"),
+  ).toBeInTheDocument();
+  expect(within(dialog).getByRole("checkbox", { name: "staging" })).toBeEnabled();
+});
+
+it("shows the diff with the previous version", async () => {
+  const user = userEvent.setup();
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("tab", { name: "Versions" }));
+  const list = await screen.findByRole("list", { name: "Versions" });
+  await user.click(within(rowOf(list, "v2")).getByRole("button", { name: "Diff" }));
+
+  const diff = await screen.findByLabelText("Template diff");
+  const removed = within(diff).getByText(/You are a support agent/);
+  expect(removed.closest("[data-op]")).toHaveAttribute("data-op", "removed");
+  const added = within(diff).getByText(/friendly support agent/);
+  expect(added.closest("[data-op]")).toHaveAttribute("data-op", "added");
+});
+
+it("sets a label on a version and removes a label", async () => {
+  const user = userEvent.setup();
+  const requests = recordRequests();
+  const removed: string[] = [];
+  server.use(
+    http.delete("/api/v1/projects/:project/prompts/:prompt/labels/:label", ({ params }) => {
+      removed.push(String(params.label));
+      return new HttpResponse(null, { status: 204 });
+    }),
+  );
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Remove label staging" }));
+  const confirm = await screen.findByRole("alertdialog", { name: "Remove label staging?" });
+  await user.click(within(confirm).getByRole("button", { name: "Remove label" }));
+  await waitFor(() => expect(removed).toEqual(["staging"]));
+
+  await user.click(screen.getByRole("tab", { name: "Versions" }));
+  const list = await screen.findByRole("list", { name: "Versions" });
+  await user.click(within(rowOf(list, "v1")).getByRole("button", { name: "Set label…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Set label" });
+  await user.type(within(dialog).getByLabelText("Label"), "canary");
+  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+
+  await waitFor(() =>
+    expect(requests.calls.find((call) => call.method === "PUT")?.body).toEqual({ version: 1 }),
+  );
+  expect(requests.calls.find((call) => call.method === "PUT")?.path.endsWith("/labels/canary")).toBe(
+    true,
+  );
+  requests.stop();
+});
+
+it("lists the label history", async () => {
+  const user = userEvent.setup();
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("tab", { name: "Labels" }));
+  const history = await screen.findByRole("list", { name: "Label history" });
+  expect(within(history).getAllByRole("listitem")).toHaveLength(labelEventsFixture.data.length);
+  expect(within(history).getByText("new → v2")).toBeInTheDocument();
+  expect(within(history).getByText("new → v1")).toBeInTheDocument();
+});
+
+it("keeps a viewer read-only, with the reason", async () => {
+  const user = userEvent.setup();
+  asRole("viewer");
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  expect(await screen.findByRole("button", { name: "Edit" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Delete prompt" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Remove label staging" })).toBeDisabled();
+  expect(screen.getAllByText("Only members can edit prompts").length).toBeGreaterThan(0);
+
+  await user.click(screen.getByRole("tab", { name: "Versions" }));
+  const list = await screen.findByRole("list", { name: "Versions" });
+  expect(within(rowOf(list, "v1")).getByRole("button", { name: "Set label…" })).toBeDisabled();
+});
+
+it("opens a prompt whose name has a dot", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/prompts/:prompt", ({ params }) =>
+      HttpResponse.json({ ...promptFixture, name: String(params.prompt), latest_version: 1 }),
+    ),
+    http.get("/api/v1/projects/:project/prompts/:prompt/versions/:version", ({ params }) =>
+      HttpResponse.json({ ...versionOneFixture, name: String(params.prompt) }),
+    ),
+    http.get("/api/v1/projects/:project/prompts/:prompt/versions", () =>
+      HttpResponse.json({ data: [], next_cursor: null }),
+    ),
+  );
+  await renderApp("/acme/support-bot/prompts/v1.2");
+
+  expect(await screen.findByRole("heading", { level: 2, name: "v1.2" })).toBeInTheDocument();
+});

@@ -11,6 +11,8 @@ import {
   parsePromptsSearch,
   tagChoices,
   templateText,
+  withPromptTab,
+  withPromptVersion,
 } from "./prompts";
 
 describe("parsePromptsSearch", () => {
@@ -161,5 +163,18 @@ describe("labelChoices and tagChoices", () => {
   it("offers the loaded tags and the selected tag, sorted, once each", () => {
     expect(tagChoices(rows, undefined)).toEqual(["billing", "support"]);
     expect(tagChoices([], "ops")).toEqual(["ops"]);
+  });
+});
+
+describe("prompt page search", () => {
+  it("sets the version, and drops it for the latest", () => {
+    expect(withPromptVersion({ tab: "versions" }, 2)).toEqual({ tab: "versions", version: 2 });
+    expect(withPromptVersion({ tab: "versions", version: 2 }, undefined)).toEqual({
+      tab: "versions",
+    });
+  });
+
+  it("sets the tab and keeps the version", () => {
+    expect(withPromptTab({ version: 1 }, "labels")).toEqual({ version: 1, tab: "labels" });
   });
 });

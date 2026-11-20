@@ -5,6 +5,14 @@ import { parseEnum, parseString } from "@/lib/search/common";
 export type PromptKind = Schema<"PromptKind">;
 export type PromptTab = "template" | "versions" | "labels" | "metrics";
 export type Position = { line: number; column: number };
+/** The search of a prompt page: the tab and the version (absent = the latest). */
+export type PromptSearch = { tab?: PromptTab; version?: number };
+
+/** Why a label or prompt control is off for a viewer. */
+export const VIEWER_REASON = "Only members can edit prompts";
+export const PROTECTED_REASON = "Only project admins can move protected labels";
+/** The text when the server refuses a label move with `403` (D-V-10). */
+export const LABEL_FORBIDDEN_TEXT = "Only project admins can move this label.";
 
 const PROMPT_TABS: readonly PromptTab[] = ["template", "versions", "labels", "metrics"];
 const PROMPT_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$/;
@@ -175,4 +183,15 @@ export function tagChoices(
     ...(selected !== undefined ? [selected] : []),
   ]);
   return [...tags].sort();
+}
+
+/** The search with the version set, or without `version` when it is undefined (the latest). */
+export function withPromptVersion(search: PromptSearch, version: number | undefined): PromptSearch {
+  const { version: _version, ...rest } = search;
+  return version === undefined ? rest : { ...rest, version };
+}
+
+/** The search with the tab set. */
+export function withPromptTab(search: PromptSearch, tab: PromptTab): PromptSearch {
+  return { ...search, tab };
 }
