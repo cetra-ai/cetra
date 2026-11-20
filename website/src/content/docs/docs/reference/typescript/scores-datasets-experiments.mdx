@@ -67,6 +67,48 @@ await client.datasets.delete("faq-v1"); // the dataset and its items
   refused item rejects with an `ApiError`, and its `errors` array names the
   failing fields.
 
+### Annotation queues
+
+People review the traces, spans or sessions of a queue in the web UI; the SDK creates queues and fills them.
+
+{/* untested: needs a running cetra server, an API key and a score definition */}
+```ts
+import { Client } from "@cetra-ai/sdk";
+
+const client = new Client(); // the key and URL come from the environment
+const definitionId = "..."; // a score definition of the project, made in the web UI
+
+const queue = await client.annotationQueues.create("Weekly review", {
+  target: "trace",
+  definitionIds: [definitionId],
+});
+const result = await client.annotationQueues.addItems(queue.id, {
+  traceIds: ["4bf92f3577b34da6a3ce929d0e0e4736"],
+});
+console.log(result.added, result.existing, result.skipped); // skipped: index and message
+```
+
+- `create(name, { target, definitionIds, description, instructions })` makes a
+  queue whose items are `"trace"`, `"span"` or `"session"`. The target cannot
+  change later. `definitionIds` lists one to fifty score definitions, in review
+  order.
+- `addItems(queueId, targets)` takes exactly one of `traceIds`, `spans` (a list
+  of `[traceId, spanId]` pairs) or `sessionIds`, and a `TypeError` is thrown
+  before any request when it does not. It sends batches of 1,000. A target
+  already in the queue counts as `existing`. Each entry of `skipped` has the
+  `index` of a target in your list and a `message`; the message never repeats
+  the value.
+- `items(queueId, { status })` lists the items, optionally only those with
+  `"pending"`, `"completed"` or `"skipped"`; `list()` and `get(queueId)` read
+  the queues.
+- `update(queueId, { version, ... })` changes the fields you pass. `version` is
+  the one you read, and a stale one is refused with an `ApiError` (`409`). An
+  empty string clears `description` or `instructions`.
+- `delete(queueId)` removes the queue and its items.
+
+Reviewers' actions (taking a lease, completing or skipping an item) happen in
+the web UI only.
+
 ### Experiments
 
 `evaluate` runs your task on every item of a dataset version, scores each
