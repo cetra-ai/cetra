@@ -369,13 +369,13 @@ pub struct Facet {
    - `facets-sessions.json`: `user_id`, `tags`, `duration_ms`, `cost_total`.
 8. `crates/server/tests/openapi.rs`:
    - the route table row `("get", ".../facets", "get_facets")` (around line 551) becomes `("post", <same path>, "post_facets")`;
-   - remove `get_facets` from `QUERY_OR_BODY` (around line 1053) and `READ_OPERATIONS` (around line 1095) if those lists hold GET operations only; if a list is meant to hold body reads too (look at what else it holds, e.g. `query_widget`, `run_sql`), put `post_facets` where `query_widget` is instead, and say which you did in the report;
+   - delete `get_facets` from `QUERY_OR_BODY` (around line 1053) and from `READ_OPERATIONS` (around line 1095); add nothing to them (`post_facets` is caught by the branch below first);
    - the error-code branch `else if *id == "run_sql" || *id == "query_widget"` (around line 1410) gets `|| *id == "post_facets"`;
    - `assert_exclusions`' `EXPECTED` (around line 1788) loses `get_facets` (the POST has no `include_eval` query parameter).
 9. `crates/server/tests/api_examples.rs`:
    - the round-trip match arm `"get_facets" => roundtrip::<FacetsResponse>` (around line 736) becomes `"post_facets"`;
    - add `("post_facets", "requests/facets-traces.json")`, `("post_facets", "requests/facets-spans.json")` and `("post_facets", "requests/facets-sessions.json")` to the `requests` array (around lines 587–670), as `post_issue_source` has two rows;
-   - add a deserialize check that each of the three request files parses as `FacetsRequest`, the way `RunEvaluatorRequest` is checked (around line 573).
+   - add a deserialize check that each of the three request files parses as `FacetsRequest`, the way `RunEvaluatorRequest` is checked (around line 573); extend the `use cetra_server::api::facets::…` import (around line 50) with `FacetsRequest`.
 
 **Done when:** the files are written. Do not compile or test; the coordinator runs the checks.
 
@@ -440,7 +440,10 @@ export function askFacet(
       const created: Batch = { project, shared, waiting: [] };
       open.set(key, created);
       setTimeout(() => {
-        open.delete(key);
+        // A full batch was already closed, and a newer one may hold the key.
+        if (open.get(key) === created) {
+          open.delete(key);
+        }
         void send(created);
       }, FACET_BATCH_MS);
       batch = created;
@@ -550,7 +553,7 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
   - `the same field asked twice is sent once`: two calls with equal shared part and field → one request with one field; both promises resolve to the same facet.
   - `a later ask starts a new batch`: one call, await it, then another → two requests.
   - `more than 20 fields go out in several requests`: 21 calls with distinct fields (`f0`…`f20`) without awaiting → two requests, of 20 and 1 fields; all 21 resolve.
-- `web/src/api/queries.test.tsx`: update the cached-key helpers to the new key (they use `facetQuery(...).queryKey`, so mostly unchanged) and the `useFacetQuery` test's handler from `http.get` to `http.post` answering `{ view, results: body.fields.map((field) => ({ field: field.field, facet })) }`. Keep every existing case: same-length window found, different length not found, other project not found, placeholder shown while the new window loads.
+- `web/src/api/queries.test.tsx`: the `answer()` helper (around line 59) returns `Schema<"Facet">` (`kind`, `total`, `missing`, `values`, `more`; no `view`, no `field`) and `seed(..., data)` takes `Schema<"Facet">`. Update the cached-key helpers to the new key (they use `facetQuery(...).queryKey`, so mostly unchanged) and the `useFacetQuery` test's handler from `http.get` to `http.post` answering `{ view, results: body.fields.map((field) => ({ field: field.field, facet })) }`. Keep every existing case: same-length window found, different length not found, other project not found, placeholder shown while the new window loads.
 - Add in `queries.test.tsx`: `facetQuery keys leave out empty parts`: `facetQuery("acme", "support-bot", { view: "traces", field: "status", from, to, filter: "", search: "", includeEval: false, q: "", limit: 10 }).queryKey` equals `["facets", <ref>, { view: "traces", from, to }, { field: "status", limit: 10 }]`, where `<ref>` is `projectRef("acme", "support-bot")`.
 
 **Done when:** the files are written. Do not run tests, type checks or builds; the coordinator runs the checks.
@@ -574,7 +577,7 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
    4. `const rows = facetRows(dataset, view, parsed);` once.
    5. For each field, in order, produce a `Schema<"FacetResult">`: the existing per-field checks (field, limit, q, same messages) become `{ field: ask.field, error: { type: "about:blank", title: "Bad Request", status: 400, code: "bad_request", errors: [{ field: "fields[<index>]", message }] } }`; a good field is `{ field: ask.field, facet }` where `facet` is today's `facetAnswer(view, field, rows, q, limit)` without its `view` and `field` members (change `facetAnswer` to return `Schema<"Facet">`).
    6. Answer `HttpResponse.json({ view, results })`. Update the doc comment to `POST …/facets` (D-C-23).
-3. `web/src/mocks/generated/handlers.test.ts`: port the six facet tests (lines ~405–520) to `fetch(\`${PROJECT}/facets\`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ view, fields: [...] }) })`, reading `results[0].facet` where they read the answer. The bad-request test(s) at ~513: a bad field/limit/q is now `200` with `results[0].error.code === "bad_request"`; a bad view stays a `400`. Add `answers every field of a batch in order` (traces, fields `status` and `duration_ms`: two results, `values` then `histogram` kinds).
+3. `web/src/mocks/generated/handlers.test.ts`: port the facet tests (lines ~405–520) to `fetch(\`${PROJECT}/facets\`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ view, fields: [...] }) })`, reading `results[0].facet` where they read the answer. The bad-request test(s) at ~513: a bad field/limit/q is now `200` with `results[0].error.code === "bad_request"`; a bad view stays a `400`. Add `answers every field of a batch in order` (traces, fields `status` and `duration_ms`: two results, `values` then `histogram` kinds).
 4. `web/src/test/facets.ts` (new), a helper for page tests:
    ```ts
    import { HttpResponse, http } from "msw";
@@ -594,7 +597,10 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
        const body = (await request.json()) as Schema<"FacetsRequest">;
        return HttpResponse.json({
          view: body.view,
-         results: body.fields.map((field) => ({ field: field.field, facet: answer(field, body) ?? EMPTY })),
+         results: body.fields.map((field) => ({
+         field: field.field,
+         facet: answer(field, body) ?? EMPTY,
+       })),
        });
      });
    }
@@ -624,7 +630,7 @@ Commit: `Document the facet batch (D-C-23)`.
 
 ## Final checks (coordinator)
 
-1. `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`; `just check`.
+1. `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH`; `just fmt` (rustfmt and Biome rewrite the phases' layout; implementers do not format), then `just check`.
 2. In the browser (`just web-dev`, mocked API): open Traces, Spans, Sessions and Users; each sends one `POST /facets` on open (network panel), and opening a section or typing in a section's value search sends one request with only that field.
 3. Sonnet code review of the whole branch; fixes by a Haiku phase with an exact brief.
 4. Open the PR. Do not merge.
