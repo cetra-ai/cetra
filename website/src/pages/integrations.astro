@@ -1,0 +1,104 @@
+---
+import Button from "../marketing/components/Button.astro";
+import Card from "../marketing/components/Card.astro";
+import Section from "../marketing/components/Section.astro";
+import SectionHeading from "../marketing/components/SectionHeading.astro";
+import { groups, loadIntegrations } from "../marketing/data/integrations.mjs";
+import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+
+const items = loadIntegrations();
+const sections = groups(items).map((group) => ({
+  group,
+  id: `group-${group.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+  items: items.filter((item) => item.group === group),
+}));
+
+/** The badges say what the repository tests, not which language each covers; the docs page has the detail. */
+function testBadges(tested: string): string[] {
+  if (tested.includes("captured") && tested.includes("SDK test")) {
+    return ["Recorded traces", "SDK test"];
+  }
+  if (tested.startsWith("captured")) return ["Recorded traces"];
+  if (tested === "SDK test") return ["SDK test"];
+  return [];
+}
+---
+
+<MarketingLayout
+  title="Integrations"
+  description="The frameworks, providers and instrumentation libraries cetra works with, over OpenTelemetry, and what each one is tested against."
+  route="/integrations/"
+>
+  <Section tone="ink" pad="md" labelledby="integrations-title">
+    <SectionHeading
+      level={1}
+      eyebrow="Integrations"
+      title="Works with your stack."
+      id="integrations-title"
+      lede="cetra reads OpenTelemetry. These libraries are tested against recorded traces or SDK tests; anything else that speaks OpenTelemetry works too."
+    />
+  </Section>
+
+  {
+    sections.map((section, index) => (
+      <Section
+        tone={index % 2 === 0 ? "raised" : "ink"}
+        divider
+        labelledby={section.id}
+      >
+        <SectionHeading title={section.group} id={section.id} />
+        <div class="tiles">
+          {section.items.map((item) => (
+            <Card title={item.title} href={item.href}>
+              <p>{item.description}</p>
+              <div class="badges">
+                {item.python && <span class="badge">Python</span>}
+                {item.typescript && <span class="badge">TypeScript</span>}
+                {testBadges(item.tested).map((label) => (
+                  <span class="badge">{label}</span>
+                ))}
+              </div>
+            </Card>
+          ))}
+        </div>
+      </Section>
+    ))
+  }
+
+  <Section tone="teal" divider labelledby="send-title">
+    <SectionHeading
+      title="Anything that speaks OpenTelemetry"
+      id="send-title"
+      lede="Point any OTLP exporter at cetra: /v1/traces over HTTP, or gRPC on port 4317."
+    />
+    <div class="actions">
+      <Button href="/docs/get-started/opentelemetry/">Send OpenTelemetry</Button>
+    </div>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--space-4);
+    margin-top: var(--space-7);
+  }
+  .badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-top: var(--space-4);
+  }
+  .badge {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 8px;
+    color: var(--fg-muted);
+  }
+  .actions {
+    margin-top: var(--space-6);
+  }
+</style>

@@ -14,6 +14,7 @@ export const MARKETING_ROUTES = [
   "/pricing/",
   "/self-hosting/",
   "/security/",
+  "/integrations/",
 ];
 
 /** @param {string} route */
