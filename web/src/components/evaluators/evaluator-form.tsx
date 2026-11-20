@@ -8,7 +8,6 @@ import { projectRef } from "@/api/project-ref";
 import { evaluatorKey, evaluatorsKey, evaluatorTemplatesInit } from "@/api/queries-evaluation";
 import { connectionsInit } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
-import type { EvaluatorDraft } from "@/lib/assistant/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import {
   buildCheckConfig,
@@ -49,6 +48,7 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import type { EvaluatorDraft } from "@/lib/assistant/types";
 import { canManageEvaluation } from "@/lib/roles";
 
 type Kind = Schema<"EvaluatorKind">;

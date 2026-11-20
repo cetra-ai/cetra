@@ -1,7 +1,7 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  Bot,
   BellRing,
+  Bot,
   Building2,
   CircleDollarSign,
   CreditCard,

@@ -1,9 +1,9 @@
 import { Link, useMatch, useRouterState } from "@tanstack/react-router";
+import { AssistantButton } from "@/components/assistant/assistant-button";
 import { CetraMark } from "@/components/brand/cetra-mark";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
-import { AssistantButton } from "@/components/assistant/assistant-button";
 import { AlertBell } from "@/components/shell/alert-bell";
 import { IngestDot } from "@/components/shell/ingest-dot";
 import { pageOf } from "@/components/shell/page-crumb";

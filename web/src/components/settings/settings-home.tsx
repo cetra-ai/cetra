@@ -3,8 +3,8 @@ import { Link } from "@tanstack/react-router";
 import type { LucideIcon } from "lucide-react";
 import type { ReactNode } from "react";
 import { $api } from "@/api/client";
-import { orgAssistantInit } from "@/api/queries-assistant";
 import { channelsQuery } from "@/api/queries-alerts";
+import { orgAssistantInit } from "@/api/queries-assistant";
 import { scoreDefinitionsInit } from "@/api/queries-evaluation";
 import { orgPricesInit, projectPricesInit } from "@/api/queries-prices";
 import {

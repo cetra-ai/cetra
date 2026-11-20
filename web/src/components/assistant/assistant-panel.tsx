@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
 import { SquarePen, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { fieldErrors, problemOf } from "@/api/problem";
 import {
   assistantStatusQuery,
   conversationKey,
@@ -9,7 +10,6 @@ import {
   conversationsKey,
   turnUrl,
 } from "@/api/queries-assistant";
-import { fieldErrors, problemOf } from "@/api/problem";
 import { Composer } from "@/components/assistant/composer";
 import { ConversationMenu, useNewChat } from "@/components/assistant/conversation-menu";
 import { Transcript } from "@/components/assistant/transcript";
@@ -18,16 +18,16 @@ import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { type PageContext, fitContext, pageContext, withoutField } from "@/lib/assistant/context";
+import { fitContext, type PageContext, pageContext, withoutField } from "@/lib/assistant/context";
 import { setPanelOpen, useCurrentConversation } from "@/lib/assistant/panel";
 import {
   type AssistantBubble,
-  type Bubble,
   applyEvent,
+  type Bubble,
   bubblesOf,
 } from "@/lib/assistant/transcript";
-import { type TurnEvent, parseTurnEvent } from "@/lib/assistant/types";
-import { StreamRequestError, postEventStream } from "@/lib/event-stream";
+import { parseTurnEvent, type TurnEvent } from "@/lib/assistant/types";
+import { postEventStream, StreamRequestError } from "@/lib/event-stream";
 import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
 import { activeTabOf, readTabs } from "@/lib/sql/tabs";
 
@@ -367,7 +367,7 @@ export function AssistantPanel() {
             </span>{" "}
             (
             {[
-              status.data.adapter ? LLM_ADAPTER_LABELS[status.data.adapter] : undefined,
+              status.data.adapter ? adapterLabel(status.data.adapter) : undefined,
               status.data.model,
             ]
               .filter((part) => part !== undefined && part !== "")
@@ -378,4 +378,11 @@ export function AssistantPanel() {
       </section>
     </TooltipProvider>
   );
+}
+
+/** The adapter's display name; the status route returns the adapter as a plain string. */
+function adapterLabel(adapter: string): string {
+  return adapter in LLM_ADAPTER_LABELS
+    ? LLM_ADAPTER_LABELS[adapter as keyof typeof LLM_ADAPTER_LABELS]
+    : adapter;
 }

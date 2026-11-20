@@ -6,8 +6,8 @@ import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { evaluatorQuery } from "@/api/queries-evaluation";
 import { connectionsInit } from "@/api/queries-settings";
-import { checkStateOf } from "@/components/evaluators/check-fields";
 import { DisabledReason } from "@/components/disabled-reason";
+import { checkStateOf } from "@/components/evaluators/check-fields";
 import { Markdown } from "@/components/payload/markdown";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
@@ -19,9 +19,9 @@ import {
   type DraftKind,
   type EvaluatorDraft,
   type FilterDraft,
+  parseDraft,
   type RuleDraft,
   type SqlDraft,
-  parseDraft,
 } from "@/lib/assistant/types";
 import { canManageDashboards, canManageEvaluation } from "@/lib/roles";
 import { MAX_TABS, readTabs } from "@/lib/sql/tabs";

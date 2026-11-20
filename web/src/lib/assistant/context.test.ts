@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTEXT_MAX_BYTES,
-  type PageContext,
   fitContext,
+  type PageContext,
   pageContext,
   withoutField,
 } from "@/lib/assistant/context";

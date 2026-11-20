@@ -1,13 +1,13 @@
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
 import {
   FILTER_MAX,
-  SEARCH_MAX,
   parseEnum,
   parseFlag,
   parseHex,
   parseRfc3339,
   parseString,
   parseViewId,
+  SEARCH_MAX,
 } from "@/lib/search/common";
 import { PRESETS } from "@/lib/time-range";
 

@@ -1,10 +1,10 @@
-import { http, HttpResponse } from "msw";
+import { HttpResponse, http } from "msw";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setUnauthorizedHandler } from "@/api/session";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { turnStream } from "@/test/turn-stream";
-import { type StreamBlock, StreamRequestError, postEventStream } from "./event-stream";
+import { postEventStream, type StreamBlock, StreamRequestError } from "./event-stream";
 
 const URL =
   "/api/v1/projects/acme%2Fsupport-bot/assistant/conversations/01900000-0000-7000-8000-000000001a01/turns";

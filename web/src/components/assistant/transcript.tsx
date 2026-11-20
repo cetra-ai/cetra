@@ -67,12 +67,13 @@ function AssistantBubbleView({
     <div className="flex flex-col gap-2 text-ui">
       {bubble.blocks.map((block, index) => {
         if (block.type === "text") {
-          return <AnswerMarkdown key={index} text={block.text} />;
+          // biome-ignore lint/suspicious/noArrayIndexKey: blocks only append, so a text block keeps its index
+          return <AnswerMarkdown key={`text-${index}`} text={block.text} />;
         }
         if (block.type === "step") {
-          return <ToolStep key={index} step={block.step} />;
+          return <ToolStep key={`step-${block.step.id}`} step={block.step} />;
         }
-        return <DraftCard key={index} kind={block.kind} draft={block.draft} />;
+        return <DraftCard key={`draft-${block.id}`} kind={block.kind} draft={block.draft} />;
       })}
       {bubble.status === "streaming" && bubble.blocks.length === 0 ? (
         <p className="text-muted-foreground">Thinking…</p>
@@ -147,6 +148,7 @@ export function Transcript({
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
+  // biome-ignore lint/correctness/useExhaustiveDependencies: new content is the trigger to scroll
   useEffect(() => {
     const element = scroller.current;
     if (element !== null && stick.current) {
@@ -183,9 +185,11 @@ export function Transcript({
       ) : (
         bubbles.map((bubble, index) =>
           bubble.role === "user" ? (
+            // biome-ignore lint/suspicious/noArrayIndexKey: bubbles only append; a refetch rebuilds the list
             <UserBubble key={index} text={bubble.text} context={bubble.context} />
           ) : (
             <AssistantBubbleView
+              // biome-ignore lint/suspicious/noArrayIndexKey: bubbles only append; a refetch rebuilds the list
               key={index}
               org={org}
               project={project}

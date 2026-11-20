@@ -1,6 +1,6 @@
 import { Link } from "@tanstack/react-router";
-import type { Schema } from "@/api/types";
 import { $api } from "@/api/client";
+import type { Schema } from "@/api/types";
 import { useProject } from "@/components/shell/project-context";
 import { canManageConnections } from "@/lib/roles";
 

@@ -3,8 +3,9 @@ import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { setCurrentConversation } from "@/lib/assistant/panel";
 import { server } from "@/mocks/node";
-import { recordRequests } from "@/test/requests";
+import { typeMessage } from "@/test/assistant";
 import { renderApp } from "@/test/render";
+import { recordRequests } from "@/test/requests";
 import { turnStream } from "@/test/turn-stream";
 import conversation from "../../../../fixtures/api/responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json";
 
@@ -84,10 +85,7 @@ async function askForDraft(
   server.use(http.post(TURNS, () => draftAnswer(kind, draft)));
   await user.click(await screen.findByRole("button", { name: "Assistant" }));
   const region = await screen.findByRole("region", { name: "Assistant" });
-  await user.type(
-    within(region).getByRole("textbox", { name: "Message the assistant" }),
-    "Draft it",
-  );
+  await typeMessage(user, region, "Draft it");
   await user.click(within(region).getByRole("button", { name: "Send" }));
   return region;
 }
@@ -125,7 +123,12 @@ it("sql_draft_opens_a_new_tab_without_touching_the_open_one", async () => {
     columns: [],
   });
 
-  await user.click(await within(region).findByRole("button", { name: "Open in SQL console" }));
+  // The conversation's earlier "Ran SQL" step has a button with the same name; the draft is last.
+  await waitFor(() => {
+    expect(within(region).getAllByRole("button", { name: "Open in SQL console" })).toHaveLength(2);
+  });
+  const buttons = within(region).getAllByRole("button", { name: "Open in SQL console" });
+  await user.click(buttons[buttons.length - 1] as HTMLElement);
 
   await waitFor(() => {
     const saved = JSON.parse(localStorage.getItem(SQL_KEY) ?? "{}") as {
@@ -224,5 +227,8 @@ it("edit_dashboard_draft_opens_the_editor", async () => {
   await user.click(await within(region).findByRole("button", { name: "Open in dashboard editor" }));
 
   expect(await screen.findByRole("button", { name: "Save" })).toBeInTheDocument();
-  expect(await screen.findByText("Drafted heading")).toBeInTheDocument();
+  // The draft card in the panel lists the widget too; the editor shows it outside the panel.
+  await waitFor(() => {
+    expect(screen.getAllByText("Drafted heading").some((el) => !region.contains(el))).toBe(true);
+  });
 });

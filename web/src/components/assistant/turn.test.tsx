@@ -3,6 +3,7 @@ import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { setCurrentConversation } from "@/lib/assistant/panel";
 import { server } from "@/mocks/node";
+import { typeMessage } from "@/test/assistant";
 import { renderApp } from "@/test/render";
 import { turnStream } from "@/test/turn-stream";
 import conversation from "../../../../fixtures/api/responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json";
@@ -82,7 +83,7 @@ async function openPanel(user: User) {
 }
 
 async function ask(user: User, region: HTMLElement, text: string) {
-  await user.type(within(region).getByRole("textbox", { name: "Message the assistant" }), text);
+  await typeMessage(user, region, text);
   await user.click(within(region).getByRole("button", { name: "Send" }));
 }
 

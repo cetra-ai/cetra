@@ -3,8 +3,9 @@ import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { STORAGE_PREFIX } from "@/product";
-import { recordRequests } from "@/test/requests";
+import { openMenu } from "@/test/assistant";
 import { renderApp } from "@/test/render";
+import { recordRequests } from "@/test/requests";
 import conversations from "../../../../fixtures/api/responses/assistant-conversations.json";
 import meDocument from "../../../../fixtures/api/static/me.json";
 import projectDocument from "../../../../fixtures/api/static/project.json";
@@ -193,9 +194,12 @@ it("creates a chat and selects it", async () => {
     expect(localStorage.getItem(CURRENT_KEY)).toBe(NEW_ID);
   });
   requests.stop();
-  expect(requests.calls.filter((call) => call.method === "POST").map((call) => call.path)).toEqual([
-    `/api/v1/projects/${encodeURIComponent(REF)}/assistant/conversations`,
-  ]);
+  // The traces page sends its own POSTs (its charts); only the assistant's are counted.
+  expect(
+    requests.calls
+      .filter((call) => call.method === "POST" && call.path.includes("/assistant/"))
+      .map((call) => call.path),
+  ).toEqual([`/api/v1/projects/${encodeURIComponent(REF)}/assistant/conversations`]);
 });
 
 it("renames and deletes the selected chat", async () => {
@@ -219,13 +223,14 @@ it("renames and deletes the selected chat", async () => {
   const { user } = await renderApp("/acme/support-bot/traces");
   const region = await openPanelFromTopBar(user);
 
-  await user.click(
+  await openMenu(
+    user,
     await within(region).findByRole("button", { name: "Why did checkout errors spike?" }),
   );
   await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
-  const title = await screen.findByRole("textbox", { name: "Title" });
-  await user.clear(title);
-  await user.type(title, "Checkout errors");
+  const titleField = await screen.findByRole("textbox", { name: "Title" });
+  await user.clear(titleField);
+  await user.type(titleField, "Checkout errors");
   await user.click(screen.getByRole("button", { name: "Rename" }));
 
   await waitFor(() => {
@@ -234,7 +239,7 @@ it("renames and deletes the selected chat", async () => {
     });
   });
 
-  await user.click(await within(region).findByRole("button", { name: "Checkout errors" }));
+  await openMenu(user, await within(region).findByRole("button", { name: "Checkout errors" }));
   await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await user.click(await screen.findByRole("button", { name: "Delete" }));
 

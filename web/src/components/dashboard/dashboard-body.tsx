@@ -32,6 +32,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { peekDraft, subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
 import {
   bottomOf,
   COLUMNS,
@@ -43,7 +44,6 @@ import {
   sameDefinition,
   withLayouts,
 } from "@/lib/dashboards/draft";
-import { peekDraft, subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
 import { OVERVIEW } from "@/lib/dashboards/overview";
 import { overviewKey, useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard, Definition, Layout, Widget } from "@/lib/dashboards/types";

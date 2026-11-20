@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import conversation from "../../../../fixtures/api/responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json";
-import type { AssistantMessage } from "@/lib/assistant/types";
 import {
   type AssistantBubble,
-  type Bubble,
   applyEvent,
+  type Bubble,
   bubblesOf,
 } from "@/lib/assistant/transcript";
+import type { AssistantMessage } from "@/lib/assistant/types";
+import conversation from "../../../../fixtures/api/responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json";
 
 const TRACE = "0af7651916cd43dd8448eb211c80319c";
 

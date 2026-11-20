@@ -5,6 +5,7 @@ import { $api } from "@/api/client";
 import { problemMessage } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { conversationKey, conversationsKey, conversationsQuery } from "@/api/queries-assistant";
+import type { Schema } from "@/api/types";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
 import {
@@ -33,8 +34,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { formatRelative } from "@/lib/format";
 import { setCurrentConversation, useCurrentConversation } from "@/lib/assistant/panel";
+import { formatRelative } from "@/lib/format";
 
 const CONVERSATION_PATH = "/api/v1/projects/{project}/assistant/conversations/{id}";
 const TITLE_MAX = 80;
@@ -56,8 +57,9 @@ export function useNewChat(org: string, project: string) {
       {
         onSuccess: (conversation) => {
           // Put the chat in the cached list first, so the menu never drops the new selection.
-          queryClient.setQueryData(conversationsKey(org, project), (old) =>
-            old ? { ...old, data: [conversation, ...old.data] } : old,
+          queryClient.setQueryData<Schema<"AssistantConversationPage">>(
+            conversationsKey(org, project),
+            (old) => (old ? { ...old, data: [conversation, ...old.data] } : old),
           );
           setCurrentConversation(ref, conversation.id);
           void queryClient.invalidateQueries({ queryKey: conversationsKey(org, project) });
@@ -234,7 +236,7 @@ export function ConversationMenu({ org, project }: { org: string; project: strin
     }
   }, [conversations, current, ref]);
 
-  const label = selected && selected.title.trim() !== "" ? selected.title : "New chat";
+  const label = selected && selected.title.trim() !== "" ? selected.title : "Untitled chat";
   return (
     <>
       <DropdownMenu>
