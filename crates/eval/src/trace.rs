@@ -23,6 +23,7 @@ use crate::config::Evaluator;
 use crate::error::{EvalError, JudgeError, WebhookError};
 use crate::judge::{Adapter, JudgeUsage};
 use crate::mapping::resolve::Variables;
+use crate::runner::CallTrace;
 
 /// Where a run was started. `Test` writes neither a rule id nor an experiment id.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +131,78 @@ pub(crate) fn build(
     normalized
 }
 
+/// One structured completion's trace before normalization (D-IC-17).
+pub(crate) struct CallTraceInput<'a> {
+    pub(crate) trace: &'a CallTrace<'a>,
+    pub(crate) started_ns: i64,
+    pub(crate) ended_ns: i64,
+    /// `Err` sets the root status to error with the error's `Display`.
+    pub(crate) result: Result<(), &'a EvalError>,
+    /// The existing `ChildSpan` enum: `Llm` here, `Embedding` from M2.3. `Webhook` is never passed.
+    pub(crate) child: Option<ChildSpan<'a>>,
+}
+
+/// Builds the trace of one completion call and normalizes it.
+///
+/// A rejection is a bug in this builder. The root name and the rejection counts
+/// are logged, and the spans that were accepted are still returned.
+pub(crate) fn build_call(input: &CallTraceInput<'_>) -> Normalized {
+    let trace = input.trace;
+    let root_id = span_id(trace.trace_id, 0);
+    let mut spans = vec![call_root_span(input, &root_id)];
+    if let Some(child) = &input.child {
+        spans.push(child_span(trace.trace_id, root_id, child));
+    }
+    let normalized = normalize(&request(spans), trace.ingest, trace.prices);
+    if normalized.rejections.total() > 0 {
+        tracing::warn!(
+            root_name = trace.root_name,
+            invalid_trace_id = normalized.rejections.count(RejectReason::InvalidTraceId),
+            invalid_span_id = normalized.rejections.count(RejectReason::InvalidSpanId),
+            timestamp_overflow = normalized.rejections.count(RejectReason::TimestampOverflow),
+            start_time_out_of_range = normalized
+                .rejections
+                .count(RejectReason::StartTimeOutOfRange),
+            "call trace dropped spans"
+        );
+    }
+    normalized
+}
+
+/// The `cost_total` of the first span of `kind`, and whether that span had tokens
+/// without a price. The rule is the one `judge_metadata` uses. A missing span gives `(None, false)`.
+pub(crate) fn call_cost(trace: &Normalized, kind: SpanKind) -> (Option<f64>, bool) {
+    let Some(span) = trace.spans.iter().find(|span| span.span_kind == kind) else {
+        return (None, false);
+    };
+    let has_tokens = span.input_tokens.is_some() || span.output_tokens.is_some();
+    (span.cost_total, has_tokens && span.cost_total.is_none())
+}
+
+fn call_root_span(input: &CallTraceInput<'_>, span_id: &SpanId) -> Span {
+    let trace = input.trace;
+    let mut attributes = vec![
+        string_attr(attr::SPAN_KIND, SpanKind::Chain.as_str()),
+        string_attr(attr::ENVIRONMENT, environment::EVAL),
+    ];
+    for (key, value) in trace.metadata {
+        attributes.push(metadata_attr(key, value));
+    }
+    let status = input
+        .result
+        .err()
+        .map(|error| error_status(&error.to_string()));
+    otel_span(
+        trace.trace_id,
+        span_id,
+        None,
+        trace.root_name,
+        (input.started_ns, input.ended_ns),
+        attributes,
+        status,
+    )
+}
+
 /// First 8 bytes of SHA-256(trace id ‖ index). An all-zero prefix becomes `…01`.
 pub(crate) fn span_id(trace_id: TraceId, index: u8) -> SpanId {
     let mut hasher = Sha256::new();
@@ -217,8 +290,13 @@ fn export_request(input: &TraceInput<'_>) -> ExportTraceServiceRequest {
     let root_id = span_id(input.trace_id, 0);
     let mut spans = vec![root_span(input, &root_id)];
     if let Some(child) = &input.child {
-        spans.push(child_span(input, &root_id, child));
+        spans.push(child_span(input.trace_id, root_id, child));
     }
+    request(spans)
+}
+
+/// One `ResourceSpans` for the evaluator service, with the spans in one scope.
+fn request(spans: Vec<Span>) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
             resource: Some(Resource {
@@ -293,7 +371,7 @@ fn root_span(input: &TraceInput<'_>, span_id: &SpanId) -> Span {
     )
 }
 
-fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) -> Span {
+fn child_span(trace_id: TraceId, parent: SpanId, child: &ChildSpan<'_>) -> Span {
     match child {
         ChildSpan::Llm {
             started_ns,
@@ -327,9 +405,9 @@ fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) ->
             }
             let status = error.map(|error| error_status(&error.to_string()));
             otel_span(
-                input.trace_id,
-                &span_id(input.trace_id, 1),
-                Some(parent),
+                trace_id,
+                &span_id(trace_id, 1),
+                Some(&parent),
                 &format!("chat {request_model}"),
                 (*started_ns, *ended_ns),
                 attributes,
@@ -367,9 +445,9 @@ fn child_span(input: &TraceInput<'_>, parent: &SpanId, child: &ChildSpan<'_>) ->
             }
             let otel_status = error.map(|error| error_status(&error.to_string()));
             otel_span(
-                input.trace_id,
-                &span_id(input.trace_id, 1),
-                Some(parent),
+                trace_id,
+                &span_id(trace_id, 1),
+                Some(&parent),
                 "webhook",
                 (*started_ns, *ended_ns),
                 attributes,
@@ -525,11 +603,15 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, judge_metadata, span_id};
+    use super::{
+        CallTraceInput, ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, build_call,
+        call_cost, judge_metadata, span_id,
+    };
     use crate::config::{Check, Evaluator, EvaluatorConfig, OutputScore};
     use crate::error::{ErrorClass, EvalError, JudgeError, WebhookError};
     use crate::judge::{Adapter, JudgeUsage};
     use crate::mapping::resolve::Variables;
+    use crate::runner::CallTrace;
 
     const INGEST: i64 = 1_767_225_600_000_000_000;
     const START: i64 = INGEST - 1_500_000_000;
@@ -1056,6 +1138,54 @@ mod tests {
         assert!(!metadata.contains_key(metadata_key::EVAL_RULE_ID));
         assert!(!metadata.contains_key(metadata_key::EVAL_EXPERIMENT_ID));
         assert_eq!(normalized.rejections.total(), 0);
+    }
+
+    #[test]
+    fn completion_trace_success() {
+        let ingest = ingest();
+        let prices = prices();
+        let metadata = [("k", "v")];
+        let trace = CallTrace {
+            trace_id: trace_id(),
+            root_name: "cetra.issue.summarize",
+            metadata: &metadata,
+            ingest: &ingest,
+            prices,
+        };
+        let usage = usage();
+        let child = ChildSpan::Llm {
+            started_ns: START,
+            ended_ns: END,
+            adapter: Adapter::OpenAi,
+            request_model: "gpt-4o-mini",
+            response_model: Some("gpt-4o-mini"),
+            prompt: "Summarize the issue.",
+            output_text: Some(r#"{"summary":"x","is_issue":true}"#),
+            usage: Some(&usage),
+            error: None,
+        };
+        let input = CallTraceInput {
+            trace: &trace,
+            started_ns: START,
+            ended_ns: END,
+            result: Ok(()),
+            child: Some(child),
+        };
+        let normalized = build_call(&input);
+        assert_common(&normalized, &[0, 1]);
+        let root = &normalized.spans[0];
+        assert_eq!(root.span_kind, SpanKind::Chain);
+        assert_eq!(root.name, "cetra.issue.summarize");
+        assert_eq!(root.status, SpanStatus::Unset);
+        assert_eq!(root.metadata.get("k").map(String::as_str), Some("v"));
+        assert!(root.input.is_none() && root.output.is_none());
+        let llm = &normalized.spans[1];
+        assert_eq!(llm.span_kind, SpanKind::Llm);
+        let (cost, unpriced) = call_cost(&normalized, SpanKind::Llm);
+        assert!(cost.is_some());
+        assert!(!unpriced);
+        assert_eq!(call_cost(&normalized, SpanKind::Embedding), (None, false));
+        snapshot("call_trace_completion_success", &normalized);
     }
 
     #[test]

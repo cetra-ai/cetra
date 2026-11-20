@@ -42,7 +42,9 @@ pub use error::{
 pub use judge::{Adapter, JudgeConnection, JudgeUsage, StructuredOutput, UnknownName};
 pub use mapping::resolve::{ItemData, TraceData, Variables, resolve};
 pub use mapping::{Expr, VariableMapping};
-pub use runner::{EvalOutcome, EvalRun, EvalRunner, RunInput};
+pub use runner::{
+    CallTrace, CompletionInput, CompletionRun, EvalOutcome, EvalRun, EvalRunner, RunInput,
+};
 pub use secret::Secret;
 pub use template::PromptTemplate;
 pub use templates::{JudgeTemplate, builtin_templates};
@@ -52,6 +54,9 @@ pub use webhook::{SIGNATURE_HEADER, sign_payload};
 #[cfg(test)]
 #[path = "../tests/anthropic.rs"]
 mod anthropic_tests;
+#[cfg(test)]
+#[path = "../tests/complete.rs"]
+mod complete_tests;
 #[cfg(test)]
 #[path = "../tests/egress_public.rs"]
 mod egress_public_tests;

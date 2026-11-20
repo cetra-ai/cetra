@@ -6,24 +6,29 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cetra_core::enums::SpanKind;
 use cetra_core::ids::TraceId;
 use cetra_core::score::ScoreValue;
 use cetra_otel::{IngestContext, Normalized, PriceTable};
+use serde_json::{Map, Value};
 
-use crate::check::{CheckInput, run_check};
+use crate::check::{CheckInput, compile_schema, run_check};
 use crate::config::{Check, Evaluator, EvaluatorConfig, JudgeConfig, WebhookConfig};
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{ConfigError, EvalError, JudgeError, WebhookError};
 use crate::judge::{
-    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, JudgeUsage,
-    answer_schema, call, parse_answer,
+    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, JudgeReply,
+    JudgeUsage, answer_schema, call, find_object, parse_answer,
 };
 use crate::mapping::resolve::Variables;
 use crate::secret::Secret;
 use crate::template::PromptTemplate;
-use crate::trace::{ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, judge_metadata};
+use crate::trace::{
+    CallTraceInput, ChildSpan, EvalOrigin, EvalTarget, TraceInput, build, build_call, call_cost,
+    judge_metadata,
+};
 use crate::webhook::{self, WebhookCall};
 
 /// Runs checks locally and sends judge and webhook calls through one client.
@@ -111,6 +116,112 @@ impl fmt::Debug for EvalOutcome {
     }
 }
 
+/// Where a call's trace goes and how it is priced (D-IC-17).
+#[derive(Debug, Clone, Copy)]
+pub struct CallTrace<'a> {
+    /// Id of the call trace. The caller derives one per attempt.
+    pub trace_id: TraceId,
+    /// Name of the root span, e.g. `cetra.issue.summarize`.
+    pub root_name: &'a str,
+    /// Copied onto the root span as `cetra.metadata.<key>` attributes (ids only, never payload).
+    pub metadata: &'a [(&'a str, &'a str)],
+    /// Project, clock and limits for normalization.
+    pub ingest: &'a IngestContext,
+    /// Prices for the child span.
+    pub prices: &'a PriceTable,
+}
+
+/// One structured completion (D-IC-4).
+pub struct CompletionInput<'a> {
+    /// Provider connection, already decrypted.
+    pub connection: &'a JudgeConnection,
+    /// Provider model id.
+    pub model: &'a str,
+    /// Sent as one user message.
+    pub prompt: &'a str,
+    /// JSON Schema (draft 2020-12) of the answer object. Must have `"type": "object"`.
+    pub schema: &'a Value,
+    /// OpenAI `json_schema.name` in native mode, and the forced function in tool mode.
+    /// `^[a-zA-Z0-9_-]{1,64}$`.
+    pub name: &'a str,
+    /// Function description in tool mode.
+    pub description: &'a str,
+    /// Sampling temperature. Omitted from the request when unset.
+    pub temperature: Option<f64>,
+    /// Completion cap, including reasoning tokens.
+    pub max_output_tokens: u32,
+    /// Whole-call timeout.
+    pub timeout: Duration,
+    /// Where the call trace goes and how it is priced.
+    pub trace: CallTrace<'a>,
+}
+
+/// The answer or the failure, and the call trace either way.
+pub struct CompletionRun {
+    /// The answer object, valid against the schema.
+    pub outcome: Result<Map<String, Value>, EvalError>,
+    /// Token counts, when the provider sent them.
+    pub usage: Option<JudgeUsage>,
+    /// `cost_total` of the `llm` span.
+    pub cost_usd: Option<f64>,
+    /// The `llm` span had tokens and no price.
+    pub unpriced_model: bool,
+    /// Root and `llm` spans, normalized.
+    pub trace: Normalized,
+}
+
+/// Prints the input's model, name, sizes and timeout, never the prompt or schema.
+impl fmt::Debug for CompletionInput<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompletionInput")
+            .field("model", &self.model)
+            .field("name", &self.name)
+            .field("prompt_bytes", &self.prompt.len())
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("timeout", &self.timeout)
+            .field("trace_id", &self.trace.trace_id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Prints the outcome's key count or error class, never the answer.
+impl fmt::Debug for CompletionRun {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CompletionRun")
+            .field(
+                "outcome",
+                &self
+                    .outcome
+                    .as_ref()
+                    .map(Map::len)
+                    .map_err(EvalError::class),
+            )
+            .field("cost_usd", &self.cost_usd)
+            .field("unpriced_model", &self.unpriced_model)
+            .field("spans", &self.trace.spans.len())
+            .finish_non_exhaustive()
+    }
+}
+
+/// One completion call, before its trace is built.
+struct Attempt {
+    outcome: Result<Map<String, Value>, EvalError>,
+    /// Set once the provider was called, even when the call failed.
+    sent: Option<SentCall>,
+}
+
+/// The `llm` child of a completion: the provider's reply, or the failure of the call.
+struct SentCall {
+    started_ns: i64,
+    ended_ns: i64,
+    output_text: Option<String>,
+    usage: Option<JudgeUsage>,
+    response_model: Option<String>,
+    error: Option<JudgeError>,
+}
+
 struct Finished {
     outcome: Result<EvalOutcome, EvalError>,
     child: Option<OwnedChild>,
@@ -134,7 +245,7 @@ enum OwnedChild {
         host: String,
         status: Option<u16>,
         request_body: Vec<u8>,
-        response_body: Option<serde_json::Value>,
+        response_body: Option<Value>,
         error: Option<WebhookError>,
     },
 }
@@ -191,6 +302,111 @@ impl EvalRunner {
         }
     }
 
+    /// Runs one structured completion. A failure is [`CompletionRun::outcome`]; the trace is always built.
+    pub async fn complete(&self, input: CompletionInput<'_>) -> CompletionRun {
+        let started = now_ns();
+        let attempt = self.attempt(&input).await;
+        let ended = now_ns().max(started);
+        let result = match &attempt.outcome {
+            Ok(_) => Ok(()),
+            Err(error) => Err(error),
+        };
+        let child = attempt.sent.as_ref().map(|sent| ChildSpan::Llm {
+            started_ns: sent.started_ns,
+            ended_ns: sent.ended_ns,
+            adapter: input.connection.adapter,
+            request_model: input.model,
+            response_model: sent.response_model.as_deref(),
+            prompt: input.prompt,
+            output_text: sent.output_text.as_deref(),
+            usage: sent.usage.as_ref(),
+            error: sent.error.as_ref(),
+        });
+        let trace = build_call(&CallTraceInput {
+            trace: &input.trace,
+            started_ns: started,
+            ended_ns: ended,
+            result,
+            child,
+        });
+        let (cost_usd, unpriced_model) = call_cost(&trace, SpanKind::Llm);
+        let usage = attempt.sent.as_ref().and_then(|sent| sent.usage);
+        tracing::debug!(
+            root_name = input.trace.root_name,
+            duration_ns = ended.saturating_sub(started),
+            error_class = attempt
+                .outcome
+                .as_ref()
+                .err()
+                .map_or("none", |error| error.class().as_str()),
+            "completion"
+        );
+        CompletionRun {
+            outcome: attempt.outcome,
+            usage,
+            cost_usd,
+            unpriced_model,
+            trace,
+        }
+    }
+
+    async fn attempt(&self, input: &CompletionInput<'_>) -> Attempt {
+        if !valid_call_name(input.name) {
+            return Attempt::unsent(JudgeError::InvalidName);
+        }
+        let Some(validator) = compile_object_schema(input.schema) else {
+            return Attempt::unsent(JudgeError::InvalidSchema);
+        };
+        let request = CompletionCall {
+            model: input.model,
+            prompt: input.prompt,
+            schema: input.schema,
+            schema_name: input.name,
+            tool_name: input.name,
+            tool_description: input.description,
+            temperature: input.temperature,
+            max_output_tokens: input.max_output_tokens,
+            timeout: input.timeout,
+        };
+        let started_ns = now_ns();
+        let reply = call(&self.client, input.connection, &request).await;
+        let ended_ns = now_ns().max(started_ns);
+        match reply {
+            Err(error) => Attempt {
+                outcome: Err(EvalError::from(error.clone())),
+                sent: Some(SentCall {
+                    started_ns,
+                    ended_ns,
+                    output_text: None,
+                    usage: None,
+                    response_model: None,
+                    error: Some(error),
+                }),
+            },
+            Ok(JudgeReply {
+                answer,
+                output_text,
+                usage,
+                response_model,
+            }) => {
+                let parsed =
+                    find_object(answer).and_then(|object| check_object(object, &validator));
+                let error = parsed.as_ref().err().cloned();
+                Attempt {
+                    outcome: parsed.map_err(EvalError::from),
+                    sent: Some(SentCall {
+                        started_ns,
+                        ended_ns,
+                        output_text: Some(output_text),
+                        usage: Some(usage),
+                        response_model,
+                        error,
+                    }),
+                }
+            }
+        }
+    }
+
     async fn judge(&self, input: &RunInput<'_>, config: &JudgeConfig) -> Finished {
         let Some(connection) = input.connection else {
             return Finished::failed(ConfigError::Invalid {
@@ -216,7 +432,7 @@ impl EvalRunner {
             tool_description: JUDGEMENT_DESCRIPTION,
             temperature: config.temperature,
             max_output_tokens: config.max_output_tokens,
-            timeout: std::time::Duration::from_millis(u64::from(config.timeout_ms)),
+            timeout: Duration::from_millis(u64::from(config.timeout_ms)),
         };
         let started = now_ns();
         let reply = call(&self.client, connection, &request).await;
@@ -375,6 +591,47 @@ fn run_one_check(input: &RunInput<'_>, check: &Check) -> Finished {
             child: None,
         },
         Err(error) => Finished::failed(error),
+    }
+}
+
+impl Attempt {
+    /// A call that failed before the provider was called. Its trace has no child.
+    fn unsent(error: JudgeError) -> Self {
+        Self {
+            outcome: Err(EvalError::from(error)),
+            sent: None,
+        }
+    }
+}
+
+/// `^[a-zA-Z0-9_-]{1,64}$`, checked byte by byte.
+fn valid_call_name(name: &str) -> bool {
+    (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The compiled schema, when it is an object schema that compiles.
+fn compile_object_schema(schema: &Value) -> Option<jsonschema::Validator> {
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        return None;
+    }
+    compile_schema(schema).ok()
+}
+
+/// The answer object, when the schema accepts it. The schema's error text is not kept.
+fn check_object(
+    object: Map<String, Value>,
+    validator: &jsonschema::Validator,
+) -> Result<Map<String, Value>, JudgeError> {
+    let instance = Value::Object(object);
+    if !validator.is_valid(&instance) {
+        return Err(JudgeError::SchemaMismatch);
+    }
+    match instance {
+        Value::Object(object) => Ok(object),
+        _ => Err(JudgeError::NotAnObject),
     }
 }
 

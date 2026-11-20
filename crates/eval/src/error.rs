@@ -251,6 +251,15 @@ pub enum JudgeError {
     /// The request body could not be encoded.
     #[error("invalid request")]
     InvalidRequest,
+    /// The answer object does not match the caller's schema. No detail is kept.
+    #[error("answer does not match the schema")]
+    SchemaMismatch,
+    /// The caller's schema does not compile, or is not an object schema.
+    #[error("invalid answer schema")]
+    InvalidSchema,
+    /// The call name does not match `^[a-zA-Z0-9_-]{1,64}$`.
+    #[error("invalid call name")]
+    InvalidName,
     /// The model refused the prompt. The refusal text is discarded.
     #[error("model refused")]
     Refused,
@@ -328,6 +337,9 @@ impl fmt::Debug for JudgeError {
             Self::InvalidModel => formatter.write_str("InvalidModel"),
             Self::InvalidHeader => formatter.write_str("InvalidHeader"),
             Self::InvalidRequest => formatter.write_str("InvalidRequest"),
+            Self::SchemaMismatch => formatter.write_str("SchemaMismatch"),
+            Self::InvalidSchema => formatter.write_str("InvalidSchema"),
+            Self::InvalidName => formatter.write_str("InvalidName"),
             Self::Refused => formatter.write_str("Refused"),
             Self::ContentFiltered => formatter.write_str("ContentFiltered"),
             Self::Truncated => formatter.write_str("Truncated"),
@@ -469,6 +481,9 @@ impl JudgeError {
             | Self::InvalidModel
             | Self::InvalidHeader
             | Self::InvalidRequest
+            | Self::SchemaMismatch
+            | Self::InvalidSchema
+            | Self::InvalidName
             | Self::Refused
             | Self::ContentFiltered
             | Self::Truncated => ErrorClass::Permanent,

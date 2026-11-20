@@ -12,7 +12,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 pub(crate) use answer::Answer;
-pub(crate) use answer::{RawAnswer, answer_schema, parse_answer};
+pub(crate) use answer::{RawAnswer, answer_schema, find_object, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
 use reqwest::Url;
 use serde_json::Value;
