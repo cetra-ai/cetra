@@ -883,7 +883,7 @@ mod tests {
                     })
                     .await
                     .unwrap();
-                let tracked = refresh_tracked(&app.state).await.unwrap();
+                let tracked = refresh_tracked(&app.state).await.unwrap().0;
                 assert_eq!(tracked[&project].timeout_ns, seconds * SECOND);
             }
         }
