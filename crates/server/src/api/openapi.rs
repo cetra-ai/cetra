@@ -41,7 +41,8 @@ use super::alerts::{
 };
 use super::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
-    AssistantMessage, AssistantMessageStatus, AssistantPart, AssistantRole,
+    AssistantMessage, AssistantMessageStatus, AssistantPart, AssistantRole, AssistantSettings,
+    AssistantStatus, AssistantTestRequest, AssistantUnavailable, PutAssistantSettings,
     UpdateAssistantConversationRequest,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
@@ -356,6 +357,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AssistantDraftKind>();
     set.insert::<UpdateAssistantConversationRequest>();
     set.insert_page::<AssistantConversation>("AssistantConversationPage");
+    set.insert::<AssistantSettings>();
+    set.insert::<PutAssistantSettings>();
+    set.insert::<AssistantTestRequest>();
+    set.insert::<AssistantUnavailable>();
+    set.insert::<AssistantStatus>();
     set.insert::<EvaluatorKind>();
     set.insert::<OutputScoreBody>();
     set.insert::<Evaluator>();
@@ -948,6 +954,7 @@ fn paths() -> Paths {
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
     let paths = assistant_paths(paths);
+    let paths = assistant_settings_paths(paths);
     media_paths(paths).build()
 }
 
@@ -4781,6 +4788,91 @@ fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/assistant/conversations/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+/// The org's assistant setting and its test, and the panel's status (D-AS-3, D-AS-4, D-AS-24).
+fn assistant_settings_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let session = || Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]);
+    let get = operation(
+        "get_org_assistant",
+        "assistant",
+        "Get the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization members and above, and viewers. Answers `enabled: false` while the org never saved one (D-AS-3).",
+    ))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The setting."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let put = operation(
+        "put_org_assistant",
+        "assistant",
+        "Save the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Enabling needs a connection and a model, and runs the tool-calling test first; a failed test saves nothing (D-AS-3, D-AS-24). Disabling needs no test.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("PutAssistantSettings")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The saved setting."),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let test = operation(
+        "post_org_assistant_test",
+        "assistant",
+        "Test a connection for the assistant",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org]))
+    .request_body(Some(json_body("AssistantTestRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let status = operation(
+        "get_project_assistant",
+        "assistant",
+        "Get whether the caller can use the assistant",
+    )
+    .description(Some(
+        "Project members and above, with a session. Answers `usable` and, when it is false, the reason: `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16).",
+    ))
+    .securities(session())
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantStatus>("The caller's status."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let mut setting = PathItem::new(HttpMethod::Get, get);
+    setting.put = Some(put);
+    paths
+        .path("/api/v1/orgs/{org}/assistant", setting)
+        .path(
+            "/api/v1/orgs/{org}/assistant/test",
+            PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            format!("{PROJECT}/assistant"),
+            PathItem::new(HttpMethod::Get, status),
         )
 }
 

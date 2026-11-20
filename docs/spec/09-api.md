@@ -191,6 +191,10 @@ Track V M6 (D-V-20 to D-V-26, D-V-33 to D-V-37). One route, answered as a stream
 
 | Method & path | Notes |
 |---|---|
+| `GET /orgs/{org}/assistant` | the org's setting: `enabled`, `connection_id`, `model`, `updated_at`; `enabled: false` while the org never saved one; viewers and above (D-AS-3) |
+| `PUT /orgs/{org}/assistant` | saves the whole setting; organization admins and owners, with a session; enabling needs a connection and a model and runs the tool-calling test first, and a failed test stores nothing (D-AS-3, D-AS-24) |
+| `POST /orgs/{org}/assistant/test` | runs the tool-calling test on one of the org's connections without saving; organization admins and owners, with a session; a provider failure is `ok: false` |
+| `GET /projects/{project}/assistant` | whether the caller can chat: `usable`, with the connection's name, adapter and model; otherwise `reason` is `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16) |
 | `GET/POST /assistant/conversations` · `GET/PATCH/DELETE /assistant/conversations/{id}` | the caller's own conversations, private to their author (another user's id is `404`); project members and above with a session (`ProjectPerm::UseAssistant`, D-AS-4); the list is newest activity first and not paged (at most 100); `POST` takes no body; `PATCH` takes `{title}` (1–80 characters); the detail holds the messages, oldest first, with their parts (spec 04 § Assistant) (D-AS-10) |
 
 ### Pricing & GDPR

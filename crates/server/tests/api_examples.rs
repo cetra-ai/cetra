@@ -17,7 +17,8 @@ use cetra_server::api::account::{
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::assistant::{
-    AssistantConversation, AssistantConversationDetail, UpdateAssistantConversationRequest,
+    AssistantConversation, AssistantConversationDetail, AssistantSettings, AssistantStatus,
+    PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
@@ -475,6 +476,7 @@ fn static_files_match_their_types() {
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
     roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
+    roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
@@ -546,6 +548,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
             "patch_assistant_conversation",
             "requests/assistant-conversation-rename.json",
         ),
+        ("put_org_assistant", "requests/assistant-settings.json"),
         (
             "post_online_rule_preview",
             "requests/online-rule-preview.json",
@@ -660,6 +663,8 @@ fn generated_files_roundtrip() {
                 roundtrip::<Page<AssistantConversation>>(&example.file);
             }
             "get_assistant_conversation" => roundtrip::<AssistantConversationDetail>(&example.file),
+            "get_org_assistant" => roundtrip::<AssistantSettings>(&example.file),
+            "get_project_assistant" => roundtrip::<AssistantStatus>(&example.file),
             "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
             | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {

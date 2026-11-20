@@ -773,6 +773,61 @@ impl TestApp {
 }
 
 impl TestApp {
+    /// The example org's assistant setting of `fixtures/api/README.md` § Fixed identifiers: on,
+    /// with the example connection `…0400` (an OpenAI connection in `acme`, inserted here since
+    /// the examples only hold it as a static file) and `gpt-4o`. Call after `seed_examples`.
+    pub(crate) async fn seed_example_assistant_settings(&self) {
+        const CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
+        let connection: Uuid = CONNECTION.parse().unwrap();
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org: String = sqlx::query_scalar("SELECT id FROM orgs WHERE slug = 'acme'")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(MetaError::Db)?;
+                    let user: String =
+                        sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::Db)?;
+                    // The sealed key is never opened by the examples, so its column is empty.
+                    sqlx::query(
+                        "INSERT INTO llm_connections \
+                         (id, org_id, name, adapter, secret_enc, api_key_hint, default_model, \
+                          created_at, updated_at) \
+                         VALUES (?, ?, 'OpenAI', 'openai', ?, 'WXYZ', 'gpt-5-mini', ?, ?)",
+                    )
+                    .bind(connection.to_string())
+                    .bind(&org)
+                    .bind(Vec::<u8>::new())
+                    .bind(MANUAL_NOW_NS)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    sqlx::query(
+                        "INSERT INTO org_assistant_settings \
+                         (org_id, enabled, connection_id, model, updated_by, updated_at) \
+                         VALUES (?, 1, ?, 'gpt-4o', ?, ?)",
+                    )
+                    .bind(&org)
+                    .bind(connection.to_string())
+                    .bind(&user)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+}
+
+impl TestApp {
     /// The example dataset `faq` of `fixtures/api/README.md` § Fixed identifiers, written
     /// through the store into the example project. Call after `seed_examples`.
     /// Not to be confused with `load_example_dataset`, which loads the example spans and

@@ -7,7 +7,7 @@
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -15,21 +15,30 @@ use cetra_core::ids::ProjectId;
 
 use crate::api::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantFeedback, AssistantMessage,
-    AssistantMessageStatus, AssistantPart, AssistantRole, UpdateAssistantConversationRequest,
+    AssistantMessageStatus, AssistantPart, AssistantRole, AssistantSettings, AssistantStatus,
+    AssistantTestRequest, AssistantUnavailable, PutAssistantSettings,
+    UpdateAssistantConversationRequest,
 };
-use crate::api::common::Page;
+use crate::api::common::{FieldError, Page};
+use crate::api::connections::{LlmConnectionTestResult, TestErrorClass};
+use crate::assistant::settings::{self as assistant_settings, Resolved};
 use crate::auth::principal::{self, Principal};
-use crate::auth::roles::ProjectPerm;
+use crate::auth::roles::{OrgPerm, ProjectPerm, Role};
 use crate::http::AppState;
-use crate::http::access::{Access, ProjectAccess, RouteDef};
+use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
+use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::assistant::{
-    self as store, ConversationRow, Feedback, MessageRole, MessageRow, MessageStatus,
+    self as store, AssistantSettingsRow, ConversationRow, Feedback, MessageRole, MessageRow,
+    MessageStatus,
 };
+use crate::meta::connections;
 
 /// Longest conversation title, in characters after trimming (D-AS-10).
 const MAX_TITLE_CHARS: usize = 80;
+/// Longest model name, in bytes after trimming (D-AS-24's test takes the same bound).
+const MAX_MODEL_BYTES: usize = 256;
 
 /// Assistant conversation routes (spec 09).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -72,6 +81,46 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             access,
             documented: true,
             handler: delete(delete_conversation),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/orgs/{org}/assistant",
+            access: Access::Org {
+                perm: OrgPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_org_assistant),
+        },
+        RouteDef {
+            method: Method::PUT,
+            path: "/api/v1/orgs/{org}/assistant",
+            access: Access::Org {
+                perm: OrgPerm::ManageConnections,
+                session_only: true,
+            },
+            documented: true,
+            handler: put(put_org_assistant),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/orgs/{org}/assistant/test",
+            access: Access::Org {
+                perm: OrgPerm::ManageConnections,
+                session_only: true,
+            },
+            documented: true,
+            handler: post(test_org_assistant),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/assistant",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: true,
+            },
+            documented: true,
+            handler: get(get_project_assistant),
         },
     ]
 }
@@ -301,6 +350,224 @@ async fn delete_conversation(
     } else {
         Err(ApiError::NotFound)
     }
+}
+
+/// The model name trimmed, when it is 1 to 256 bytes.
+fn checked_model(text: &str) -> Option<String> {
+    let model = text.trim();
+    (!model.is_empty() && model.len() <= MAX_MODEL_BYTES).then(|| model.to_owned())
+}
+
+fn model_error() -> FieldError {
+    FieldError {
+        field: "model".to_owned(),
+        message: "must be 1 to 256 bytes".to_owned(),
+        position: None,
+    }
+}
+
+fn required_error(field: &str) -> FieldError {
+    FieldError {
+        field: field.to_owned(),
+        message: "required when enabled".to_owned(),
+        position: None,
+    }
+}
+
+/// The per-user limit of connection tests (`state.limits.connection_tests`), shared with the
+/// assistant's test (D-AS-24).
+fn check_test_limit(state: &AppState, user: Uuid) -> Result<(), ApiError> {
+    state
+        .limits
+        .connection_tests
+        .check(&user, state.clock.now_ns())
+        .map_err(|retry| ApiError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })
+}
+
+/// The stored setting as the API returns it. No row is the setting off, never saved.
+fn settings_json(row: Option<AssistantSettingsRow>) -> AssistantSettings {
+    match row {
+        None => AssistantSettings {
+            enabled: false,
+            connection_id: None,
+            model: None,
+            updated_at: None,
+        },
+        Some(row) => AssistantSettings {
+            enabled: row.enabled,
+            connection_id: row.connection_id,
+            model: row.model,
+            updated_at: Some(row.updated_at),
+        },
+    }
+}
+
+fn class_name(class: TestErrorClass) -> &'static str {
+    match class {
+        TestErrorClass::Retryable => "retryable",
+        TestErrorClass::Pause => "pause",
+        TestErrorClass::Permanent => "permanent",
+    }
+}
+
+/// A failed test call, as `400`: the class and the provider's text, with the field `model`.
+fn test_failed(result: &LlmConnectionTestResult) -> ApiError {
+    let detail = match &result.error {
+        Some(error) => format!(
+            "the test call failed: {}: {}",
+            class_name(error.class),
+            error.message
+        ),
+        None => "the test call failed".to_owned(),
+    };
+    ApiError::BadRequest {
+        detail: Some(detail),
+        errors: vec![FieldError {
+            field: "model".to_owned(),
+            message: "the model must support tool calling".to_owned(),
+            position: None,
+        }],
+    }
+}
+
+fn unusable(reason: AssistantUnavailable) -> AssistantStatus {
+    AssistantStatus {
+        usable: false,
+        reason: Some(reason),
+        connection_name: None,
+        adapter: None,
+        model: None,
+    }
+}
+
+/// `GET /orgs/{org}/assistant`: the setting, or `enabled: false` when the org never saved one.
+async fn get_org_assistant(
+    State(state): State<AppState>,
+    Extension(access): Extension<OrgAccess>,
+) -> Result<error::Json<AssistantSettings>, ApiError> {
+    let row = store::get_settings(state.meta.reader(), access.org.id).await?;
+    Ok(error::Json(settings_json(row)))
+}
+
+/// `PUT /orgs/{org}/assistant`: saves the whole setting. Enabling runs the tool-calling test first
+/// (D-AS-3, D-AS-24); a failed test stores nothing. Answers the saved setting.
+async fn put_org_assistant(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<PutAssistantSettings>,
+) -> Result<error::Json<AssistantSettings>, ApiError> {
+    let user = principal::session_user(&principal)?.id;
+    let org = access.org.id;
+    let mut errors = Vec::new();
+    let model = match body.model.as_deref() {
+        None => None,
+        Some(text) => {
+            let model = checked_model(text);
+            if model.is_none() {
+                errors.push(model_error());
+            }
+            model
+        }
+    };
+    if body.enabled {
+        if body.connection_id.is_none() {
+            errors.push(required_error("connection_id"));
+        }
+        if body.model.is_none() {
+            errors.push(required_error("model"));
+        }
+    }
+    if !errors.is_empty() {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors,
+        });
+    }
+    let connection = match body.connection_id {
+        Some(id) => Some(
+            connections::get_connection(state.meta.reader(), org, id)
+                .await?
+                .ok_or_else(|| {
+                    field_error("connection_id", "connection not found in this organization")
+                })?,
+        ),
+        None => None,
+    };
+    if let (true, Some(connection), Some(model)) =
+        (body.enabled, connection.as_ref(), model.as_deref())
+    {
+        refuse_outbound(&state, "assistant test")?;
+        check_test_limit(&state, user)?;
+        let result = assistant_settings::test_call(&state, connection, model).await?;
+        if !result.ok {
+            return Err(test_failed(&result));
+        }
+    }
+    let saved = AssistantSettingsRow {
+        enabled: body.enabled,
+        connection_id: body.connection_id,
+        model,
+        updated_by: Some(user),
+        updated_at: state.clock.now_ns(),
+    };
+    let to_store = saved.clone();
+    state
+        .meta
+        .write(move |conn| Box::pin(async move { store::put_settings(conn, org, &to_store).await }))
+        .await?;
+    tracing::info!(target: "audit", org_id = %org, user_id = %user, enabled = saved.enabled, connection_id = ?saved.connection_id, "assistant setting saved");
+    Ok(error::Json(settings_json(Some(saved))))
+}
+
+/// `POST /orgs/{org}/assistant/test`: runs the tool-calling test on a connection without saving.
+async fn test_org_assistant(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<AssistantTestRequest>,
+) -> Result<error::Json<LlmConnectionTestResult>, ApiError> {
+    refuse_outbound(&state, "assistant test")?;
+    let user = principal::session_user(&principal)?.id;
+    check_test_limit(&state, user)?;
+    let connection =
+        connections::get_connection(state.meta.reader(), access.org.id, body.connection_id)
+            .await?
+            .ok_or(ApiError::NotFound)?;
+    let model = checked_model(&body.model).ok_or_else(|| ApiError::BadRequest {
+        detail: None,
+        errors: vec![model_error()],
+    })?;
+    let result = assistant_settings::test_call(&state, &connection, &model).await?;
+    Ok(error::Json(result))
+}
+
+/// `GET /projects/{project}/assistant`: whether the caller can chat, and why not. Answers `200`
+/// in every case: the reason is in the body.
+async fn get_project_assistant(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+) -> Result<error::Json<AssistantStatus>, ApiError> {
+    if !matches!(access.role, Some(role) if role >= Role::Member) {
+        return Ok(error::Json(unusable(AssistantUnavailable::Forbidden)));
+    }
+    if state.config.restore_mode {
+        return Ok(error::Json(unusable(AssistantUnavailable::RestoreMode)));
+    }
+    let status = match assistant_settings::resolve(&state, access.project.org_id).await? {
+        Resolved::Disabled => unusable(AssistantUnavailable::Disabled),
+        Resolved::NoConnection => unusable(AssistantUnavailable::NoConnection),
+        Resolved::Usable { connection, model } => AssistantStatus {
+            usable: true,
+            reason: None,
+            connection_name: Some(connection.name),
+            adapter: Some(connection.adapter),
+            model: Some(model),
+        },
+    };
+    Ok(error::Json(status))
 }
 
 #[cfg(test)]
@@ -845,5 +1112,416 @@ mod tests {
         assert!(logs.contains("assistant conversation renamed"), "{logs}");
         assert!(logs.contains(&conversation_id.to_string()), "{logs}");
         assert!(!logs.contains("secret title"), "{logs}");
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use std::sync::Arc;
+
+    use axum::http::{Method, StatusCode};
+    use cetra_capture::{Mock, Turn};
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    use crate::auth::roles::OrgRole;
+    use crate::http::restore::tests::assert_refused;
+    use crate::test_support::{TestApp, TestResponse, capture_logs, second_org};
+
+    fn text(response: &TestResponse) -> String {
+        String::from_utf8_lossy(&response.body).into_owned()
+    }
+
+    /// A chat turn whose answer is `text`, from the OpenAI-style mock.
+    fn text_turn(text: &str) -> Turn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": text},
+            "finish": "stop",
+            "usage": {"input": 5, "output": 2},
+            "ttft_ms": 0,
+            "chunk_delay_ms": 0,
+        }))
+        .expect("a text turn")
+    }
+
+    /// A turn that calls the tool `ping` with `ok` true.
+    fn ping_turn() -> Turn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"tool_calls": [{"id": "call_1", "name": "ping", "arguments": {"ok": true}}]},
+            "finish": "tool_calls",
+            "usage": {"input": 5, "output": 2},
+            "ttft_ms": 0,
+            "chunk_delay_ms": 0,
+        }))
+        .expect("a ping turn")
+    }
+
+    /// Serves `turns` on loopback as an OpenAI-style provider. Returns the mock and the base URL.
+    async fn provider(turns: Vec<Turn>) -> (Arc<Mock>, String) {
+        let mock = Mock::new(turns);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let router = mock.router();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (mock, format!("http://{addr}/v1"))
+    }
+
+    /// An app that may call the loopback mock.
+    async fn mock_app() -> TestApp {
+        TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await
+    }
+
+    /// Creates an `openai` connection in `org` and returns its id. Without `base`, the provider's
+    /// default address is used, which these tests never call.
+    async fn connection(app: &TestApp, cookie: &str, org: &str, base: Option<&str>) -> Uuid {
+        let mut body = json!({
+            "name": format!("Mocked {}", Uuid::now_v7()),
+            "adapter": "openai",
+            "api_key": "sk-test-key-0123456789",
+            "default_model": "gpt-test",
+        });
+        if let Some(base) = base {
+            body["base_url"] = json!(base);
+        }
+        let response = app
+            .request(Method::POST, &format!("/api/v1/orgs/{org}/llm-connections"))
+            .header("cookie", cookie)
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::CREATED, "{}", text(&response));
+        let value: Value = response.json();
+        value["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
+    async fn connection_status(app: &TestApp, cookie: &str, id: Uuid) -> String {
+        let response = app
+            .request(
+                Method::GET,
+                &format!("/api/v1/orgs/acme/llm-connections/{id}"),
+            )
+            .header("cookie", cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        let value: Value = response.json();
+        value["status"].as_str().expect("status").to_owned()
+    }
+
+    async fn put_settings(app: &TestApp, cookie: &str, body: &Value) -> TestResponse {
+        app.request(Method::PUT, "/api/v1/orgs/acme/assistant")
+            .header("cookie", cookie)
+            .json(body)
+            .send()
+            .await
+    }
+
+    async fn read_settings(app: &TestApp, cookie: &str) -> Value {
+        let response = app
+            .request(Method::GET, "/api/v1/orgs/acme/assistant")
+            .header("cookie", cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        response.json()
+    }
+
+    async fn read_status(app: &TestApp, cookie: &str, project: &str) -> Value {
+        let response = app
+            .request(
+                Method::GET,
+                &format!("/api/v1/projects/{project}/assistant"),
+            )
+            .header("cookie", cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        response.json()
+    }
+
+    #[tokio::test]
+    async fn settings_default_to_off() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        for cookie in [&seeded.cookie, &member.cookie, &viewer.cookie] {
+            assert_eq!(read_settings(&app, cookie).await, json!({"enabled": false}));
+        }
+    }
+
+    #[tokio::test]
+    async fn only_admins_write() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let response = put_settings(&app, &member.cookie, &json!({"enabled": false})).await;
+        assert_eq!(
+            response.status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            text(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_needs_connection_and_model() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let neither = put_settings(&app, &seeded.cookie, &json!({"enabled": true})).await;
+        assert_eq!(
+            neither.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            text(&neither)
+        );
+        assert!(text(&neither).contains("connection_id"));
+        assert!(text(&neither).contains("model"));
+        let id = connection(&app, &seeded.cookie, "acme", None).await;
+        let no_model = put_settings(
+            &app,
+            &seeded.cookie,
+            &json!({"enabled": true, "connection_id": id}),
+        )
+        .await;
+        assert_eq!(
+            no_model.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            text(&no_model)
+        );
+        assert!(text(&no_model).contains("model"));
+        let no_connection = put_settings(
+            &app,
+            &seeded.cookie,
+            &json!({"enabled": true, "model": "gpt-test"}),
+        )
+        .await;
+        assert_eq!(
+            no_connection.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            text(&no_connection)
+        );
+        assert!(text(&no_connection).contains("connection_id"));
+        assert_eq!(
+            read_settings(&app, &seeded.cookie).await,
+            json!({"enabled": false})
+        );
+    }
+
+    #[tokio::test]
+    async fn enabling_runs_the_test() {
+        let (_mock, base) = provider(vec![text_turn("No tool here."), ping_turn()]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let id = connection(&app, &seeded.cookie, "acme", Some(&base)).await;
+        let body = json!({"enabled": true, "connection_id": id, "model": "gpt-test"});
+
+        // The model answers in text: the test fails, nothing is stored, the connection stays ok.
+        let failed = put_settings(&app, &seeded.cookie, &body).await;
+        assert_eq!(failed.status, StatusCode::BAD_REQUEST, "{}", text(&failed));
+        assert!(text(&failed).contains("the model must support tool calling"));
+        assert_eq!(
+            read_settings(&app, &seeded.cookie).await,
+            json!({"enabled": false})
+        );
+        assert_eq!(connection_status(&app, &seeded.cookie, id).await, "ok");
+
+        // The model calls `ping`: the setting is stored.
+        let saved = put_settings(&app, &seeded.cookie, &body).await;
+        assert_eq!(saved.status, StatusCode::OK, "{}", text(&saved));
+        let stored = read_settings(&app, &seeded.cookie).await;
+        assert_eq!(stored["enabled"], true);
+        assert_eq!(stored["connection_id"], json!(id));
+        assert_eq!(stored["model"], "gpt-test");
+        assert!(stored["updated_at"].is_string());
+        assert_eq!(connection_status(&app, &seeded.cookie, id).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn disabling_needs_no_test() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = put_settings(&app, &seeded.cookie, &json!({"enabled": false})).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        let stored = read_settings(&app, &seeded.cookie).await;
+        assert_eq!(stored["enabled"], false);
+        assert!(stored["updated_at"].is_string());
+    }
+
+    #[tokio::test]
+    async fn connection_of_another_org_is_400() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (_other, owner) = second_org(&app, "other", "owner@example.com").await;
+        let foreign = connection(&app, &owner.cookie, "other", None).await;
+        let response = put_settings(
+            &app,
+            &seeded.cookie,
+            &json!({"enabled": false, "connection_id": foreign}),
+        )
+        .await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            text(&response)
+        );
+        assert!(text(&response).contains("connection not found in this organization"));
+    }
+
+    #[tokio::test]
+    async fn deleting_the_connection_turns_it_off() {
+        let (_mock, base) = provider(vec![ping_turn()]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let id = connection(&app, &seeded.cookie, "acme", Some(&base)).await;
+        let saved = put_settings(
+            &app,
+            &seeded.cookie,
+            &json!({"enabled": true, "connection_id": id, "model": "gpt-test"}),
+        )
+        .await;
+        assert_eq!(saved.status, StatusCode::OK, "{}", text(&saved));
+        let deleted = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/llm-connections/{id}"),
+            )
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT, "{}", text(&deleted));
+        let status = read_status(&app, &seeded.cookie, &seeded.project.id.to_string()).await;
+        assert_eq!(status, json!({"usable": false, "reason": "no_connection"}));
+    }
+
+    #[tokio::test]
+    async fn status_reasons() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let project = seeded.project.id.to_string();
+        let as_viewer = read_status(&app, &viewer.cookie, &project).await;
+        assert_eq!(as_viewer, json!({"usable": false, "reason": "forbidden"}));
+        let as_member = read_status(&app, &member.cookie, &project).await;
+        assert_eq!(as_member, json!({"usable": false, "reason": "disabled"}));
+    }
+
+    #[tokio::test]
+    async fn usable_status_names_the_connection() {
+        let (_mock, base) = provider(vec![ping_turn()]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let id = connection(&app, &seeded.cookie, "acme", Some(&base)).await;
+        let saved = put_settings(
+            &app,
+            &seeded.cookie,
+            &json!({"enabled": true, "connection_id": id, "model": "gpt-test"}),
+        )
+        .await;
+        assert_eq!(saved.status, StatusCode::OK, "{}", text(&saved));
+        let status = read_status(&app, &member.cookie, &seeded.project.id.to_string()).await;
+        assert_eq!(status["usable"], true);
+        assert_eq!(
+            status["connection_name"]
+                .as_str()
+                .map(|name| name.starts_with("Mocked")),
+            Some(true)
+        );
+        assert_eq!(status["adapter"], "openai");
+        assert_eq!(status["model"], "gpt-test");
+        assert!(status.get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn restore_mode_is_its_own_reason() {
+        let app = TestApp::with_config(|config| {
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let status = read_status(&app, &seeded.cookie, &seeded.project.id.to_string()).await;
+        assert_eq!(status, json!({"usable": false, "reason": "restore_mode"}));
+    }
+
+    #[tokio::test]
+    async fn test_route_reports_a_failed_call() {
+        let (_mock, base) = provider(vec![text_turn("I cannot call tools.")]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let id = connection(&app, &seeded.cookie, "acme", Some(&base)).await;
+        let response = app
+            .request(Method::POST, "/api/v1/orgs/acme/assistant/test")
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"connection_id": id, "model": "gpt-test"}))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        let value: Value = response.json();
+        assert_eq!(value["ok"], false);
+        assert_eq!(value["error"]["class"], "permanent");
+        assert_eq!(connection_status(&app, &seeded.cookie, id).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn restore_mode_refuses_the_test() {
+        let app = TestApp::with_config(|config| {
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let response = app
+            .request(Method::POST, "/api/v1/orgs/acme/assistant/test")
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"connection_id": Uuid::now_v7(), "model": "gpt-test"}))
+            .send()
+            .await;
+        assert_refused(&response, "assistant test");
+    }
+
+    #[tokio::test]
+    async fn audit_log_has_no_model_answer() {
+        const ANSWER: &str = "ANSWER-MARKER-7f3a9c";
+        let (_mock, base) = provider(vec![text_turn(ANSWER)]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let id = connection(&app, &seeded.cookie, "acme", Some(&base)).await;
+        let body = json!({"enabled": true, "connection_id": id, "model": "gpt-test"});
+        let (response, logs) = capture_logs(put_settings(&app, &seeded.cookie, &body)).await;
+        assert_eq!(
+            response.status,
+            StatusCode::BAD_REQUEST,
+            "{}",
+            text(&response)
+        );
+        assert!(!text(&response).contains(ANSWER));
+        assert!(!logs.contains(ANSWER));
     }
 }

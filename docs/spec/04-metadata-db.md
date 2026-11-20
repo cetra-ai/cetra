@@ -330,6 +330,22 @@ CREATE TABLE assistant_messages (
 CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL;
 ```
 
+The org's assistant setting (D-AS-3) is one row per org; an org with no row has the assistant off.
+
+```sql
+-- The org's in-app assistant setting (track AS, D-AS-3).
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+);
+```
+
+> Enabling needs a connection and a model; turning it on runs the tool-calling test (D-AS-24) and stores nothing when the test fails. The assistant never changes a connection's status. Deleting the connection leaves the setting with no connection, which reads as `no_connection`. A setting with `enabled` false, or with no row, reads as `disabled`.
+
 > `parts` is a JSON array of parts. The message parts of spec 01 are used where they fit: `{type: "text", content}` and `{type: "tool_call", id, name, arguments}`. Two parts are the assistant's own: `{type: "tool_result", id, name, ok, result, size_bytes, rows?, stubbed}` (the tool's JSON answer, `null` once stubbed) and `{type: "draft", id, kind, draft}` (`kind` is `filter`, `sql`, `dashboard`, `evaluator` or `online_rule`; D-AS-6). A user message holds text parts and its page context in `context`; an assistant message holds text, tool calls and drafts; a tool message holds tool results.
 >
 > Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). Both run at startup, then hourly. Conversations are deleted with their project, org or author.

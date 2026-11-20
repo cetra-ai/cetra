@@ -440,6 +440,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/assistant/conversations/{id}",
         "delete_assistant_conversation",
     ),
+    ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
+    ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/assistant/test",
+        "post_org_assistant_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant",
+        "get_project_assistant",
+    ),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -1091,6 +1103,9 @@ fn document_lint() {
                 | "get_assistant_conversation"
                 | "patch_assistant_conversation"
                 | "delete_assistant_conversation"
+                | "put_org_assistant"
+                | "post_org_assistant_test"
+                | "get_project_assistant"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1163,6 +1178,8 @@ fn document_lint() {
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
             || *id == "patch_assistant_conversation"
+            || *id == "put_org_assistant"
+            || *id == "post_org_assistant_test"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {

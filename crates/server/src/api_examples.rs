@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::api::assistant::{AssistantConversation, AssistantConversationDetail};
+use crate::api::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantSettings, AssistantStatus,
+};
 use crate::api::common::Page;
 use crate::api::dashboards::WidgetQueryResponse;
 use crate::api::datasets::{Dataset, DatasetItem, DatasetVersion, ExperimentTrends, ItemChange};
@@ -175,6 +177,22 @@ async fn fetch<T: Serialize + DeserializeOwned>(
     response.json()
 }
 
+/// `GET` of `path`, an absolute path. Asserts `200` and parses the body as `T`.
+async fn get_at<T: DeserializeOwned>(app: &TestApp, cookie: &str, path: &str) -> T {
+    let response = app
+        .request(Method::GET, path)
+        .header("cookie", cookie)
+        .send()
+        .await;
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "{path}: {}",
+        String::from_utf8_lossy(&response.body)
+    );
+    response.json()
+}
+
 /// `POST` of `body` to the example project's `path`. Asserts `200` and parses the body as `T`.
 async fn post_json<T: Serialize + DeserializeOwned>(
     app: &TestApp,
@@ -207,6 +225,7 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
     app.load_example_dataset(project).await;
     app.seed_example_faq_dataset().await;
     app.seed_example_conversation().await;
+    app.seed_example_assistant_settings().await;
     app.seed_example_prompts().await;
     let cookie = cookie.as_str();
     let mut out = Output::default();
@@ -344,6 +363,22 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
         &[],
         &format!("responses/assistant-conversations/{EXAMPLE_CONVERSATION}.json"),
         &conversation,
+    );
+    let org_setting: AssistantSettings = get_at(&app, cookie, "/api/v1/orgs/acme/assistant").await;
+    out.add(
+        "get_org_assistant",
+        &[("org", "acme")],
+        &[],
+        "responses/org-assistant.json",
+        &org_setting,
+    );
+    let assistant_status: AssistantStatus = fetch(&app, cookie, "/assistant").await;
+    out.add(
+        "get_project_assistant",
+        &[],
+        &[],
+        "responses/project-assistant.json",
+        &assistant_status,
     );
 
     let datasets: Page<Dataset> = fetch(&app, cookie, "/datasets").await;

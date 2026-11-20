@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use cetra_core::ids::ProjectId;
+use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -429,6 +429,102 @@ fn stubbed_parts(conversation_id: &str, seq: i64, parts: &str) -> String {
     }
     // A vector of JSON values always serializes; `[]` is the fallback that keeps the job going.
     serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/// An org's assistant setting (D-AS-3). An org with no row has the setting off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssistantSettingsRow {
+    pub(crate) enabled: bool,
+    pub(crate) connection_id: Option<Uuid>,
+    pub(crate) model: Option<String>,
+    pub(crate) updated_by: Option<Uuid>,
+    pub(crate) updated_at: i64,
+}
+
+/// A `org_assistant_settings` row as SQLite returns it.
+#[derive(Debug, sqlx::FromRow)]
+struct SettingsRecord {
+    enabled: i64,
+    connection_id: Option<String>,
+    model: Option<String>,
+    updated_by: Option<String>,
+    updated_at: i64,
+}
+
+fn corrupt_settings(column: &'static str) -> MetaError {
+    MetaError::Corrupt {
+        table: "org_assistant_settings",
+        column,
+    }
+}
+
+fn settings_from(record: SettingsRecord) -> Result<AssistantSettingsRow, MetaError> {
+    let optional_uuid = |text: Option<String>, column: &'static str| {
+        text.map(|text| Uuid::parse_str(&text).map_err(|_| corrupt_settings(column)))
+            .transpose()
+    };
+    Ok(AssistantSettingsRow {
+        enabled: match record.enabled {
+            0 => false,
+            1 => true,
+            _ => return Err(corrupt_settings("enabled")),
+        },
+        connection_id: optional_uuid(record.connection_id, "connection_id")?,
+        model: record.model,
+        updated_by: optional_uuid(record.updated_by, "updated_by")?,
+        updated_at: record.updated_at,
+    })
+}
+
+/// The setting of `org`, or `None` when the org never saved one.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn get_settings(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<Option<AssistantSettingsRow>, MetaError> {
+    let record: Option<SettingsRecord> = sqlx::query_as(
+        "SELECT enabled, connection_id, model, updated_by, updated_at \
+         FROM org_assistant_settings WHERE org_id = ?",
+    )
+    .bind(org.to_string())
+    .fetch_optional(pool)
+    .await?;
+    record.map(settings_from).transpose()
+}
+
+/// Stores the setting of `org`, replacing every column of its row.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails.
+pub(crate) async fn put_settings(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    row: &AssistantSettingsRow,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO org_assistant_settings \
+         (org_id, enabled, connection_id, model, updated_by, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(org_id) DO UPDATE SET \
+           enabled = excluded.enabled, \
+           connection_id = excluded.connection_id, \
+           model = excluded.model, \
+           updated_by = excluded.updated_by, \
+           updated_at = excluded.updated_at",
+    )
+    .bind(org.to_string())
+    .bind(i64::from(row.enabled))
+    .bind(row.connection_id.map(|id| id.to_string()))
+    .bind(row.model.as_deref())
+    .bind(row.updated_by.map(|id| id.to_string()))
+    .bind(row.updated_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 #[cfg(test)]
