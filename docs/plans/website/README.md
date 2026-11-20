@@ -10,7 +10,7 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 | M4 Integrations | [`04-m4-integrations.md`](04-m4-integrations.md) | done (I1–I2) |
 | M5 Compare | [`05-m5-compare.md`](05-m5-compare.md) | done (C1–C2) |
 | M6 Benchmarks | not planned (waits for the benchmark, design §9.2) | — |
-| M7 Launch | `07-m7-launch.md` | — |
+| M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | planned |
 
 ## Branches
 
