@@ -1503,7 +1503,7 @@ export interface paths {
         put?: never;
         /**
          * Create a notification channel
-         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409). Under open signup every email recipient must be a verified member of the org (400 on recipients).
+         * @description Needs role member. Email channels need SMTP. At most 20 channels per project (409). When `alerts.email_recipients` is `members` (the default under open signup), every email recipient must be a verified member of the org (400 on recipients).
          */
         post: operations["create_channel"];
         delete?: never;
@@ -1528,7 +1528,7 @@ export interface paths {
         head?: never;
         /**
          * Update a notification channel
-         * @description Under open signup every email recipient must be a verified member of the org (400 on recipients).
+         * @description When `alerts.email_recipients` is `members` (the default under open signup), every email recipient must be a verified member of the org (400 on recipients).
          */
         patch: operations["update_channel"];
         trace?: never;

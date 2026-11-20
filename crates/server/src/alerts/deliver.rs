@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config};
 use crate::alerts::message::{self, MessageKind, Notice};
-use crate::api::account::SignupPolicy;
+use crate::config::EmailRecipients;
 use crate::email::MailError;
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -178,8 +178,8 @@ fn egress_error(error: &EgressError) -> SendError {
 /// One email to each recipient, in order. SMTP connection, TLS and authentication failures
 /// are retryable (an admin may fix the credentials within the retry span, D-K-7).
 ///
-/// Under open signup only verified members of the org get mail (D-K-19): the other recipients
-/// are skipped, and the delivery then fails with a count. Every message counts against the
+/// When `alerts.email_recipients` is `members`, only verified members of the org get mail (D-K-19,
+/// D-K-21): the other recipients are skipped, and the delivery then fails with a count. Every message counts against the
 /// org's daily cap, reserved just before its send.
 async fn send_email(
     state: &AppState,
@@ -191,7 +191,7 @@ async fn send_email(
     let Some(mailer) = state.mailer.as_ref() else {
         return Err(permanent("email is not configured"));
     };
-    let (sendable, skipped) = if state.config.auth.signup == SignupPolicy::Open {
+    let (sendable, skipped) = if state.config.email_recipients() == EmailRecipients::Members {
         let members = verified_member_emails(state.meta.reader(), org_id)
             .await
             .map_err(|_| retryable("could not read the org members"))?;

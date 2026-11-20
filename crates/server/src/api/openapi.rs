@@ -4865,7 +4865,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
     let create = operation("create_channel", "alerts", "Create a notification channel")
         .description(Some(
             "Needs role member. Email channels need SMTP. At most 20 channels per project (409). \
-             Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+             When `alerts.email_recipients` is `members` (the default under open signup), every email \
+             recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("CreateChannelRequest")))
@@ -4877,7 +4878,8 @@ fn channel_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let update = operation("update_channel", "alerts", "Update a notification channel")
         .description(Some(
-            "Under open signup every email recipient must be a verified member of the org (400 on recipients).",
+            "When `alerts.email_recipients` is `members` (the default under open signup), every email \
+             recipient must be a verified member of the org (400 on recipients).",
         ))
         .parameters(Some(vec![project_param(), path_uuid("id", "Channel id.")]))
         .request_body(Some(json_body("UpdateChannelRequest")))
