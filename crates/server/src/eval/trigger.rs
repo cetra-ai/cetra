@@ -2066,6 +2066,7 @@ mod tests {
                 .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
                 .await
                 .unwrap();
+            refresh_tracked(&app.state).await.unwrap();
             id
         }
 
