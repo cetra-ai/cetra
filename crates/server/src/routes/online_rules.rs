@@ -207,6 +207,16 @@ async fn list_online_rules(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<OnlineRulePage>, ApiError> {
+    Ok(error::Json(rule_page(&state, &access, params).await?))
+}
+
+/// One page of the project's online rules, each with its last 24 hours of jobs (`GET /online-rules`).
+/// Also served to the assistant's `list_online_rules` tool (AS M2).
+pub(crate) async fn rule_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: PageParams,
+) -> Result<OnlineRulePage, ApiError> {
     let project = access.project.id;
     let now = state.clock.now_ns();
     let rows = store::list_rules(state.meta.reader(), project).await?;
@@ -221,7 +231,7 @@ async fn list_online_rules(
     let mut data = Vec::with_capacity(page.data.len());
     for row in &page.data {
         let jobs = counts.get(&row.id).copied().unwrap_or_default();
-        data.push(rule_json(&state, row, &jobs, now).await?);
+        data.push(rule_json(state, row, &jobs, now).await?);
     }
     let mut conn = state
         .meta
@@ -230,11 +240,11 @@ async fn list_online_rules(
         .await
         .map_err(MetaError::from)?;
     let org_enabled_rules = store::count_enabled_rules(&mut conn, access.project.org_id).await?;
-    Ok(error::Json(OnlineRulePage {
+    Ok(OnlineRulePage {
         data,
         next_cursor: page.next_cursor,
         org_enabled_rules,
-    }))
+    })
 }
 
 /// `GET /online-rules/stats`: the last 24 hours of every online rule of the project (D-I-50).
@@ -243,6 +253,15 @@ async fn get_online_rule_stats(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
 ) -> Result<error::Json<OnlineRuleStatsResponse>, ApiError> {
+    Ok(error::Json(rule_stats(&state, &access).await?))
+}
+
+/// The last 24 hours of every online rule of the project (D-I-50). Also served to the assistant's
+/// online rule tools (AS M2).
+pub(crate) async fn rule_stats(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<OnlineRuleStatsResponse, ApiError> {
     let deadline = Deadline::start();
     let project = access.project.id;
     let org = access.project.org_id;
@@ -253,10 +272,10 @@ async fn get_online_rule_stats(
     // Rules come in list order. Each rule's evaluator is read for its current output type.
     let rules = store::list_rules(state.meta.reader(), project).await?;
     if rules.is_empty() {
-        return Ok(error::Json(OnlineRuleStatsResponse {
+        return Ok(OnlineRuleStatsResponse {
             window,
             data: Vec::new(),
-        }));
+        });
     }
     let mut output_types: HashMap<Uuid, ScoreDataType> = HashMap::new();
     for row in evaluators::list_evaluators(state.meta.reader(), project).await? {
@@ -276,7 +295,7 @@ async fn get_online_rule_stats(
 
     let jobs = eval_jobs::rule_finished_hourly(state.meta.reader(), project, from, to).await?;
     let scores_ctx =
-        open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
+        open_query_windowed(state, org, project, Some(TimeWindow::new(from, to)?)).await?;
     // At most `MAX_RESTRICT` ids per statement: the placeholders stay under the sandbox's operator
     // limit and the hourly rows (ids × 24) under its row limit, whatever the number of rules.
     let mut aggregates = HashMap::new();
@@ -335,7 +354,7 @@ async fn get_online_rule_stats(
             },
         });
     }
-    Ok(error::Json(OnlineRuleStatsResponse { window, data }))
+    Ok(OnlineRuleStatsResponse { window, data })
 }
 
 async fn get_online_rule(
@@ -343,6 +362,16 @@ async fn get_online_rule(
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<error::Json<OnlineRule>, ApiError> {
+    Ok(error::Json(rule_detail(&state, &access, id).await?))
+}
+
+/// One online rule (`GET /online-rules/{id}`). Also served to the assistant's `get_online_rule` tool
+/// (AS M2).
+pub(crate) async fn rule_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+    id: Uuid,
+) -> Result<OnlineRule, ApiError> {
     let project = access.project.id;
     let now = state.clock.now_ns();
     let row = store::get_rule(state.meta.reader(), project, id)
@@ -350,7 +379,7 @@ async fn get_online_rule(
         .ok_or(ApiError::NotFound)?;
     let counts = eval_jobs::counts_since(state.meta.reader(), project, now - DAY_NS).await?;
     let jobs = counts.get(&id).copied().unwrap_or_default();
-    Ok(error::Json(rule_json(&state, &row, &jobs, now).await?))
+    rule_json(state, &row, &jobs, now).await
 }
 
 async fn create_online_rule(

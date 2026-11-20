@@ -338,6 +338,16 @@ async fn list_dashboards(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<DashboardListParams>,
 ) -> Result<error::Json<Page<DashboardSummary>>, ApiError> {
+    Ok(error::Json(dashboard_page(&state, &access, params).await?))
+}
+
+/// One page of the project's dashboards, without their definitions (`GET /dashboards`). Also served to
+/// the assistant's `list_dashboards` tool (AS M2).
+pub(crate) async fn dashboard_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: DashboardListParams,
+) -> Result<Page<DashboardSummary>, ApiError> {
     let after = params.cursor.as_deref().map(decode_cursor).transpose()?;
     let page = store::list(
         state.meta.reader(),
@@ -351,10 +361,10 @@ async fn list_dashboards(
         .as_ref()
         .map(|(name, id)| encode_cursor(name, *id))
         .transpose()?;
-    Ok(error::Json(Page {
+    Ok(Page {
         data: page.rows.into_iter().map(DashboardSummary::from).collect(),
         next_cursor,
-    }))
+    })
 }
 
 async fn get_dashboard(
@@ -362,9 +372,21 @@ async fn get_dashboard(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<DashboardPath>,
 ) -> Result<error::Json<Dashboard>, ApiError> {
-    store::get(state.meta.reader(), access.project.id, path.id)
+    Ok(error::Json(
+        dashboard_detail(&state, &access, path.id).await?,
+    ))
+}
+
+/// One dashboard with its definition (`GET /dashboards/{id}`). Also served to the assistant's
+/// `get_dashboard` tool (AS M2).
+pub(crate) async fn dashboard_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+    id: Uuid,
+) -> Result<Dashboard, ApiError> {
+    store::get(state.meta.reader(), access.project.id, id)
         .await?
-        .map(|row| error::Json(Dashboard::from(row)))
+        .map(Dashboard::from)
         .ok_or(ApiError::NotFound)
 }
 
@@ -906,29 +928,48 @@ async fn query_widget(
     Extension(access): Extension<ProjectAccess>,
     error::Json(body): error::Json<WidgetQueryRequest>,
 ) -> Result<error::Json<WidgetQueryResponse>, SharedError> {
-    let (from, to) = query_range(&body)?;
+    let response = widget_data(&state, &access, body)
+        .await
+        .map_err(SharedError)?;
+    Ok(error::Json((*response).clone()))
+}
+
+/// One widget's data over `[from, to)`, cached (spec 05 § Dashboard queries). Also served to the
+/// assistant's `query_metrics` tool (AS M2), which shares the cache and its errors.
+///
+/// # Errors
+///
+/// The request's problem, shared as an `Arc` because a failed computation is shared with every request
+/// that waited on it.
+pub(crate) async fn widget_data(
+    state: &AppState,
+    access: &ProjectAccess,
+    body: WidgetQueryRequest,
+) -> Result<Arc<WidgetQueryResponse>, Arc<ApiError>> {
+    let (from, to) = query_range(&body).map_err(Arc::new)?;
     // The shape is checked before the cache, so a refused query never takes a cache slot.
     let query = body.query.to_storage();
-    storage::validate_shape(&query).map_err(widget_error)?;
+    storage::validate_shape(&query).map_err(|error| Arc::new(widget_error(error)))?;
     let key = WidgetKey::new(
         access.project.id,
-        crate::entitlements::of(&state, access.project.org_id)
+        crate::entitlements::of(state, access.project.org_id)
             .limits
             .data_access_days,
         from,
         to,
         &body,
-    )?;
+    )
+    .map_err(Arc::new)?;
     let (org, project) = (access.project.org_id, access.project.id);
     let clock = &state.clock;
-    let response = state
+    state
         .widget_cache
         .get_or_compute(
             key,
             || clock.now_ns(),
             || async {
                 let window = storage::TimeWindow::new(from, to)?;
-                let ctx = open_query(&state, org, project, None).await?;
+                let ctx = open_query(state, org, project, None).await?;
                 let data = storage::widget_query(
                     &ctx,
                     storage::WidgetRequest {
@@ -950,8 +991,6 @@ async fn query_widget(
             },
         )
         .await
-        .map_err(SharedError)?;
-    Ok(error::Json((*response).clone()))
 }
 
 /// The request's `[from, to)` as nanoseconds. Both are RFC 3339 and `from` is before `to`.

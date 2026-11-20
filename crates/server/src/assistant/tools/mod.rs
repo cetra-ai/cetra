@@ -68,11 +68,10 @@ impl fmt::Debug for ToolResult {
 pub(crate) struct UnknownTool;
 
 /// A tool's failure: most tools fail with an `ApiError`; `query_metrics` shares the dashboard cache's
-/// `Arc<ApiError>`, since `ApiError` is not `Clone` (AS2.4 constructs `Shared`).
+/// `Arc<ApiError>`, since `ApiError` is not `Clone`.
 #[derive(Debug)]
 pub(crate) enum ToolError {
     Api(ApiError),
-    #[allow(dead_code)] // constructed by `query_metrics` (AS2.4); removed with that change
     Shared(std::sync::Arc<ApiError>),
 }
 
@@ -187,6 +186,41 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             reads::LIST_ALERT_RULES_DESCRIPTION,
             reads::list_alert_rules_schema(),
         ),
+        spec(
+            reads::LIST_EVALUATORS,
+            reads::LIST_EVALUATORS_DESCRIPTION,
+            reads::list_evaluators_schema(),
+        ),
+        spec(
+            reads::GET_EVALUATOR,
+            reads::GET_EVALUATOR_DESCRIPTION,
+            reads::get_evaluator_schema(),
+        ),
+        spec(
+            reads::LIST_ONLINE_RULES,
+            reads::LIST_ONLINE_RULES_DESCRIPTION,
+            reads::list_online_rules_schema(),
+        ),
+        spec(
+            reads::GET_ONLINE_RULE,
+            reads::GET_ONLINE_RULE_DESCRIPTION,
+            reads::get_online_rule_schema(),
+        ),
+        spec(
+            reads::LIST_DASHBOARDS,
+            reads::LIST_DASHBOARDS_DESCRIPTION,
+            reads::list_dashboards_schema(),
+        ),
+        spec(
+            reads::GET_DASHBOARD,
+            reads::GET_DASHBOARD_DESCRIPTION,
+            reads::get_dashboard_schema(),
+        ),
+        spec(
+            reads::QUERY_METRICS,
+            reads::QUERY_METRICS_DESCRIPTION,
+            reads::query_metrics_schema(),
+        ),
     ]
 }
 
@@ -262,6 +296,13 @@ pub(crate) async fn run(
         }
         reads::GET_PROJECT_SETTINGS => reads::get_project_settings(state, scope, arguments).await,
         reads::LIST_ALERT_RULES => reads::list_alert_rules(state, scope, arguments).await,
+        reads::LIST_EVALUATORS => reads::list_evaluators(state, scope, arguments).await,
+        reads::GET_EVALUATOR => reads::get_evaluator(state, scope, arguments).await,
+        reads::LIST_ONLINE_RULES => reads::list_online_rules(state, scope, arguments).await,
+        reads::GET_ONLINE_RULE => reads::get_online_rule(state, scope, arguments).await,
+        reads::LIST_DASHBOARDS => reads::list_dashboards(state, scope, arguments).await,
+        reads::GET_DASHBOARD => reads::get_dashboard(state, scope, arguments).await,
+        reads::QUERY_METRICS => reads::query_metrics(state, scope, arguments).await,
         _ => return Err(UnknownTool),
     };
     Ok(match outcome {
@@ -336,8 +377,16 @@ mod tests {
                 "list_score_definitions",
                 "get_project_settings",
                 "list_alert_rules",
+                "list_evaluators",
+                "get_evaluator",
+                "list_online_rules",
+                "get_online_rule",
+                "list_dashboards",
+                "get_dashboard",
+                "query_metrics",
             ]
         );
+        assert_eq!(names.len(), 19);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();
