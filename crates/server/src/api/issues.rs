@@ -41,6 +41,8 @@ pub struct IssueSource {
     pub filter: Option<String>,
     /// Whether the source runs. A disabled source counts for no plan limit.
     pub enabled: bool,
+    /// Channels notified of new and regressed issues. Ordered by id.
+    pub channel_ids: Vec<Uuid>,
     /// Why the sweeper skips the source. Omitted when it runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_reason: Option<String>,
@@ -259,6 +261,10 @@ pub struct CreateIssueSourceRequest {
     /// Whether the source runs. Default true.
     #[serde(default = "yes")]
     pub enabled: bool,
+    /// Channels notified of new and regressed issues, at most 10 channels of this project.
+    /// Default none.
+    #[serde(default)]
+    pub channel_ids: Vec<Uuid>,
     /// Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds
     /// only. Default 1.
     #[serde(
@@ -365,6 +371,9 @@ pub struct UpdateIssueSourceRequest {
     /// Turns the source on or off.
     #[serde(default, deserialize_with = "present")]
     pub enabled: Option<bool>,
+    /// New channels, at most 10 of this project. `[]` removes every channel. Absent keeps them.
+    #[serde(default, deserialize_with = "present")]
+    pub channel_ids: Option<Vec<Uuid>>,
     /// Share of the matching traces or scores that become candidates, in `(0, 1]`. LLM kinds only.
     #[serde(default, deserialize_with = "present")]
     pub sample_rate: Option<f64>,

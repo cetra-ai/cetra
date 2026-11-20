@@ -42,9 +42,11 @@ use crate::http::error::{self, ApiError};
 use crate::issues::source_limit::{self, SourceLimitError};
 use crate::meta::MetaError;
 use crate::meta::connections;
+use crate::meta::issue_links;
 use crate::meta::issues::{self as store, IssueSort, RefitRow, SourceKind, SourceRow};
 use crate::meta::online_rules::PAUSE_BUDGET;
 
+use super::alert_rules::checked_channels;
 use super::orgs::page_named;
 use super::read::{READ_TIMEOUT, open_query};
 
@@ -253,13 +255,16 @@ async fn list_issue_sources(
         params.limit.get(),
     )?;
     let open = store::open_counts(state.meta.reader(), project).await?;
+    let channels = issue_links::source_channel_ids_by_source(state.meta.reader(), project).await?;
     let now = state.clock.now_ns();
     let mut data = Vec::with_capacity(page.data.len());
     for row in &page.data {
         let figures = llm_figures(&state, row, now).await?;
+        let channel_ids = channels.get(&row.id).cloned().unwrap_or_default();
         data.push(source_json(
             row,
             open_issues(&open, row.id),
+            channel_ids,
             figures.as_ref(),
         ));
     }
@@ -287,10 +292,12 @@ async fn get_issue_source(
         .await?
         .ok_or(ApiError::NotFound)?;
     let open = store::open_counts(state.meta.reader(), project).await?;
+    let channel_ids = issue_links::source_channel_ids(state.meta.reader(), id).await?;
     let figures = llm_figures(&state, &row, state.clock.now_ns()).await?;
     Ok(error::Json(source_json(
         &row,
         open_issues(&open, id),
+        channel_ids,
         figures.as_ref(),
     )))
 }
@@ -305,14 +312,19 @@ async fn create_issue_source(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    let requested_channels = body.channel_ids.clone();
     let errors = unused(source_kind(body.kind), &create_given(&body));
     let row = created_row(body, project, user.id, now);
     validate(&state, org, project, &row, errors, now).await?;
+    let channels = checked_channels(&state, project, &requested_channels).await?;
     let id = row.id;
     let limit = source_limit::limit(&state, org);
+    let written = channels.clone();
     let outcome = state
         .meta
-        .write(move |conn| Box::pin(async move { insert_checked(conn, org, row, limit).await }))
+        .write(move |conn| {
+            Box::pin(async move { insert_checked(conn, org, row, limit, &written, now).await })
+        })
         .await?;
     match outcome {
         SourceWrite::Done(row) => {
@@ -328,7 +340,7 @@ async fn create_issue_source(
             let figures = llm_figures(&state, &row, now).await?;
             Ok((
                 StatusCode::CREATED,
-                error::Json(source_json(&row, 0, figures.as_ref())),
+                error::Json(source_json(&row, 0, channels, figures.as_ref())),
             ))
         }
         SourceWrite::OverLimit(error) => Err(error.into()),
@@ -352,6 +364,7 @@ async fn update_issue_source(
         .ok_or(ApiError::NotFound)?;
     let mut errors = unused(stored.kind, &update_given(&body));
     errors.extend(update_refusals(&body));
+    let requested_channels = body.channel_ids;
     let name = body
         .name
         .map_or_else(|| stored.name.clone(), |name| name.trim().to_owned());
@@ -390,11 +403,17 @@ async fn update_issue_source(
         ..stored.clone()
     };
     validate(&state, org, project, &row, errors, now).await?;
+    let channels = match requested_channels {
+        Some(ids) => Some(checked_channels(&state, project, &ids).await?),
+        None => None,
+    };
     let limit = source_limit::limit(&state, org);
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { update_checked(conn, project, org, stored, row, limit).await })
+            Box::pin(async move {
+                update_checked(conn, project, org, stored, row, limit, channels, now).await
+            })
         })
         .await?;
     match outcome {
@@ -409,10 +428,12 @@ async fn update_issue_source(
             reload_score_rules(&state).await;
             state.issues_wake();
             let open = store::open_counts(state.meta.reader(), project).await?;
+            let channel_ids = issue_links::source_channel_ids(state.meta.reader(), id).await?;
             let figures = llm_figures(&state, &row, now).await?;
             Ok(error::Json(source_json(
                 &row,
                 open_issues(&open, id),
+                channel_ids,
                 figures.as_ref(),
             )))
         }
@@ -512,10 +533,16 @@ async fn post_issue_source_refit(
         ..row
     };
     let open = store::open_counts(state.meta.reader(), project).await?;
+    let channel_ids = issue_links::source_channel_ids(state.meta.reader(), id).await?;
     let figures = llm_figures(&state, &row, now).await?;
     Ok((
         StatusCode::ACCEPTED,
-        error::Json(source_json(&row, open_issues(&open, id), figures.as_ref())),
+        error::Json(source_json(
+            &row,
+            open_issues(&open, id),
+            channel_ids,
+            figures.as_ref(),
+        )),
     ))
 }
 
@@ -544,12 +571,14 @@ async fn reload_score_rules(state: &AppState) {
 }
 
 /// The create's write: when the source is enabled, the active-source limit is checked with it
-/// counted (D-IC-13).
+/// counted (D-IC-13). An enabled source starts its notification clock now (D-IC-21).
 async fn insert_checked(
     conn: &mut SqliteConnection,
     org: OrgId,
     row: SourceRow,
     limit: Option<u64>,
+    channels: &[Uuid],
+    now: i64,
 ) -> Result<SourceWrite, MetaError> {
     if row.enabled {
         let active = store::count_enabled_sources(conn, org).await? + 1;
@@ -558,12 +587,21 @@ async fn insert_checked(
         }
     }
     store::insert_source(conn, &row).await?;
+    issue_links::set_source_channels(conn, row.id, channels).await?;
+    if row.enabled {
+        issue_links::set_last_notified_at(conn, row.id, now).await?;
+    }
     Ok(SourceWrite::Done(Box::new(row)))
 }
 
 /// The PATCH's write: the source must be the row the checks ran against. Enabling a disabled
 /// source checks the active-source limit (D-IC-13). A changed budget clears a `budget` pause in the
 /// same write, as a changed rule budget does (D-I-15).
+///
+/// The notification clock starts again (D-IC-21) when the source is enabled, or when its channel
+/// list goes from empty to non-empty, so a backlog is never sent (Q12). Other channel changes keep
+/// the cut-off.
+#[allow(clippy::too_many_arguments)]
 async fn update_checked(
     conn: &mut SqliteConnection,
     project: ProjectId,
@@ -571,6 +609,8 @@ async fn update_checked(
     stored: SourceRow,
     mut row: SourceRow,
     limit: Option<u64>,
+    channels: Option<Vec<Uuid>>,
+    now: i64,
 ) -> Result<SourceWrite, MetaError> {
     let Some(current) = store::get_source_tx(conn, project, stored.id).await? else {
         return Ok(SourceWrite::Missing);
@@ -591,8 +631,19 @@ async fn update_checked(
         row.paused_at = None;
         row.paused_detail = None;
     }
+    let had_channels = issue_links::source_has_channels(conn, row.id).await?;
     if !store::update_source(conn, &row).await? {
         return Ok(SourceWrite::Missing);
+    }
+    if let Some(channels) = &channels {
+        issue_links::set_source_channels(conn, row.id, channels).await?;
+    }
+    let enabling = !stored.enabled && row.enabled;
+    let first_channels = channels
+        .as_ref()
+        .is_some_and(|ids| !ids.is_empty() && !had_channels);
+    if enabling || first_channels {
+        issue_links::set_last_notified_at(conn, row.id, now).await?;
     }
     Ok(SourceWrite::Done(Box::new(row)))
 }
@@ -1858,7 +1909,12 @@ async fn llm_figures(
 
 /// The source as the API shows it. The LLM fields are set for the LLM kinds, and the score
 /// names for `score` and `feedback`, the feedback sources for `feedback`.
-fn source_json(row: &SourceRow, open_issues: u64, figures: Option<&LlmFigures>) -> IssueSource {
+fn source_json(
+    row: &SourceRow,
+    open_issues: u64,
+    channel_ids: Vec<Uuid>,
+    figures: Option<&LlmFigures>,
+) -> IssueSource {
     IssueSource {
         id: row.id,
         project_id: row.project_id.as_uuid(),
@@ -1866,6 +1922,7 @@ fn source_json(row: &SourceRow, open_issues: u64, figures: Option<&LlmFigures>) 
         kind: kind_of(row.kind),
         filter: row.filter.clone(),
         enabled: row.enabled,
+        channel_ids,
         paused_reason: row.paused_reason.clone(),
         created_by: row.created_by,
         created_at: row.created_at,
@@ -1956,6 +2013,7 @@ mod tests {
         RefitRow,
     };
     use crate::scores::{self as score_writes, Writer};
+    use crate::test_support::issues::put_channel;
     use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
 
     const HOUR_NS: i64 = 3_600_000_000_000;
@@ -3957,5 +4015,283 @@ mod tests {
         assert_eq!(body["candidates_24h"]["queued"], 2);
         assert_eq!(body["candidates_24h"]["pending"], 1);
         assert_eq!(body["candidates_24h"]["dropped"], 0);
+    }
+
+    /// The channel ids as the API lists them: sorted.
+    fn channel_strings(ids: &[Uuid]) -> Value {
+        let mut sorted = ids.to_vec();
+        sorted.sort();
+        json!(sorted.iter().map(Uuid::to_string).collect::<Vec<_>>())
+    }
+
+    fn with_channels(mut body: Value, ids: &[Uuid]) -> Value {
+        body["channel_ids"] = json!(ids);
+        body
+    }
+
+    /// The stored notification cut-off of a source, straight from the table.
+    async fn last_notified_at(app: &TestApp, id: Uuid) -> Option<i64> {
+        sqlx::query_scalar("SELECT last_notified_at FROM issue_sources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
+    /// Moves the manual clock an hour on and returns the new time.
+    fn advance_an_hour(app: &TestApp) -> i64 {
+        let later = app.state.clock.now_ns() + HOUR_NS;
+        app.state.clock.set(later);
+        later
+    }
+
+    async fn get_source(app: &TestApp, seeded: &Seeded, id: Uuid) -> Value {
+        let response = app
+            .request(Method::GET, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        response.json()
+    }
+
+    /// The message of the one field error of a 400.
+    fn channel_error(response: &TestResponse) -> String {
+        assert_eq!(response.status, 400, "{}", text(response));
+        let problem = response.problem();
+        assert_eq!(problem.errors.len(), 1, "{}", text(response));
+        assert_eq!(problem.errors[0].field, "channel_ids");
+        problem.errors[0].message.clone()
+    }
+
+    #[tokio::test]
+    async fn create_source_with_channels() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let b = put_channel(&app, seeded.project.id, "B").await;
+        let created = create_ok(
+            &app,
+            &seeded,
+            &with_channels(source_body("Errors"), &[b, a]),
+        )
+        .await;
+        assert_eq!(created["channel_ids"], channel_strings(&[a, b]));
+        let id = id_of(&created);
+
+        let read = get_source(&app, &seeded, id).await;
+        assert_eq!(read["channel_ids"], channel_strings(&[a, b]));
+
+        let page = app
+            .request(Method::GET, &path(seeded.project.id))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await
+            .json::<Value>();
+        assert_eq!(page["data"][0]["channel_ids"], channel_strings(&[a, b]));
+    }
+
+    #[tokio::test]
+    async fn create_source_without_channels_returns_an_empty_list() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, &source_body("Errors")).await;
+        assert_eq!(created["channel_ids"], json!([]));
+        let read = get_source(&app, &seeded, id_of(&created)).await;
+        assert_eq!(read["channel_ids"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn channel_ids_are_validated() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let (other, _) = app.add_project(&seeded, "other", None).await;
+        let foreign = put_channel(&app, other.id, "Foreign").await;
+
+        let eleven: Vec<Uuid> = (0..11).map(|_| Uuid::now_v7()).collect();
+        let too_many = create(&app, &seeded, &with_channels(source_body("Many"), &eleven)).await;
+        assert_eq!(channel_error(&too_many), "at most 10 channels");
+
+        let twice = create(&app, &seeded, &with_channels(source_body("Twice"), &[a, a])).await;
+        assert_eq!(channel_error(&twice), "duplicate channel");
+
+        let unknown = create(
+            &app,
+            &seeded,
+            &with_channels(source_body("Foreign"), &[foreign]),
+        )
+        .await;
+        assert_eq!(channel_error(&unknown), "unknown channel");
+    }
+
+    #[tokio::test]
+    async fn patch_replaces_and_clears_channels() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let b = put_channel(&app, seeded.project.id, "B").await;
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+
+        let set_a = patch(&app, &seeded, id, &json!({"channel_ids": [a]})).await;
+        assert_eq!(set_a.status, 200, "{}", text(&set_a));
+        assert_eq!(set_a.json::<Value>()["channel_ids"], channel_strings(&[a]));
+
+        let set_b = patch(&app, &seeded, id, &json!({"channel_ids": [b]})).await;
+        assert_eq!(set_b.status, 200, "{}", text(&set_b));
+        assert_eq!(set_b.json::<Value>()["channel_ids"], channel_strings(&[b]));
+
+        let kept = patch(&app, &seeded, id, &json!({"name": "Renamed"})).await;
+        assert_eq!(kept.status, 200, "{}", text(&kept));
+        assert_eq!(kept.json::<Value>()["channel_ids"], channel_strings(&[b]));
+
+        let refused = patch(&app, &seeded, id, &json!({"channel_ids": null})).await;
+        assert_eq!(refused.status, 400, "{}", text(&refused));
+
+        let cleared = patch(&app, &seeded, id, &json!({"channel_ids": []})).await;
+        assert_eq!(cleared.status, 200, "{}", text(&cleared));
+        assert_eq!(cleared.json::<Value>()["channel_ids"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn creating_an_enabled_source_sets_last_notified_at() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        assert_eq!(last_notified_at(&app, id).await, Some(now));
+    }
+
+    #[tokio::test]
+    async fn creating_a_disabled_source_leaves_last_notified_at_null() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let mut body = source_body("Off");
+        body["enabled"] = json!(false);
+        let id = id_of(&create_ok(&app, &seeded, &body).await);
+        assert_eq!(last_notified_at(&app, id).await, None);
+    }
+
+    #[tokio::test]
+    async fn enabling_a_disabled_source_sets_it_to_now() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let mut body = source_body("Off");
+        body["enabled"] = json!(false);
+        let id = id_of(&create_ok(&app, &seeded, &body).await);
+        let later = advance_an_hour(&app);
+        let enabled = patch(&app, &seeded, id, &json!({"enabled": true})).await;
+        assert_eq!(enabled.status, 200, "{}", text(&enabled));
+        assert_eq!(last_notified_at(&app, id).await, Some(later));
+    }
+
+    #[tokio::test]
+    async fn disabling_and_re_enabling_resets_it() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        advance_an_hour(&app);
+        let disabled = patch(&app, &seeded, id, &json!({"enabled": false})).await;
+        assert_eq!(disabled.status, 200, "{}", text(&disabled));
+        let later = advance_an_hour(&app);
+        let enabled = patch(&app, &seeded, id, &json!({"enabled": true})).await;
+        assert_eq!(enabled.status, 200, "{}", text(&enabled));
+        assert_eq!(last_notified_at(&app, id).await, Some(later));
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_keeps_the_source_enabled_leaves_last_notified_at() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        advance_an_hour(&app);
+        let renamed = patch(&app, &seeded, id, &json!({"name": "Renamed"})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        assert_eq!(last_notified_at(&app, id).await, Some(now));
+    }
+
+    #[tokio::test]
+    async fn adding_the_first_channel_resets_the_cutoff() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let later = advance_an_hour(&app);
+        let added = patch(&app, &seeded, id, &json!({"channel_ids": [a]})).await;
+        assert_eq!(added.status, 200, "{}", text(&added));
+        assert_eq!(last_notified_at(&app, id).await, Some(later));
+    }
+
+    #[tokio::test]
+    async fn changing_channels_that_are_not_empty_keeps_the_cutoff() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let b = put_channel(&app, seeded.project.id, "B").await;
+        let first = app.state.clock.now_ns();
+        let id =
+            id_of(&create_ok(&app, &seeded, &with_channels(source_body("Errors"), &[a])).await);
+        assert_eq!(last_notified_at(&app, id).await, Some(first));
+
+        advance_an_hour(&app);
+        let swapped = patch(&app, &seeded, id, &json!({"channel_ids": [b]})).await;
+        assert_eq!(swapped.status, 200, "{}", text(&swapped));
+        assert_eq!(last_notified_at(&app, id).await, Some(first));
+
+        let cleared = patch(&app, &seeded, id, &json!({"channel_ids": []})).await;
+        assert_eq!(cleared.status, 200, "{}", text(&cleared));
+        assert_eq!(last_notified_at(&app, id).await, Some(first));
+
+        // Empty to non-empty again starts the clock again.
+        let again = advance_an_hour(&app);
+        let readded = patch(&app, &seeded, id, &json!({"channel_ids": [a]})).await;
+        assert_eq!(readded.status, 200, "{}", text(&readded));
+        assert_eq!(last_notified_at(&app, id).await, Some(again));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_channel_removes_it_from_a_source() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let id =
+            id_of(&create_ok(&app, &seeded, &with_channels(source_body("Errors"), &[a])).await);
+        let deleted = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/projects/{}/channels/{a}", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(deleted.status, 204, "{}", text(&deleted));
+        let read = get_source(&app, &seeded, id).await;
+        assert_eq!(read["channel_ids"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_viewer_cannot_set_channels() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let a = put_channel(&app, seeded.project.id, "A").await;
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let created = app
+            .request(Method::POST, &path(seeded.project.id))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&with_channels(source_body("Mine"), &[a]))
+            .send()
+            .await;
+        assert_eq!(created.status, 403, "{}", text(&created));
+        let patched = app
+            .request(Method::PATCH, &format!("{}/{id}", path(seeded.project.id)))
+            .header(header::COOKIE.as_str(), &viewer.cookie)
+            .json(&json!({"channel_ids": [a]}))
+            .send()
+            .await;
+        assert_eq!(patched.status, 403, "{}", text(&patched));
     }
 }
