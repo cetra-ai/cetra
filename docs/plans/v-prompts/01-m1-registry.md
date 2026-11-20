@@ -246,8 +246,9 @@ pub enum PlainTemplateError {
     },
 }
 
-/// One piece of a scanned template.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One piece of a scanned template. `Debug` is hand-written: `Text` prints its length in
+/// characters only (`Text(12 chars)`), `Var` prints the name.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Segment<'a> {
     /// Literal text, copied as is.
     Text(&'a str),
@@ -330,7 +331,7 @@ Error cases still carry `variables` and `placeholder_names`.
 
 1. `shared_text_cases` — reads `include_str!("../../../fixtures/prompts/render.json")` (relative to `crates/eval/src/plain_template.rs`), and for every `text` case: `variables(template)` equals `variables` (or is an `Invalid` error when it is `null`); `render(template, values)` equals `expected`, or the error equals the case's error (`Invalid { at: TextAt { line, column }, reason }` with `reason.as_str() == reason`, or `MissingVariable { name }`). Every case name appears in the assertion message.
 2. `scan_segments` — `scan("a{{x}}b{{ y }}")` is `[Text("a"), Var("x"), Text("b"), Var("y")]`; `scan("")` is `[]`; `scan("{{x}}{{y}}")` is `[Var("x"), Var("y")]`.
-3. `accepted_templates_render_the_same_in_minijinja` — for every valid text case (no `error`), build a `crate::PromptTemplate::compile(template)` and render it with `crate::Variables::from_map(values as BTreeMap<String, serde_json::Value::String>)`; the output equals `expected`, except for the case `trailing-newline`, where it equals `expected` without its final `\n` (minijinja's default; module doc). For every `invalid` case whose reason is `reserved`, assert that `PromptTemplate::compile` fails, or compiles and renders without any value supplied (it names an engine literal or global). This proves the subset property (D-V-3). If any other case differs, STOP and report the case name.
+3. `accepted_templates_render_the_same_in_minijinja` — for every valid text case (no `error`), build a `crate::PromptTemplate::compile(template)` and render it with `crate::Variables::from_map(values as BTreeMap<String, serde_json::Value::String>)`; the output equals `expected`, except for the case `trailing-newline`, where it equals `expected` without its final `\n` (minijinja's default; module doc). Reserved-name cases are not checked against minijinja: they are refused by this module, which is all the subset property needs (`if` is reserved defensively even though minijinja reads `{{ if }}` as a variable). This proves the subset property (D-V-3). If any other case differs, STOP and report the case name.
 4. `errors_hold_no_template_text` — render a template `"{{ secret_payload.x }}"` and `"{{secret_payload}}"` with no values; the `Display` of both errors does not contain `secret_payload` for the `Invalid` one (the name is allowed in `MissingVariable`, which only holds the variable name; assert the Invalid display has no `secret_payload`).
 5. `proptest_render_never_panics` — with `proptest` (a dev-dependency of `cetra-eval`) and the crate's config `crate::hostile_tests::config()` (from `crates/eval/tests/hostile.rs`, included by `lib.rs`; it reads `CETRA_PROPTEST_CASES` and turns failure persistence off), in `proptest! { #![proptest_config(crate::hostile_tests::config())] … }`: for any `String` source, `scan`, `variables` and `render(&source, &BTreeMap::new())` return without panicking; and for a source built as text without `{`/`}` plus `{{v0}}`, `render` with `v0 → x` equals the text with `x` in place.
 
