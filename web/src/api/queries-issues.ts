@@ -112,6 +112,27 @@ export function issueSourcesQuery(org: string, project: string) {
   });
 }
 
+/** Prefix of every issue source list query of the project, for invalidation. */
+export function issueSourcesKey(org: string, project: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/issue-sources", {
+    params: { path: { project: projectRef(org, project) } },
+  }).queryKey;
+}
+
+/** One issue source. */
+export function issueSourceQuery(org: string, project: string, sourceId: string) {
+  return $api.queryOptions(
+    "get",
+    "/api/v1/projects/{project}/issue-sources/{id}",
+    issueInit(org, project, sourceId),
+  );
+}
+
+/** The key of one issue source's detail query, for invalidation. */
+export function issueSourceKey(org: string, project: string, sourceId: string) {
+  return issueSourceQuery(org, project, sourceId).queryKey;
+}
+
 /** Edits an issue's title, description or state. Refreshes the issue, the list and its history. */
 export function usePatchIssue(org: string, project: string) {
   const queryClient = useQueryClient();
@@ -121,6 +142,41 @@ export function usePatchIssue(org: string, project: string) {
       void queryClient.invalidateQueries({ queryKey: issueKey(org, project, issueId) });
       void queryClient.invalidateQueries({ queryKey: issuesKey(org, project) });
       void queryClient.invalidateQueries({ queryKey: issueEventsKey(org, project, issueId) });
+    },
+  });
+}
+
+/** Creates an issue source. Refreshes the source list. */
+export function useCreateIssueSource(org: string, project: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("post", "/api/v1/projects/{project}/issue-sources", {
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: issueSourcesKey(org, project) });
+    },
+  });
+}
+
+/** Edits a source's name, filter or enabled flag. Refreshes the source and the list. */
+export function usePatchIssueSource(org: string, project: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("patch", "/api/v1/projects/{project}/issue-sources/{id}", {
+    onSuccess: (_source, variables) => {
+      const sourceId = variables.params.path.id;
+      void queryClient.invalidateQueries({ queryKey: issueSourceKey(org, project, sourceId) });
+      void queryClient.invalidateQueries({ queryKey: issueSourcesKey(org, project) });
+    },
+  });
+}
+
+/** Deletes a source and its issues. Refreshes the source list and the issues. */
+export function useDeleteIssueSource(org: string, project: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("delete", "/api/v1/projects/{project}/issue-sources/{id}", {
+    onSuccess: (_result, variables) => {
+      const sourceId = variables.params.path.id;
+      void queryClient.invalidateQueries({ queryKey: issueSourceKey(org, project, sourceId) });
+      void queryClient.invalidateQueries({ queryKey: issueSourcesKey(org, project) });
+      void queryClient.invalidateQueries({ queryKey: issuesKey(org, project) });
     },
   });
 }
