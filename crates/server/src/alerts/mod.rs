@@ -4,6 +4,7 @@ pub(crate) mod channel;
 pub(crate) mod condition;
 pub(crate) mod deliver;
 pub(crate) mod evaluate;
+pub(crate) mod issue_notify;
 pub(crate) mod message;
 pub(crate) mod quota;
 
@@ -41,12 +42,13 @@ impl AlertTiming {
     };
 }
 
-/// Starts the evaluation, delivery and pruning loops. Each loop waits for its pass to finish
-/// before the next tick (`MissedTickBehavior::Skip`), so passes never overlap. The first pass
-/// runs one period after the start. Errors are logged and the loop goes on.
+/// Starts the evaluation (which also sends issue notifications, D-IC-21), delivery and pruning
+/// loops. Each loop waits for its pass to finish before the next tick
+/// (`MissedTickBehavior::Skip`), so passes never overlap. The first pass runs one period after
+/// the start. Errors are logged and the loop goes on.
 ///
 /// In restore mode only the pruning loop starts (N M3, D-N-25): evaluation and delivery send
-/// alerts outward.
+/// alerts outward, issue notifications included.
 pub(crate) fn spawn_loops(state: &AppState, timing: AlertTiming) -> Vec<JoinHandle<()>> {
     if state.config.restore_mode {
         return vec![spawn_history_prune_loop(state.clone(), timing.prune_every)];
@@ -77,6 +79,18 @@ fn spawn_evaluation_loop(state: AppState, every: Duration) -> JoinHandle<()> {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(error = %error, "alert evaluation pass failed");
+                }
+            }
+            match issue_notify::notify_issues(&state, now).await {
+                Ok(report) if report.notifications > 0 || report.failed > 0 => tracing::debug!(
+                    due = report.due,
+                    notifications = report.notifications,
+                    failed = report.failed,
+                    "issue notification pass"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "issue notification pass failed");
                 }
             }
         }
