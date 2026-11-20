@@ -31,6 +31,8 @@ const HOUR_NS: i64 = 3_600_000_000_000;
 const DAY_NS: i64 = 86_400_000_000_000;
 /// Prefix of the derived-id input (spec 06).
 const DERIVE_TAG: &[u8] = b"cetra.score.v1";
+/// Prefix of the occurrence names of issues (D-IC-11). Only [`Writer::Issue`] may write it.
+const ISSUE_NAME_PREFIX: &str = "issue:";
 
 /// Who is writing, which decides `source`, the author and the ownership check (D-G-27, D-I-36).
 #[derive(Debug, Clone, Copy)]
@@ -402,6 +404,13 @@ fn check_item(
     }
     if !text_ok(&item.name) {
         errors.push(field(index, "name", "name must be 1 to 255 bytes"));
+    }
+    if item.name.starts_with(ISSUE_NAME_PREFIX) && !matches!(writer, Writer::Issue { .. }) {
+        errors.push(field(
+            index,
+            "name",
+            "names starting with issue: are reserved for issues",
+        ));
     }
     if let ScoreTarget::Session { session_id } = &item.target
         && !text_ok(session_id)
@@ -2543,6 +2552,74 @@ mod tests {
         )
         .await;
         assert!(matches!(refused, Err(ApiError::QuotaExceeded { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_issue_prefix_is_reserved_for_the_issue_writer() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let name = format!("issue:{}", v4(8));
+        let reserved = (
+            "scores[0].name".to_owned(),
+            "names starting with issue: are reserved for issues".to_owned(),
+        );
+        // The API, feedback and evaluator writers are refused.
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                api_writer(),
+                vec![item(&name, 1.0)],
+            )
+            .await,
+        );
+        assert_eq!(errors, vec![reserved.clone()]);
+        let end_user = Writer::EndUser { key_id: author() };
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                end_user,
+                vec![item(&name, 1.0)],
+            )
+            .await,
+        );
+        assert_eq!(errors, vec![reserved.clone()]);
+        let evaluator = Writer::Evaluator {
+            kind: EvaluatorKind::Check,
+            evaluator_id: v4(9),
+            rule_id: None,
+        };
+        let errors = refused(
+            write(
+                &app.state,
+                &seeded.project,
+                evaluator,
+                vec![item(&name, 1.0)],
+            )
+            .await,
+        );
+        assert_eq!(errors, vec![reserved]);
+        // Another prefix is not reserved, and the issue writer may write its own names.
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![item("issues:open", 1.0)],
+        )
+        .await
+        .unwrap();
+        let written = write(
+            &app.state,
+            &seeded.project,
+            Writer::Issue { source_id: v4(7) },
+            vec![ScoreCreate {
+                target: trace_target(),
+                ..item(&name, 1.0)
+            }],
+        )
+        .await;
+        assert!(written.is_ok(), "the issue writer is refused: {written:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
