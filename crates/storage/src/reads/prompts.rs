@@ -137,7 +137,7 @@ async fn compute(
     for entry in &mut versions {
         entry.scores.sort_by(|a, b| a.name.cmp(&b.name));
     }
-    versions.sort_by(|a, b| b.version.cmp(&a.version));
+    versions.sort_by_key(|a| std::cmp::Reverse(a.version));
     Ok(versions)
 }
 
@@ -156,7 +156,11 @@ async fn linked_spans(
         .and(col(spans::PROMPT_VERSION).is_not_null())
         .and(in_subquery(col(spans::TRACE_ID), Arc::new(ids.clone())));
     if !request.versions.is_empty() {
-        let versions = request.versions.iter().map(|version| lit(*version)).collect();
+        let versions = request
+            .versions
+            .iter()
+            .map(|version| lit(*version))
+            .collect();
         predicate = predicate.and(col(spans::PROMPT_VERSION).in_list(versions, false));
     }
     ctx.session()

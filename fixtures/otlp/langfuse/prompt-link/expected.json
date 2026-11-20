@@ -1,0 +1,31 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7a1f0000000000000000000000000001",
+      "span_id": "7a1f000000000001",
+      "name": "llm",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:51.000000000Z",
+      "status": "unset",
+      "prompt_name": "summarize",
+      "prompt_version": 3,
+      "operation": "chat",
+      "cost_source": "none",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "langfuse.observation.prompt.name": "summarize",
+        "langfuse.observation.prompt.version": "3"
+      },
+      "conventions": [
+        "genai",
+        "langfuse"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

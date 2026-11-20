@@ -2810,6 +2810,127 @@ mod tests {
         storage.shutdown().await.unwrap();
     }
 
+    /// The prompt columns survive a flush: spans keep them and the trace merges
+    /// them into the distinct list `prompts` (D-V-15).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn prompt_columns_round_trip() {
+        use arrow::array::{Array, Int64Array, ListArray};
+
+        use crate::reads::{
+            ListScope, SortOrder, TraceListRequest, TraceSort, trace_detail, trace_list,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(config_in(dir.path())).await.unwrap();
+        let spans: Vec<_> = [1_u8, 2]
+            .into_iter()
+            .map(|version| {
+                let mut span = span_row(1, version, 1_000 + i64::from(version), 1_000);
+                span.prompt_name = Some("p".to_owned());
+                span.prompt_version = Some(i64::from(version));
+                span
+            })
+            .collect();
+        let trace_id = spans[0].trace_id.to_string();
+        storage
+            .append_spans(project(), span_rows(&spans))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+
+        let ctx = QueryContext::new(
+            storage
+                .query(project(), QueryOptions::new(None, None))
+                .await
+                .unwrap(),
+            None,
+        )
+        .unwrap();
+        let timeout = Duration::from_secs(30);
+        let detail = trace_detail(&ctx, &trace_id, timeout)
+            .await
+            .unwrap()
+            .expect("the trace exists");
+        let mut span_values = Vec::new();
+        for batch in &detail.spans {
+            let names = batch
+                .column_by_name(spans::PROMPT_NAME)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let versions = batch
+                .column_by_name(spans::PROMPT_VERSION)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                span_values.push((names.value(row).to_owned(), versions.value(row)));
+            }
+        }
+        assert_eq!(span_values, [("p".to_owned(), 1), ("p".to_owned(), 2)]);
+
+        let list = trace_list(
+            &ctx,
+            TraceListRequest {
+                filter: None,
+                search: None,
+                strict_exclusions: false,
+                scope: ListScope {
+                    window: None,
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                sort: TraceSort::StartTime,
+                order: SortOrder::Desc,
+                limit: 10,
+                cursor: None,
+                timeout,
+            },
+        )
+        .await
+        .unwrap();
+        let trace_batch = &list.batches[0];
+        let prompts = trace_batch
+            .column_by_name(cetra_core::schema::traces::PROMPTS)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let prompts = prompts.as_any().downcast_ref::<StringArray>().unwrap();
+        let prompts: Vec<_> = (0..prompts.len()).map(|i| prompts.value(i)).collect();
+        assert_eq!(prompts, ["p@1", "p@2"]);
+
+        for (filter, matches) in [("prompts @> ['p@2']", 1), ("prompts @> ['p@3']", 0)] {
+            let page = trace_list(
+                &ctx,
+                TraceListRequest {
+                    filter: Some(filter),
+                    search: None,
+                    strict_exclusions: false,
+                    scope: ListScope {
+                        window: None,
+                        include_eval: false,
+                        include_experiments: false,
+                    },
+                    sort: TraceSort::StartTime,
+                    order: SortOrder::Desc,
+                    limit: 10,
+                    cursor: None,
+                    timeout,
+                },
+            )
+            .await
+            .unwrap();
+            let rows: usize = page.batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(rows, matches, "{filter}");
+        }
+        drop(ctx);
+        storage.shutdown().await.unwrap();
+    }
+
     /// One sort of every span row, whose spill passes through the query's disk manager.
     /// The window sorts every row and the outer count returns one row: there is no top-k
     /// that would avoid the sort.

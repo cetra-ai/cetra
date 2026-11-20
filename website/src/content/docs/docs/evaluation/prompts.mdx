@@ -175,6 +175,18 @@ await withContext({ prompt }, async () => {
 
 Every span started in the block carries `cetra.prompt.name`. A span also carries `cetra.prompt.version` when the prompt is a registry version. A fallback writes the name only. A nested block with no prompt keeps the outer one, and an inner prompt replaces it.
 
+## Find traces by prompt version
+
+A linked span carries `prompt_name` and `prompt_version`. Its trace carries `prompts`, the list of `name@version` pairs of its spans. Filter the trace list with `prompts @> ['support-reply@2']` to find the traces that used version 2 of `support-reply`.
+
+To compare versions, ask for the metrics of one prompt. The answer has one entry per version: span and trace counts, errors, cost, latency percentiles, token averages and the mean of each numeric or boolean score. `from` and `to` bound the window (the last 7 days by default), and `versions` takes a comma-separated list:
+
+{/* untested: needs a running cetra server */}
+```bash
+curl -H "Authorization: Bearer <API_KEY>" \
+  "http://localhost:8080/api/v1/projects/current/prompts/support-reply/metrics?versions=1,2"
+```
+
 ## Caching and fallback
 
 The SDK keeps prompts in the process, so a call does not wait on the server each time.

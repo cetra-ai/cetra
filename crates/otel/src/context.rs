@@ -705,7 +705,10 @@ mod tests {
         let (fields, bag, warnings) = filled_with_warnings(&attrs);
         assert_eq!(fields.prompt_name.as_deref(), Some("support-reply"));
         assert_eq!(fields.prompt_version, None);
-        assert_eq!(bag.state("langfuse.observation.prompt.name"), Some(Use::Unread));
+        assert_eq!(
+            bag.state("langfuse.observation.prompt.name"),
+            Some(Use::Unread)
+        );
         assert_eq!(
             bag.state("langfuse.observation.prompt.version"),
             Some(Use::Unread)

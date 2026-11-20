@@ -171,6 +171,12 @@
           "column_type": "string_list",
           "nullable": false,
           "description": "Distinct model names."
+        },
+        {
+          "name": "prompts",
+          "column_type": "string_list",
+          "nullable": false,
+          "description": "Registry prompts the trace used, as name@version (D-V-15)."
         }
       ]
     },
@@ -309,6 +315,18 @@
           "column_type": "string",
           "nullable": true,
           "description": "coalesce(response_model, request_model)."
+        },
+        {
+          "name": "prompt_name",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Registry prompt the span used (D-V-15)."
+        },
+        {
+          "name": "prompt_version",
+          "column_type": "integer",
+          "nullable": true,
+          "description": "Version of that prompt."
         },
         {
           "name": "operation",

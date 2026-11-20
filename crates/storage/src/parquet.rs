@@ -819,6 +819,7 @@ mod tests {
             Arc::new(Int64Array::from(vec![1_i64; count])),
             Arc::new(Float64Array::from(vec![0.5_f64; count])),
             utf8_list("model", count),
+            utf8_list("p@1", count),
             Arc::new(last_ingest_time.finish()),
             Arc::new(Int32Array::from(vec![1_i32; count])),
         ];

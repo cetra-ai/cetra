@@ -149,10 +149,7 @@ impl SpanColumns {
                 sum_len(spans, |span| span.response_model.as_deref()),
             ),
             model: string_builder(rows, 0),
-            prompt_name: string_builder(
-                rows,
-                sum_len(spans, |span| span.prompt_name.as_deref()),
-            ),
+            prompt_name: string_builder(rows, sum_len(spans, |span| span.prompt_name.as_deref())),
             prompt_version: Int64Builder::with_capacity(rows),
             operation: string_builder(rows, sum_len(spans, |span| span.operation.as_deref())),
             input_tokens: Int64Builder::with_capacity(rows),

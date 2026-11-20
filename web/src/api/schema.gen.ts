@@ -2531,6 +2531,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/prompts/{prompt}/metrics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get per-version prompt metrics
+         * @description Any project member, or an API key with `read`. Default window: the last 7 days; at most 90 days (D-V-17).
+         */
+        get: operations["get_prompt_metrics"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/prompts/{prompt}/resolve": {
         parameters: {
             query?: never;
@@ -6914,12 +6934,42 @@ export interface components {
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
         };
+        /** @description The per-version metrics of a prompt over a window (D-V-17). Versions come newest first. */
+        PromptMetrics: {
+            /**
+             * Format: date-time
+             * @description Window start.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description Window end (exclusive).
+             */
+            to: string;
+            /** @description One entry per version that has linked spans in the window. */
+            versions: components["schemas"]["PromptVersionMetrics"][];
+        };
         /** @description One page of results. `next_cursor` is null when there is no next page. */
         PromptPage: {
             /** @description Items in this page. */
             data: components["schemas"]["Prompt"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description The mean of one score name for one version. */
+        PromptScoreMean: {
+            /**
+             * Format: int64
+             * @description Number of scores averaged.
+             */
+            count: number;
+            /**
+             * Format: double
+             * @description Average of the numeric and boolean score values.
+             */
+            mean: number;
+            /** @description Score name. */
+            name: string;
         };
         /** @description The prompt settings of a project, read and written by the settings routes (D-V-10). */
         PromptSettings: {
@@ -6958,6 +7008,64 @@ export interface components {
             /**
              * Format: int64
              * @description The version number, 1, 2, …
+             */
+            version: number;
+        };
+        /**
+         * @description One version's numbers over the window. Span scores count for their span's version; a trace
+         *     score counts for every version its linked spans carry (D-V-17).
+         */
+        PromptVersionMetrics: {
+            /**
+             * Format: double
+             * @description Average span cost, USD. Omitted when no span has a cost.
+             */
+            cost_avg?: number;
+            /**
+             * Format: double
+             * @description Sum of span costs, USD.
+             */
+            cost_total: number;
+            /**
+             * Format: int64
+             * @description Linked spans with status `error`.
+             */
+            error_count: number;
+            /**
+             * Format: double
+             * @description Average input tokens. Omitted when no span has them.
+             */
+            input_tokens_avg?: number;
+            /**
+             * Format: double
+             * @description Median span duration, milliseconds (approximate). Omitted when there are no spans.
+             */
+            latency_p50_ms?: number;
+            /**
+             * Format: double
+             * @description 95th percentile span duration, milliseconds (approximate). Omitted when there are no spans.
+             */
+            latency_p95_ms?: number;
+            /**
+             * Format: double
+             * @description Average output tokens. Omitted when no span has them.
+             */
+            output_tokens_avg?: number;
+            /** @description Numeric and boolean score means, by name. */
+            scores: components["schemas"]["PromptScoreMean"][];
+            /**
+             * Format: int64
+             * @description Linked `llm` spans.
+             */
+            span_count: number;
+            /**
+             * Format: int64
+             * @description Distinct traces of those spans.
+             */
+            trace_count: number;
+            /**
+             * Format: int64
+             * @description The version, 1 or more.
              */
             version: number;
         };
@@ -7909,6 +8017,13 @@ export interface components {
             output_tokens?: number;
             /** @description Parent span. Omitted when this span is a root of the received trace. */
             parent_span_id?: components["schemas"]["SpanId"];
+            /** @description Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16). */
+            prompt_name?: string;
+            /**
+             * Format: int64
+             * @description Prompt version, a number of at least 1, from the convention that named the prompt.
+             */
+            prompt_version?: number;
             /** @description Normalized provider name. */
             provider?: string;
             /**
@@ -8093,6 +8208,13 @@ export interface components {
             output_tokens?: number;
             /** @description Parent span. Omitted when this span is a root of the received trace. */
             parent_span_id?: components["schemas"]["SpanId"];
+            /** @description Prompt name from `cetra.prompt.name` or Langfuse's prompt attributes (D-V-15, D-V-16). */
+            prompt_name?: string;
+            /**
+             * Format: int64
+             * @description Prompt version, a number of at least 1, from the convention that named the prompt.
+             */
+            prompt_version?: number;
             /** @description Normalized provider name. */
             provider?: string;
             /**
@@ -8432,6 +8554,11 @@ export interface components {
              * @description Sum of span output tokens. Omitted when every span omitted the field.
              */
             output_tokens?: number;
+            /**
+             * @description Distinct `name@version` of the prompt versions that this trace's spans link (D-V-15).
+             *     Omitted when no span links a prompt version.
+             */
+            prompts?: string[];
             /**
              * Format: int64
              * @description Sum of reasoning tokens. Omitted when every span omitted the field.
@@ -21854,6 +21981,101 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_prompt_metrics: {
+        parameters: {
+            query?: {
+                /** @description Window start, RFC 3339 or epoch milliseconds. Default: `to` minus 7 days. */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Window end, RFC 3339 or epoch milliseconds. Default: now. */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated version numbers, 1 to 50 distinct. Default: every version. */
+                versions?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Per-version metrics of the prompt over the window. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptMetrics"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

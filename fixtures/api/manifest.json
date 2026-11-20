@@ -528,6 +528,19 @@
     "file": "responses/prompts/support-reply.json"
   },
   {
+    "operation_id": "get_prompt_metrics",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "from": "2026-01-01T00:00:00Z",
+      "to": "2026-01-02T00:00:00Z"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/metrics.json"
+  },
+  {
     "operation_id": "get_prompt_resolve",
     "path_params": {
       "prompt": "support-reply"
