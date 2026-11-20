@@ -26,7 +26,7 @@ function IssueSourcesPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
+    <div className="flex w-full flex-1 flex-col gap-6 overflow-auto px-4 py-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <h2 className="text-title font-medium">Issue sources</h2>
         <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
