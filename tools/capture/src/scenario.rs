@@ -26,6 +26,9 @@ pub const GROUPS: &[&str] = &[
     "langfuse",
     "laminar",
     "google_adk",
+    "claude_code",
+    "codex",
+    "gemini_cli",
     "edge",
 ];
 
@@ -1056,6 +1059,15 @@ mod tests {
         value["turns"][0]["message"]["extra"] = json!(true);
         let error = serde_json::from_value::<Scenario>(value).expect_err("unknown message field");
         assert!(error.to_string().contains("extra"), "{error}");
+    }
+
+    #[test]
+    fn case_path_accepts_the_coding_agent_groups() {
+        for group in ["claude_code", "codex", "gemini_cli"] {
+            let text = format!("{group}/x");
+            let path: CasePath = text.parse().expect(&text);
+            assert_eq!(path.to_string(), text);
+        }
     }
 
     #[test]

@@ -81,6 +81,7 @@ impl Mock {
             .route("/v1/embeddings", posted.clone())
             .route("/v1/messages", posted.clone())
             .route("/v1beta/models/{model_action}", posted)
+            .route("/api/hello", axum::routing::head(hello))
             .fallback(unknown)
             .with_state(std::sync::Arc::clone(self))
     }
@@ -115,6 +116,11 @@ async fn handle(
     request: axum::extract::Request,
 ) -> Response {
     mock.respond(request).await
+}
+
+/// Claude Code's start-up connectivity check (`HEAD /api/hello`). Not a turn and not an error.
+async fn hello() -> StatusCode {
+    StatusCode::OK
 }
 
 async fn unknown(
@@ -809,6 +815,21 @@ mod tests {
         assert_eq!(response.status(), 200);
         let log = mock.finish();
         assert_eq!(log.errors, vec!["1 turns not served"]);
+    }
+
+    #[tokio::test]
+    async fn head_api_hello_is_ok_and_not_logged() {
+        let mock = Mock::new(Vec::new());
+        let response = mock
+            .router()
+            .oneshot(request("HEAD", "/api/hello", ""))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(bytes(response).await.is_empty());
+        let log = mock.finish();
+        assert!(log.served.is_empty(), "{:?}", log.served);
+        assert!(log.errors.is_empty(), "{:?}", log.errors);
     }
 
     #[tokio::test]

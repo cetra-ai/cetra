@@ -34,6 +34,9 @@ pub const GROUPS: &[&str] = &[
     "langfuse",
     "laminar",
     "google_adk",
+    "claude_code",
+    "codex",
+    "gemini_cli",
     "cetra",
     "edge",
 ];
