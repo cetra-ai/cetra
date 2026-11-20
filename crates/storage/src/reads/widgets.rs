@@ -186,6 +186,7 @@ const TRACES: SourceFields = SourceFields {
         traces::ENVIRONMENT,
         traces::RELEASE,
         traces::USER_ID,
+        traces::SESSION_ID,
         traces::TAGS,
         traces::MODELS,
     ],
@@ -1511,6 +1512,19 @@ mod tests {
             let mut ok = query(WidgetSource::Traces, vec![measure(Agg::Count, None, None)]);
             ok.breakdown = breakdown("name", limit);
             assert!(validate_shape(&ok).is_ok(), "{limit}");
+        }
+        let mut session = query(WidgetSource::Traces, vec![measure(Agg::Count, None, None)]);
+        session.breakdown = breakdown("session_id", 5);
+        assert!(validate_shape(&session).is_ok());
+        let mut spans_session = query(WidgetSource::Spans, vec![measure(Agg::Count, None, None)]);
+        spans_session.breakdown = breakdown("session_id", 5);
+        match validate_shape(&spans_session) {
+            Err(WidgetError::Fields(errors)) => {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                assert_eq!(errors[0].path, "breakdown.field");
+                assert_eq!(errors[0].message, "not a breakdown field of this source");
+            }
+            other => panic!("expected field errors, got {other:?}"),
         }
     }
 
@@ -2983,6 +2997,36 @@ mod tests {
                     false,
                     vec![Some(1.0), Some(2.0)]
                 ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn breakdown_by_session_id_on_traces() {
+        let mut spans = Vec::new();
+        for (trace, session, cost) in [
+            (0u16, Some("s1"), 1.0),
+            (1, Some("s1"), 2.0),
+            (2, Some("s2"), 5.0),
+            (3, None, 9.0),
+        ] {
+            let mut span = span(trace, 0, minute(i64::from(trace) * 5 + 5), None);
+            span.session_id = session.map(str::to_owned);
+            span.cost_total = Some(cost);
+            spans.push(span);
+        }
+        let ctx = context_of(&spans);
+        let by_session = build(
+            WidgetSource::Traces,
+            vec![measure(Agg::Sum, Some("cost_total"), None)],
+            split("session_id", 5, false),
+        );
+        let data = answer(&ctx, ask(&by_session, hour(), Shape::Total)).await;
+        assert_eq!(
+            total_pairs(&data),
+            vec![
+                (Some("s2".to_owned()), false, vec![Some(5.0)]),
+                (Some("s1".to_owned()), false, vec![Some(3.0)]),
             ]
         );
     }

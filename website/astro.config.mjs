@@ -192,6 +192,15 @@ export default defineConfig({
                   ],
                 },
                 {
+                  label: "Coding agents",
+                  items: [
+                    { label: "Claude Code", link: "/docs/integrations/claude-code/" },
+                    { label: "Codex CLI", link: "/docs/integrations/codex/" },
+                    { label: "Gemini CLI", link: "/docs/integrations/gemini-cli/" },
+                    { label: "GitHub Copilot", link: "/docs/integrations/copilot/" },
+                  ],
+                },
+                {
                   label: "Instrumentation libraries",
                   items: [
                     { label: "OpenInference", link: "/docs/integrations/openinference/" },

@@ -81,6 +81,22 @@ pub(super) async fn resolve(
     let id = row.id;
     let session_count = (row.kind == DeletionKind::User).then(|| count(sessions.len()));
     let trace_count = count(scope.len());
+    // D-CA-9: a user deletion also removes the user's coding-agent contexts. The context key is
+    // the form the post stored (trimmed, lowercased). The writes lock keeps a post from
+    // re-inserting one between the meta write and the map change; only a user deletion takes it.
+    let context_user: Option<String> = match row.kind {
+        DeletionKind::User => row
+            .user_id
+            .as_deref()
+            .map(|user| user.trim().to_lowercase()),
+        _ => None,
+    };
+    let contexts = state.ingest.contexts();
+    let _writes = match context_user {
+        Some(_) => Some(contexts.writes().lock().await),
+        None => None,
+    };
+    let write_user = context_user.clone();
     // J's cascade (D-J-9) reads the scope from `deletion_traces` in this transaction, so an item
     // added from a trace before it is never missed; add-from-trace checks the guard in its own
     // write, so one added after the guard is filled is refused.
@@ -96,6 +112,10 @@ pub(super) async fn resolve(
                     crate::meta::eval_jobs::delete_jobs(conn, &jobs).await?;
                     let cascade =
                         crate::meta::experiments::delete_copies_of_tx(conn, id, project).await?;
+                    if let Some(user) = write_user.as_deref() {
+                        crate::meta::agent_contexts::delete_user_contexts(conn, project, user)
+                            .await?;
+                    }
                     return Ok((true, cascade));
                 }
                 Ok((false, Cascade::default()))
@@ -103,6 +123,13 @@ pub(super) async fn resolve(
         })
         .await
         .map_err(|error| super::from_meta(&error))?;
+    if let (true, Some(user), Some(map)) =
+        (stored, context_user.as_deref(), contexts.project(project))
+    {
+        map.write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, _, context| context.user.as_deref() != Some(user));
+    }
     if cascade.dataset_item_revisions > 0 || cascade.experiment_items > 0 {
         tracing::info!(
             target: "audit",

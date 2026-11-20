@@ -600,6 +600,10 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     state.live.publish_resync(project);
     state.clear_answers(project);
     {
+        let _writes = state.ingest.contexts().writes().lock().await;
+        state.ingest.contexts().forget_project(project);
+    }
+    {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).
         let _writes = state.ingest.prices().lock_writes().await;
         state.ingest.prices().forget_project(project);
@@ -721,6 +725,8 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
     for project in &projects {
         state.live.publish_resync(*project);
         state.clear_answers(*project);
+        let _writes = state.ingest.contexts().writes().lock().await;
+        state.ingest.contexts().forget_project(*project);
     }
     {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).
@@ -748,10 +754,12 @@ mod tests {
     use cetra_core::ids::{ProjectId, SpanId, TraceId};
     use cetra_core::names::metadata_key;
     use cetra_core::span::Span;
+    use cetra_otel::AgentContext;
     use cetra_storage::DeletionStatus;
     use cetra_storage::error::{AppendError, DeletionError};
 
     use super::*;
+    use crate::meta::agent_contexts::{AgentContextRow, load_contexts, upsert_context};
     use crate::meta::datasets::{
         DatasetFields, NewRevision, VersionChange, insert_dataset, write_version,
     };
@@ -1142,6 +1150,133 @@ mod tests {
         assert_eq!(user.status, StatusCode::NOT_FOUND);
     }
 
+    /// Stores a claude-code context of `user` for `session` in `project`, in `meta.db` and in memory.
+    async fn put_context(app: &TestApp, project: ProjectId, session: &str, user: &str) {
+        let row = AgentContextRow {
+            project_id: project,
+            agent: "claude-code".to_owned(),
+            session_id: session.to_owned(),
+            repository: None,
+            branch: Some("main".to_owned()),
+            user_id: Some(user.to_owned()),
+            updated_at: app.state.clock.now_ns(),
+        };
+        let stored = row.clone();
+        let written = app
+            .state
+            .meta
+            .write(move |conn| Box::pin(async move { upsert_context(conn, &row).await }))
+            .await
+            .unwrap();
+        assert!(written);
+        app.state
+            .ingest
+            .contexts()
+            .project_or_insert(project)
+            .write()
+            .unwrap()
+            .insert(
+                "claude-code",
+                session,
+                AgentContext {
+                    repository: stored.repository,
+                    branch: stored.branch,
+                    user: stored.user_id,
+                    updated_at: stored.updated_at,
+                },
+            );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_removes_the_users_contexts() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        put_context(&app, project, "s-a", "a@example.com").await;
+        put_context(&app, project, "s-b", "b@example.com").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let mut new = new_row(&app, &seeded.project, DeletionKind::User);
+        new.user_id = Some("a@example.com".to_owned());
+        let id = insert(&app, new, &[]).await;
+        worker(&app).await;
+        assert_ne!(deletion_row(&app, id).await.state, DeletionState::Resolving);
+
+        let rows: Vec<Option<String>> = load_contexts(app.state.meta.reader())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.project_id == project)
+            .map(|row| row.user_id)
+            .collect();
+        assert_eq!(rows, vec![Some("b@example.com".to_owned())]);
+        let map = app.state.ingest.contexts().project(project).unwrap();
+        let map = map.read().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.get("claude-code", "s-b").is_some());
+        assert!(map.get("claude-code", "s-a").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_matches_context_users_case_insensitively() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        // Contexts store the user trimmed and lowercased; the deletion names the user as typed.
+        put_context(&app, project, "s-a", "dev@example.com").await;
+        put_context(&app, project, "s-b", "other@example.com").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let mut new = new_row(&app, &seeded.project, DeletionKind::User);
+        new.user_id = Some("Dev@Example.com".to_owned());
+        let id = insert(&app, new, &[]).await;
+        worker(&app).await;
+        assert_ne!(deletion_row(&app, id).await.state, DeletionState::Resolving);
+
+        let rows: Vec<Option<String>> = load_contexts(app.state.meta.reader())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.project_id == project)
+            .map(|row| row.user_id)
+            .collect();
+        assert_eq!(rows, vec![Some("other@example.com".to_owned())]);
+        let map = app.state.ingest.contexts().project(project).unwrap();
+        let map = map.read().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.get("claude-code", "s-a").is_none());
+        assert!(map.get("claude-code", "s-b").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trace_deletion_keeps_contexts() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        commit(&app, &seeded.project, &trace_id(1), &span_id(1), |_| {}).await;
+        put_context(&app, project, "s-a", "a@example.com").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let id = insert(
+            &app,
+            new_row(&app, &seeded.project, DeletionKind::TraceIds),
+            &[trace(1)],
+        )
+        .await;
+        worker(&app).await;
+        assert_ne!(deletion_row(&app, id).await.state, DeletionState::Resolving);
+
+        let rows = load_contexts(app.state.meta.reader())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.project_id == project)
+            .count();
+        assert_eq!(rows, 1);
+        let map = app.state.ingest.contexts().project(project).unwrap();
+        assert_eq!(map.read().unwrap().len(), 1);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_scope_is_reused_after_a_restart() {
         let app = TestApp::new().await;
@@ -1326,6 +1461,28 @@ mod tests {
             trace_status(&app, &seeded, seeded.project.id, &trace_id(2)).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_project_has_no_map() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (doomed, _key) = app.add_project(&seeded, "doomed", None).await;
+        app.state.ingest.contexts().project_or_insert(doomed.id);
+        assert!(app.state.ingest.contexts().project(doomed.id).is_some());
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let mut new = new_row(&app, &doomed, DeletionKind::Project);
+        new.request = RequestDetails {
+            name: Some("doomed".to_owned()),
+            slug: Some("doomed".to_owned()),
+            ..RequestDetails::default()
+        };
+        let id = insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Applied);
+        assert!(app.state.ingest.contexts().project(doomed.id).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]

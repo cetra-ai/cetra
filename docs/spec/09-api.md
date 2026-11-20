@@ -1,11 +1,12 @@
 # 09 — API surface
 
-All HTTP on one port (`CETRA_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on `CETRA_GRPC_ADDR` (default `0.0.0.0:4317`); an OTLP/HTTP-only listener on `CETRA_OTLP_HTTP_ADDR` (default `0.0.0.0:4318`, serves only the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`) for exporters configured with the standard OTel port.
+All HTTP on one port (`CETRA_HTTP_ADDR`, default `0.0.0.0:8080`); OTLP/gRPC on `CETRA_GRPC_ADDR` (default `0.0.0.0:4317`); an OTLP/HTTP-only listener on `CETRA_OTLP_HTTP_ADDR` (default `0.0.0.0:4318`, serves only the OTLP routes `/v1/traces`, `/v1/logs`, `/v1/metrics` and `/v1/agent-context`) for exporters configured with the standard OTel port.
 
 | Prefix | Purpose | Auth |
 |---|---|---|
 | `/v1/traces` | OTLP/HTTP ingest; follows OTLP (02), not in the OpenAPI document; errors are problem+json (D-G-6) | `sk` (ingest scope) |
 | `/v1/logs`, `/v1/metrics` | OTLP/HTTP, accepted and dropped (02, D-G-40); same auth, limits and errors as `/v1/traces` | `sk` (ingest scope) |
+| `/v1/agent-context` | coding-agent session context (D-CA-9); in the OpenAPI document; `204` | sk (ingest scope) |
 | `/api/auth/*` | login, OAuth, invites, reset | none / cookie |
 | `/api/v1/*` | REST API (UI + SDK + CLI) | cookie, PAT, or `sk` |
 | `/api/public/*` | browser-safe endpoints | `pk` |
@@ -250,8 +251,12 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `cetra query "<sql>" \| --file <path> --project … [--param k=v]… [--from … --to … \| --since 24h] [--limit n] [--timeout-ms n] [--format table\|csv\|json\|ndjson\|parquet] [-o <path>]` | SQL console from the terminal; CSV, NDJSON and Parquet stream through the export path (D-H-12) |
 | `cetra traces list [--filter …] [--search …] [--from …] [--to …] [--since 24h] [--sort …] [--order …] [--limit n] [--cursor …] [--include-eval] [--include-experiments] [--format table\|json]` · `cetra traces get <id> [--around <time>] [--format tree\|json]` | inspect traces |
 | `cetra projects list [--format table\|json]` | projects the token can read |
+| `cetra agents setup <agent> --url` | configure Claude Code, Codex, Gemini CLI or Copilot to send traces to cetra; key from `CETRA_INGEST_KEY` or `--key`; `--user`, `--no-content`, `--print` (D-CA-10) |
+| `cetra agents remove <agent>` | remove what setup wrote (D-CA-10) |
 | `cetra bench ingest --rate 50000 --duration 60s --target …` | load generator (synthetic OTLP) |
 | `cetra version` | |
 | `cetra health [--url http://127.0.0.1:8080]` | exits 0 when `GET <url>/readyz` answers 200 within 5 s, else 1; the container healthcheck (D-N-4) |
 
 The remote commands (`query`, `traces`, `projects`) take the server and token from `--url`/`--token`, then `CETRA_URL`/`CETRA_TOKEN`, then the `cetra login` credentials file; `--project` or `CETRA_PROJECT` names the project (D-H-12).
+
+`cetra agents hook <agent>` is hidden: the agents' hooks run it to send the session context (D-CA-8).

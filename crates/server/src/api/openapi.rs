@@ -33,6 +33,7 @@ use super::admin::{
     AdminLicense, AdminResetLink, AdminSettings, AdminUser, CreateAdminUserRequest,
     CreatedAdminUser, UpdateAdminUserRequest,
 };
+use super::agent_context::AgentContextBody;
 use super::alerts::{
     AlertCondition, AlertDelivery, AlertEvent, AlertEventKind, AlertMetric, AlertRule, AlertState,
     AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
@@ -296,6 +297,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<FeedbackRequest>();
     set.insert::<FeedbackValue>();
     set.insert::<FeedbackResult>();
+    set.insert::<AgentContextBody>();
     set.insert::<SchemaResponse>();
     set.insert::<SavedView>();
     set.insert::<CreateSavedView>();
@@ -598,6 +600,10 @@ pub fn openapi() -> OpenApi {
             tag("media", "Extracted media blobs."),
             tag("deletions", "GDPR deletions and their status."),
             tag(
+                "ingest",
+                "Calls made by coding agents and SDKs on the ingest key.",
+            ),
+            tag(
                 "alerts",
                 "Alert rules, alert events and notification channels.",
             ),
@@ -661,6 +667,9 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("UpdatePromptRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
+    ("AgentContextBody", "repository"),
+    ("AgentContextBody", "branch"),
+    ("AgentContextBody", "user"),
 ];
 
 /// Removes the `NULL_IS_A_VALUE` properties of `name` from `schema` so that
@@ -2512,6 +2521,25 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             &[400, 401, 402, 403, 404, 413, 429],
         ))
         .build();
+    let agent_context = operation(
+        "post_agent_context",
+        "ingest",
+        "Send a coding agent's session context",
+    )
+    .description(Some(
+        "Called by `cetra agents hook`. Needs an `sk` key with the `ingest` scope. Later spans of the session carry the repository, branch and person (D-CA-9).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .request_body(Some(json_body("AgentContextBody")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Stored.").build(),
+        &[400, 401, 402, 403, 413],
+    ))
+    .build();
     let schema = operation("get_schema", "schema", "Get the schema")
         .parameters(Some(vec![project_param()]))
         .responses(responses(
@@ -2553,6 +2581,10 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/public/feedback".to_owned(),
             PathItem::new(HttpMethod::Post, feedback),
+        )
+        .path(
+            "/v1/agent-context".to_owned(),
+            PathItem::new(HttpMethod::Post, agent_context),
         )
         .path(
             format!("{PROJECT}/schema"),

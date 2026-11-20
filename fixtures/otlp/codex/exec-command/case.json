@@ -1,0 +1,16 @@
+{
+  "description": "Codex CLI 0.167.2 `codex exec` runs one exec_command tool call; trace export, filtered to the turn's spans.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@openai/codex",
+    "instrumentation_version": "0.167.2",
+    "language": "typescript",
+    "libraries": {
+      "@openai/codex": "0.167.2"
+    },
+    "captured_at": "2026-11-20T10:50:06Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ]
+}
