@@ -8,7 +8,7 @@ export const LAUNCHED = false;
 export const ALWAYS_NOINDEX = ["/styleguide/", "/home/"];
 
 /** Every marketing route, with a trailing slash. `/docs/` pages are not listed: Starlight owns them. */
-export const MARKETING_ROUTES = ["/styleguide/", "/home/"];
+export const MARKETING_ROUTES = ["/styleguide/", "/home/", "/pricing/"];
 
 /** @param {string} route */
 export function isNoindex(route) {

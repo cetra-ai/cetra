@@ -1,0 +1,132 @@
+---
+import Button from "../marketing/components/Button.astro";
+import Card from "../marketing/components/Card.astro";
+import Section from "../marketing/components/Section.astro";
+import SectionHeading from "../marketing/components/SectionHeading.astro";
+import { SELF_HOSTED } from "../marketing/data/pricing.mjs";
+import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+import Calculator from "../marketing/pricing/Calculator.astro";
+import PlanCards from "../marketing/pricing/PlanCards.astro";
+import PricingFaq from "../marketing/pricing/PricingFaq.astro";
+import { CONTACT_EMAIL } from "../marketing/site";
+---
+
+<MarketingLayout
+  title="Pricing"
+  description="cetra Cloud plans from free to Pro, and free self-hosting with no limits. Pay for spans and scores, with a spend cap."
+  route="/pricing/"
+>
+  <Section tone="ink" pad="md">
+    <SectionHeading
+      level={1}
+      align="center"
+      eyebrow="Pricing"
+      title="Free to start. Free to self-host."
+      lede="cetra Cloud bills by usage, with a free plan and a spend cap. Self-hosted cetra is free with no limits; companies add a licence for single sign-on."
+    />
+  </Section>
+
+  <Section tone="ink" pad="md">
+    <PlanCards />
+  </Section>
+
+  <Section tone="raised" divider labelledby="calc-title">
+    <SectionHeading
+      eyebrow="Estimate"
+      title="What will it cost?"
+      id="calc-title"
+      lede="Enter your monthly spans and scores. The estimate is the list price; volume lowers it."
+    />
+    <Calculator />
+  </Section>
+
+  <Section tone="teal" divider labelledby="self-title">
+    <SectionHeading
+      eyebrow="Self-hosted"
+      title="Run it yourself, free."
+      id="self-title"
+      lede="The same software on your own server: every core feature, no usage limits, and your data stays with you."
+    />
+    <div class="cards">
+      <Card title={SELF_HOSTED.name}>
+        <p class="price"><span class="amount">${SELF_HOSTED.priceYearly}</span></p>
+        <ul class="points">
+          {SELF_HOSTED.features.map((feature) => <li>{feature}</li>)}
+        </ul>
+        <div class="actions">
+          <Button href="/docs/self-hosting/install/">Install guide</Button>
+        </div>
+      </Card>
+      <Card title={SELF_HOSTED.licence.name}>
+        <p class="price">
+          <span class="amount">${SELF_HOSTED.licence.priceYearly.toLocaleString("en-US")}</span> / year
+        </p>
+        <ul class="points">
+          {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
+        </ul>
+        <p class="muted licence-note">Billed yearly, per licence. A 30-day trial is available from sales.</p>
+        <div class="actions">
+          <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+        </div>
+      </Card>
+    </div>
+  </Section>
+
+  <PricingFaq />
+</MarketingLayout>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+  .price {
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    color: var(--fg);
+    margin-top: var(--space-3);
+  }
+  .amount {
+    font-size: var(--text-3xl);
+    letter-spacing: var(--tracking-display);
+    line-height: var(--leading-tight);
+  }
+  .points {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-5) 0 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+  .points li {
+    position: relative;
+    padding-left: var(--space-4);
+  }
+  .points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .licence-note {
+    margin-top: var(--space-4);
+    font-size: var(--text-sm);
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-5);
+  }
+  @media (max-width: 860px) {
+    .cards {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
