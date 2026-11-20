@@ -16761,13 +16761,13 @@
       }
     },
     "/api/v1/projects/{project}/facets": {
-      "get": {
+      "post": {
         "tags": [
           "traces"
         ],
         "summary": "Get facets",
-        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
-        "operationId": "get_facets",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Answers 1 to 20 fields over the rows the list would show: the window, the default exclusions, `search` and `filter`, given once for every field, but not the list's cursor, sort or limit. The answer has one result per field, in request order, with either `facet` or `error`: a bad field, `limit` or `q`, or a field that times out, fails only that field. A bad filter, `search` on sessions, a bad window, or 0 or more than 20 fields fail the whole request. A field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server. A read: a read-only personal access token and a `read` key may call it.",
+        "operationId": "post_facets",
         "parameters": [
           {
             "name": "project",
@@ -16777,105 +16777,21 @@
             "schema": {
               "type": "string"
             }
-          },
-          {
-            "name": "view",
-            "in": "query",
-            "description": "The list the facet describes.",
-            "required": true,
-            "schema": {
-              "$ref": "#/components/schemas/FacetView"
-            }
-          },
-          {
-            "name": "field",
-            "in": "query",
-            "description": "`column` or `map['key']`. A bare map column facets its keys.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "filter",
-            "in": "query",
-            "description": "Filter DSL expression over `view`. Blank means no filter.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "search",
-            "in": "query",
-            "description": "Full-text search. `traces` and `spans` only. At most 1,024 bytes.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "from",
-            "in": "query",
-            "description": "Inclusive range start. RFC 3339 or epoch milliseconds.",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "description": "Exclusive range end. RFC 3339 or epoch milliseconds.",
-            "required": false,
-            "schema": {
-              "$ref": "#/components/schemas/TimeParam"
-            }
-          },
-          {
-            "name": "include_eval",
-            "in": "query",
-            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "name": "include_experiments",
-            "in": "query",
-            "description": "Include experiment traces. Default false.",
-            "required": false,
-            "schema": {
-              "type": "boolean"
-            }
-          },
-          {
-            "name": "q",
-            "in": "query",
-            "description": "Case-insensitive substring the value or key must contain. 1 to 200 characters after\ntrimming. Ignored by histograms.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Most values or keys returned (1 to 100, default 10).",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int32",
-              "default": 10,
-              "maximum": 100,
-              "minimum": 1
-            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FacetsRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
-            "description": "A facet: values, keys or a histogram.",
+            "description": "One result per field, in request order.",
             "content": {
               "application/json": {
                 "schema": {
@@ -16916,6 +16832,26 @@
           },
           "404": {
             "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request body is not JSON.",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -30843,6 +30779,48 @@
           "csv"
         ]
       },
+      "Facet": {
+        "type": "object",
+        "description": "One field's facet.\n\n`values` and `more` are present for kinds `values` and `keys`. `histogram` is present for\nkind `histogram` when at least one row has a value.",
+        "required": [
+          "kind",
+          "total",
+          "missing"
+        ],
+        "properties": {
+          "histogram": {
+            "$ref": "#/components/schemas/FacetHistogram",
+            "description": "The histogram of a number field."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/FacetKind",
+            "description": "What the answer describes."
+          },
+          "missing": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows with no value: null, or an empty list or map.",
+            "minimum": 0
+          },
+          "more": {
+            "type": "boolean",
+            "description": "True when more distinct values matched than `limit`."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Rows counted.",
+            "minimum": 0
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FacetValue"
+            },
+            "description": "At most `limit` values or keys, by count descending then value ascending."
+          }
+        }
+      },
       "FacetBucket": {
         "type": "object",
         "description": "One histogram bucket. `[lo, hi)`, except the last bucket, which is `[lo, hi]`.",
@@ -30869,6 +30847,32 @@
             "description": "Lower bound."
           }
         }
+      },
+      "FacetFieldRequest": {
+        "type": "object",
+        "description": "One field of a facet batch.",
+        "required": [
+          "field"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "`column` or `map['key']`. A bare map column facets its keys."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most values or keys returned (1 to 100, default 10). Ignored by histograms.",
+            "default": 10,
+            "maximum": 100,
+            "minimum": 1
+          },
+          "q": {
+            "type": "string",
+            "description": "Case-insensitive substring the value or key must contain. 1 to 200 characters after\ntrimming. Ignored by histograms."
+          }
+        },
+        "additionalProperties": false
       },
       "FacetHistogram": {
         "type": "object",
@@ -30925,6 +30929,27 @@
           "histogram"
         ]
       },
+      "FacetResult": {
+        "type": "object",
+        "description": "One field's result: exactly one of `facet` and `error`.",
+        "required": [
+          "field"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/Problem",
+            "description": "Why this field was not answered. The other fields are not affected."
+          },
+          "facet": {
+            "$ref": "#/components/schemas/Facet",
+            "description": "The facet, when the field was answered."
+          },
+          "field": {
+            "type": "string",
+            "description": "The field, as requested."
+          }
+        }
+      },
       "FacetValue": {
         "type": "object",
         "description": "One value or key and the rows under it.",
@@ -30954,55 +30979,70 @@
           "sessions"
         ]
       },
-      "FacetsResponse": {
+      "FacetsRequest": {
         "type": "object",
-        "description": "The answer of a facet request.\n\n`values` and `more` are present for kinds `values` and `keys`. `histogram` is present for\nkind `histogram` when at least one row has a value.",
+        "description": "Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-23).",
         "required": [
           "view",
-          "field",
-          "kind",
-          "total",
-          "missing"
+          "fields"
         ],
         "properties": {
-          "field": {
-            "type": "string",
-            "description": "The field, as requested."
-          },
-          "histogram": {
-            "$ref": "#/components/schemas/FacetHistogram",
-            "description": "The histogram of a number field."
-          },
-          "kind": {
-            "$ref": "#/components/schemas/FacetKind",
-            "description": "What the answer describes."
-          },
-          "missing": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Rows with no value: null, or an empty list or map.",
-            "minimum": 0
-          },
-          "more": {
-            "type": "boolean",
-            "description": "True when more distinct values matched than `limit`."
-          },
-          "total": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Rows counted.",
-            "minimum": 0
-          },
-          "values": {
+          "fields": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/FacetValue"
+              "$ref": "#/components/schemas/FacetFieldRequest"
             },
-            "description": "At most `limit` values or keys, by count descending then value ascending."
+            "description": "The fields, 1 to 20. Answered in this order."
+          },
+          "filter": {
+            "type": "string",
+            "description": "Filter DSL expression over `view`. Blank means no filter."
+          },
+          "from": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Inclusive range start. RFC 3339 or epoch milliseconds."
+          },
+          "include_eval": {
+            "type": "boolean",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false."
+          },
+          "include_experiments": {
+            "type": "boolean",
+            "description": "Include experiment traces. Default false."
+          },
+          "search": {
+            "type": "string",
+            "description": "Full-text search. `traces` and `spans` only. At most 1,024 bytes."
+          },
+          "to": {
+            "$ref": "#/components/schemas/TimeParam",
+            "description": "Exclusive range end. RFC 3339 or epoch milliseconds."
           },
           "view": {
             "$ref": "#/components/schemas/FacetView",
-            "description": "The list the facet describes."
+            "description": "The list the facets describe."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FacetsResponse": {
+        "type": "object",
+        "description": "The answer of a facet batch: one result per requested field, in request order.",
+        "required": [
+          "view",
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FacetResult"
+            },
+            "description": "One result per requested field, in request order."
+          },
+          "view": {
+            "$ref": "#/components/schemas/FacetView",
+            "description": "The list the facets describe."
           }
         }
       },

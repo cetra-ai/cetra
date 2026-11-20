@@ -256,204 +256,6 @@
     "file": "static/experiment-summaries.json"
   },
   {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "tags",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-tags.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "user_id",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-user_id.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "model",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-model.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "name",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-name.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "span_kind",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-span_kind.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "status",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-status.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "environment",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-environment.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "metadata",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-metadata.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "models",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-models.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "name",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-name.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "status",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-status.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "tags",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-tags.json"
-  },
-  {
     "operation_id": "get_invite_preview",
     "path_params": {
       "token": "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA"
@@ -1629,6 +1431,30 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/experiment-created.json"
+  },
+  {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions.json"
+  },
+  {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans.json"
+  },
+  {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces.json"
   },
   {
     "operation_id": "post_llm_connection",

@@ -277,7 +277,10 @@ mod tests {
         let (status, body) = facets(
             &app,
             &seeded,
-            &request("traces", json!([{ "field": "status" }, { "field": "input" }])),
+            &request(
+                "traces",
+                json!([{ "field": "status" }, { "field": "input" }]),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -320,8 +323,7 @@ mod tests {
         assert_eq!(body["code"], "bad_request");
 
         let too_many: Vec<Json> = (0..21).map(|_| json!({ "field": "status" })).collect();
-        let (status, body) =
-            facets(&app, &seeded, &request("traces", Json::Array(too_many))).await;
+        let (status, body) = facets(&app, &seeded, &request("traces", Json::Array(too_many))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert_eq!(body["code"], "bad_request");
     }
