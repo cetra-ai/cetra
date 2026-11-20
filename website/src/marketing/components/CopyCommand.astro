@@ -28,9 +28,9 @@ const { commands, note, noteHref, id } = Astro.props;
   {commands.map((c, i) => (
     <div
       class="panel"
-      role="tabpanel"
+      role={commands.length > 1 ? "tabpanel" : undefined}
       id={`${id}-panel-${i}`}
-      aria-labelledby={`${id}-tab-${i}`}
+      aria-labelledby={commands.length > 1 ? `${id}-tab-${i}` : undefined}
       hidden={i !== 0}
     >
       <pre><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{c.command}</span></code></pre>

@@ -9,7 +9,7 @@
     "build": "pnpm gen:openapi && pnpm gen:changelog && astro build && node scripts/md-pages.mjs && node scripts/docs-index.mjs",
     "test:scripts": "node --test scripts/ src/marketing/",
     "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs && node scripts/check-env-vars.mjs && node scripts/check-backing.mjs && node scripts/check-screenshots.mjs && node scripts/skill-references.mjs && node scripts/check-skill.mjs",
-    "check": "biome check . && pnpm test:scripts && pnpm gen:openapi && pnpm gen:changelog && astro check && pnpm check:content && astro build && node scripts/md-pages.mjs && node scripts/docs-index.mjs"
+    "check": "biome check . && pnpm test:scripts && pnpm gen:openapi && pnpm gen:changelog && astro check && pnpm check:content && astro build && node scripts/md-pages.mjs && node scripts/docs-index.mjs && node scripts/check-marketing.mjs"
   },
   "dependencies": {
     "@astrojs/starlight": "0.42.10",

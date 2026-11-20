@@ -4,7 +4,7 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 
 | Milestone | Plan | Status |
 |---|---|---|
-| M1 Foundation | [`01-m1-foundation.md`](01-m1-foundation.md) | planned |
+| M1 Foundation | [`01-m1-foundation.md`](01-m1-foundation.md) | done (F1–F4) |
 | M2 Homepage | `02-m2-homepage.md` | — |
 | M3 Pricing, self-hosting, security | `03-m3-pricing-selfhost-security.md` | — |
 | M4 Integrations | `04-m4-integrations.md` | — |
