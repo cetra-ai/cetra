@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use cetra_core::enums::ScoreSource;
-use cetra_core::ids::ProjectId;
+use cetra_core::ids::{ProjectId, TraceId};
 use cetra_core::score::{Score, ScoreTarget, ScoreValue};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -56,6 +56,9 @@ pub(crate) enum Writer {
         evaluator_id: Uuid,
         rule_id: Option<Uuid>,
     },
+    /// An issue source writing occurrences (D-IC-11). Not billed and not capped.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Issue { source_id: Uuid },
 }
 
 impl Writer {
@@ -69,6 +72,7 @@ impl Writer {
             (Self::Api { .. } | Self::Pat { .. }, Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::Sdk { .. }, None | Some(ScoreSource::Sdk)) => Some(ScoreSource::Sdk),
             (Self::EndUser { .. }, None | Some(ScoreSource::EndUser)) => Some(ScoreSource::EndUser),
+            (Self::Issue { .. }, None | Some(ScoreSource::Issue)) => Some(ScoreSource::Issue),
             (Self::Evaluator { kind, .. }, None) => Some(evaluator_source(kind)),
             (Self::Evaluator { kind, .. }, Some(requested))
                 if requested == evaluator_source(kind) =>
@@ -91,6 +95,7 @@ impl Writer {
                 rule_id,
                 ..
             } => rule_id.unwrap_or(evaluator_id),
+            Self::Issue { source_id } => source_id,
         }
     }
 
@@ -102,20 +107,24 @@ impl Writer {
             | Self::Api { .. }
             | Self::Sdk { .. }
             | Self::EndUser { .. }
-            | Self::Evaluator { .. } => None,
+            | Self::Evaluator { .. }
+            | Self::Issue { .. } => None,
         }
     }
 
     /// The person behind a session or PAT write, and whether they are a project admin. `None`
-    /// for keys, feedback and evaluators, which the ownership check leaves alone (D-I-26).
+    /// for keys, feedback, evaluators and issues, which the ownership check leaves alone
+    /// (D-I-26).
     fn person(self) -> Option<(Uuid, bool)> {
         match self {
             Self::Human { user_id, admin } | Self::Pat { user_id, admin, .. } => {
                 Some((user_id, admin))
             }
-            Self::Api { .. } | Self::Sdk { .. } | Self::EndUser { .. } | Self::Evaluator { .. } => {
-                None
-            }
+            Self::Api { .. }
+            | Self::Sdk { .. }
+            | Self::EndUser { .. }
+            | Self::Evaluator { .. }
+            | Self::Issue { .. } => None,
         }
     }
 
@@ -131,7 +140,8 @@ impl Writer {
             | Self::Pat { .. }
             | Self::Api { .. }
             | Self::Sdk { .. }
-            | Self::EndUser { .. } => (None, None),
+            | Self::EndUser { .. }
+            | Self::Issue { .. } => (None, None),
         }
     }
 }
@@ -167,9 +177,12 @@ pub(crate) async fn write(
     writer: Writer,
     items: Vec<ScoreCreate>,
 ) -> Result<Vec<Uuid>, ApiError> {
-    check_cap(state, project.org_id)
-        .await
-        .map_err(ApiError::from)?;
+    // Issue occurrences are not capped (D-IC-11).
+    if !matches!(writer, Writer::Issue { .. }) {
+        check_cap(state, project.org_id)
+            .await
+            .map_err(ApiError::from)?;
+    }
     let now = state.clock.now_ns();
     let definitions = state.definitions.live(&state.meta, project.id, now).await?;
     let mut errors = Vec::new();
@@ -309,14 +322,17 @@ pub(crate) async fn write(
         .collect();
 
     append(state, project.id, &rows).await?;
-    state.usage.add(
-        project.org_id,
-        project.id,
-        now,
-        0,
-        0,
-        u64::try_from(rows.len()).unwrap_or(u64::MAX),
-    );
+    // Issue occurrences are not billed (D-IC-11).
+    if !matches!(writer, Writer::Issue { .. }) {
+        state.usage.add(
+            project.org_id,
+            project.id,
+            now,
+            0,
+            0,
+            u64::try_from(rows.len()).unwrap_or(u64::MAX),
+        );
+    }
     Ok(ids)
 }
 
@@ -576,6 +592,35 @@ pub(crate) fn rule_score_id(
     rule: Uuid,
 ) -> Uuid {
     derive_id(project, target, name, evaluator_source(kind), rule)
+}
+
+/// Prefix of the occurrence-id input (D-IC-18).
+const OCCURRENCE_TAG: &[u8] = b"cetra.issue-occurrence.v1";
+
+/// The id of the occurrence of `issue` on `trace` (D-IC-18): a UUIDv7 whose time is the
+/// trace's start (milliseconds, clamped at 0) and whose random bits come from SHA-256.
+/// The caller clamps `trace_start_ns` to `now`.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn occurrence_id(
+    project: ProjectId,
+    trace: TraceId,
+    issue: Uuid,
+    trace_start_ns: i64,
+) -> Uuid {
+    // The low 48 bits of the millisecond time (a UUIDv7 field).
+    let ms = u64::try_from(trace_start_ns.max(0) / 1_000_000).unwrap_or(0) & 0xFFFF_FFFF_FFFF;
+    let mut hasher = Sha256::new();
+    hasher.update(OCCURRENCE_TAG);
+    hasher.update(project.as_uuid().as_bytes());
+    hasher.update(trace.as_bytes());
+    hasher.update(issue.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes[..6].copy_from_slice(&ms.to_be_bytes()[2..]);
+    bytes[6..].copy_from_slice(&digest[..10]);
+    bytes[6] = (bytes[6] & 0x0F) | 0x70;
+    bytes[8] = (bytes[8] & 0x3F) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// The live versions of `ids` (UUID strings), keyed by score id. No ids means no lookup.
@@ -2375,6 +2420,169 @@ mod tests {
         );
         assert_ne!(a[0], b[0]);
         assert_eq!(a, again);
+    }
+
+    #[test]
+    fn occurrence_id_is_a_v7_with_the_trace_start() {
+        let trace: TraceId = TRACE.parse().unwrap();
+        // 999 999 ns after the fixed v7 time: the id keeps only the millisecond.
+        let start = V7_FIXED_MS * 1_000_000 + 999_999;
+        let id = occurrence_id(project_id(), trace, v4(1), start);
+        assert!(is_v7(id));
+        assert_eq!(v7_created_at(id), Some(V7_FIXED_MS * 1_000_000));
+        // A start before the epoch clamps to the epoch.
+        let early = occurrence_id(project_id(), trace, v4(1), -5);
+        assert!(is_v7(early));
+        assert_eq!(v7_created_at(early), Some(0));
+    }
+
+    #[test]
+    fn occurrence_id_is_deterministic_and_distinct() {
+        let trace: TraceId = TRACE.parse().unwrap();
+        let other_trace: TraceId = "a1000000000000000000000000000002".parse().unwrap();
+        let issue = v4(1);
+        let start = V7_FIXED_MS * 1_000_000;
+        let base = occurrence_id(project_id(), trace, issue, start);
+        assert_eq!(base, occurrence_id(project_id(), trace, issue, start));
+        assert_ne!(
+            base,
+            occurrence_id(ProjectId::from_uuid(v4(2)), trace, issue, start)
+        );
+        assert_ne!(base, occurrence_id(project_id(), other_trace, issue, start));
+        assert_ne!(base, occurrence_id(project_id(), trace, v4(3), start));
+        assert_ne!(
+            base,
+            occurrence_id(project_id(), trace, issue, start + 1_000_000)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_writer_bills_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let org = seeded.org_id;
+        let now = app.state.clock.now_ns();
+        let trace: TraceId = TRACE.parse().unwrap();
+        let start = now - 60_000_000_000;
+        let before = app
+            .state
+            .usage
+            .month_units(&app.state.meta, org, now)
+            .await
+            .unwrap();
+        let writer = Writer::Issue { source_id: v4(7) };
+        for issue in [v4(8), v4(9)] {
+            let id = occurrence_id(seeded.project.id, trace, issue, start);
+            write(
+                &app.state,
+                &seeded.project,
+                writer,
+                vec![ScoreCreate {
+                    score_id: Some(id),
+                    target: trace_target(),
+                    ..item("issue:x", 1.0)
+                }],
+            )
+            .await
+            .unwrap();
+        }
+        let after_issues = app
+            .state
+            .usage
+            .month_units(&app.state.meta, org, now)
+            .await
+            .unwrap();
+        assert_eq!(after_issues, before);
+        // A client's write is billed, so the counter does move.
+        write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![item("accuracy", 0.5)],
+        )
+        .await
+        .unwrap();
+        let after_api = app
+            .state
+            .usage
+            .month_units(&app.state.meta, org, now)
+            .await
+            .unwrap();
+        assert_eq!(after_api, before + 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_writer_ignores_the_cap() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2025-12-01T00:00:00Z",
+            &serde_json::json!({"units_cap": 0}),
+        );
+        let trace: TraceId = TRACE.parse().unwrap();
+        let start = app.state.clock.now_ns() - 60_000_000_000;
+        let id = occurrence_id(seeded.project.id, trace, v4(8), start);
+        let written = write(
+            &app.state,
+            &seeded.project,
+            Writer::Issue { source_id: v4(7) },
+            vec![ScoreCreate {
+                score_id: Some(id),
+                target: trace_target(),
+                ..item("issue:x", 1.0)
+            }],
+        )
+        .await
+        .unwrap();
+        assert_eq!(written, vec![id]);
+        let refused = write(
+            &app.state,
+            &seeded.project,
+            api_writer(),
+            vec![item("accuracy", 0.5)],
+        )
+        .await;
+        assert!(matches!(refused, Err(ApiError::QuotaExceeded { .. })));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_writer_rewrite_is_idempotent() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let trace: TraceId = TRACE.parse().unwrap();
+        let now = app.state.clock.now_ns();
+        // The sub-millisecond part of the trace start is dropped from the id's time.
+        let start = now - 60_000_000_000 - 500_000;
+        let id = occurrence_id(seeded.project.id, trace, v4(8), start);
+        let writer = Writer::Issue { source_id: v4(7) };
+        let occurrence = |value: f64| {
+            write(
+                &app.state,
+                &seeded.project,
+                writer,
+                vec![ScoreCreate {
+                    score_id: Some(id),
+                    target: trace_target(),
+                    ..item("issue:x", value)
+                }],
+            )
+        };
+        occurrence(1.0).await.unwrap();
+        app.state.clock.advance(std::time::Duration::from_secs(60));
+        occurrence(2.0).await.unwrap();
+
+        let rows = stored(&app, seeded.org_id, seeded.project.id).await;
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.score_id, id);
+        assert_eq!(row.value, ScoreValue::Numeric(2.0));
+        assert_eq!(row.source, ScoreSource::Issue);
+        assert_eq!(row.author_user_id, None);
+        assert_eq!(row.target, trace_target());
+        assert_eq!(row.created_at, (start / 1_000_000) * 1_000_000);
+        assert_eq!(row.updated_at, now + 60_000_000_000);
     }
 
     #[tokio::test(flavor = "multi_thread")]
