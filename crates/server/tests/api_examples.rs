@@ -41,7 +41,8 @@ use cetra_server::api::experiments::{
 use cetra_server::api::facets::FacetsResponse;
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
 use cetra_server::api::issues::{
-    CreateIssueSourceRequest, IssueSource, IssueSourcePage, UpdateIssueSourceRequest,
+    CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueSource,
+    IssueSourcePage, UpdateIssueSourceRequest,
 };
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
@@ -453,6 +454,10 @@ fn static_files_match_their_types() {
     roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
     roundtrip::<IssueSourcePage>("static/issue-sources.json");
     roundtrip::<IssueSource>("static/issue-source.json");
+    roundtrip::<IssuePage>("static/issues.json");
+    roundtrip::<Issue>("static/issue.json");
+    roundtrip::<IssueOccurrences>("static/issue-occurrences.json");
+    roundtrip::<IssueEventPage>("static/issue-events.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
@@ -700,6 +705,10 @@ fn generated_files_roundtrip() {
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
             "list_issue_sources" => roundtrip::<IssueSourcePage>(&example.file),
             "get_issue_source" => roundtrip::<IssueSource>(&example.file),
+            "list_issues" => roundtrip::<IssuePage>(&example.file),
+            "get_issue" => roundtrip::<Issue>(&example.file),
+            "get_issue_occurrences" => roundtrip::<IssueOccurrences>(&example.file),
+            "get_issue_events" => roundtrip::<IssueEventPage>(&example.file),
             "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);

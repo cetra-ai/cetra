@@ -5,9 +5,10 @@ use std::borrow::Cow;
 use serde::{Deserialize, Serialize};
 use utoipa::openapi::schema::{ArrayBuilder, ObjectBuilder, Schema, SchemaType, Type};
 use utoipa::openapi::{Ref, RefOr};
-use utoipa::{PartialSchema, ToSchema};
+use utoipa::{IntoParams, PartialSchema, ToSchema};
 use uuid::Uuid;
 
+use super::common::{Limit, Page, TimeParam};
 use super::online_rules::present;
 
 /// What an issue source reads. M3 adds kinds (D-IC-1).
@@ -149,6 +150,203 @@ pub struct UpdateIssueSourceRequest {
     /// Turns the source on or off.
     #[serde(default, deserialize_with = "present")]
     pub enabled: Option<bool>,
+}
+
+/// The state of an issue (D-IC-10). `merged` issues point at their target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum IssueState {
+    /// Needs attention.
+    Open,
+    /// Fixed. A recurrence reopens it as regressed.
+    Resolved,
+    /// Muted. Its occurrences are still written.
+    Ignored,
+    /// Folded into `merged_into`. Its occurrences count on the target.
+    Merged,
+}
+
+/// An issue: one distinct error of an error source (spec 09 § Issues, D-IC-10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Issue {
+    /// Issue id.
+    pub id: Uuid,
+    /// The project the issue belongs to.
+    pub project_id: Uuid,
+    /// The source the issue belongs to.
+    pub source_id: Uuid,
+    /// Name of that source.
+    pub source_name: String,
+    /// Kind of that source.
+    pub kind: IssueSourceKind,
+    /// Name of the occurrence scores of this issue: `issue:<id>`.
+    pub score_name: String,
+    /// Title, from the error.
+    pub title: String,
+    /// Description written by a member. `null` when there is none.
+    pub description: Option<String>,
+    /// Lifecycle state.
+    pub state: IssueState,
+    /// `true` when a resolved issue recurred and was reopened.
+    pub regressed: bool,
+    /// The issue this one was merged into. `null` unless `state` is `merged`.
+    pub merged_into: Option<Uuid>,
+    /// Issues merged into this one. Their occurrences count here.
+    pub merged_from: Vec<Uuid>,
+    /// Start of the earliest occurrence. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub first_seen: i64,
+    /// Start of the latest occurrence. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub last_seen: i64,
+    /// When it was resolved. Omitted unless the issue is resolved.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub resolved_at: Option<i64>,
+    /// Who resolved it. `null` when nobody did or the user is unknown.
+    pub resolved_by: Option<Uuid>,
+    /// Creation time. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+    /// Last change time. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub updated_at: i64,
+    /// Occurrences in the period: the last 24 hours on `get`, or the `from`/`to` period on
+    /// `list`. Counts the issue's own occurrences and those of the issues merged into it.
+    pub count: u64,
+    /// Distinct users in the same period: the largest user count of the issue's names, so an
+    /// approximation when merged issues share users.
+    pub users: u64,
+}
+
+/// `GET /api/v1/projects/{project}/issues` answer. `next_cursor` is null on the last page.
+pub type IssuePage = Page<Issue>;
+
+/// Query parameters of `GET /api/v1/projects/{project}/issues`. Spec 09 § Issues.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct IssueListParams {
+    /// Comma-separated states: `open`, `resolved`, `ignored`, `merged`, or `all` (every state
+    /// but `merged`). Default `open`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// Issues of this source only.
+    #[serde(default)]
+    pub source_id: Option<Uuid>,
+    /// Keeps issues whose title contains this text, ignoring case.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// `last_seen` (default) or `first_seen`, newest first.
+    #[serde(default)]
+    pub sort: Option<String>,
+    /// Start of the period for `count` and `users`, inclusive. RFC 3339 or epoch milliseconds.
+    /// Default 24 hours before `to`.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// End of the period for `count` and `users`, exclusive. RFC 3339 or epoch milliseconds.
+    /// Default now.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+    /// Comma-separated issue ids, at most 100. Only these issues are listed. Blank means no
+    /// filter.
+    #[serde(default)]
+    pub ids: Option<String>,
+    /// Maximum number of items to return (1–1000, default 50).
+    #[serde(default)]
+    #[param(minimum = 1, maximum = 1000, default = 50)]
+    pub limit: Limit,
+    /// Opaque cursor from a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// Query parameters of `GET …/issues/{id}/occurrences`. Spec 09 § Issues.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct IssueOccurrenceParams {
+    /// Start of the days, inclusive. RFC 3339 or epoch milliseconds. Default 14 days before
+    /// `to`; the period is at most 90 days.
+    #[serde(default)]
+    pub from: Option<TimeParam>,
+    /// End of the days, exclusive. RFC 3339 or epoch milliseconds. Default now.
+    #[serde(default)]
+    pub to: Option<TimeParam>,
+}
+
+/// Occurrences of an issue (spec 09 § Issues).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct IssueOccurrences {
+    /// One entry per UTC day of the period with at least one occurrence, oldest first. `users`
+    /// is the largest user count of the issue's names that day, an approximation when merged
+    /// issues share users.
+    pub days: Vec<IssueDay>,
+    /// The newest occurrences of the issue and of the issues merged into it, at most 20. Not
+    /// limited to the period.
+    pub examples: Vec<IssueExample>,
+}
+
+/// One UTC day of an issue's occurrences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueDay {
+    /// Start of the UTC day. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub day: i64,
+    /// Occurrences that day.
+    pub count: u64,
+    /// Largest user count of the issue's names that day.
+    pub users: u64,
+}
+
+/// One occurrence of an issue, with the trace it is on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueExample {
+    /// Trace id, 32 lowercase hex digits.
+    pub trace_id: String,
+    /// The error span the occurrence came from, 16 lowercase hex digits. `null` when unknown.
+    pub span_id: Option<String>,
+    /// When the occurrence happened (the trace's start). JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+    /// Reason stored with the occurrence. `null` when there is none.
+    pub reason: Option<String>,
+    /// The issue the occurrence belongs to: the issue itself or one merged into it.
+    pub issue_id: Uuid,
+}
+
+/// One entry of an issue's history (D-IC-10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueEvent {
+    /// Event id.
+    pub id: Uuid,
+    /// `created`, `state_changed`, `renamed`, `merged` or `regressed`.
+    pub kind: String,
+    /// The user who acted. `null` for the system or an unknown user.
+    pub actor_user_id: Option<Uuid>,
+    /// The value before the change, when there is one.
+    pub from_value: Option<String>,
+    /// The value after the change, when there is one.
+    pub to_value: Option<String>,
+    /// When it happened. JSON is RFC 3339.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub at: i64,
+}
+
+/// `GET …/issues/{id}/events` answer: the newest 100 events, newest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct IssueEventPage {
+    /// The events, newest first.
+    pub data: Vec<IssueEvent>,
 }
 
 fn yes() -> bool {

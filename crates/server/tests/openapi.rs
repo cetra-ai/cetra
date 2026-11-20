@@ -524,6 +524,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/issue-sources/{id}",
         "delete_issue_source",
     ),
+    ("get", "/api/v1/projects/{project}/issues", "list_issues"),
+    ("get", "/api/v1/projects/{project}/issues/{id}", "get_issue"),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/occurrences",
+        "get_issue_occurrences",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/events",
+        "get_issue_events",
+    ),
     (
         "post",
         "/api/v1/projects/{project}/online-rules",
@@ -851,6 +863,9 @@ const READ_OPERATIONS: &[&str] = &[
     "get_evaluator_stats",
     "get_online_rule_stats",
     "get_experiment_summaries",
+    "list_issues",
+    "get_issue",
+    "get_issue_occurrences",
 ];
 
 const TAGS: &[&str] = &[
@@ -1166,6 +1181,7 @@ fn document_lint() {
         } else if *id == "get_online_rule"
             || *id == "get_issue_source"
             || *id == "delete_issue_source"
+            || *id == "get_issue_events"
             || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"
@@ -1298,6 +1314,7 @@ fn document_lint() {
         ("AlertEventPage", "AlertEvent"),
         ("OnlineRulePage", "OnlineRule"),
         ("IssueSourcePage", "IssueSource"),
+        ("IssuePage", "Issue"),
         ("EvalJobPage", "EvalJob"),
         ("BackfillPage", "Backfill"),
     ];
@@ -1585,6 +1602,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "AlertEventPage",
         "OnlineRulePage",
         "IssueSourcePage",
+        "IssuePage",
         "EvalJobPage",
         "BackfillPage",
         "InternalUsagePage",
@@ -1602,6 +1620,16 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     expected.insert("IssueSource.filter".to_owned());
     expected.insert("IssueSource.paused_reason".to_owned());
     expected.insert("IssueSource.created_by".to_owned());
+    // An issue shows its description, merge target and resolver, `null` when it has none; its
+    // examples and events show their optional texts and users the same way.
+    expected.insert("Issue.description".to_owned());
+    expected.insert("Issue.merged_into".to_owned());
+    expected.insert("Issue.resolved_by".to_owned());
+    expected.insert("IssueExample.span_id".to_owned());
+    expected.insert("IssueExample.reason".to_owned());
+    expected.insert("IssueEvent.actor_user_id".to_owned());
+    expected.insert("IssueEvent.from_value".to_owned());
+    expected.insert("IssueEvent.to_value".to_owned());
     assert_eq!(required_nullable, expected);
 }
 

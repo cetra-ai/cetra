@@ -94,8 +94,9 @@ use super::internal::{
 };
 use super::invites::{CreateInviteRequest, CreatedInvite, Invite, InvitePreview};
 use super::issues::{
-    CreateIssueSourceRequest, IssueSource, IssueSourceKind, IssueSourcePage,
-    UpdateIssueSourceRequest,
+    CreateIssueSourceRequest, Issue, IssueDay, IssueEvent, IssueEventPage, IssueExample,
+    IssueListParams, IssueOccurrenceParams, IssueOccurrences, IssueSource, IssueSourceKind,
+    IssueSourcePage, IssueState, UpdateIssueSourceRequest,
 };
 use super::keys::{
     ApiKey as ProjectApiKey, CreateApiKeyRequest, CreatePersonalTokenRequest, CreatedApiKey,
@@ -457,6 +458,13 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<IssueSourcePage>();
     set.insert::<CreateIssueSourceRequest>();
     set.insert::<UpdateIssueSourceRequest>();
+    set.insert::<IssueState>();
+    set.insert_page::<Issue>("IssuePage");
+    set.insert::<IssueDay>();
+    set.insert::<IssueExample>();
+    set.insert::<IssueOccurrences>();
+    set.insert::<IssueEvent>();
+    set.insert::<IssueEventPage>();
     set.insert::<EvalJobKind>();
     set.insert::<EvalJobStatus>();
     set.insert::<EvalJob>();
@@ -889,6 +897,7 @@ fn paths() -> Paths {
     let paths = evaluator_paths(paths);
     let paths = online_rule_paths(paths);
     let paths = issue_source_paths(paths);
+    let paths = issue_paths(paths);
     let paths = eval_job_paths(paths);
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
@@ -2898,6 +2907,74 @@ fn issue_source_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/issue-sources/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+}
+
+fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
+    let id = path_uuid("id", "Issue id.");
+    let list = operation("list_issues", "issues", "List issues")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the period `[from, to)` (default the last 24 hours). Merged issues are listed only when `state` names `merged`. Blank `ids` means no filter.",
+        ))
+        .parameters(Some(with_query::<IssueListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("IssuePage", "One page of issues."),
+            READ_ERRORS,
+        ))
+        .build();
+    let get = operation("get_issue", "issues", "Get an issue")
+        .description(Some(
+            "Any project member can read. `count` and `users` cover the last 24 hours. `merged_from` lists the issues merged into this one.",
+        ))
+        .parameters(Some(vec![project_param(), id.clone()]))
+        .responses(responses("200", json_of::<Issue>("The issue."), READ_ERRORS))
+        .build();
+    let occurrences = operation(
+        "get_issue_occurrences",
+        "issues",
+        "Get the occurrences of an issue",
+    )
+    .description(Some(
+        "Any project member can read. `days` has one entry per UTC day of `[from, to)` (default the last 14 days, at most 90) with an occurrence. `examples` are the newest 20 occurrences of the issue and of the issues merged into it, not limited to the period.",
+    ))
+    .parameters(Some(with_query::<IssueOccurrenceParams>(vec![
+        project_param(),
+        id.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_of::<IssueOccurrences>("The occurrences."),
+        READ_ERRORS,
+    ))
+    .build();
+    let events = operation("get_issue_events", "issues", "List the events of an issue")
+        .description(Some(
+            "Any project member can read. The newest 100 events of the issue, newest first.",
+        ))
+        .parameters(Some(vec![project_param(), id]))
+        .responses(responses(
+            "200",
+            json_of::<IssueEventPage>("The events."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/issues"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/occurrences"),
+            PathItem::new(HttpMethod::Get, occurrences),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/events"),
+            PathItem::new(HttpMethod::Get, events),
         )
 }
 
