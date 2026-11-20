@@ -4,9 +4,9 @@ import datasetItemDocument from "../../../fixtures/api/responses/datasets/019000
 import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
 import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
 import promptSettingsDocument from "../../../fixtures/api/responses/prompt-settings.json";
-import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
 import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
+import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";

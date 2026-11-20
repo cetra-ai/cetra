@@ -101,13 +101,18 @@ it("links each version to its traces on the same window", async () => {
   );
   await renderApp("/acme/support-bot/prompts/support-reply?tab=metrics");
 
-  const table = await screen.findByRole("table", { name: "Metrics by version" });
+  await screen.findByRole("table", { name: "Metrics by version" });
   await user.click(screen.getByRole("combobox", { name: "Window" }));
   await user.click(await screen.findByRole("option", { name: "30 days" }));
 
-  const link = within(rowOf(table, "v2")).getByRole("link", { name: "Traces" });
-  const search = new URL(link.getAttribute("href") ?? "", "http://x").searchParams;
-  expect(search.get("range")).toBe("30d");
+  // A new window loads again, so the table is a new element: read the one the page shows now.
+  const search = await waitFor(() => {
+    const table = screen.getByRole("table", { name: "Metrics by version" });
+    const link = within(rowOf(table, "v2")).getByRole("link", { name: "Traces" });
+    const found = new URL(link.getAttribute("href") ?? "", "http://x").searchParams;
+    expect(found.get("range")).toBe("30d");
+    return found;
+  });
   expect(search.get("filter")).toBe("prompts @> ['support-reply@2']");
 });
 

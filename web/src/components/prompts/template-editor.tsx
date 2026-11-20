@@ -1,5 +1,4 @@
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
-import type { ChatEntry, ChatRole, Position } from "@/lib/prompts";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -10,6 +9,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import type { ChatEntry, ChatRole, Position } from "@/lib/prompts";
 
 const ROLES: readonly ChatRole[] = ["system", "user", "assistant"];
 
@@ -129,7 +129,7 @@ function ChatTemplate({
       <ol className="flex flex-col gap-3">
         {value.map((entry, index) => {
           const number = index + 1;
-          const noun = entry.type === "placeholder" ? "placeholder" : "message";
+          const noun = "type" in entry ? "placeholder" : "message";
           const entryMessage = [
             `template[${index}]`,
             `template[${index}].role`,

@@ -10,8 +10,8 @@ import { CreatedBy } from "@/components/created-by";
 import { DisabledReason } from "@/components/disabled-reason";
 import { SaveVersionDialog } from "@/components/prompts/save-version-dialog";
 import { TemplateEditor } from "@/components/prompts/template-editor";
-import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { RelativeTime } from "@/components/relative-time";
+import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { useProject } from "@/components/shell/project-context";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -76,7 +76,7 @@ export function TemplateTab({
 }) {
   const { org, project } = useProject();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
+  const navigate = useNavigate({ from: "/$org/$project/prompts/$prompt" });
   const create = $api.useMutation("post", "/api/v1/projects/{project}/prompts/{prompt}/versions");
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => draftOf(version));
@@ -284,12 +284,11 @@ function TemplateView({ version }: { version: PromptVersion }) {
   return (
     <div className="flex flex-col gap-4">
       {version.type === "text" ? (
-        <pre
-          aria-label="Template"
-          className="rounded-md border bg-muted/30 p-3 font-mono text-body whitespace-pre-wrap break-words"
-        >
-          {templateText(version.template, "text")}
-        </pre>
+        <section aria-label="Template">
+          <pre className="rounded-md border bg-muted/30 p-3 font-mono text-body whitespace-pre-wrap break-words">
+            {templateText(version.template, "text")}
+          </pre>
+        </section>
       ) : (
         <ol aria-label="Messages" className="flex flex-col gap-2">
           {entries.map((entry, index) =>
@@ -338,9 +337,11 @@ function TemplateView({ version }: { version: PromptVersion }) {
         </dd>
         <dt className="text-muted-foreground">Config</dt>
         <dd>
-          <pre aria-label="Config" className="font-mono text-caption whitespace-pre-wrap">
-            {prettyJson(version.config)}
-          </pre>
+          <section aria-label="Config">
+            <pre className="font-mono text-caption whitespace-pre-wrap">
+              {prettyJson(version.config)}
+            </pre>
+          </section>
         </dd>
       </dl>
       <div className="flex flex-col gap-1 text-caption text-muted-foreground">

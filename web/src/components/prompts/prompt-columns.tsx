@@ -73,9 +73,7 @@ export const PROMPT_COLUMNS: DataTableColumn<Prompt>[] = [
     enableSorting: false,
     cell: ({ row }) =>
       row.original.tags.length > 0 ? (
-        <span className="block truncate text-muted-foreground">
-          {row.original.tags.join(", ")}
-        </span>
+        <span className="block truncate text-muted-foreground">{row.original.tags.join(", ")}</span>
       ) : null,
   },
   {

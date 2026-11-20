@@ -52,12 +52,7 @@ export function promptVersionsKey(org: string, project: string, prompt: string) 
   }).queryKey;
 }
 
-export function promptVersionQuery(
-  org: string,
-  project: string,
-  prompt: string,
-  version: number,
-) {
+export function promptVersionQuery(org: string, project: string, prompt: string, version: number) {
   return $api.queryOptions("get", VERSION_PATH, {
     params: { path: { project: projectRef(org, project), prompt, version } },
   });

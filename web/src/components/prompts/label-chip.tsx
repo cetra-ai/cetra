@@ -1,5 +1,5 @@
-import { Lock, X } from "lucide-react";
 import { cn } from "cn";
+import { Lock, X } from "lucide-react";
 import { DisabledReason } from "@/components/disabled-reason";
 import { categoryClasses } from "@/lib/colors";
 import { PROTECTED_REASON, VIEWER_REASON } from "@/lib/prompts";

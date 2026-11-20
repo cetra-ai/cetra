@@ -129,7 +129,7 @@ function SaveVersionForm({
         error={errors.commit_message}
         maxLength={500}
       />
-      <div role="group" aria-label="Labels" className="flex flex-col gap-2">
+      <fieldset aria-label="Labels" className="m-0 flex min-w-0 flex-col gap-2 border-0 p-0">
         {labels.map((label) => {
           const locked = protectedLabels.includes(label) && !canProtect;
           const id = `${idPrefix}-label-${label}`;
@@ -171,7 +171,7 @@ function SaveVersionForm({
           </p>
           {labelsMessage ? <p className="text-caption text-destructive">{labelsMessage}</p> : null}
         </div>
-      </div>
+      </fieldset>
       <FormError message={error} />
       <DialogFooter>
         <SubmitButton pending={pending}>Save version</SubmitButton>

@@ -4,18 +4,16 @@ import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
-import { recordRequests } from "@/test/requests";
 import { renderApp } from "@/test/render";
+import { recordRequests } from "@/test/requests";
+import versionOneFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import promptsFixture from "../../../../../../fixtures/api/responses/prompts.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
-import versionOneFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 
 /** Answers the project read with `role`, so the page sees the signed-in user's role. */
 function asRole(role: "member" | "viewer") {
   server.use(
-    http.get("/api/v1/projects/:project", () =>
-      HttpResponse.json({ ...projectFixture, role }),
-    ),
+    http.get("/api/v1/projects/:project", () => HttpResponse.json({ ...projectFixture, role })),
   );
 }
 
@@ -145,6 +143,11 @@ it("disables the New prompt button for a viewer, with the reason", async () => {
 it("lets an admin edit the protected labels, one per line", async () => {
   const user = userEvent.setup();
   const requests = recordRequests();
+  server.use(
+    http.put("/api/v1/projects/:project/prompt-settings", () =>
+      HttpResponse.json({ protected_labels: ["production", "prod"] }),
+    ),
+  );
   await renderApp("/acme/support-bot/prompts");
 
   await user.click(await screen.findByRole("button", { name: "Protected labels" }));
@@ -168,9 +171,7 @@ it("disables the protected labels button below admin, with the reason", async ()
   await renderApp("/acme/support-bot/prompts");
 
   expect(await screen.findByRole("button", { name: "Protected labels" })).toBeDisabled();
-  expect(
-    screen.getByText("Only project admins can change protected labels"),
-  ).toBeInTheDocument();
+  expect(screen.getByText("Only project admins can change protected labels")).toBeInTheDocument();
 });
 
 it("unchecks and disables production for a member, and sends no labels", async () => {
@@ -185,9 +186,11 @@ it("unchecks and disables production for a member, and sends no labels", async (
 
   await renderApp("/acme/support-bot/prompts?create=1");
   const dialog = await screen.findByRole("dialog", { name: "New prompt" });
-  const production = within(dialog).getByRole("checkbox", { name: "Label as production" });
-  await waitFor(() => expect(production).toBeDisabled());
-  expect(production).not.toBeChecked();
+  // The disabled box is wrapped by its reason once the settings load, so it is a new element.
+  await waitFor(() =>
+    expect(within(dialog).getByRole("checkbox", { name: "Label as production" })).toBeDisabled(),
+  );
+  expect(within(dialog).getByRole("checkbox", { name: "Label as production" })).not.toBeChecked();
 
   await user.type(within(dialog).getByLabelText("Name"), "faq-bot");
   await user.click(within(dialog).getByRole("button", { name: "Create prompt" }));

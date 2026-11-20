@@ -11,8 +11,8 @@ import {
   promptVersionsInit,
 } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
-import { EmptyState } from "@/components/empty-state";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { EmptyState } from "@/components/empty-state";
 import { LabelsTab } from "@/components/prompts/labels-tab";
 import { MetricsTab } from "@/components/prompts/metrics-tab";
 import { LATEST, LOAD_MORE, PromptHeader } from "@/components/prompts/prompt-header";
@@ -22,12 +22,7 @@ import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  type PromptTab,
-  parsePromptSearch,
-  withPromptTab,
-  withPromptVersion,
-} from "@/lib/prompts";
+import { type PromptTab, parsePromptSearch, withPromptTab, withPromptVersion } from "@/lib/prompts";
 import { atLeast, canManagePrompts } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/prompts/$prompt")({

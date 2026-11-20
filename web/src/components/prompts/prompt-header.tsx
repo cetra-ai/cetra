@@ -13,6 +13,7 @@ import { DisabledReason } from "@/components/disabled-reason";
 import { LabelChip } from "@/components/prompts/label-chip";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
+import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -22,7 +23,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { LABEL_FORBIDDEN_TEXT, PROTECTED_REASON, VIEWER_REASON } from "@/lib/prompts";
 
 /** The version picker's value for "the latest version". */
@@ -185,7 +185,10 @@ export function PromptHeader({
       {prompt.description ? (
         <p className="w-full text-body text-muted-foreground">{prompt.description}</p>
       ) : null}
-      <div role="group" aria-label={`Labels of v${shown}`} className="flex flex-wrap gap-1.5">
+      <fieldset
+        aria-label={`Labels of v${shown}`}
+        className="m-0 flex min-w-0 flex-wrap gap-1.5 border-0 p-0"
+      >
         {labels.map((label) =>
           label === "latest" ? (
             <Badge key={label} variant="outline">
@@ -203,7 +206,7 @@ export function PromptHeader({
             />
           ),
         )}
-      </div>
+      </fieldset>
 
       <ConfirmDialog
         open={removing !== undefined}

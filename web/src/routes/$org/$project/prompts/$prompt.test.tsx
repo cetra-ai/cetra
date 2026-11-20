@@ -4,13 +4,13 @@ import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
-import { recordRequests } from "@/test/requests";
 import { renderApp } from "@/test/render";
-import projectFixture from "../../../../../../fixtures/api/static/project.json";
+import { recordRequests } from "@/test/requests";
 import labelEventsFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/label-events.json";
-import promptFixture from "../../../../../../fixtures/api/responses/prompts/support-reply.json";
 import versionOneFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import versionTwoFixture from "../../../../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
+import promptFixture from "../../../../../../fixtures/api/responses/prompts/support-reply.json";
+import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 /** Answers the project read with `role`, so the page sees the signed-in user's role. */
 function asRole(role: "member" | "viewer") {
@@ -49,7 +49,7 @@ it("shows an older version, and goes back to the latest", async () => {
 
   expect(await screen.findByText("Viewing version 1.")).toBeInTheDocument();
   const labels = screen.getByRole("group", { name: "Labels of v1" });
-  expect(within(labels).getByText("production")).toBeInTheDocument();
+  expect(await within(labels).findByText("production")).toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Go to latest" }));
   await waitFor(() => expect(screen.queryByText("Viewing version 1.")).not.toBeInTheDocument());
@@ -58,9 +58,7 @@ it("shows an older version, and goes back to the latest", async () => {
 
 it("answers not found for an unknown prompt", async () => {
   server.use(
-    http.get("/api/v1/projects/:project/prompts/:prompt", () =>
-      problemResponse(404, "not_found"),
-    ),
+    http.get("/api/v1/projects/:project/prompts/:prompt", () => problemResponse(404, "not_found")),
   );
   await renderApp("/acme/support-bot/prompts/nope");
 
@@ -162,6 +160,9 @@ it("sets a label on a version and removes a label", async () => {
       removed.push(String(params.label));
       return new HttpResponse(null, { status: 204 });
     }),
+    http.put("/api/v1/projects/:project/prompts/:prompt/labels/:label", () =>
+      HttpResponse.json(promptFixture),
+    ),
   );
   await renderApp("/acme/support-bot/prompts/support-reply");
 
@@ -180,9 +181,9 @@ it("sets a label on a version and removes a label", async () => {
   await waitFor(() =>
     expect(requests.calls.find((call) => call.method === "PUT")?.body).toEqual({ version: 1 }),
   );
-  expect(requests.calls.find((call) => call.method === "PUT")?.path.endsWith("/labels/canary")).toBe(
-    true,
-  );
+  expect(
+    requests.calls.find((call) => call.method === "PUT")?.path.endsWith("/labels/canary"),
+  ).toBe(true);
   requests.stop();
 });
 

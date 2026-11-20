@@ -187,7 +187,7 @@ function NewPromptForm({
     );
   }
 
-  function saved(prompt: Schema<"Prompt">) {
+  function saved(prompt: Schema<"PromptVersion">) {
     void queryClient.invalidateQueries({ queryKey: promptsKey(org, project) });
     // The new prompt opens on its own page; the dialog goes with the list page it was opened from.
     void navigate({

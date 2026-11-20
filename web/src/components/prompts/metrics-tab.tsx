@@ -21,12 +21,7 @@ import {
 } from "@/components/ui/table";
 import { formatCost, formatDuration, formatTokens } from "@/lib/format";
 import { formatCount, formatPercent } from "@/lib/metrics";
-import {
-  METRICS_PRESETS,
-  type MetricsPreset,
-  metricsWindow,
-  tracesSearchFor,
-} from "@/lib/prompts";
+import { METRICS_PRESETS, type MetricsPreset, metricsWindow, tracesSearchFor } from "@/lib/prompts";
 
 const WINDOW_LABELS: Record<MetricsPreset, string> = {
   "24h": "24 hours",
