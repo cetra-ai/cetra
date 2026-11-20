@@ -47,6 +47,19 @@ test("sends the user agent and calls the right URL", async () => {
   assert.equal(calls[0].init.headers["user-agent"], "cetra-website-build");
 });
 
+test("sends the token when GITHUB_TOKEN is set", async () => {
+  const saved = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = "test-token";
+  try {
+    const calls = [];
+    await fetchStars("a/b", { fetchImpl: fakeFetch({ ok: false }, calls) });
+    assert.equal(calls[0].init.headers.authorization, "Bearer test-token");
+  } finally {
+    if (saved === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = saved;
+  }
+});
+
 test("formats counts", () => {
   const cases = [
     [0, "0"],

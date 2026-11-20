@@ -65,10 +65,34 @@ export function textOf(inner) {
     .trim();
 }
 
-/** True when an element has visible text, an aria-label, or an img with alt text. */
-function isNamed(element) {
+/** The attributes of every opening tag, in document order. */
+function allAttributes(html) {
+  return [...html.matchAll(/<[a-z][^\s/>]*([^>]*)>/gi)].map((m) => attributes(m[1]));
+}
+
+/** The visible text of the element with this id, or "" when there is none. */
+function textOfId(html, id) {
+  const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = html.match(
+    new RegExp(`<([a-z][a-z0-9]*)\\b[^>]*\\sid="${escaped}"[^>]*>([\\s\\S]*?)</\\1>`, "i"),
+  );
+  return m ? textOf(m[2]) : "";
+}
+
+/**
+ * True when an element has visible text, an aria-label, an aria-labelledby that points at text,
+ * an inner svg with an aria-label or a title, or an img with alt text.
+ */
+function isNamed(element, html) {
   if (textOf(element.inner) !== "") return true;
   if ((element.attrs.get("aria-label") ?? "").trim() !== "") return true;
+  const labelledBy = (element.attrs.get("aria-labelledby") ?? "").split(/\s+/).filter(Boolean);
+  if (labelledBy.some((id) => textOfId(html, id) !== "")) return true;
+  const svgs = elements(element.inner, "svg");
+  if (svgs.some((svg) => (svg.attrs.get("aria-label") ?? "").trim() !== "")) return true;
+  if (svgs.some((svg) => elements(svg.inner, "title").some((t) => textOf(t.inner) !== ""))) {
+    return true;
+  }
   return tags(element.inner, "img").some((img) => (img.get("alt") ?? "") !== "");
 }
 
@@ -123,10 +147,11 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
   }
 
   for (const link of elements(stripped, "a")) {
-    if (!isNamed(link)) findings.push(`link without a name: ${link.attrs.get("href") ?? ""}`);
+    if (!isNamed(link, stripped))
+      findings.push(`link without a name: ${link.attrs.get("href") ?? ""}`);
   }
   for (const button of elements(stripped, "button")) {
-    if (!isNamed(button)) findings.push("button without a name");
+    if (!isNamed(button, stripped)) findings.push("button without a name");
   }
 
   for (const a of tags(stripped, "a")) {
@@ -140,31 +165,52 @@ export function checkPage(route, html, { noindex, distFiles = new Set() }) {
     if (!built) findings.push(`broken internal link: ${href}`);
   }
 
+  if (
+    tags(stripped, "a").some((a) => a.get("href") === "#main") &&
+    !allAttributes(stripped).some((a) => a.get("id") === "main")
+  ) {
+    findings.push("skip link target #main missing");
+  }
+
+  // Everything a reader or a screen reader hears: the body text, the title, the description,
+  // every alt and every aria-label.
   const bodyHtml = elements(stripped, "body")[0]?.inner ?? stripped;
-  const text = textOf(bodyHtml);
-  for (const m of text.matchAll(BANNED_WORD)) findings.push(`banned word: ${m[0]}`);
-  findings.push(...Array.from(text.matchAll(CETRA_CAPS), () => "write cetra in lower case"));
+  const scanned = [
+    textOf(bodyHtml),
+    title ? textOf(title.inner) : "",
+    description,
+    ...tags(stripped, "img").map((img) => img.get("alt") ?? ""),
+    ...allAttributes(stripped).map((a) => a.get("aria-label") ?? ""),
+  ].join(" ");
+  for (const m of scanned.matchAll(BANNED_WORD)) findings.push(`banned word: ${m[0]}`);
+  findings.push(...Array.from(scanned.matchAll(CETRA_CAPS), () => "write cetra in lower case"));
 
   return findings;
 }
 
-/** The bytes a visitor downloads: the HTML and the /_astro/ stylesheets and scripts. Fonts are not counted. */
+/** The bytes a visitor downloads: the HTML and the /_astro/ stylesheets, scripts and module preloads. Fonts are not counted. */
 export function pageWeight(html, readAsset) {
   let bytes = Buffer.byteLength(html);
   for (const link of tags(html, "link")) {
-    const href = link.get("href") ?? "";
+    const rel = (link.get("rel") ?? "").split(/\s+/);
+    const path = assetPath(link.get("href"));
     if (
-      (link.get("rel") ?? "").split(/\s+/).includes("stylesheet") &&
-      href.startsWith("/_astro/")
+      (rel.includes("stylesheet") || rel.includes("modulepreload")) &&
+      path.startsWith("/_astro/")
     ) {
-      bytes += readAsset(href).length;
+      bytes += readAsset(path).length;
     }
   }
   for (const script of tags(html, "script")) {
-    const src = script.get("src") ?? "";
-    if (src.startsWith("/_astro/")) bytes += readAsset(src).length;
+    const path = assetPath(script.get("src"));
+    if (path.startsWith("/_astro/")) bytes += readAsset(path).length;
   }
   return bytes;
+}
+
+/** The path of a local asset, without its ?query or #fragment. */
+function assetPath(href = "") {
+  return href.replace(/[?#].*$/, "");
 }
 
 /** The routes of the built pages outside /docs/. The holding page's "/" is left out until launch. */

@@ -117,7 +117,46 @@ describe("checkPage", () => {
   });
 
   it("link named by aria-label", () => {
-    const body = '<h1>A</h1><a href="#main" aria-label="Menu"></a>';
+    const body = '<h1>A</h1><a href="#main" aria-label="Menu"></a><main id="main"></main>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
+  });
+
+  it("link named by aria-labelledby that points at text", () => {
+    const body = '<h1>A</h1><span id="lbl">Home</span><a href="/x/" aria-labelledby="lbl"></a>';
+    assert.deepEqual(
+      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      [],
+    );
+  });
+
+  it("aria-labelledby that points at an empty element does not name the link", () => {
+    const body = '<h1>A</h1><span id="lbl"></span><a href="/x/" aria-labelledby="lbl"></a>';
+    assert.deepEqual(
+      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      ["link without a name: /x/"],
+    );
+  });
+
+  it("button named by an inner svg aria-label", () => {
+    const body = '<h1>A</h1><button type="button"><svg aria-label="Close"></svg></button>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
+  });
+
+  it("link named by an inner svg title", () => {
+    const body = '<h1>A</h1><a href="/x/"><svg><title>Home</title></svg></a>';
+    assert.deepEqual(
+      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      [],
+    );
+  });
+
+  it("skip link target #main must exist", () => {
+    const body = '<h1>A</h1><a href="#main">Skip to content</a>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["skip link target #main missing"]);
+  });
+
+  it("skip link with its target present", () => {
+    const body = '<h1>A</h1><a href="#main">Skip to content</a><main id="main"></main>';
     assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
   });
 
@@ -153,7 +192,7 @@ describe("checkPage", () => {
   it("external, mailto and in-page links not checked", () => {
     const body =
       '<h1>A</h1><a href="https://example.com/">E</a><a href="//cdn.example.com/x">C</a>' +
-      '<a href="mailto:a@b.c">M</a><a href="#main">Main</a>';
+      '<a href="mailto:a@b.c">M</a><a href="#main">Main</a><main id="main"></main>';
     assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
   });
 
@@ -172,6 +211,32 @@ describe("checkPage", () => {
     assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["write cetra in lower case"]);
   });
 
+  it("banned word in the title", () => {
+    assert.deepEqual(checkPage("/x/", page({ title: "<title>Powerful</title>" }), noindex), [
+      "banned word: Powerful",
+    ]);
+  });
+
+  it("capitalised name in the description", () => {
+    const description = '<meta name="description" content="Cetra is here">';
+    assert.deepEqual(checkPage("/x/", page({ description }), noindex), [
+      "write cetra in lower case",
+    ]);
+  });
+
+  it("banned word in an alt", () => {
+    const body = '<h1>A</h1><img src="/a.png" alt="Simply">';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), ["banned word: Simply"]);
+  });
+
+  it("banned word and capitalised name in an aria-label", () => {
+    const body = '<h1>A</h1><button type="button" aria-label="Seamless CETRA"></button>';
+    assert.deepEqual(checkPage("/x/", page({ body }), noindex), [
+      "banned word: Seamless",
+      "write cetra in lower case",
+    ]);
+  });
+
   it("script and style content ignored", () => {
     const body =
       '<h1>A</h1><script>document.write("<h1>B</h1>")</script>' +
@@ -187,6 +252,22 @@ describe("pageWeight", () => {
       '<body><script type="module" src="/_astro/a.js"></script><h1>A</h1></body></html>';
     const weight = pageWeight(html, (path) => Buffer.alloc(path.endsWith(".css") ? 100 : 200));
     assert.equal(weight, Buffer.byteLength(html) + 300);
+  });
+});
+
+describe("pageWeight with asset URLs", () => {
+  it("strips the query and fragment, and counts modulepreload links", () => {
+    const html =
+      '<html lang="en"><head><link rel="stylesheet" href="/_astro/b.css?v=1#x">' +
+      '<link rel="modulepreload" href="/_astro/c.js"></head>' +
+      '<body><script type="module" src="/_astro/a.js?v=2"></script></body></html>';
+    const requested = [];
+    const weight = pageWeight(html, (path) => {
+      requested.push(path);
+      return Buffer.alloc(10);
+    });
+    assert.deepEqual(requested, ["/_astro/b.css", "/_astro/c.js", "/_astro/a.js"]);
+    assert.equal(weight, Buffer.byteLength(html) + 30);
   });
 });
 
