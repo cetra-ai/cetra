@@ -40,7 +40,9 @@ pub use facets::{
     HistogramBucket, MAX_FACET_KEY, MAX_FACET_LIMIT, MAX_FACET_QUERY, facet,
 };
 pub use scores::{
-    LATEST_SCORE_COLUMNS, ScoreListRequest, ScoreTargets, latest_scores, score_list, scores_by_id,
+    LATEST_SCORE_COLUMNS, MAX_COUNT_NAMES, ScoreListRequest, ScoreNameCount,
+    ScoreNameCountsRequest, ScoreTargets, latest_scores, score_list, score_name_counts,
+    scores_by_id,
 };
 pub use sessions::{
     MAX_SESSION_TURNS, SESSION_ERROR_TRACE_COUNT, SESSION_FIRST_INPUT_PREVIEW,
@@ -48,11 +50,12 @@ pub use sessions::{
     SessionSort, session_detail, session_extras, session_list,
 };
 pub use traces::{
-    MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS,
-    MatchCountRequest, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest,
-    SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceDetailData, TraceListRequest,
-    TraceRefreshRequest, TraceSort, TraceSpansData, TraceSpansRequest, match_count, span_detail,
-    span_list, span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
+    ERROR_SPAN_COLUMNS, ErrorSpansRequest, MAX_ERROR_SPANS_PER_TRACE, MAX_MATCH_COUNT,
+    MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS, MatchCountRequest,
+    SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
+    TRACE_REFRESH_STRICT_COLUMNS, TraceDetailData, TraceListRequest, TraceRefreshRequest,
+    TraceSort, TraceSpansData, TraceSpansRequest, error_spans, match_count, span_detail, span_list,
+    span_refresh, trace_detail, trace_list, trace_list_plan, trace_refresh, trace_spans,
 };
 pub use users::{
     ACTIVITY_BUCKETS, ERROR_TRACE_COUNT, MAX_USER_METADATA_KEYS, MAX_USER_SESSIONS, USER_COLUMNS,

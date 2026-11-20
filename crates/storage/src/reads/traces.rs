@@ -9,6 +9,7 @@ use std::time::Duration;
 use arrow::array::BooleanArray;
 use arrow::compute::{concat_batches, filter_record_batch};
 use arrow::record_batch::RecordBatch;
+use cetra_core::enums::SpanStatus;
 use cetra_core::schema::{spans, traces};
 use datafusion::common::ScalarValue;
 use datafusion::error::DataFusionError;
@@ -81,6 +82,34 @@ pub struct SpanRefreshRequest<'a> {
 
 /// The columns `span_refresh` returns, in this order.
 pub const SPAN_REFRESH_COLUMNS: &[&str] = &[spans::TRACE_ID, spans::SPAN_ID, spans::START_TIME];
+
+/// Most error spans [`error_spans`] returns for one trace (D-IC-2).
+pub const MAX_ERROR_SPANS_PER_TRACE: usize = 50;
+
+/// Error spans of the given traces that match a span filter, for error issue sources (D-IC-2).
+#[derive(Debug, Clone, Copy)]
+pub struct ErrorSpansRequest<'a> {
+    /// Filter text over `spans`. Empty or whitespace means no filter. `status = 'error'` is
+    /// always added.
+    pub filter: Option<&'a str>,
+    /// Trace ids, 32 hex digits, either case. At most [`MAX_REFRESH_IDS`].
+    pub trace_ids: &'a [&'a str],
+    /// Time allowed for planning and running.
+    pub timeout: Duration,
+}
+
+/// The columns `error_spans` returns, in this order.
+pub const ERROR_SPAN_COLUMNS: &[&str] = &[
+    spans::TRACE_ID,
+    spans::SPAN_ID,
+    spans::START_TIME,
+    spans::SERVICE_NAME,
+    spans::NAME,
+    spans::STATUS_MESSAGE,
+    spans::EVENTS,
+    spans::USER_ID,
+    spans::SESSION_ID,
+];
 
 /// The columns `trace_refresh` returns with `strict_exclusions: true`, in this order.
 pub const TRACE_REFRESH_STRICT_COLUMNS: &[&str] = &[traces::TRACE_ID, traces::START_TIME];
@@ -605,6 +634,23 @@ async fn refresh_spans(
     if let Some(filter) = filter {
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
+    let per_trace = u64::try_from(request.per_trace)
+        .map_err(|error| RunError::InvalidRequest(format!("per_trace is out of range: {error}")))?;
+    frame = rank_per_trace(frame, per_trace)?
+        .sort(order_by(
+            spans::TRACE_ID,
+            &[spans::START_TIME, spans::SPAN_ID],
+            SortOrder::Asc,
+        ))
+        .map_err(classify)?
+        .select(SPAN_REFRESH_COLUMNS.iter().copied().map(col))
+        .map_err(classify)?;
+    frame.collect().await.map_err(|error| ctx.fail(error))
+}
+
+/// Ranks the spans of each trace by `start_time`, then `span_id`, and keeps the first
+/// `per_trace` of each (D-I-9). The rank column stays in the frame; callers select their columns.
+fn rank_per_trace(frame: DataFrame, per_trace: u64) -> Result<DataFrame, RunError> {
     let rank = row_number()
         .partition_by(vec![col(spans::TRACE_ID)])
         .order_by(vec![
@@ -614,19 +660,76 @@ async fn refresh_spans(
         .build()
         .map_err(classify)?
         .alias(SPAN_RANK);
-    frame = frame.window(vec![rank]).map_err(classify)?;
-    let per_trace = u64::try_from(request.per_trace)
-        .map_err(|error| RunError::InvalidRequest(format!("per_trace is out of range: {error}")))?;
-    frame = frame
-        .filter(col(SPAN_RANK).lt_eq(lit(per_trace)))
+    frame
+        .window(vec![rank])
         .map_err(classify)?
+        .filter(col(SPAN_RANK).lt_eq(lit(per_trace)))
+        .map_err(classify)
+}
+
+/// Error spans of `trace_ids` that pass the strict exclusions and the filter, the first
+/// [`MAX_ERROR_SPANS_PER_TRACE`] of each trace by `start_time`, then `span_id` (D-IC-2). The rows
+/// are the [`ERROR_SPAN_COLUMNS`], ordered by trace, then `start_time`, then `span_id`.
+///
+/// An empty `trace_ids` parses the filter and returns no batches without running a query.
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] for filter text; [`RunError::InvalidRequest`] for more than
+/// [`MAX_REFRESH_IDS`] ids or an id that is not 32 hex digits; [`RunError::Timeout`].
+pub async fn error_spans(
+    ctx: &QueryContext,
+    request: ErrorSpansRequest<'_>,
+) -> Result<Vec<RecordBatch>, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Spans, text)?),
+        None => None,
+    };
+    if request.trace_ids.len() > MAX_REFRESH_IDS {
+        return Err(RunError::InvalidRequest(format!(
+            "at most {MAX_REFRESH_IDS} trace ids"
+        )));
+    }
+    let ids = request
+        .trace_ids
+        .iter()
+        .map(|id| hex_id(id, 32, "trace_id"))
+        .collect::<Result<Vec<_>, _>>()?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(request.timeout, error_span_rows(ctx, filter, &ids)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn error_span_rows(
+    ctx: &QueryContext,
+    filter: Option<Filter>,
+    ids: &[String],
+) -> Result<Vec<RecordBatch>, RunError> {
+    let mut frame = ctx.session().table(SPANS).await.map_err(classify)?;
+    let literals = ids.iter().map(|id| lit(id.as_str())).collect();
+    let predicate = strict_exclusions(ctx, FilterView::Spans, Some(ids))
+        .await?
+        .and(col(spans::TRACE_ID).in_list(literals, false))
+        .and(col(spans::STATUS).eq(lit(SpanStatus::Error.as_str())));
+    frame = frame.filter(predicate).map_err(classify)?;
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    let per_trace = u64::try_from(MAX_ERROR_SPANS_PER_TRACE).map_err(|error| {
+        RunError::InvalidRequest(format!("per-trace cap is out of range: {error}"))
+    })?;
+    frame = rank_per_trace(frame, per_trace)?
         .sort(order_by(
             spans::TRACE_ID,
             &[spans::START_TIME, spans::SPAN_ID],
             SortOrder::Asc,
         ))
         .map_err(classify)?
-        .select(SPAN_REFRESH_COLUMNS.iter().copied().map(col))
+        .select(ERROR_SPAN_COLUMNS.iter().copied().map(col))
         .map_err(classify)?;
     frame.collect().await.map_err(|error| ctx.fail(error))
 }
@@ -1117,19 +1220,20 @@ mod tests {
     use cetra_core::ids::{SpanId, TraceId};
     use cetra_core::names::{environment, metadata_key};
     use cetra_core::schema::{SPANS_LIGHT_COLUMNS, spans};
-    use cetra_core::span::Span;
+    use cetra_core::span::{Span, SpanEvent};
     use cetra_core::time_serde::parse_rfc3339;
     use datafusion::execution::runtime_env::RuntimeEnv;
     use datafusion::physical_plan::displayable;
     use serde_json::Value;
 
     use super::{
-        MAX_FETCH, MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE,
-        MatchCountRequest, SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest,
-        SpanRefreshRequest, SpanSort, TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest,
-        TraceRefreshRequest, TraceSort, TraceSpansRequest, match_count, span_detail, span_list,
-        span_list_capped, span_refresh, trace_detail, trace_detail_limited, trace_frame,
-        trace_list, trace_refresh, trace_spans,
+        ERROR_SPAN_COLUMNS, ErrorSpansRequest, MAX_ERROR_SPANS_PER_TRACE, MAX_FETCH,
+        MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MatchCountRequest,
+        SPAN_LIST_COLUMNS, SPAN_REFRESH_COLUMNS, SpanListRequest, SpanRefreshRequest, SpanSort,
+        TRACE_REFRESH_STRICT_COLUMNS, TraceListRequest, TraceRefreshRequest, TraceSort,
+        TraceSpansRequest, error_spans, match_count, span_detail, span_list, span_list_capped,
+        span_refresh, trace_detail, trace_detail_limited, trace_frame, trace_list, trace_refresh,
+        trace_spans,
     };
     use crate::query_error::{Position, RunError};
     use crate::reads::{ListScope, Page, SortOrder};
@@ -2870,5 +2974,148 @@ mod tests {
             .await
             .expect("full");
         assert!(full.first().expect("a batch").num_columns() > TRACE_REFRESH_STRICT_COLUMNS.len());
+    }
+
+    /// A span of the test project with status `error`.
+    fn error_span(trace: u16, span: u8, start: i64) -> Span {
+        let mut row = span_row(trace, span, start, start);
+        row.status = SpanStatus::Error;
+        row
+    }
+
+    /// An `error_spans` request over `trace_ids`.
+    fn error_request<'a>(
+        filter: Option<&'a str>,
+        trace_ids: &'a [&'a str],
+    ) -> ErrorSpansRequest<'a> {
+        ErrorSpansRequest {
+            filter,
+            trace_ids,
+            timeout: TIMEOUT,
+        }
+    }
+
+    #[tokio::test]
+    async fn error_spans_returns_only_error_spans_with_their_fields() {
+        let mut ok = span_row(0, 0, 100, 100);
+        ok.name = "ok span".to_owned();
+        let mut error = error_span(0, 1, 200);
+        error.name = "failing".to_owned();
+        error.status_message = Some("boom".to_owned());
+        error.service_name = Some("api".to_owned());
+        error.user_id = Some("user-1".to_owned());
+        error.session_id = Some("session-1".to_owned());
+        error.events = vec![SpanEvent {
+            time: 210,
+            name: "exception".to_owned(),
+            attributes: None,
+        }];
+        let spans = [ok, error];
+        let ctx = context_for(&spans);
+        let trace = spans[0].trace_id.to_string();
+        let ids = [trace.as_str()];
+
+        let batches = error_spans(&ctx, error_request(None, &ids))
+            .await
+            .expect("error spans");
+        let schema = batches.first().expect("a batch").schema();
+        let columns: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(columns, ERROR_SPAN_COLUMNS);
+        let rows = json_rows(&batches);
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["trace_id"], trace.as_str());
+        assert_eq!(row["span_id"], "0202020202020202");
+        assert_eq!(row["name"], "failing");
+        assert_eq!(row["service_name"], "api");
+        assert_eq!(row["status_message"], "boom");
+        assert_eq!(row["user_id"], "user-1");
+        assert_eq!(row["session_id"], "session-1");
+        assert!(!row["start_time"].is_null());
+        assert!(!row["events"].is_null());
+    }
+
+    #[tokio::test]
+    async fn error_spans_applies_the_filter() {
+        let mut a = error_span(0, 0, 100);
+        a.name = "a".to_owned();
+        let mut b = error_span(0, 1, 200);
+        b.name = "b".to_owned();
+        let spans = [a, b];
+        let ctx = context_for(&spans);
+        let trace = spans[0].trace_id.to_string();
+        let ids = [trace.as_str()];
+
+        let batches = error_spans(&ctx, error_request(Some("name = 'b'"), &ids))
+            .await
+            .expect("filtered");
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [(trace.clone(), "0202020202020202".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn error_spans_caps_per_trace() {
+        // 60 error spans in one trace; span `s` starts at `1000 - s`, so the earliest are the
+        // highest span numbers. The 50 kept are spans 59 down to 10.
+        let spans: Vec<Span> = (0..60)
+            .map(|span| error_span(0, span, 1_000 - i64::from(span)))
+            .collect();
+        let ctx = context_for(&spans);
+        let trace = spans[0].trace_id.to_string();
+        let ids = [trace.as_str()];
+
+        let batches = error_spans(&ctx, error_request(None, &ids))
+            .await
+            .expect("capped");
+        let rows = json_rows(&batches);
+        assert_eq!(rows.len(), MAX_ERROR_SPANS_PER_TRACE);
+        assert_eq!(rows[0]["span_id"], "3c3c3c3c3c3c3c3c");
+        assert_eq!(rows[49]["span_id"], "0b0b0b0b0b0b0b0b");
+    }
+
+    #[tokio::test]
+    async fn error_spans_excludes_eval_traces() {
+        let mut eval = error_span(0, 0, 100);
+        eval.environment = Some(environment::EVAL.to_owned());
+        let production = error_span(1, 0, 100);
+        let spans = [eval, production];
+        let ctx = context_for(&spans);
+        let eval_trace = spans[0].trace_id.to_string();
+        let production_trace = spans[1].trace_id.to_string();
+        let ids = [eval_trace.as_str(), production_trace.as_str()];
+
+        let batches = error_spans(&ctx, error_request(None, &ids))
+            .await
+            .expect("both");
+        assert_eq!(
+            pairs(&json_rows(&batches), "trace_id", "span_id"),
+            [(production_trace, "0101010101010101".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn error_spans_rejects_too_many_or_bad_ids_and_is_empty_without_ids() {
+        let ctx = context();
+        let many = vec![ID_ANSWER; MAX_REFRESH_IDS + 1];
+        assert!(matches!(
+            error_spans(&ctx, error_request(None, &many)).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        let bad = ["not-a-trace-id"];
+        assert!(matches!(
+            error_spans(&ctx, error_request(None, &bad)).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        let none: [&str; 0] = [];
+        let batches = error_spans(&ctx, error_request(None, &none))
+            .await
+            .expect("no ids");
+        assert!(batches.is_empty());
     }
 }
