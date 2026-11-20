@@ -392,16 +392,21 @@ pub async fn facets(
         Err(_) => return Err(RunError::Timeout),
         Ok(frame) => frame?,
     };
-    let futures = checked.into_iter().map(|entry| {
-        let frame = frame.clone();
-        async move {
-            let (field, query, limit) = entry?;
-            match tokio::time::timeout_at(deadline, one(ctx, frame, &field, query, limit)).await {
-                Err(_) => Err(RunError::Timeout),
-                Ok(result) => result,
+    // Collected first: a lazy `map` inside the stream makes the handler's future not `Send`.
+    let futures: Vec<_> = checked
+        .into_iter()
+        .map(|entry| {
+            let frame = frame.clone();
+            async move {
+                let (field, query, limit) = entry?;
+                match tokio::time::timeout_at(deadline, one(ctx, frame, &field, query, limit)).await
+                {
+                    Err(_) => Err(RunError::Timeout),
+                    Ok(result) => result,
+                }
             }
-        }
-    });
+        })
+        .collect();
     // At most `FIELDS_AT_ONCE` fields run at a time, so one batch does not take the scans of
     // twenty readers; `buffered` keeps the request order.
     Ok(futures::stream::iter(futures)
