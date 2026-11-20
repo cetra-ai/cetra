@@ -1218,6 +1218,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn user_deletion_matches_context_users_case_insensitively() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        // Contexts store the user trimmed and lowercased; the deletion names the user as typed.
+        put_context(&app, project, "s-a", "dev@example.com").await;
+        put_context(&app, project, "s-b", "other@example.com").await;
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let mut new = new_row(&app, &seeded.project, DeletionKind::User);
+        new.user_id = Some("Dev@Example.com".to_owned());
+        let id = insert(&app, new, &[]).await;
+        worker(&app).await;
+        assert_ne!(deletion_row(&app, id).await.state, DeletionState::Resolving);
+
+        let rows: Vec<Option<String>> = load_contexts(app.state.meta.reader())
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.project_id == project)
+            .map(|row| row.user_id)
+            .collect();
+        assert_eq!(rows, vec![Some("other@example.com".to_owned())]);
+        let map = app.state.ingest.contexts().project(project).unwrap();
+        let map = map.read().unwrap();
+        assert_eq!(map.len(), 1);
+        assert!(map.get("claude-code", "s-a").is_none());
+        assert!(map.get("claude-code", "s-b").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn trace_deletion_keeps_contexts() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;

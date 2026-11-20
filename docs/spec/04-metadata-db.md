@@ -535,7 +535,7 @@ CREATE INDEX agent_contexts_user ON agent_contexts(project_id, user_id) WHERE us
 CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at);
 ```
 
-Written by `POST /v1/agent-context` (last write wins; an unchanged post within an hour writes nothing), loaded into memory before the listeners open, read by ingest from memory only. An hourly sweep deletes rows older than 30 days or the project's retention when shorter; a project keeps at most 10,000 rows, the oldest evicted; a deletion by user deletes the user's rows.
+Written by `POST /v1/agent-context` (last write wins; an unchanged post within an hour writes nothing), loaded into memory before the listeners open, read by ingest from memory only. An hourly sweep deletes rows older than 30 days or the project's retention when shorter; a project keeps at most 10,000 rows, the oldest evicted; a deletion by user deletes the user's rows. Only active projects are loaded and swept; rows of a paused project stay until it is active again or dropped.
 
 ## Alerts
 

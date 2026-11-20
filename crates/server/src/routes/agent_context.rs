@@ -153,7 +153,8 @@ async fn store(state: &AppState, project: ProjectId, post: &Post) -> Result<bool
         .write(move |conn| {
             Box::pin(async move {
                 let evicted = if is_new {
-                    delete_oldest(conn, project, MAX_PER_PROJECT).await?
+                    let key = (row.agent.as_str(), row.session_id.as_str());
+                    delete_oldest(conn, project, MAX_PER_PROJECT, key).await?
                 } else {
                     None
                 };
@@ -206,6 +207,13 @@ mod tests {
         let map = app.state.ingest.contexts().project(project)?;
         let guard = map.read().unwrap_or_else(PoisonError::into_inner);
         guard.get("codex", session).cloned()
+    }
+
+    /// The `updated_at` of the one `meta.db` row the test stored.
+    async fn stored_row_time(app: &TestApp) -> i64 {
+        let rows = load_contexts(app.state.meta.reader()).await.unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        rows[0].updated_at
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -288,6 +296,8 @@ mod tests {
         let first = stored(&app, seeded.project.id, SESSION)
             .expect("stored")
             .updated_at;
+        let first_db = stored_row_time(&app).await;
+        assert_eq!(first_db, first);
 
         app.state.clock.advance(Duration::from_secs(60));
         assert_eq!(
@@ -298,6 +308,41 @@ mod tests {
             .expect("stored")
             .updated_at;
         assert_eq!(again, first);
+        assert_eq!(stored_row_time(&app).await, first_db);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn changed_post_within_an_hour_writes() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let key = seeded.ingest_key.clone();
+        post_context(
+            &app,
+            &key,
+            &json!({"agent": "codex", "session_id": SESSION, "branch": "main"}),
+        )
+        .await;
+        let first = stored(&app, seeded.project.id, SESSION)
+            .expect("stored")
+            .updated_at;
+
+        app.state.clock.advance(Duration::from_secs(60));
+        let now = app.state.clock.now_ns();
+        assert_eq!(
+            post_context(
+                &app,
+                &key,
+                &json!({"agent": "codex", "session_id": SESSION, "branch": "feature/y"}),
+            )
+            .await
+            .status,
+            StatusCode::NO_CONTENT
+        );
+        let context = stored(&app, seeded.project.id, SESSION).expect("stored");
+        assert_eq!(context.branch.as_deref(), Some("feature/y"));
+        assert_eq!(context.updated_at, now);
+        assert_ne!(context.updated_at, first);
+        assert_eq!(stored_row_time(&app).await, now);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -377,6 +422,19 @@ mod tests {
         let text = String::from_utf8_lossy(&response.body).into_owned();
         assert!(!text.contains("dev@example.com"), "{text}");
         assert!(!text.contains("feature/secret"), "{text}");
+
+        let numeric = assert_logs_clean(
+            &["12345678", key.as_str()],
+            post_context(
+                &app,
+                &key,
+                &json!({"agent": "codex", "session_id": SESSION, "branch": 12345678}),
+            ),
+        )
+        .await;
+        assert_eq!(numeric.status, StatusCode::BAD_REQUEST);
+        let text = String::from_utf8_lossy(&numeric.body).into_owned();
+        assert!(!text.contains("12345678"), "{text}");
     }
 
     #[tokio::test(flavor = "current_thread")]

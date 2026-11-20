@@ -95,9 +95,10 @@ pub(crate) async fn upsert_context(
     Ok(written > 0)
 }
 
-/// When the project has at least `cap` rows, deletes the row with the smallest
-/// `(updated_at, agent, session_id)` and returns its `(agent, session_id)`. Under `cap`, deletes
-/// nothing and returns `None`.
+/// When `key` is not stored yet and the project has at least `cap` rows, deletes the row with the
+/// smallest `(updated_at, agent, session_id)` and returns its `(agent, session_id)`. Under `cap`,
+/// or when the `key` row already exists (an update, not an insert), deletes nothing and returns
+/// `None`.
 ///
 /// # Errors
 ///
@@ -106,8 +107,21 @@ pub(crate) async fn delete_oldest(
     conn: &mut SqliteConnection,
     project: ProjectId,
     cap: usize,
+    key: (&str, &str),
 ) -> Result<Option<(String, String)>, MetaError> {
     let project = project.to_string();
+    let (agent, session_id) = key;
+    let present: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM agent_contexts WHERE project_id = ?1 AND agent = ?2 AND session_id = ?3",
+    )
+    .bind(&project)
+    .bind(agent)
+    .bind(session_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if present.is_some() {
+        return Ok(None);
+    }
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM agent_contexts WHERE project_id = ?1")
             .bind(&project)
@@ -309,7 +323,9 @@ mod tests {
 
         // Under the cap: nothing is deleted.
         let under = db
-            .write(move |conn| Box::pin(async move { delete_oldest(conn, a, 4).await }))
+            .write(move |conn| {
+                Box::pin(async move { delete_oldest(conn, a, 4, ("codex", "new")).await })
+            })
             .await
             .unwrap();
         assert_eq!(under, None);
@@ -317,7 +333,9 @@ mod tests {
 
         // At the cap: the tie on updated_at goes to the smaller (agent, session_id).
         let deleted = db
-            .write(move |conn| Box::pin(async move { delete_oldest(conn, a, 3).await }))
+            .write(move |conn| {
+                Box::pin(async move { delete_oldest(conn, a, 3, ("codex", "new")).await })
+            })
             .await
             .unwrap();
         assert_eq!(deleted, Some(("claude-code".to_owned(), "s1".to_owned())));
@@ -330,6 +348,39 @@ mod tests {
         assert_eq!(
             left,
             vec![
+                ("claude-code".to_owned(), "s2".to_owned()),
+                ("codex".to_owned(), "s0".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_oldest_skips_an_existing_key() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (a, _) = seed(&db).await;
+        upsert(&db, row(a, "codex", "s0", 9)).await;
+        upsert(&db, row(a, "claude-code", "s2", 5)).await;
+        upsert(&db, row(a, "claude-code", "s1", 5)).await;
+
+        // At the cap, but the key is already stored: an update evicts nothing.
+        let deleted = db
+            .write(move |conn| {
+                Box::pin(async move { delete_oldest(conn, a, 3, ("codex", "s0")).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(deleted, None);
+        assert_eq!(count(&db).await, 3);
+        let left: Vec<(String, String)> = sqlx::query_as(
+            "SELECT agent, session_id FROM agent_contexts ORDER BY agent, session_id",
+        )
+        .fetch_all(db.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            left,
+            vec![
+                ("claude-code".to_owned(), "s1".to_owned()),
                 ("claude-code".to_owned(), "s2".to_owned()),
                 ("codex".to_owned(), "s0".to_owned()),
             ]

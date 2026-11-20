@@ -81,14 +81,21 @@ pub(super) async fn resolve(
     let id = row.id;
     let session_count = (row.kind == DeletionKind::User).then(|| count(sessions.len()));
     let trace_count = count(scope.len());
-    // D-CA-9: a user deletion also removes the user's coding-agent contexts. The writes lock keeps
-    // a post from re-inserting one between the meta write and the map change.
+    // D-CA-9: a user deletion also removes the user's coding-agent contexts. The context key is
+    // the form the post stored (trimmed, lowercased). The writes lock keeps a post from
+    // re-inserting one between the meta write and the map change; only a user deletion takes it.
     let context_user: Option<String> = match row.kind {
-        DeletionKind::User => row.user_id.clone(),
+        DeletionKind::User => row
+            .user_id
+            .as_deref()
+            .map(|user| user.trim().to_lowercase()),
         _ => None,
     };
     let contexts = state.ingest.contexts();
-    let _writes = contexts.writes().lock().await;
+    let _writes = match context_user {
+        Some(_) => Some(contexts.writes().lock().await),
+        None => None,
+    };
     let write_user = context_user.clone();
     // J's cascade (D-J-9) reads the scope from `deletion_traces` in this transaction, so an item
     // added from a trace before it is never missed; add-from-trace checks the guard in its own
