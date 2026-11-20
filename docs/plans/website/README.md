@@ -5,7 +5,7 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 | Milestone | Plan | Status |
 |---|---|---|
 | M1 Foundation | [`01-m1-foundation.md`](01-m1-foundation.md) | done (F1–F4) |
-| M2 Homepage | `02-m2-homepage.md` | — |
+| M2 Homepage | [`02-m2-homepage.md`](02-m2-homepage.md) | planned |
 | M3 Pricing, self-hosting, security | `03-m3-pricing-selfhost-security.md` | — |
 | M4 Integrations | `04-m4-integrations.md` | — |
 | M5 Compare | `05-m5-compare.md` | — |
@@ -24,5 +24,8 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 - While iterating, run only what you touched: `pnpm --dir website exec node --test <files>`, `pnpm --dir website exec astro check`, `pnpm --dir website exec biome check <paths>`. Run `just check-docs` once, before the commit. Never run `just check` (the whole repository) and never run Rust builds: this track touches no Rust.
 - Never kill a process you did not start.
 - Commit with the phase's exact subject, no attribution line, one commit per phase.
+- After writing files, run `pnpm --dir website exec biome check --write <the files you changed>`. Biome's formatting and import order win over code quoted in a plan; behaviour stays as quoted. Accepted Biome warnings: `noUnusedImports` and `noUnusedVariables` on frontmatter names used in Astro templates, and `noImportantStyles` in `base.css`. Errors are not accepted.
+- Build with `pnpm --dir website exec astro build` (not `pnpm build`, which also regenerates the API docs).
+- To look at pages, build first, then run `node /tmp/claude-1000/-home-sebastien-travaux-llm-observer--claude-worktrees-website-research-c9eb27/36c8a93a-58fa-4df8-91cd-fccb6be3c70f/scratchpad/tools/pageshots.mjs <worktree> <route> …`. It starts `astro preview` on port 4329, takes full-page screenshots at 1440 and 390 px (scrolling first so lazy images load), prints each PNG path with `ok` or `HORIZONTAL OVERFLOW`, and stops the server. Read the PNGs.
 - **Never guess.** If the code differs from what a phase quotes, or a step is ambiguous, stop and end your turn with `QUESTION:` and the exact questions.
 - Copy: second person, short sentences, no exclamation marks, no emoji. Avoid the words banned in `website/STYLE.md` (seamless, blazing, effortless, powerful, simply). Write "cetra" in lower case. No performance numbers anywhere (design §1, §9.2).

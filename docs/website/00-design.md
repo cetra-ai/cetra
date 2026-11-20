@@ -77,8 +77,9 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - The integrations list is generated from the same source as the docs integration matrix (track W, D-W-6), not typed twice.
   - The GitHub star count is fetched at build time, with a fallback to "GitHub" when the fetch fails. It is never hard-coded.
 - **Product visuals:**
-  - **Coded UI scenes** (HTML/CSS components showing cetra's real screens with seeded, realistic data, the Linear/Braintrust pattern) for the hero and the product chapters. They are crisp, themeable and light, and they stay true because they copy the real UI's layout and use data shaped like `fixtures/api`.
-  - **Real screenshots** from `just docs-screenshots` (Playwright on the MSW mocks, already in track W) where a full screen is better.
+  - **Real screenshots of the UI in its dark theme** for the hero and the product chapters, made by `just docs-screenshots` (Playwright on the MSW mocks, track W) as `marketing-*` shots with `"theme": "dark"`, shown in a window frame. On phones they are scrollable crops.
+  - **One coded scene:** a terminal transcript of a coding agent using the MCP server.
+  - *Changed in the M2 plan (2026-11-20):* coded HTML scenes of every screen were dropped. Real screens stay true with no hand-built UI, and one command refreshes them when the UI changes.
 - **Links out:**
   - the cloud (demo `/demo`, sign-up, log in), using URLs from one config constant;
   - GitHub;
@@ -88,8 +89,8 @@ website/                          (one Astro project, one Cloudflare Pages proje
 **Alternatives rejected**
 - **A separate website repo.** The user chose the main repo (2026-11-19). That keeps one deploy, one CI and one source for shared facts.
 - **Marketing pages inside Starlight (splash template).** It is too constrained for the Braintrust/Linear level of design and would mix marketing styles into the docs.
-- **A React island framework for the scenes.** Not needed for static scenes. It could be added later for one interactive piece if a plan shows the need.
-- **Embedding the real app (an iframe of `web/` on mock data).** It is heavy and fragile, and needs sign-in on the cloud anyway. Coded scenes plus the demo link do the job.
+- **A React island framework.** Not needed for static pages. It could be added later for one interactive piece if a plan shows the need.
+- **Embedding the real app (an iframe of `web/` on mock data).** It is heavy and fragile, and needs sign-in on the cloud anyway. Screenshots plus the demo link do the job.
 
 ## 4. Visual direction
 
@@ -103,7 +104,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - **JetBrains Mono** for code and for eyebrows/labels (the app's mono).
 
   All three load from the site, with fallbacks.
-- **Product (Linear):** coded UI scenes that bleed off the edge of their band, with soft fades at the edges. Every product chapter repeats one layout: title, one line, UI scene, small feature list.
+- **Product (Linear):** screenshots in window frames that bleed off the edge of their band, with soft fades at the edges. Every product chapter repeats one layout: title, one line, UI scene, small feature list.
 - **Motion:** little of it. One orchestrated hero moment (the trace tree filling in), tab switches, copy feedback. Everything readable at rest, and `prefers-reduced-motion` respected. No scroll-triggered content that can render blank (an anti-pattern in `research.md` §6).
 - **Mobile:** every section stacks to one column; scenes become scrollable crops.
 
@@ -134,7 +135,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    - sub: one binary, nothing to babysit, your data stays on your server, or use our cloud;
    - buttons: **Try the demo** (main) and **Start free**;
    - under them, a copyable **install command** with OS tabs and a "what does this run?" link;
-   - a coded **trace scene** (trace list → one agent trace's span tree, LLM messages, cost, a score) that bleeds off the fold.
+   - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) that bleeds off the fold.
 3. **Proof strip.** Until we have logos: open-source facts that are true at launch, such as the licence (MIT core), GitHub stars, OpenTelemetry-native, the number of integrations backed by fixtures. Engine numbers join only once measured (M6).
 4. **"Nothing else to run."** The stack contrast as a diagram: a typical self-hosted stack (Web, Worker, Postgres, Redis, ClickHouse, S3) against one cetra box. The "replaces X" framing comes from Bun. Each competitor is named only on its compare page, not here.
 5. **Product chapters** (Linear's repeated layout, Braintrust's bands):
@@ -143,7 +144,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    3. Evaluate (online judges, checks, datasets, experiments, presented as "when you're ready");
    4. Get alerted (error rate, cost, latency, score).
 
-   Each has a coded scene.
+   Each shows a dark screenshot of that screen.
 6. **Your agents can read it too.** MCP and SQL: a coding agent querying production traces, shown as a terminal next to the UI. This uses the user's earlier idea, as a section, not the hero.
 7. **Integrations.** A logo grid of frameworks and SDKs, each linking to its docs page; "and anything that speaks OpenTelemetry".
 8. **Your data, your rules.** Self-host by default, no telemetry (to confirm in the code before stating it), retention and GDPR deletion, open Parquet files. Links to Security.
@@ -167,7 +168,7 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 
 | Asset | Needed by | Exists? | Owner |
 |---|---|---|---|
-| Coded UI scenes (trace list, span tree, evals, SQL, alerts) | M2 | No | This track |
+| Dark UI screenshots (trace view, trace list, SQL, evaluators, alerts) and the agent transcript | M2 | No | This track |
 | Real screenshots from the MSW mocks | M2–M4 | Yes (track W tooling) | Track W tooling |
 | Install command that works on a clean machine | M2 | Packaging done (track N); exact command to confirm | N |
 | Cloud URLs: demo, sign-up, log in | M2 | Cloud exists; URLs to confirm | Cloud track |
@@ -180,7 +181,7 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 
 ## 9. Answers to the open questions (user, 2026-11-19)
 
-1. **The demo needs sign-in** (D187). Keep **"Try the demo"** as the main button, labelled honestly as needing a free account. The homepage's coded scenes show the product with no sign-up.
+1. **The demo needs sign-in** (D187). Keep **"Try the demo"** as the main button, labelled honestly as needing a free account. The homepage's screenshots show the product with no sign-up.
 2. **Benchmarks:** launch **without** `/benchmarks/` and without engine numbers. M6 adds them when the benchmark is measured.
 3. **Compare pages: all nine at launch**: Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar, MLflow.
 4. **Cloud region: named** (today `eu1`) on Security, Pricing and the "Cloud or self-hosted" cards, with more added as regions open. The exact cloud URLs (demo, sign-up, log in) come from the cloud track before M2. This is a lookup, not a decision.
@@ -193,7 +194,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | # | Delivers (what works when it's done) | Depends on | Leaves out |
 |---|---|---|---|
 | **M1 Foundation** | Marketing layout (header, footer, release banner), design tokens, fonts, the bands and the rim motif, base components (buttons, copy-command box, tabs, section and chapter layouts, card), the marketing page checks (structure, metadata, `noindex`, internal links, weight, contrast). A style page at `/styleguide/` (noindex) to review the look. The docs already link back to `/` through Starlight's site title; the data-file checks come with their data in M3–M5 | PR #161 merged (the `website/` project) | Real content, scenes |
-| **M2 Homepage** | `/` content as in §6 (at a preview URL, the holding page still live): final copy reviewed with the user, coded UI scenes, install command, cloud links, stack diagram, FAQ | M1; cloud URLs; install command | Compare details, benchmark numbers |
+| **M2 Homepage** | `/` content as in §6 (at a preview URL, the holding page still live): copy drafted in the M2 plan (for the user's review), dark UI screenshots in window frames, the agents transcript, install command, cloud links, stack diagram, FAQ | M1; cloud URLs; install command | Compare details, benchmark numbers |
 | **M3 Pricing, self-hosting, security** | `/pricing/` from the plans data file with the units calculator and spend cap; `/self-hosting/`; `/security/` | M1; D172–D178 text confirmed | Enterprise contract terms |
 | **M4 Integrations** | `/integrations/` generated from the docs matrix, logos, links to the docs pages | M1; the docs matrix | — |
 | **M5 Compare** | `/compare/` and nine competitor pages (§9.3), facts in data files with sources and visible "checked on" dates, each fact verified by a Sonnet agent against its source, the staleness check | M1 | Benchmark numbers |
@@ -202,7 +203,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 
 ## 11. Risks
 
-- **The scenes drift from the real UI** as the app changes. Mitigation: build them from the same data shapes as `fixtures/api`, and refresh them in the same PR as a visible UI redesign.
+- **The screenshots drift from the real UI** as the app changes. Mitigation: `just docs-screenshots marketing-…` rewrites them from the mocks; refresh them in the same PR as a visible UI redesign.
 - **Comparison claims go stale or are wrong**, which costs trust (the Helicone anti-pattern). Mitigation: sources, dates, the staleness check, "when to choose them" honesty.
 - **"Everything at once" delays the launch.** Mitigation: M6 is outside the launch (§9.2). Every other milestone ships to `main` behind `noindex`, so nothing waits on a long branch.
 - **Font weight and page speed.** Three families is the most; subset them and preload only what's above the fold.
