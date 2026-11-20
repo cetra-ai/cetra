@@ -290,6 +290,10 @@ pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
             state.clone(),
             stop.clone(),
         )));
+        handles.push(tokio::spawn(issues::refit::run_refits(
+            state.clone(),
+            stop.clone(),
+        )));
     }
     handles.push(tokio::spawn(run_budget(
         state.clone(),

@@ -63,7 +63,7 @@ const EMBED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Embedding size requested from the provider (D-IC-5).
 const EMBED_DIMENSIONS: u32 = 512;
 /// Members a centroid averages; past this a join no longer moves it (D-IC-7).
-const CENTROID_MEMBERS: u64 = 500;
+pub(crate) const CENTROID_MEMBERS: u64 = 500;
 /// How far before a session candidate's score its latest trace may start (A4).
 const SESSION_WINDOW_NS: i64 = 30 * budget::DAY_NS;
 
@@ -553,7 +553,9 @@ async fn summarize(job: &Job<'_>, loaded: &Loaded, spent_usd: &mut f64) -> Resul
     let estimate = budget::model_price(&prices, chat_model, adapter, now)
         .map(|price| budget::estimate_usd(prompt.chars().count(), SUMMARY_TOKENS, price));
     let reservation = match estimate {
-        Some(estimate) => reserve(state, source, estimate, now).await?,
+        Some(estimate) => reserve(state, source, estimate, now)
+            .await
+            .map_err(|stop| stop.exit(now))?,
         None => None,
     };
     // Step 5.3: a slot and a token of the chat connection.
@@ -684,7 +686,9 @@ async fn embed(
         .and_then(|price| price.price_input)
         .map(|price_input| embed_estimate_usd(summary, price_input));
     let reservation = match estimate {
-        Some(estimate) => reserve(state, source, estimate, now).await?,
+        Some(estimate) => reserve(state, source, estimate, now)
+            .await
+            .map_err(|stop| stop.exit(now))?,
         None => None,
     };
     let _slot = state
@@ -879,14 +883,34 @@ async fn assign(
     Ok(())
 }
 
+/// Why a budget reservation does not hold (D-I-15): the budget is spent, the spend of the period
+/// is not loaded yet, or `meta.db` failed.
+pub(crate) enum BudgetStop {
+    Over,
+    NotLoaded,
+    Meta(MetaError),
+}
+
+impl BudgetStop {
+    /// The exit of a candidate that could not reserve: a skip when over budget, a requeue while the
+    /// spend loads.
+    fn exit(self, now: i64) -> Exit {
+        match self {
+            Self::Over => skip("budget"),
+            Self::NotLoaded => Exit::End(CandidateFinish::Requeue { not_before: now }),
+            Self::Meta(error) => Exit::Meta(error),
+        }
+    }
+}
+
 /// Reserves `estimate` against the source's budget (D-I-15, as for rules). A source without a
 /// budget reserves nothing.
-async fn reserve<'a>(
+pub(crate) async fn reserve<'a>(
     state: &'a AppState,
     source: &SourceRow,
     estimate: f64,
     now: i64,
-) -> Result<Option<Reservation<'a>>, Exit> {
+) -> Result<Option<Reservation<'a>>, BudgetStop> {
     let (Some(limit), Some(period)) = (
         source.budget_usd,
         source
@@ -906,14 +930,15 @@ async fn reserve<'a>(
             period_start,
             budget::day_start(now) + budget::DAY_NS,
         )
-        .await?;
+        .await
+        .map_err(BudgetStop::Meta)?;
         budgets.load(source.id, period_start, spent);
         attempt = budgets.try_reserve(source.id, period_start, limit, estimate);
     }
     match attempt {
         Reserve::Reserved(guard) => Ok(Some(guard)),
-        Reserve::Over => Err(skip("budget")),
-        Reserve::NotLoaded => Err(Exit::End(CandidateFinish::Requeue { not_before: now })),
+        Reserve::Over => Err(BudgetStop::Over),
+        Reserve::NotLoaded => Err(BudgetStop::NotLoaded),
     }
 }
 
