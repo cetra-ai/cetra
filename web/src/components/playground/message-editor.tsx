@@ -17,6 +17,14 @@ import { uuidv7 } from "@/lib/uuid";
 
 const ROLES: readonly Role[] = ["system", "user", "assistant", "tool"];
 
+/** What an empty text message says, by role. */
+const TEXT_PLACEHOLDER: Record<Role, string> = {
+  system: "System instructions…",
+  user: "User message…",
+  assistant: "Assistant reply…",
+  tool: "",
+};
+
 type MessageEditorProps = {
   entries: Entry[];
   /** The new entries. `rename` is given when a placeholder's name changed, so its text moves too. */
@@ -253,6 +261,7 @@ export const MessageEditor = memo(function MessageEditor({
                   className="font-mono text-body"
                   spellCheck={false}
                   rows={3}
+                  placeholder={TEXT_PLACEHOLDER[entry.role]}
                   value={textOfParts(entry.parts)}
                   aria-invalid={error ? true : undefined}
                   onChange={(event) => {

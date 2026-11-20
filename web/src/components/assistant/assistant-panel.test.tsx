@@ -7,6 +7,7 @@ import { openMenu, typeMessage } from "@/test/assistant";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import { recordRequests } from "@/test/requests";
+import { turnStream } from "@/test/turn-stream";
 import conversations from "../../../../fixtures/api/responses/assistant-conversations.json";
 import meDocument from "../../../../fixtures/api/static/me.json";
 import projectDocument from "../../../../fixtures/api/static/project.json";
@@ -213,7 +214,7 @@ it("a chat that cannot be created drops the question, and picking a chat sends n
   await user.click(within(region).getByRole("button", { name: "Send" }));
   expect(await within(region).findByText("The chat could not be created.")).toBeInTheDocument();
 
-  await openMenu(user, within(region).getByRole("button", { name: "Untitled chat" }));
+  await openMenu(user, within(region).getByRole("button", { name: "Chats: New chat" }));
   await user.click(await screen.findByRole("menuitem", { name: /Why did checkout errors spike/ }));
 
   await waitFor(() => {
@@ -248,7 +249,7 @@ it("renames and deletes the selected chat", async () => {
 
   await openMenu(
     user,
-    await within(region).findByRole("button", { name: "Why did checkout errors spike?" }),
+    await within(region).findByRole("button", { name: "Chats: Why did checkout errors spike?" }),
   );
   await user.click(await screen.findByRole("menuitem", { name: "Rename" }));
   const titleField = await screen.findByRole("textbox", { name: "Title" });
@@ -262,7 +263,10 @@ it("renames and deletes the selected chat", async () => {
     });
   });
 
-  await openMenu(user, await within(region).findByRole("button", { name: "Checkout errors" }));
+  await openMenu(
+    user,
+    await within(region).findByRole("button", { name: "Chats: Checkout errors" }),
+  );
   await user.click(await screen.findByRole("menuitem", { name: "Delete" }));
   await user.click(await screen.findByRole("button", { name: "Delete" }));
 
@@ -276,4 +280,41 @@ it("renames and deletes the selected chat", async () => {
       path: `/api/v1/projects/${encodeURIComponent(REF)}/assistant/conversations/${EXISTING_ID}`,
     },
   ]);
+});
+
+it("an empty chat offers questions for the page, and a click asks one in a new chat", async () => {
+  const turns: unknown[] = [];
+  server.use(
+    http.post(LIST, () => HttpResponse.json(NEW_CHAT, { status: 201 })),
+    http.get(LIST, () => HttpResponse.json({ data: [NEW_CHAT], next_cursor: null })),
+    http.get(ITEM, () => HttpResponse.json({ ...NEW_CHAT, messages: [] })),
+    http.post(`${ITEM}/turns`, async ({ request }) => {
+      turns.push(await request.json());
+      return turnStream([]);
+    }),
+  );
+  const { user } = await renderApp("/acme/support-bot/dashboard");
+  const region = await openPanelFromTopBar(user);
+
+  expect(
+    await within(region).findByRole("heading", { name: "Ask about Support bot" }),
+  ).toBeInTheDocument();
+  const suggestions = within(region).getByRole("list", { name: "Suggested questions" });
+  expect(within(suggestions).getAllByRole("button")).toHaveLength(3);
+  expect(within(region).getByRole("textbox", { name: "Message the assistant" })).toHaveAttribute(
+    "placeholder",
+    "Ask about this dashboard…",
+  );
+  expect(within(region).getByRole("list", { name: "Page context" })).toHaveTextContent("Dashboard");
+
+  await user.click(
+    within(suggestions).getByRole("button", { name: "Which models cost the most?" }),
+  );
+  await waitFor(() => {
+    expect(turns).toHaveLength(1);
+  });
+  expect(turns[0]).toMatchObject({
+    message: "Which models cost the most?",
+    context: { page: "dashboard" },
+  });
 });

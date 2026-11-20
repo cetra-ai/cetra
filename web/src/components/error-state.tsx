@@ -10,7 +10,7 @@ export function ErrorState({ error, reset }: ErrorComponentProps) {
   const detail = signedOut ? "Sign in again to continue." : problem?.detail;
 
   return (
-    <div className="mx-auto flex max-w-md flex-col gap-3 px-4 py-16">
+    <div className="mx-auto flex w-full max-w-md flex-col items-center gap-3 px-4 py-16 text-center">
       <h1 className="text-title font-medium">{title}</h1>
       {detail ? <p>{detail}</p> : null}
       {problem && !signedOut ? <p className="font-mono text-caption">{problem.code}</p> : null}
