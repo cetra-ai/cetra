@@ -73,6 +73,8 @@ const pairs = [
   ["--c-paper", "--c-ink-0"],
   ["--c-teal-light", "--c-ink-0"],
   ["--c-stone-400", "--c-ink-0"],
+  ["--c-paper", "#2a2a2a"],
+  ["--c-stone-400", "#2a2a2a"],
 ];
 
 test("text pairs meet 4.5:1", () => {

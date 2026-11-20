@@ -8,6 +8,9 @@ export const DOCS_URL = "/docs/";
 export const STATUS_URL = "https://status.cetra.sh";
 export const CONTACT_EMAIL = "hello@cetra.sh";
 
+/** Below this the header shows "GitHub" without a number. */
+export const MIN_STARS_SHOWN = 50;
+
 /**
  * The cloud. Sources: the control plane's routes `/signup` and `/login` on `app.cetra.sh`
  * (llmobs-control `web/src/routes/`), the demo route `/demo` on the first cell `eu1.cetra.sh`
