@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { checkPage, listedRoutes, pageWeight } from "./check-marketing.mjs";
+import { ALWAYS_NOINDEX, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
+import { checkPage, checkSitemap, listedRoutes, pageWeight } from "./check-marketing.mjs";
 
 // A valid page built from parts. Each part can be replaced by a test.
 function page({
@@ -15,7 +16,9 @@ function page({
   return `<!doctype html><html ${htmlAttrs}><head>${title}${description}${canonical}${robots}${ogImage}</head><body>${body}</body></html>`;
 }
 
-const noindex = { noindex: true };
+// Every built file the page links to, /og.png included.
+const built = new Set(["/og.png"]);
+const noindex = { noindex: true, distFiles: built };
 
 describe("checkPage", () => {
   it("a valid page has no findings", () => {
@@ -72,7 +75,9 @@ describe("checkPage", () => {
   });
 
   it("noindex not allowed", () => {
-    assert.deepEqual(checkPage("/x/", page(), { noindex: false }), ["noindex not allowed"]);
+    assert.deepEqual(checkPage("/x/", page(), { noindex: false, distFiles: built }), [
+      "noindex not allowed",
+    ]);
   });
 
   it("two h1", () => {
@@ -112,7 +117,10 @@ describe("checkPage", () => {
   it("empty link", () => {
     const body = '<h1>A</h1><a href="/x/"></a>';
     assert.deepEqual(
-      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      checkPage("/x/", page({ body }), {
+        noindex: true,
+        distFiles: new Set(["/x/index.html", "/og.png"]),
+      }),
       ["link without a name: /x/"],
     );
   });
@@ -125,7 +133,10 @@ describe("checkPage", () => {
   it("link named by aria-labelledby that points at text", () => {
     const body = '<h1>A</h1><span id="lbl">Home</span><a href="/x/" aria-labelledby="lbl"></a>';
     assert.deepEqual(
-      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      checkPage("/x/", page({ body }), {
+        noindex: true,
+        distFiles: new Set(["/x/index.html", "/og.png"]),
+      }),
       [],
     );
   });
@@ -133,7 +144,10 @@ describe("checkPage", () => {
   it("aria-labelledby that points at an empty element does not name the link", () => {
     const body = '<h1>A</h1><span id="lbl"></span><a href="/x/" aria-labelledby="lbl"></a>';
     assert.deepEqual(
-      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      checkPage("/x/", page({ body }), {
+        noindex: true,
+        distFiles: new Set(["/x/index.html", "/og.png"]),
+      }),
       ["link without a name: /x/"],
     );
   });
@@ -146,7 +160,10 @@ describe("checkPage", () => {
   it("link named by an inner svg title", () => {
     const body = '<h1>A</h1><a href="/x/"><svg><title>Home</title></svg></a>';
     assert.deepEqual(
-      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      checkPage("/x/", page({ body }), {
+        noindex: true,
+        distFiles: new Set(["/x/index.html", "/og.png"]),
+      }),
       [],
     );
   });
@@ -183,7 +200,10 @@ describe("checkPage", () => {
   it("link named by an img alt", () => {
     const body = '<h1>A</h1><a href="/x/"><img src="/a.png" alt="Home"></a>';
     assert.deepEqual(
-      checkPage("/x/", page({ body }), { noindex: true, distFiles: new Set(["/x/index.html"]) }),
+      checkPage("/x/", page({ body }), {
+        noindex: true,
+        distFiles: new Set(["/x/index.html", "/og.png"]),
+      }),
       [],
     );
   });
@@ -200,7 +220,7 @@ describe("checkPage", () => {
 
   it("internal link ok", () => {
     const body = '<h1>A</h1><a href="/docs/">Docs</a><a href="/docs/#x">Docs</a>';
-    const distFiles = new Set(["/docs/index.html"]);
+    const distFiles = new Set(["/docs/index.html", "/og.png"]);
     assert.deepEqual(checkPage("/x/", page({ body }), { noindex: true, distFiles }), []);
   });
 
@@ -215,8 +235,9 @@ describe("checkPage", () => {
     assert.deepEqual(checkPage("/x/", page({ body }), { ...options, distFiles: new Set() }), [
       "broken internal link: /",
       "broken internal link: /#product",
+      "og image /og.png not built",
     ]);
-    const distFiles = new Set(["/index.html"]);
+    const distFiles = new Set(["/index.html", "/og.png"]);
     assert.deepEqual(checkPage("/x/", page({ body }), { ...options, distFiles }), []);
   });
 
@@ -277,6 +298,41 @@ describe("checkPage", () => {
 
   it("og:image missing", () => {
     assert.deepEqual(checkPage("/x/", page({ ogImage: "" }), noindex), ["og:image missing"]);
+  });
+
+  it("og image file not built", () => {
+    assert.deepEqual(checkPage("/x/", page(), { noindex: true, distFiles: new Set() }), [
+      "og image /og.png not built",
+    ]);
+  });
+});
+
+/** A sitemap listing the given routes, as @astrojs/sitemap writes them. */
+function sitemapOf(routes) {
+  const locs = routes.map((route) => `<url><loc>https://cetra.sh${route}</loc></url>`).join("");
+  return `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${locs}</urlset>`;
+}
+
+const indexable = MARKETING_ROUTES.filter((route) => !ALWAYS_NOINDEX.includes(route));
+
+describe("checkSitemap", () => {
+  it("a sitemap with every indexable route and no noindex page has no findings", () => {
+    assert.deepEqual(checkSitemap(sitemapOf(indexable), true), []);
+  });
+
+  it("a noindex page listed is reported", () => {
+    const xml = sitemapOf([...indexable, ...ALWAYS_NOINDEX]);
+    assert.deepEqual(checkSitemap(xml, true), [`sitemap lists noindex page ${ALWAYS_NOINDEX[0]}`]);
+  });
+
+  it("a missing marketing route is reported when launched", () => {
+    const xml = sitemapOf(indexable.filter((route) => route !== "/pricing/"));
+    assert.deepEqual(checkSitemap(xml, true), ["sitemap misses /pricing/"]);
+  });
+
+  it("a missing marketing route is not reported before launch", () => {
+    const xml = sitemapOf(indexable.filter((route) => route !== "/pricing/"));
+    assert.deepEqual(checkSitemap(xml, false), []);
   });
 });
 

@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isNoindex, LAUNCHED, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
+import { ALWAYS_NOINDEX, isNoindex, LAUNCHED, MARKETING_ROUTES } from "../src/marketing/routes.mjs";
 import { SITE_URL } from "../src/marketing/site.ts";
 
 const DIST = join(dirname(fileURLToPath(import.meta.url)), "..", "dist");
@@ -206,7 +206,28 @@ export function checkPage(route, html, { noindex, distFiles = new Set(), launche
     (m) => m.get("property") === "og:image" && (m.get("content") ?? "").startsWith(`${SITE_URL}/`),
   );
   if (!hasOgImage) findings.push("og:image missing");
+  if (!distFiles.has("/og.png")) findings.push("og image /og.png not built");
 
+  return findings;
+}
+
+/**
+ * The findings for dist/sitemap-0.xml (without the route). A noindex page must not be listed.
+ * When `launched`, every indexable marketing route must be listed.
+ */
+export function checkSitemap(xml, launched) {
+  const findings = [];
+  const listed = (route) => xml.includes(`<loc>https://cetra.sh${route}</loc>`);
+  for (const route of ALWAYS_NOINDEX) {
+    if (listed(route)) findings.push(`sitemap lists noindex page ${route}`);
+  }
+  if (launched) {
+    for (const route of MARKETING_ROUTES) {
+      if (!ALWAYS_NOINDEX.includes(route) && !listed(route)) {
+        findings.push(`sitemap misses ${route}`);
+      }
+    }
+  }
   return findings;
 }
 
@@ -259,6 +280,16 @@ function run() {
 
   for (const route of listedRoutes(distFiles, LAUNCHED)) {
     if (!MARKETING_ROUTES.includes(route)) findings.push(`${route}: unlisted marketing page`);
+  }
+
+  if (!distFiles.has("/sitemap-index.xml")) {
+    findings.push("sitemap-index.xml not built");
+  }
+  if (distFiles.has("/sitemap-0.xml")) {
+    const xml = readFileSync(join(DIST, "sitemap-0.xml"), "utf8");
+    for (const message of checkSitemap(xml, LAUNCHED)) findings.push(`sitemap: ${message}`);
+  } else {
+    findings.push("sitemap-0.xml not built");
   }
 
   const readAsset = (path) => readFileSync(join(DIST, path));
