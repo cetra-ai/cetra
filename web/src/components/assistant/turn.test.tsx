@@ -328,3 +328,26 @@ it("links_and_images", async () => {
   );
   expect(within(region).getByText("https://example.com")).toBeInTheDocument();
 });
+
+it("refuses_links_that_leave_the_app", async () => {
+  // A backslash, or a tab that the browser strips, turns "/" into a protocol-relative host.
+  const answer = "[x](/\\\\evil.com)\n\n[y](</\t/evil.com>)";
+  server.use(
+    http.post(TURNS, () => {
+      stored = storedTurn("Show me", [
+        { role: "assistant", parts: [{ type: "text", content: answer }] },
+      ]);
+      return turnStream([START, { event: "text", data: { delta: answer } }, DONE]);
+    }),
+  );
+  const { user } = await renderApp(TRACES_URL);
+  const region = await openPanel(user);
+
+  await ask(user, region, "Show me");
+
+  expect(await within(region).findByText("x")).toBeInTheDocument();
+  expect(within(region).getByText("y")).toBeInTheDocument();
+  expect(within(region).queryByRole("link", { name: "x" })).toBeNull();
+  expect(within(region).queryByRole("link", { name: "y" })).toBeNull();
+  expect(region.querySelector('a[href*="evil.com"]')).toBeNull();
+});

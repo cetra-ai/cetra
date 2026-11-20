@@ -182,6 +182,10 @@ function DashboardGrid({
       return;
     }
     function takeEditDraft() {
+      // An open edit keeps its state; the draft stays in the store until the edit is closed.
+      if (session !== null) {
+        return;
+      }
       const draft = peekDraft(ref, "dashboard");
       if (!canEdit || customId === undefined || draft?.dashboard_id !== customId) {
         return;
@@ -190,12 +194,12 @@ function DashboardGrid({
       setSession({
         ...editSession(definition, version),
         draft: draft.definition,
-        version: draft.version,
+        version: draft.version ?? version,
       });
     }
     takeEditDraft();
     return subscribeDrafts(ref, takeEditDraft);
-  }, [active, canEdit, customId, definition, version, ref]);
+  }, [active, canEdit, customId, definition, session, version, ref]);
   const editing = canEdit && session !== null;
   const draft = editing ? session.draft : undefined;
   // Outside Edit, a moved or resized chart is saved by itself (D-C-18). Viewing saves nothing.

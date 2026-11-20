@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { handDraft, peekDraft, subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  DRAFT_TTL_MS,
+  handDraft,
+  peekDraft,
+  subscribeDrafts,
+  takeDraft,
+} from "@/lib/assistant/handoff";
 import type { SqlDraft } from "@/lib/assistant/types";
 
 const sql = (query: string): SqlDraft => ({ query, params: {}, columns: [] });
@@ -60,5 +66,31 @@ describe("hand-off store", () => {
     handDraft("acme/listen-b", { kind: "sql", draft: sql("b") });
     expect(listener).not.toHaveBeenCalled();
     unsubscribe();
+  });
+});
+
+describe("hand-off expiry", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("keeps a draft for DRAFT_TTL_MS and no longer", () => {
+    vi.useFakeTimers();
+    handDraft("acme/ttl", { kind: "sql", draft: sql("old") });
+
+    vi.advanceTimersByTime(DRAFT_TTL_MS);
+    expect(peekDraft("acme/ttl", "sql")?.query).toBe("old");
+
+    vi.advanceTimersByTime(1);
+    expect(peekDraft("acme/ttl", "sql")).toBeUndefined();
+  });
+
+  it("deletes an expired draft, so a later take finds nothing", () => {
+    vi.useFakeTimers();
+    handDraft("acme/ttl-take", { kind: "sql", draft: sql("stale") });
+
+    vi.advanceTimersByTime(DRAFT_TTL_MS + 1);
+    expect(takeDraft("acme/ttl-take", "sql")).toBeUndefined();
+    expect(peekDraft("acme/ttl-take", "sql")).toBeUndefined();
   });
 });

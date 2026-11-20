@@ -1,7 +1,7 @@
 import { useNavigate } from "@tanstack/react-router";
 import { CircleCheck, CircleX, Loader } from "lucide-react";
 import { projectRef } from "@/api/project-ref";
-import { fenced, sqlTabsFullReason } from "@/components/assistant/draft-card";
+import { closePanelOnNarrow, fenced, sqlTabsFullReason } from "@/components/assistant/draft-card";
 import { DisabledReason } from "@/components/disabled-reason";
 import { Markdown } from "@/components/payload/markdown";
 import { useProject } from "@/components/shell/project-context";
@@ -105,7 +105,12 @@ export function ToolStep({ step }: { step: Step }) {
                 disabled={sqlReason !== undefined}
                 onClick={() => {
                   handDraft(ref, { kind: "sql", draft: { query, params, columns: [] } });
-                  void navigate({ to: "/$org/$project/sql", params: { org, project } });
+                  void navigate({
+                    to: "/$org/$project/sql",
+                    params: { org, project },
+                    search: (prev) => prev,
+                  });
+                  closePanelOnNarrow();
                 }}
               >
                 Open in SQL console

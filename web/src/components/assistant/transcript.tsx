@@ -148,6 +148,12 @@ export function Transcript({
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
+  // Another chat starts at its newest content, even when the reader had scrolled up in the last one.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the chat switch is the trigger
+  useEffect(() => {
+    stick.current = true;
+  }, [conversationId]);
+
   // biome-ignore lint/correctness/useExhaustiveDependencies: new content is the trigger to scroll
   useEffect(() => {
     const element = scroller.current;

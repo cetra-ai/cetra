@@ -3,7 +3,8 @@ import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
 import { STORAGE_PREFIX } from "@/product";
-import { openMenu } from "@/test/assistant";
+import { openMenu, typeMessage } from "@/test/assistant";
+import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import { recordRequests } from "@/test/requests";
 import conversations from "../../../../fixtures/api/responses/assistant-conversations.json";
@@ -200,6 +201,28 @@ it("creates a chat and selects it", async () => {
       .filter((call) => call.method === "POST" && call.path.includes("/assistant/"))
       .map((call) => call.path),
   ).toEqual([`/api/v1/projects/${encodeURIComponent(REF)}/assistant/conversations`]);
+});
+
+it("a chat that cannot be created drops the question, and picking a chat sends nothing", async () => {
+  server.use(http.post(LIST, () => problemResponse(500, "internal_error")));
+  const requests = recordRequests();
+  const { user } = await renderApp("/acme/support-bot/traces");
+  const region = await openPanelFromTopBar(user);
+
+  await typeMessage(user, region, "Which traces failed?");
+  await user.click(within(region).getByRole("button", { name: "Send" }));
+  expect(await within(region).findByText("The chat could not be created.")).toBeInTheDocument();
+
+  await openMenu(user, within(region).getByRole("button", { name: "Untitled chat" }));
+  await user.click(await screen.findByRole("menuitem", { name: /Why did checkout errors spike/ }));
+
+  await waitFor(() => {
+    expect(localStorage.getItem(CURRENT_KEY)).toBe(EXISTING_ID);
+  });
+  requests.stop();
+  expect(
+    requests.calls.filter((call) => call.method === "POST" && call.path.endsWith("/turns")),
+  ).toEqual([]);
 });
 
 it("renames and deletes the selected chat", async () => {

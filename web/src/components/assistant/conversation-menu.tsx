@@ -44,12 +44,16 @@ function titleOf(title: string): string {
   return title.trim() === "" ? "Untitled" : title;
 }
 
-/** Creates a chat and selects it. The menu and the panel's New chat button share it. */
-export function useNewChat(org: string, project: string) {
+/**
+ * Creates a chat and selects it. The menu and the panel's New chat button share it. `onError`
+ * runs when the server refuses the chat, so the caller can drop what waited for it.
+ */
+export function useNewChat(org: string, project: string, onError: () => void) {
   const queryClient = useQueryClient();
   const ref = projectRef(org, project);
   const create = $api.useMutation("post", "/api/v1/projects/{project}/assistant/conversations", {
     gcTime: 0,
+    onError,
   });
   function newChat(): void {
     create.mutate(
@@ -216,7 +220,16 @@ function DeleteDialog({
 }
 
 /** The chat list in the panel header: the trigger shows the selected chat, the items select one. */
-export function ConversationMenu({ org, project }: { org: string; project: string }) {
+export function ConversationMenu({
+  org,
+  project,
+  onSelect,
+}: {
+  org: string;
+  project: string;
+  /** Runs when the user picks a chat from the list, before it is shown. */
+  onSelect?: () => void;
+}) {
   const ref = projectRef(org, project);
   const list = useQuery(conversationsQuery(org, project));
   const conversations = list.data?.data;
@@ -260,6 +273,7 @@ export function ConversationMenu({ org, project }: { org: string; project: strin
             <DropdownMenuItem
               key={conversation.id}
               onSelect={() => {
+                onSelect?.();
                 setCurrentConversation(ref, conversation.id);
               }}
               className="flex flex-col items-start gap-0"

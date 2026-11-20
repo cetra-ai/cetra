@@ -36,6 +36,7 @@ const RESTORE_TEXT = "The assistant is paused while this server is in restore mo
 const LOST_TEXT = "The connection to the server was lost.";
 const ASK_TEXT = "The question could not be sent.";
 const EMPTY_TEXT = "Ask about this project's traces, metrics, evaluations and settings.";
+const CREATE_TEXT = "The chat could not be created.";
 
 /** A message the panel shows under the transcript. `retry` resends the same message and context. */
 type Notice = { text: string; hint?: string; retry?: { message: string; context: PageContext } };
@@ -115,7 +116,6 @@ export function AssistantPanel() {
   const { org, project, ref } = useProject();
   const queryClient = useQueryClient();
   const status = useQuery(assistantStatusQuery(org, project));
-  const { newChat, pending } = useNewChat(org, project);
   const usable = status.data?.usable === true;
   const current = useCurrentConversation(ref);
   const detail = useQuery({
@@ -134,6 +134,11 @@ export function AssistantPanel() {
   );
   // A question waiting for its chat to be created (a send with no chat selected).
   const pendingRef = useRef<{ message: string; context: PageContext } | undefined>(undefined);
+  // A refused chat drops the question waiting for it: it is not sent to a chat picked later.
+  const { newChat, pending } = useNewChat(org, project, () => {
+    pendingRef.current = undefined;
+    setNotice({ text: CREATE_TEXT });
+  });
 
   // The page context now: read at call time, so SQL typed since the last render is included.
   function contextNow(): PageContext {
@@ -273,7 +278,13 @@ export function AssistantPanel() {
         }}
       >
         <header className="flex h-10 shrink-0 items-center gap-1 border-b px-2">
-          <ConversationMenu org={org} project={project} />
+          <ConversationMenu
+            org={org}
+            project={project}
+            onSelect={() => {
+              pendingRef.current = undefined;
+            }}
+          />
           <div className="flex-1" />
           <Button
             type="button"

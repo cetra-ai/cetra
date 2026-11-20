@@ -49,6 +49,22 @@ export function rangeSearchOf(source: {
   return {};
 }
 
+/**
+ * The SQL console's search after a SQL draft is applied: the draft's range replaces the search's
+ * range when the draft has one, and the search keeps its own range when it does not.
+ */
+export function sqlSearchOf(
+  prev: Record<string, unknown>,
+  draft: { range?: string; from?: string; to?: string },
+): Record<string, unknown> {
+  const range = rangeSearchOf(draft);
+  if (Object.keys(range).length === 0) {
+    return prev;
+  }
+  const { range: _range, from: _from, to: _to, ...rest } = prev;
+  return { ...rest, ...range };
+}
+
 /** An all-digit value is epoch milliseconds; anything else, or an unreadable number, is kept as given. */
 function isoOf(value: string): string {
   if (!/^\d+$/.test(value)) {

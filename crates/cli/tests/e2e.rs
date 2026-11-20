@@ -1664,17 +1664,38 @@ async fn assistant_turn_end_to_end() {
         "{detail}"
     );
 
-    // Apply: the draft's filter over the draft's window, as the traces page would list it.
-    // The list route takes from and to, not the draft's range (the web client converts it).
+    // Apply: the streamed draft's filter over a window that holds the error trace, as the traces
+    // page would list it. The list route takes from and to, not the draft's range (the web client
+    // converts it), so the window is the one the draft's range stands for.
+    let draft_block = events
+        .split("\n\n")
+        .find(|block| block.lines().any(|line| line == "event: draft"))
+        .unwrap_or_else(|| panic!("no draft event: {events}"));
+    let draft_data = draft_block
+        .lines()
+        .find_map(|line| line.strip_prefix("data:"))
+        .unwrap_or_else(|| panic!("the draft event has no data: {draft_block}"));
+    let streamed: Value = serde_json::from_str(draft_data.trim()).unwrap();
+    let draft_filter = streamed["draft"]["filter"].as_str().unwrap();
+    assert_eq!(draft_filter, "status = 'error'", "{streamed}");
+    let mut apply = reqwest::Url::parse("http://localhost/").unwrap();
+    apply
+        .query_pairs_mut()
+        .append_pair("filter", draft_filter)
+        .append_pair("from", &rfc3339(now - 24 * 3_600 * NANOS_PER_SECOND))
+        .append_pair("to", &rfc3339(now + 3_600 * NANOS_PER_SECOND));
     let applied = server
         .api
-        .get(&format!(
-            "{project}/traces?filter=status%20%3D%20%27error%27&from={}&to={}",
-            rfc3339(now - 24 * 3_600 * NANOS_PER_SECOND),
-            rfc3339(now + 3_600 * NANOS_PER_SECOND),
-        ))
+        .get(&format!("{project}/traces?{}", apply.query().unwrap()))
         .await;
-    assert!(!applied["data"].as_array().unwrap().is_empty(), "{applied}");
+    assert!(
+        applied["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["trace_id"] == trace.as_str()),
+        "{applied}"
+    );
 
     // The turn's trace is in the reserved environment: listed with evaluation traces only.
     let (turn_rows, has_turn) = rows_until(

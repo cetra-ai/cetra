@@ -12,8 +12,10 @@ import { Markdown } from "@/components/payload/markdown";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { filterTarget, rangeSearchOf, sqlTabDraft } from "@/lib/assistant/apply";
+import { isNarrowWindow } from "@/hooks/use-narrow-viewport";
+import { filterTarget, sqlSearchOf, sqlTabDraft } from "@/lib/assistant/apply";
 import { handDraft } from "@/lib/assistant/handoff";
+import { setPanelOpen } from "@/lib/assistant/panel";
 import {
   type DashboardDraft,
   type DraftKind,
@@ -36,6 +38,13 @@ export function fenced(language: string, body: string): string {
   const longest = Math.max(2, ...(body.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(longest + 1);
   return `${fence}${language}\n${body}\n${fence}`;
+}
+
+/** After an Apply hands its draft over, a narrow window closes the panel sheet so the target shows. */
+export function closePanelOnNarrow(): void {
+  if (isNarrowWindow()) {
+    setPanelOpen(false);
+  }
 }
 
 /** Why the SQL console cannot take one more tab, or `undefined` when it can. */
@@ -153,6 +162,7 @@ function FilterCard({ draft }: { draft: FilterDraft }) {
               params: { org, project },
               search: target.search as never,
             });
+            closePanelOnNarrow();
           }}
         />
       }
@@ -192,12 +202,14 @@ function SqlCard({ draft }: { draft: SqlDraft }) {
           reason={sqlTabsFullReason(ref)}
           onApply={() => {
             handDraft(ref, { kind: "sql", draft });
-            // The console's validateSearch drops an invalid range, as for the list pages.
+            // A draft without a range keeps the console's current range. The console's
+            // validateSearch drops an invalid range, as for the list pages.
             void navigate({
               to: "/$org/$project/sql",
               params: { org, project },
-              search: rangeSearchOf(draft) as never,
+              search: (prev) => sqlSearchOf(prev, draft) as never,
             });
+            closePanelOnNarrow();
           }}
         />
       }
@@ -255,6 +267,7 @@ function DashboardCard({ draft }: { draft: DashboardDraft }) {
                 search: (prev) => prev,
               });
             }
+            closePanelOnNarrow();
           }}
         />
       }
@@ -298,6 +311,7 @@ function EvaluatorCard({ draft }: { draft: EvaluatorDraft }) {
           onApply={() => {
             handDraft(ref, { kind: "evaluator", draft });
             void navigate({ to: "/$org/$project/evaluators/new", params: { org, project } });
+            closePanelOnNarrow();
           }}
         />
       }
@@ -362,6 +376,7 @@ function RuleCard({ draft }: { draft: RuleDraft }) {
           onApply={() => {
             handDraft(ref, { kind: "online_rule", draft });
             void navigate({ to: "/$org/$project/online-rules/new", params: { org, project } });
+            closePanelOnNarrow();
           }}
         />
       }
