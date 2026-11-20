@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { problemMessage, problemOf } from "@/api/problem";
+import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { annotationQueuesInit, annotationQueueWriteKeys } from "@/api/queries-annotation-queues";
 import type { Schema } from "@/api/types";
@@ -339,7 +339,9 @@ function QueueTargetForm({
       setResult({ queue: picked, answer });
     } catch (caught) {
       setFormError(
-        queueFullMessage(caught) ?? problemMessage(caught, "The items could not be added."),
+        queueFullMessage(caught) ??
+          Object.values(fieldErrors(caught))[0] ??
+          problemMessage(caught, "The items could not be added."),
       );
     }
   }

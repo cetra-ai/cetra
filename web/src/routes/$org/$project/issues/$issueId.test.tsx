@@ -347,6 +347,27 @@ it("explains a full queue", async () => {
   expect(await within(dialog).findByText("The queue is full (100 000 items).")).toBeInTheDocument();
 });
 
+it("shows why an issue without occurrences cannot be sent", async () => {
+  serveIssue();
+  serveQueues([TRACE_QUEUE]);
+  server.use(
+    http.post(SEND, () =>
+      problemResponse(400, "bad_request", {
+        errors: [{ field: "issue", message: "the issue has no occurrences in the data window" }],
+      }),
+    ),
+  );
+  const { user } = await renderApp(PAGE);
+
+  const dialog = await openSendDialog(user);
+  await choose(user, dialog, "Relevance review · trace");
+  await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  expect(
+    await within(dialog).findByText("the issue has no occurrences in the data window"),
+  ).toBeInTheDocument();
+});
+
 it("creates a new queue first and sends the issue to it", async () => {
   serveIssue();
   serveQueues([]);
