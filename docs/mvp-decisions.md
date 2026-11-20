@@ -872,6 +872,11 @@ Decisions of track AS (`docs/plans/as-assistant/00-design.md`), numbered `D-AS-<
 | D-AS-18 | Panel | A resizable right-hand panel in the project shell (top bar button, `Ctrl/Cmd + I`) that stays open across navigation: history, Markdown answers, collapsed tool steps, draft cards, Stop, thumbs, context chips, and a line naming the connection and its provider. |
 | D-AS-19 | Config cut | `get_evaluator`, `get_online_rule` and `get_dashboard` cut strings at 4,000 characters; other read tools at 200 like MCP. |
 | D-AS-20 | Tool limits | Lists 1–100 rows (evaluators 1–50); `query_metrics` at most 30 days; results fitted to 20,000 characters, not raisable by the model. A list cut to fit the budget drops its cursor. |
+| D-AS-21 | How a turn is stored | The user message first, with its context; each model call stores one assistant message (text, then its tool calls); a tool message follows its results in call order, each result followed by the draft it produced (`draft_<tool call id>`). Every message carries the turn's trace id. Drafts sit beside their result, not on the assistant message (D-AS-6, amended). |
+| D-AS-22 | History sent to the model | A stub goes as `{"stubbed": true, …, "note"}`; a call without a stored result goes with a "not run" result; draft parts are not sent; the page context goes only with the latest user message. |
+| D-AS-23 | Turn limit | At 16 model calls, 32 tool calls or 10 minutes the server appends an assistant message naming the limit and sends `done` with `finish_reason: "limit"`; tool calls beyond the 32nd are not run. |
+| D-AS-24 | Setting test | One call forcing a `ping` tool call (256 tokens, 30 s); it takes no connection permit, shares the 10-a-minute connection-test limit, and never changes the connection's status. |
+| D-AS-25 | Room for a turn | A turn starts only when the conversation has room for 34 messages, its worst case, so an answer is never lost to the 200-message cap; otherwise `409`. |
 
 ## Open
 

@@ -798,3 +798,18 @@ pub fn build_assistant_trace(input: &AssistantTurnTrace<'_>, ingest: &IngestCont
 **Commit:** `docs: record the AS M3 decisions`
 
 Then the milestone check: `just check` once (with the nvm `PATH` export), `just openapi`, `just api-examples` and the schema snapshot update. Fix what fails, commit `Make the AS M3 checks pass`, run a Sonnet code review of M3, fix its findings, and push to PR #182.
+
+## Deviations during implementation
+
+- **AS3.1 (reserved environment).** The text step touched more files than the phase's Edit list: `crates/server/src/api/common.rs`, `dashboards.rs`, `facets.rs`, `sessions.rs`, `traces.rs`, `users.rs`, the storage filter `crates/storage/src/filter/mod.rs` (the exclusion test was added there, next to V's playground test, because `filter/scope.rs` has none), and the generated SQL schema reference. The "before" text quoted in step 4 did not exist verbatim.
+- **AS3.4 (writers, feedback, limits, history).** `a_busy_refusal_spends_no_rate_token` checks 19 further admits, since the held turn spent one of the 20 tokens.
+- **AS3.5 (turn engine).** The turn trace is committed through the existing `eval::execute::commit_judge_trace` (it reserves 0 and commits in a task), not a new commit path. The prompt's filter DSL paragraph follows spec 05; the plan's `~` and `2s` forms are not in the DSL. The 32-tool-call limit text is "I stopped here: this turn reached its limit of 32 tool calls. Ask me to continue."
+- **AS3.6 (turn route).** `TURN_MESSAGES_MAX` was added to `turn.rs` by AS3.6, since AS3.5 had not written it. `new_trace_id` is a copy of the playground's private helper.
+- **Migrations.** M1's is `0024_assistant.sql`; AS3.3's is `0025_assistant_settings.sql` (V's `0023_prompts.sql` came first).
+- **Assumed V interfaces.** Every name matched the merged code; the table is unchanged.
+- **AS3.7 (closeout), found while checking the docs against the code.**
+  - Design D-AS-9 does not contain the phrase "a draft part of the assistant message"; only D-AS-6 was changed.
+  - Spec 12 has no playground limits, so the assistant's limits are documented in spec 09 § Assistant, beside the playground's in § Playground. Spec 12 gets the restore-mode line only.
+  - The roadmap AS row reads "M1–M3 implemented", as step 3 says, before the milestone checks have run.
+  - The API omits `result` on a stubbed tool result, where the stored JSON holds `null` (spec 04 and spec 09 say so).
+  - A turn is refused with `409` when the assistant is off or has no connection; spec 09 names this status.
