@@ -445,6 +445,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
         "put_assistant_feedback",
     ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/turns",
+        "post_assistant_turn",
+    ),
     ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
     ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
     (
@@ -1109,6 +1114,7 @@ fn document_lint() {
                 | "patch_assistant_conversation"
                 | "delete_assistant_conversation"
                 | "put_assistant_feedback"
+                | "post_assistant_turn"
                 | "put_org_assistant"
                 | "post_org_assistant_test"
                 | "get_project_assistant"
@@ -1269,6 +1275,9 @@ fn document_lint() {
         } else if *id == "post_playground_run" {
             // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_assistant_turn" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);

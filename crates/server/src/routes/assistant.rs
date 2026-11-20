@@ -4,41 +4,64 @@
 //! no personal access token. A conversation is private to its author, so another user's id, and
 //! an id of another project, answer `404`.
 
-use axum::extract::{Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{Method, StatusCode};
+use axum::response::sse::Event;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, patch, post, put};
 use serde::Deserialize;
+use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio::time::{Instant, MissedTickBehavior, interval_at};
 use uuid::Uuid;
 
-use cetra_core::ids::ProjectId;
+use cetra_core::ids::{ProjectId, TraceId};
 
 use crate::api::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantFeedback,
     AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
-    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantUnavailable,
-    PutAssistantSettings, UpdateAssistantConversationRequest,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
+    AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use crate::api::common::{FieldError, Page};
 use crate::api::connections::{LlmConnectionTestResult, TestErrorClass};
 use crate::assistant::settings::{self as assistant_settings, Resolved};
+use crate::assistant::turn::{PERMIT_WAIT, TURN_MESSAGES_MAX, TurnEvent, TurnSetup, run_turn};
+use crate::auth::limits::{AssistantRefusal, RetryAfter};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm, Role};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::http::restore::refuse_outbound;
+use crate::live::StreamTiming;
 use crate::meta::MetaError;
 use crate::meta::assistant::{
     self as store, AssistantSettingsRow, ConversationRow, Feedback, FeedbackOutcome, MessageRole,
-    MessageRow, MessageStatus,
+    MessageRow, MessageStatus, NewMessage,
 };
 use crate::meta::connections;
+use crate::meta::orgs;
+use crate::routes::streams::{ping_event, send, sse_response};
 
 /// Longest conversation title, in characters after trimming (D-AS-10).
 const MAX_TITLE_CHARS: usize = 80;
 /// Longest model name, in bytes after trimming (D-AS-24's test takes the same bound).
 const MAX_MODEL_BYTES: usize = 256;
+/// Largest body of a turn request: the message, the context and their JSON (D-AS-14, D-AS-15).
+const TURN_BODY_LIMIT: usize = 64 * 1024;
+/// Longest user message, in bytes after trimming (D-AS-15).
+const MAX_MESSAGE_BYTES: usize = 16_384;
+/// Largest page context, as compact JSON (D-AS-14).
+const MAX_CONTEXT_BYTES: usize = 8_192;
+/// Longest `page` name of a context, in characters (D-AS-14).
+const MAX_PAGE_CHARS: usize = 64;
+/// The `409` detail when the org's assistant is off or has no usable connection.
+const ASSISTANT_OFF: &str = "the assistant is off in this organization";
+/// The `409` detail when the conversation already has a turn in progress.
+const TURN_RUNNING: &str = "a turn is already running in this conversation";
+/// Events the turn may have queued for its forwarder before the engine waits.
+const TURN_BUFFER: usize = 16;
 
 /// Assistant conversation routes (spec 09).
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -74,6 +97,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             access,
             documented: true,
             handler: put(put_feedback),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/assistant/conversations/{id}/turns",
+            access,
+            documented: true,
+            handler: post(post_turn).layer(DefaultBodyLimit::max(TURN_BODY_LIMIT)),
         },
         RouteDef {
             method: Method::PATCH,
@@ -409,6 +439,196 @@ async fn delete_conversation(
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+/// The user message trimmed, when it is 1 to 16,384 bytes (D-AS-15).
+fn checked_message(text: &str) -> Result<String, ApiError> {
+    let message = text.trim();
+    if (1..=MAX_MESSAGE_BYTES).contains(&message.len()) {
+        Ok(message.to_owned())
+    } else {
+        Err(field_error("message", "must be 1 to 16384 bytes"))
+    }
+}
+
+/// The page context as compact JSON (D-AS-14): an object, at most 8 KiB, with a string `page` of
+/// 1 to 64 characters. `None` when the request has no context.
+fn checked_context(context: Option<&Value>) -> Result<Option<String>, ApiError> {
+    let Some(context) = context else {
+        return Ok(None);
+    };
+    let Some(object) = context.as_object() else {
+        return Err(field_error("context", "must be a JSON object"));
+    };
+    let compact = serde_json::to_string(context).map_err(internal)?;
+    if compact.len() > MAX_CONTEXT_BYTES {
+        return Err(field_error("context", "must be at most 8 KiB"));
+    }
+    let page_ok = object
+        .get("page")
+        .and_then(Value::as_str)
+        .is_some_and(|page| (1..=MAX_PAGE_CHARS).contains(&page.chars().count()));
+    if !page_ok {
+        return Err(field_error(
+            "context.page",
+            "must be a string of 1 to 64 characters",
+        ));
+    }
+    Ok(Some(compact))
+}
+
+/// The conversation title of a turn's first message: control characters become spaces, and the
+/// text is cut to 80 characters (D-AS-10).
+fn turn_title(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_TITLE_CHARS)
+        .collect()
+}
+
+/// A trace id of 16 random bytes (as the playground's runs make them).
+fn new_trace_id() -> Result<TraceId, ApiError> {
+    let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
+    let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
+    TraceId::from_bytes(bytes).map_err(internal)
+}
+
+fn internal(error: impl std::error::Error + Send + Sync + 'static) -> ApiError {
+    ApiError::Internal(Box::new(error))
+}
+
+/// `POST …/assistant/conversations/{id}/turns`: stores the user message, then streams the turn's
+/// events as SSE (D-AS-9). Every refusal before the stream is a problem answer. Aborting the
+/// request cancels the turn.
+async fn post_turn(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ConversationPath>,
+    error::Json(body): error::Json<AssistantTurnRequest>,
+) -> Result<Response, ApiError> {
+    refuse_outbound(&state, "assistant turn")?;
+    let user = principal::session_user(&principal)?.clone();
+    let project = access.project.clone();
+    let id = parse_id(&path.id)?;
+    let message = checked_message(&body.message)?;
+    let context_json = checked_context(body.context.as_ref())?;
+    let reader = state.meta.reader();
+    let conversation = store::get_conversation(reader, project.id, user.id, id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    let org = orgs::org_by_id(reader, project.org_id)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    if conversation.message_count + TURN_MESSAGES_MAX > store::MESSAGES_PER_CONVERSATION {
+        return Err(ApiError::Conflict {
+            detail: store::TOO_MANY_MESSAGES,
+        });
+    }
+    let (connection_row, model) = match assistant_settings::resolve(&state, project.org_id).await? {
+        Resolved::Usable { connection, model } => (connection, model),
+        Resolved::Disabled | Resolved::NoConnection => {
+            return Err(ApiError::Conflict {
+                detail: ASSISTANT_OFF,
+            });
+        }
+    };
+    let now = state.clock.now_ns();
+    let guard = state
+        .limits
+        .assistant
+        .admit(id, user.id, project.org_id, now)
+        .map_err(|refusal| match refusal {
+            AssistantRefusal::Busy => ApiError::Conflict {
+                detail: TURN_RUNNING,
+            },
+            AssistantRefusal::Limited(RetryAfter(wait)) => ApiError::RateLimited {
+                retry_after_s: wait.as_secs().max(1),
+            },
+        })?;
+    let connection = state
+        .connections
+        .get(&state.secrets, &connection_row)
+        .map_err(internal)?;
+    let trace_id = new_trace_id()?;
+    let user_message = NewMessage {
+        role: MessageRole::User,
+        parts: serde_json::to_string(&[AssistantPart::Text {
+            content: message.clone(),
+        }])
+        .map_err(internal)?,
+        context: context_json,
+        status: MessageStatus::Complete,
+        turn_trace_id: Some(trace_id.to_hex()),
+        stub_after: None,
+    };
+    let title = turn_title(&message);
+    let user_seq = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                let seq = store::append_message(conn, id, user_message, now).await?;
+                store::set_title_if_empty(conn, id, &title).await?;
+                Ok::<i64, MetaError>(seq)
+            })
+        })
+        .await?;
+    let (project_id, user_id) = (project.id, user.id);
+    let setup = TurnSetup {
+        project,
+        org_slug: org.slug,
+        user,
+        conversation: id,
+        user_seq,
+        context: body.context,
+        connection_row,
+        connection,
+        model,
+        trace_id,
+        permit_wait: PERMIT_WAIT,
+    };
+    let timing = state.live.timing;
+    let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>(TURN_BUFFER);
+    let (sse_tx, sse_rx) = mpsc::channel::<Event>(TURN_BUFFER);
+    tokio::spawn(run_turn(state.clone(), setup, turn_tx, guard));
+    tokio::spawn(forward_turn(turn_rx, sse_tx, timing));
+    tracing::info!(target: "audit", conversation_id = %id, project_id = %project_id, user_id = %user_id, turn_seq = user_seq, "assistant turn started");
+    Ok(sse_response(sse_rx))
+}
+
+/// Forwards the engine's events to the client as SSE, with a ping every `timing.ping` (D-AS-9).
+/// Stops when the client goes away or stops reading within `timing.send`. Dropping `turn_rx` then
+/// cancels the turn.
+async fn forward_turn(
+    mut turn_rx: mpsc::Receiver<TurnEvent>,
+    sse_tx: mpsc::Sender<Event>,
+    timing: StreamTiming,
+) {
+    let mut ping = interval_at(Instant::now() + timing.ping, timing.ping);
+    ping.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            () = sse_tx.closed() => break,
+            event = turn_rx.recv() => {
+                let Some(event) = event else {
+                    break;
+                };
+                let sse = Event::default()
+                    .event(event.name())
+                    .data(event.data().to_string());
+                if !send(&sse_tx, sse, timing.send).await {
+                    break;
+                }
+            }
+            _ = ping.tick() => {
+                if !send(&sse_tx, ping_event(), timing.send).await {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1696,5 +1916,562 @@ mod settings_tests {
         );
         assert!(!text(&response).contains(ANSWER));
         assert!(!logs.contains(ANSWER));
+    }
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    use axum::http::{Method, StatusCode};
+    use cetra_capture::{Mock, Turn};
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    use crate::auth::roles::OrgRole;
+    use crate::http::restore::tests::assert_refused;
+    use crate::meta::MetaError;
+    use crate::meta::assistant::insert_message_raw;
+    use crate::test_support::{Seeded, TestApp, TestResponse, TestStream};
+
+    /// How long a test waits for the next event.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    fn text(response: &TestResponse) -> String {
+        String::from_utf8_lossy(&response.body).into_owned()
+    }
+
+    fn real_now() -> i64 {
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_nanos(),
+        )
+        .expect("fits i64")
+    }
+
+    /// An app whose clock is the real time and that may call the loopback mock.
+    async fn mock_app() -> TestApp {
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        app.state.clock.set(real_now());
+        app
+    }
+
+    /// A chat turn whose answer is `text`, from the OpenAI-style mock.
+    fn text_turn(text: &str) -> Turn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": text},
+            "finish": "stop",
+            "usage": {"input": 5, "output": 2},
+            "ttft_ms": 0,
+            "chunk_delay_ms": 0,
+        }))
+        .expect("a text turn")
+    }
+
+    /// A turn that calls the tool `ping` with `ok` true: the org setting's test (D-AS-24).
+    fn ping_turn() -> Turn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"tool_calls": [{"id": "call_1", "name": "ping", "arguments": {"ok": true}}]},
+            "finish": "tool_calls",
+            "usage": {"input": 5, "output": 2},
+            "ttft_ms": 0,
+            "chunk_delay_ms": 0,
+        }))
+        .expect("a ping turn")
+    }
+
+    /// A turn that waits five seconds before it answers, so the turn stays open.
+    fn slow_turn() -> Turn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": "Late."},
+            "finish": "stop",
+            "usage": {"input": 1, "output": 1},
+            "ttft_ms": 5000,
+            "chunk_delay_ms": 0,
+        }))
+        .expect("a slow turn")
+    }
+
+    /// Serves `turns` on loopback as an OpenAI-style provider. Returns the mock and the base URL.
+    async fn provider(turns: Vec<Turn>) -> (Arc<Mock>, String) {
+        let mock = Mock::new(turns);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("address");
+        let router = mock.router();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        (mock, format!("http://{addr}/v1"))
+    }
+
+    /// Creates an `openai` connection in the seeded org `acme`, served at `base`.
+    async fn connection(app: &TestApp, seeded: &Seeded, base: &str) -> Uuid {
+        let response = app
+            .request(Method::POST, "/api/v1/orgs/acme/llm-connections")
+            .header("cookie", &seeded.cookie)
+            .json(&json!({
+                "name": format!("Mocked {}", Uuid::now_v7()),
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": base,
+                "default_model": "gpt-test",
+            }))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::CREATED, "{}", text(&response));
+        let value: Value = response.json();
+        value["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
+    /// Turns the assistant on with `connection` and `gpt-test`. The setting's test takes one
+    /// `ping` turn from the mock.
+    async fn enable(app: &TestApp, seeded: &Seeded, connection: Uuid) {
+        let response = app
+            .request(Method::PUT, "/api/v1/orgs/acme/assistant")
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"enabled": true, "connection_id": connection, "model": "gpt-test"}))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+    }
+
+    fn conversations_path(seeded: &Seeded) -> String {
+        format!(
+            "/api/v1/projects/{}/assistant/conversations",
+            seeded.project.id
+        )
+    }
+
+    fn turns_path(seeded: &Seeded, conversation: Uuid) -> String {
+        format!("{}/{conversation}/turns", conversations_path(seeded))
+    }
+
+    async fn create_conversation(app: &TestApp, seeded: &Seeded) -> Uuid {
+        let response = app
+            .request(Method::POST, &conversations_path(seeded))
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::CREATED, "{}", text(&response));
+        let value: Value = response.json();
+        value["id"].as_str().expect("id").parse().expect("uuid")
+    }
+
+    /// Posts a turn as `cookie` and answers the stream (its status says whether it was admitted).
+    async fn post_turn(
+        app: &TestApp,
+        seeded: &Seeded,
+        cookie: &str,
+        conversation: Uuid,
+        body: &Value,
+    ) -> TestStream {
+        app.request(Method::POST, &turns_path(seeded, conversation))
+            .header("cookie", cookie)
+            .json(body)
+            .send_stream()
+            .await
+    }
+
+    /// Reads a turn's events to its end: the `(event, data)` pairs.
+    async fn read_turn(stream: &mut TestStream) -> Vec<(String, Value)> {
+        let mut events = Vec::new();
+        while let Some(event) = stream.next_non_ping(WAIT).await {
+            let data = serde_json::from_str(&event.data).unwrap_or(Value::Null);
+            events.push((event.event, data));
+        }
+        events
+    }
+
+    fn event_names(events: &[(String, Value)]) -> Vec<&str> {
+        events.iter().map(|event| event.0.as_str()).collect()
+    }
+
+    async fn detail(app: &TestApp, seeded: &Seeded, conversation: Uuid) -> Value {
+        let response = app
+            .request(
+                Method::GET,
+                &format!("{}/{conversation}", conversations_path(seeded)),
+            )
+            .header("cookie", &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        response.json()
+    }
+
+    /// Stores `count` user messages in `conversation` and sets its count to `count`: the raw
+    /// insert does not set the count.
+    async fn fill(app: &TestApp, conversation: Uuid, count: i64) {
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    for seq in 1..=count {
+                        insert_message_raw(
+                            conn,
+                            conversation,
+                            seq,
+                            "user",
+                            r#"[{"type":"text","content":"Filler"}]"#,
+                            None,
+                            None,
+                            now,
+                        )
+                        .await?;
+                    }
+                    sqlx::query(
+                        "UPDATE assistant_conversations SET message_count = ? WHERE id = ?",
+                    )
+                    .bind(count)
+                    .bind(conversation.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streams_a_turn() {
+        let (_mock, base) = provider(vec![
+            ping_turn(),
+            text_turn("Checkout errors rose at noon."),
+        ])
+        .await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let connection = connection(&app, &seeded, &base).await;
+        enable(&app, &seeded, connection).await;
+        let conversation = create_conversation(&app, &seeded).await;
+        let message = "Why did checkout errors spike yesterday?";
+        let mut stream = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            conversation,
+            &json!({"message": message}),
+        )
+        .await;
+        assert_eq!(stream.status, StatusCode::OK);
+        let events = read_turn(&mut stream).await;
+        let names = event_names(&events);
+        assert_eq!(names.first(), Some(&"start"), "{names:?}");
+        assert!(names.contains(&"text"), "{names:?}");
+        assert_eq!(names.last(), Some(&"done"), "{names:?}");
+        let done = &events.last().expect("a done event").1;
+        assert_eq!(done["steps"], 1);
+
+        let stored = detail(&app, &seeded, conversation).await;
+        assert_eq!(stored["title"], message);
+        let messages = stored["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["status"], "complete");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn turn_validation() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let conversation = create_conversation(&app, &seeded).await;
+        let cases = [
+            (json!({"message": "   "}), "message"),
+            (json!({"message": "a".repeat(16_385)}), "message"),
+            (json!({"message": "hi", "context": "traces"}), "context"),
+            (
+                json!({"message": "hi", "context": {"page": "traces", "pad": "x".repeat(9_000)}}),
+                "context",
+            ),
+            (
+                json!({"message": "hi", "context": {"filter": "x"}}),
+                "context.page",
+            ),
+        ];
+        for (body, field) in cases {
+            let response = app
+                .request(Method::POST, &turns_path(&seeded, conversation))
+                .header("cookie", &seeded.cookie)
+                .json(&body)
+                .send()
+                .await;
+            assert_eq!(
+                response.status,
+                StatusCode::BAD_REQUEST,
+                "{}",
+                text(&response)
+            );
+            let value: Value = response.json();
+            assert!(
+                value
+                    .to_string()
+                    .contains(&format!("\"field\":\"{field}\"")),
+                "{field}: {value}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn assistant_off_is_409() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let conversation = create_conversation(&app, &seeded).await;
+        let response = app
+            .request(Method::POST, &turns_path(&seeded, conversation))
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"message": "hi"}))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{}", text(&response));
+        assert!(text(&response).contains("the assistant is off"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_turn_per_conversation() {
+        let (_mock, base) =
+            provider(vec![ping_turn(), slow_turn(), text_turn("Another chat.")]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let connection = connection(&app, &seeded, &base).await;
+        enable(&app, &seeded, connection).await;
+        let busy = create_conversation(&app, &seeded).await;
+        let other = create_conversation(&app, &seeded).await;
+
+        let mut first = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            busy,
+            &json!({"message": "one"}),
+        )
+        .await;
+        assert_eq!(first.status, StatusCode::OK);
+        let start = first.next_non_ping(WAIT).await.expect("the start event");
+        assert_eq!(start.event, "start");
+
+        let second = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            busy,
+            &json!({"message": "two"}),
+        )
+        .await;
+        assert_eq!(second.status, StatusCode::CONFLICT);
+
+        let mut third = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            other,
+            &json!({"message": "three"}),
+        )
+        .await;
+        assert_eq!(third.status, StatusCode::OK);
+        let events = read_turn(&mut third).await;
+        assert_eq!(event_names(&events).last(), Some(&"done"));
+        drop(first);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn viewer_pat_and_key_are_refused() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let conversation = create_conversation(&app, &seeded).await;
+        let body = json!({"message": "hi"});
+        let token = app.personal_token(seeded.user_id, true).await;
+        let bearer_token = format!("Bearer {token}");
+        let bearer_key = format!("Bearer {}", seeded.read_key);
+
+        let viewer_stream = post_turn(&app, &seeded, &viewer.cookie, conversation, &body).await;
+        assert_eq!(viewer_stream.status, StatusCode::FORBIDDEN);
+        for header in [&bearer_token, &bearer_key] {
+            let response = app
+                .request(Method::POST, &turns_path(&seeded, conversation))
+                .header("authorization", header)
+                .json(&body)
+                .send()
+                .await;
+            assert_eq!(
+                response.status,
+                StatusCode::FORBIDDEN,
+                "{}",
+                text(&response)
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn another_users_conversation_is_404() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let conversation = create_conversation(&app, &seeded).await;
+        let stream = post_turn(
+            &app,
+            &seeded,
+            &member.cookie,
+            conversation,
+            &json!({"message": "hi"}),
+        )
+        .await;
+        assert_eq!(stream.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn full_conversation_is_409() {
+        let (_mock, base) = provider(vec![ping_turn(), text_turn("Room left.")]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let connection = connection(&app, &seeded, &base).await;
+        enable(&app, &seeded, connection).await;
+
+        let full = create_conversation(&app, &seeded).await;
+        fill(&app, full, 167).await;
+        let refused = app
+            .request(Method::POST, &turns_path(&seeded, full))
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"message": "hi"}))
+            .send()
+            .await;
+        assert_eq!(refused.status, StatusCode::CONFLICT, "{}", text(&refused));
+        assert!(text(&refused).contains("the conversation is full"));
+
+        let room = create_conversation(&app, &seeded).await;
+        fill(&app, room, 166).await;
+        let mut stream = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            room,
+            &json!({"message": "hi"}),
+        )
+        .await;
+        assert_eq!(stream.status, StatusCode::OK);
+        let events = read_turn(&mut stream).await;
+        assert_eq!(event_names(&events).last(), Some(&"done"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn restore_mode_refuses() {
+        let app = TestApp::with_config(|config| config.restore_mode = true).await;
+        let seeded = app.seed().await;
+        let conversation = create_conversation_in_restore(&app, &seeded).await;
+        let response = app
+            .request(Method::POST, &turns_path(&seeded, conversation))
+            .header("cookie", &seeded.cookie)
+            .json(&json!({"message": "hi"}))
+            .send()
+            .await;
+        assert_refused(&response, "assistant turn");
+    }
+
+    /// A conversation stored with `insert_conversation`, so the restore-mode test does not depend
+    /// on the create route's behaviour in restore mode.
+    async fn create_conversation_in_restore(app: &TestApp, seeded: &Seeded) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = app.state.clock.now_ns();
+        let project = seeded.project.id;
+        let user = seeded.user_id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::assistant::insert_conversation(conn, id, project, user, now)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn abort_cancels_the_turn() {
+        let (_mock, base) =
+            provider(vec![ping_turn(), slow_turn(), text_turn("Back again.")]).await;
+        let app = mock_app().await;
+        let seeded = app.seed().await;
+        let connection = connection(&app, &seeded, &base).await;
+        enable(&app, &seeded, connection).await;
+        let conversation = create_conversation(&app, &seeded).await;
+
+        let mut stream = post_turn(
+            &app,
+            &seeded,
+            &seeded.cookie,
+            conversation,
+            &json!({"message": "slow"}),
+        )
+        .await;
+        let start = stream.next_non_ping(WAIT).await.expect("the start event");
+        assert_eq!(start.event, "start");
+        // The client leaves while the provider is still waiting.
+        drop(stream);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let stored = detail(&app, &seeded, conversation).await;
+            let cancelled = stored["messages"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["role"] == "assistant" && message["status"] == "cancelled"
+                })
+            });
+            if cancelled {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the cancelled turn stored no message"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        // The turn's slot is released once the engine returns, so a new turn is admitted soon.
+        let mut again = loop {
+            let stream = post_turn(
+                &app,
+                &seeded,
+                &seeded.cookie,
+                conversation,
+                &json!({"message": "again"}),
+            )
+            .await;
+            if stream.status == StatusCode::OK {
+                break stream;
+            }
+            assert_eq!(stream.status, StatusCode::CONFLICT);
+            assert!(
+                Instant::now() < deadline + Duration::from_secs(2),
+                "the slot was not freed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        let events = read_turn(&mut again).await;
+        assert_eq!(event_names(&events).last(), Some(&"done"));
     }
 }

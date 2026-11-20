@@ -47,6 +47,10 @@ pub(crate) const MAX_TOOL_CALLS: usize = 32;
 pub(crate) const TURN_DEADLINE: Duration = Duration::from_secs(600);
 pub(crate) const MAX_TOKENS: u32 = 4_096;
 pub(crate) const PERMIT_WAIT: Duration = Duration::from_secs(10);
+/// The most messages one turn can append (D-AS-25): the user message, up to 16 assistant messages
+/// and 16 tool messages, and the closing limit message. A turn starts only when the conversation
+/// has room for this many.
+pub(crate) const TURN_MESSAGES_MAX: i64 = 34;
 
 /// The shortest whole-call timeout a model call gets, when the turn is nearly over.
 const MIN_CALL_TIMEOUT: Duration = Duration::from_secs(1);

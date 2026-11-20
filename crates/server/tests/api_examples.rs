@@ -18,7 +18,8 @@ use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAd
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
 use cetra_server::api::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantFeedbackRequest,
-    AssistantSettings, AssistantStatus, PutAssistantSettings, UpdateAssistantConversationRequest,
+    AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
+    UpdateAssistantConversationRequest,
 };
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
@@ -477,6 +478,7 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
     roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
     roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
+    roundtrip::<AssistantTurnRequest>("requests/assistant-turn.json");
     roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");

@@ -189,6 +189,19 @@ pub struct AssistantFeedbackRequest {
     pub feedback: Option<AssistantFeedback>,
 }
 
+/// `POST …/assistant/conversations/{id}/turns`: one user message and its page context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AssistantTurnRequest {
+    /// 1–16,384 bytes after trimming (D-AS-15).
+    pub message: String,
+    /// The page context (D-AS-14): a JSON object with a string `page` (1–64 characters), at most
+    /// 8 KiB as compact JSON.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub context: Option<serde_json::Value>,
+}
+
 /// The org's assistant setting (D-AS-3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AssistantSettings {

@@ -42,8 +42,8 @@ use super::alerts::{
 use super::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
     AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
-    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantUnavailable,
-    PutAssistantSettings, UpdateAssistantConversationRequest,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
+    AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
@@ -357,6 +357,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AssistantDraftKind>();
     set.insert::<UpdateAssistantConversationRequest>();
     set.insert::<AssistantFeedbackRequest>();
+    set.insert::<AssistantTurnRequest>();
     set.insert_page::<AssistantConversation>("AssistantConversationPage");
     set.insert::<AssistantSettings>();
     set.insert::<PutAssistantSettings>();
@@ -4777,6 +4778,29 @@ fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
         .description(Some("Message position, from 1."))
         .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
         .build();
+    let turn = operation(
+        "post_assistant_turn",
+        "assistant",
+        "Stream an assistant turn",
+    )
+    .description(Some(
+        "Members and above, with a session (D-AS-4). Streams one turn (D-AS-9); aborting the request cancels it. Not units (D-AS-11).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("AssistantTurnRequest")))
+    .responses(responses(
+        "200",
+        sse("The turn's events, as `text/event-stream`: `start`, `text`, `tool_call`, `tool_result` and `draft` events, then one `done` or `error`. A `ping` comes every 15 seconds."),
+        &[400, 401, 403, 404, 409, 413, 429, 503],
+    ))
+    .build();
     let feedback = operation(
         "put_assistant_feedback",
         "assistant",
@@ -4825,6 +4849,10 @@ fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/assistant/conversations/{{id}}/messages/{{seq}}/feedback"),
             PathItem::new(HttpMethod::Put, feedback),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/turns"),
+            PathItem::new(HttpMethod::Post, turn),
         )
 }
 
