@@ -49,8 +49,9 @@ pub use sessions::{
     SessionSort, session_detail, session_extras, session_list,
 };
 pub use targets::{
-    MAX_TARGET_IDS, SessionTarget, SpanTarget, TraceTarget, session_targets, span_targets,
-    trace_targets,
+    FilteredTargets, MAX_TARGET_IDS, SessionTarget, SessionTargetFilter, SpanTarget,
+    SpanTargetFilter, TraceTarget, filter_session_targets, filter_span_targets, session_targets,
+    span_targets, trace_targets,
 };
 pub use traces::{
     MAX_MATCH_COUNT, MAX_REFRESH_IDS, MAX_REFRESH_SPANS_PER_TRACE, MAX_TRACE_SPANS,

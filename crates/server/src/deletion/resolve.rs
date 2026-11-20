@@ -128,7 +128,7 @@ async fn filter_targets(
     };
     let window = TimeWindow::new(from, to).map_err(|error| super::from_run(&error, row.kind))?;
     let cap = state.deletions.filter_cap();
-    let ids = filter_trace_ids(
+    let targets = filter_trace_ids(
         ctx,
         FilterDeletionRequest {
             filter: request.filter.as_deref(),
@@ -142,10 +142,10 @@ async fn filter_targets(
     )
     .await
     .map_err(|error| super::from_run(&error, row.kind))?;
-    if ids.len() > cap {
+    if targets.len() > cap {
         return Err(Step::Fail(FailReason::TooManyTraces));
     }
-    Ok(ids)
+    Ok(targets.into_iter().map(|target| target.trace_id).collect())
 }
 
 /// A count as the `u64` the store takes. Saturates only where `usize` exceeds `u64`.

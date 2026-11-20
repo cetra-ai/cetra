@@ -11,11 +11,15 @@ use cetra_core::ids::{SpanId, TraceId};
 use cetra_core::schema::{spans, traces};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Expr, col, lit};
+use futures::StreamExt;
 
 use super::deletions::{bad_id, utf8};
-use super::{ListScope, scoped_traces};
+use super::sessions::filtered_session_ids;
+use super::traces::scope_frame;
+use super::{ListScope, present, scoped_traces};
+use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
-use crate::views::QueryContext;
+use crate::views::{QueryContext, TimeWindow};
 
 /// Most ids one lookup takes (D-AQ-8: an add takes 1–1 000 targets).
 pub const MAX_TARGET_IDS: usize = 1_000;
@@ -105,6 +109,110 @@ pub async fn session_targets(
     bounded(timeout, session_scan(ctx, ids)).await
 }
 
+/// A span query for [`filter_span_targets`]: the spans list's filter, search and window.
+#[derive(Debug, Clone, Copy)]
+pub struct SpanTargetFilter<'a> {
+    /// Filter text over `spans`. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// Full-text search over the spans. Empty or whitespace means no search.
+    pub search: Option<&'a str>,
+    /// `start_time ∈ [from, to)` of the span itself.
+    pub window: TimeWindow,
+    /// Keep spans of experiment traces, as the spans list does.
+    pub include_experiments: bool,
+    /// Most targets returned. The server passes its cap; one more match is reported as `capped`.
+    pub limit: usize,
+    /// Time allowed for the whole call.
+    pub timeout: Duration,
+}
+
+/// A session query for [`filter_session_targets`]: the sessions list's filter and window. The
+/// sessions list has no search, so this request has none.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionTargetFilter<'a> {
+    /// Filter text over `sessions`. Empty or whitespace means no filter.
+    pub filter: Option<&'a str>,
+    /// The sessions of traces that start in `[from, to)`, as the sessions list selects them.
+    pub window: TimeWindow,
+    /// Keep sessions of experiment traces, as the sessions list does.
+    pub include_experiments: bool,
+    /// Most targets returned. The server passes its cap; one more match is reported as `capped`.
+    pub limit: usize,
+    /// Time allowed for the whole call.
+    pub timeout: Duration,
+}
+
+/// Targets found, and whether more than `limit` matched before any target was dropped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilteredTargets<T> {
+    /// At most `limit` targets, sorted by id.
+    pub targets: Vec<T>,
+    /// True when more than `limit` rows matched the filter.
+    pub capped: bool,
+}
+
+/// The visible spans the spans list selects for `request`, each with its trace's start time
+/// (the trace start, even when it is before the window). Distinct `(trace, span)` pairs, sorted.
+/// A span matched more than once (copies) is one target. Evaluation spans are never returned.
+/// The scan stops once `limit + 1` distinct pairs are seen; `capped` says so, and the first
+/// `limit` pairs by id are kept.
+///
+/// # Errors
+///
+/// [`RunError::Invalid`] for filter text; [`RunError::InvalidRequest`] for a bad search;
+/// [`RunError::Timeout`]; the query's other errors as `ctx.fail` classifies them.
+pub async fn filter_span_targets(
+    ctx: &QueryContext,
+    request: SpanTargetFilter<'_>,
+) -> Result<FilteredTargets<SpanTarget>, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Spans, text)?),
+        None => None,
+    };
+    bounded(
+        request.timeout,
+        span_filter_scan(
+            ctx,
+            filter,
+            request.search,
+            request.window,
+            request.include_experiments,
+            request.limit,
+        ),
+    )
+    .await
+}
+
+/// The visible sessions the sessions list selects for `request`, each with its earliest visible
+/// trace's start and its visible trace ids, as [`session_targets`] answers them (no window, no
+/// evaluation traces). Sorted by session id. A session the scan finds but the lookup does not
+/// answer (only evaluation traces left) is dropped. The scan stops at `limit + 1` sessions;
+/// `capped` says so, and the first `limit` are kept.
+///
+/// # Errors
+///
+/// As [`filter_span_targets`].
+pub async fn filter_session_targets(
+    ctx: &QueryContext,
+    request: SessionTargetFilter<'_>,
+) -> Result<FilteredTargets<SessionTarget>, RunError> {
+    let filter = match present(request.filter) {
+        Some(text) => Some(ctx.parse_filter(FilterView::Sessions, text)?),
+        None => None,
+    };
+    bounded(
+        request.timeout,
+        session_filter_scan(
+            ctx,
+            filter,
+            request.window,
+            request.include_experiments,
+            request.limit,
+        ),
+    )
+    .await
+}
+
 async fn bounded<T>(
     timeout: Duration,
     scan: impl Future<Output = Result<T, RunError>>,
@@ -113,6 +221,94 @@ async fn bounded<T>(
         Err(_) => Err(RunError::Timeout),
         Ok(result) => result,
     }
+}
+
+async fn span_filter_scan(
+    ctx: &QueryContext,
+    filter: Option<Filter>,
+    search_text: Option<&str>,
+    window: TimeWindow,
+    include_experiments: bool,
+    limit: usize,
+) -> Result<FilteredTargets<SpanTarget>, RunError> {
+    let scope = ListScope {
+        window: Some(window),
+        include_eval: false,
+        include_experiments,
+    };
+    let frame = scope_frame(
+        ctx,
+        FilterView::Spans,
+        "spans",
+        filter,
+        search_text,
+        scope,
+        false,
+    )
+    .await?
+    .select(vec![col(spans::TRACE_ID), col(spans::SPAN_ID)])
+    .map_err(classify)?;
+    let mut stream = frame
+        .execute_stream()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let mut pairs = BTreeSet::new();
+    'read: while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| ctx.fail(error))?;
+        let trace_column = utf8(batch.column(0))?;
+        let trace_column = trace_column.as_string::<i32>();
+        let span_column = utf8(batch.column(1))?;
+        let span_column = span_column.as_string::<i32>();
+        for row in 0..batch.num_rows() {
+            pairs.insert((
+                parse_trace(trace_column.value(row))?,
+                parse_span(span_column.value(row))?,
+            ));
+            if pairs.len() > limit {
+                break 'read;
+            }
+        }
+    }
+    let capped = pairs.len() > limit;
+    let kept: Vec<(TraceId, SpanId)> = pairs.into_iter().take(limit).collect();
+    let trace_ids: BTreeSet<TraceId> = kept.iter().map(|(trace_id, _)| *trace_id).collect();
+    let trace_ids: Vec<TraceId> = trace_ids.into_iter().collect();
+    let mut starts = BTreeMap::new();
+    for chunk in trace_ids.chunks(MAX_TARGET_IDS) {
+        for target in trace_scan(ctx, chunk).await? {
+            starts.insert(target.trace_id, target.start_time);
+        }
+    }
+    let targets = kept
+        .into_iter()
+        .filter_map(|(trace_id, span_id)| {
+            starts.get(&trace_id).map(|&trace_start| SpanTarget {
+                trace_id,
+                span_id,
+                trace_start,
+            })
+        })
+        .collect();
+    Ok(FilteredTargets { targets, capped })
+}
+
+async fn session_filter_scan(
+    ctx: &QueryContext,
+    filter: Option<Filter>,
+    window: TimeWindow,
+    include_experiments: bool,
+    limit: usize,
+) -> Result<FilteredTargets<SessionTarget>, RunError> {
+    let mut ids = filtered_session_ids(ctx, filter, window, include_experiments, limit + 1).await?;
+    let capped = ids.len() > limit;
+    ids.truncate(limit);
+    let mut targets = Vec::new();
+    for chunk in ids.chunks(MAX_TARGET_IDS) {
+        let refs: Vec<&str> = chunk.iter().map(String::as_str).collect();
+        targets.extend(session_scan(ctx, &refs).await?);
+    }
+    targets.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+    Ok(FilteredTargets { targets, capped })
 }
 
 fn check_len(len: usize) -> Result<(), RunError> {
@@ -277,7 +473,9 @@ async fn session_scan(ctx: &QueryContext, ids: &[&str]) -> Result<Vec<SessionTar
         .collect())
 }
 
-fn start_column(column: &ArrayRef) -> Result<&PrimitiveArray<TimestampNanosecondType>, RunError> {
+pub(super) fn start_column(
+    column: &ArrayRef,
+) -> Result<&PrimitiveArray<TimestampNanosecondType>, RunError> {
     column
         .as_primitive_opt::<TimestampNanosecondType>()
         .ok_or_else(|| {
@@ -299,16 +497,24 @@ fn parse_span(text: &str) -> Result<SpanId, RunError> {
 mod tests {
     use std::time::Duration;
 
+    use std::collections::BTreeSet;
+    use std::str::FromStr;
+
     use cetra_core::ids::{SpanId, TraceId};
+    use cetra_core::schema::spans;
     use cetra_core::span::Span;
 
     use super::{
-        MAX_TARGET_IDS, SessionTarget, SpanTarget, TraceTarget, session_targets, span_targets,
-        trace_targets,
+        FilteredTargets, MAX_TARGET_IDS, SessionTarget, SessionTargetFilter, SpanTarget,
+        SpanTargetFilter, TraceTarget, filter_session_targets, filter_span_targets,
+        session_targets, span_targets, trace_targets,
     };
     use crate::query_error::RunError;
+    use crate::reads::deletions::utf8;
+    use crate::reads::{ListScope, Page, SortOrder, SpanListRequest, SpanSort, span_list};
     use crate::test_support::{example_query, span_row, spans_table, traces_table};
-    use crate::views::{ProjectQuery, QueryContext};
+    use crate::views::{ProjectQuery, QueryContext, TimeWindow};
+    use arrow::array::AsArray;
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -476,5 +682,304 @@ mod tests {
                 trace_ids,
             }]
         );
+    }
+
+    fn wide() -> TimeWindow {
+        TimeWindow::new(0, 1_000_000).expect("window")
+    }
+
+    fn span_filter<'a>(
+        filter: Option<&'a str>,
+        search: Option<&'a str>,
+        limit: usize,
+    ) -> SpanTargetFilter<'a> {
+        SpanTargetFilter {
+            filter,
+            search,
+            window: wide(),
+            include_experiments: false,
+            limit,
+            timeout: TIMEOUT,
+        }
+    }
+
+    /// The `(trace, span)` pairs of a span list page.
+    fn listed_pairs(page: &Page) -> BTreeSet<(TraceId, SpanId)> {
+        let mut pairs = BTreeSet::new();
+        for batch in &page.batches {
+            let traces =
+                utf8(batch.column_by_name(spans::TRACE_ID).expect("trace column")).expect("cast");
+            let span_ids =
+                utf8(batch.column_by_name(spans::SPAN_ID).expect("span column")).expect("cast");
+            let (traces, span_ids) = (traces.as_string::<i32>(), span_ids.as_string::<i32>());
+            for row in 0..batch.num_rows() {
+                pairs.insert((
+                    TraceId::from_str(traces.value(row)).expect("trace id"),
+                    SpanId::from_str(span_ids.value(row)).expect("span id"),
+                ));
+            }
+        }
+        pairs
+    }
+
+    fn pairs_of(targets: &FilteredTargets<SpanTarget>) -> BTreeSet<(TraceId, SpanId)> {
+        targets
+            .targets
+            .iter()
+            .map(|target| (target.trace_id, target.span_id))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_follow_the_span_list() {
+        let mut chat = span_row(1, 1, 1_500, 0);
+        chat.name = "chat".to_owned();
+        let mut tool = span_row(2, 0, 2_000, 0);
+        tool.name = "tool".to_owned();
+        let mut late = span_row(3, 0, 9_000, 0);
+        late.name = "chat".to_owned();
+        let ctx = context_of(&[span_row(1, 0, 1_000, 0), chat, tool, late], None);
+        let window = TimeWindow::new(1_200, 5_000).expect("window");
+        let page = span_list(
+            &ctx,
+            SpanListRequest {
+                filter: Some("name = 'chat'"),
+                search: None,
+                scope: ListScope {
+                    window: Some(window),
+                    include_eval: false,
+                    include_experiments: false,
+                },
+                strict_exclusions: false,
+                sort: SpanSort::StartTime,
+                order: SortOrder::Asc,
+                limit: 100,
+                cursor: None,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("list");
+        let listed = listed_pairs(&page);
+        let found = filter_span_targets(
+            &ctx,
+            SpanTargetFilter {
+                filter: Some("name = 'chat'"),
+                search: None,
+                window,
+                include_experiments: false,
+                limit: 100,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("targets");
+        assert!(!found.capped);
+        assert_eq!(pairs_of(&found), listed);
+        assert_eq!(listed, BTreeSet::from([(id(1), span_id(1, 1))]));
+        // The trace starts before the window; the target keeps the trace's own start.
+        assert_eq!(found.targets[0].trace_start, 1_000);
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_stop_at_the_limit() {
+        let spans: Vec<Span> = (1..=5).map(|trace| span_row(trace, 0, 1_000, 0)).collect();
+        let ctx = context_of(&spans, None);
+        let found = filter_span_targets(&ctx, span_filter(None, None, 2))
+            .await
+            .expect("targets");
+        assert_eq!(found.targets.len(), 2);
+        assert!(found.capped);
+        let exact = filter_span_targets(&ctx, span_filter(None, None, 5))
+            .await
+            .expect("exact");
+        assert_eq!(exact.targets.len(), 5);
+        assert!(!exact.capped);
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_dedup_copies() {
+        // The same span stored twice (a re-send not yet compacted).
+        let spans = [span_row(1, 0, 1_000, 10), span_row(1, 0, 1_000, 20)];
+        let ctx = context_of(&spans, None);
+        let found = filter_span_targets(&ctx, span_filter(None, None, 10))
+            .await
+            .expect("targets");
+        assert_eq!(found.targets.len(), 1);
+        assert!(!found.capped);
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_exclude_eval_and_honour_experiments() {
+        let mut eval = span_row(3, 0, 3_000, 0);
+        eval.environment = Some("cetra-eval".to_owned());
+        let mut experiment = span_row(4, 0, 4_000, 0);
+        experiment
+            .metadata
+            .insert("cetra.experiment_id".to_owned(), "e1".to_owned());
+        let ctx = context_of(&[span_row(1, 0, 1_000, 0), eval, experiment], None);
+        let found = filter_span_targets(&ctx, span_filter(None, None, 10))
+            .await
+            .expect("default");
+        assert_eq!(pairs_of(&found), BTreeSet::from([(id(1), span_id(1, 0))]));
+        let mut request = span_filter(None, None, 10);
+        request.include_experiments = true;
+        let found = filter_span_targets(&ctx, request)
+            .await
+            .expect("experiments");
+        assert_eq!(
+            pairs_of(&found),
+            BTreeSet::from([(id(1), span_id(1, 0)), (id(4), span_id(4, 0))])
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_use_the_trace_start() {
+        let root = span_row(1, 0, 1_000, 0);
+        let child = span_row(1, 1, 1_600, 0);
+        let ctx = context_of(&[root, child], None);
+        let window = TimeWindow::new(1_500, 3_000).expect("window");
+        let mut request = span_filter(None, None, 10);
+        request.window = window;
+        let found = filter_span_targets(&ctx, request).await.expect("targets");
+        assert_eq!(found.targets.len(), 1);
+        let trace = trace_targets(&ctx, &[id(1)], TIMEOUT).await.expect("trace");
+        assert_eq!(found.targets[0].trace_start, trace[0].start_time);
+        assert!(found.targets[0].trace_start < 1_500);
+    }
+
+    #[tokio::test]
+    async fn filter_span_targets_search_narrows() {
+        let mut hit = span_row(1, 0, 1_000, 0);
+        hit.input = Some("refund please".to_owned());
+        let ctx = context_of(&[hit, span_row(2, 0, 2_000, 0)], None);
+        let found = filter_span_targets(&ctx, span_filter(None, Some("refund"), 10))
+            .await
+            .expect("search");
+        assert_eq!(pairs_of(&found), BTreeSet::from([(id(1), span_id(1, 0))]));
+    }
+
+    #[tokio::test]
+    async fn filter_session_targets_follow_the_session_list() {
+        let mut spans = Vec::new();
+        for (trace, start, session) in [(1, 1_000, "s1"), (2, 2_000, "s2"), (3, 3_000, "s1")] {
+            let mut span = span_row(trace, 0, start, 0);
+            span.session_id = Some(session.to_owned());
+            spans.push(span);
+        }
+        let ctx = context_of(&spans, None);
+        let found = filter_session_targets(
+            &ctx,
+            SessionTargetFilter {
+                filter: None,
+                window: wide(),
+                include_experiments: false,
+                limit: 10,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("sessions");
+        assert!(!found.capped);
+        let ids: Vec<&str> = found
+            .targets
+            .iter()
+            .map(|target| target.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["s1", "s2"]);
+    }
+
+    #[tokio::test]
+    async fn filter_session_targets_use_the_earliest_visible_trace() {
+        let mut early = span_row(1, 0, 1_000, 0);
+        early.session_id = Some("s1".to_owned());
+        let mut inside = span_row(2, 0, 2_000, 0);
+        inside.session_id = Some("s1".to_owned());
+        let ctx = context_of(&[early, inside], None);
+        let found = filter_session_targets(
+            &ctx,
+            SessionTargetFilter {
+                filter: None,
+                window: TimeWindow::new(1_500, 3_000).expect("window"),
+                include_experiments: false,
+                limit: 10,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("sessions");
+        let mut trace_ids = vec![id(1), id(2)];
+        trace_ids.sort();
+        assert_eq!(
+            found.targets,
+            [SessionTarget {
+                session_id: "s1".to_owned(),
+                start_time: 1_000,
+                trace_ids,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_session_targets_stop_at_the_limit() {
+        let mut spans = Vec::new();
+        for trace in 1..=3 {
+            let mut span = span_row(trace, 0, 1_000, 0);
+            span.session_id = Some(format!("s{trace}"));
+            spans.push(span);
+        }
+        let ctx = context_of(&spans, None);
+        let found = filter_session_targets(
+            &ctx,
+            SessionTargetFilter {
+                filter: None,
+                window: wide(),
+                include_experiments: false,
+                limit: 2,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("sessions");
+        assert_eq!(found.targets.len(), 2);
+        assert!(found.capped);
+    }
+
+    #[tokio::test]
+    async fn filter_session_targets_leave_out_evaluation_sessions() {
+        // The sessions view has no `environment` column, so a filter cannot keep evaluation
+        // traces in; the scan leaves an evaluation-only session out before the lookup.
+        let mut eval = span_row(1, 0, 1_000, 0);
+        eval.session_id = Some("eval-only".to_owned());
+        eval.environment = Some("cetra-eval".to_owned());
+        let mut plain = span_row(2, 0, 2_000, 0);
+        plain.session_id = Some("plain".to_owned());
+        let ctx = context_of(&[eval, plain], None);
+        let found = filter_session_targets(
+            &ctx,
+            SessionTargetFilter {
+                filter: None,
+                window: wide(),
+                include_experiments: false,
+                limit: 10,
+                timeout: TIMEOUT,
+            },
+        )
+        .await
+        .expect("sessions");
+        let ids: Vec<&str> = found
+            .targets
+            .iter()
+            .map(|target| target.session_id.as_str())
+            .collect();
+        assert_eq!(ids, ["plain"]);
+        assert!(!found.capped);
+    }
+
+    #[tokio::test]
+    async fn filter_targets_refuse_a_bad_filter() {
+        let ctx = context_of(&[span_row(1, 0, 1_000, 0)], None);
+        let result = filter_span_targets(&ctx, span_filter(Some("name = "), None, 10)).await;
+        assert!(matches!(result, Err(RunError::Invalid(_))), "{result:?}");
     }
 }

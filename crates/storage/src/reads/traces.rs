@@ -916,6 +916,52 @@ pub async fn trace_list_plan(
     ))
 }
 
+/// The rows of `table` that a list of `view` selects before its cursor, sort and limit: the
+/// window on `start_time`, the default exclusions (the strict ones when `strict`), the search
+/// and the filter. The annotation-queue scans of spans select through this too, so they select
+/// the same rows as the lists.
+pub(crate) async fn scope_frame(
+    ctx: &QueryContext,
+    view: FilterView,
+    table: &str,
+    filter: Option<Filter>,
+    search_text: Option<&str>,
+    scope: ListScope,
+    strict: bool,
+) -> Result<DataFrame, RunError> {
+    let references_environment = filter
+        .as_ref()
+        .is_some_and(|filter| filter.references_environment);
+    let mut frame = ctx.session().table(table).await.map_err(classify)?;
+    let mut conjuncts = Vec::new();
+    if let Some(window) = scope.window {
+        conjuncts.push(time_window(window));
+    }
+    if strict {
+        conjuncts.push(strict_exclusions(ctx, view, None).await?);
+    } else if let Some(expr) = exclusions(
+        ctx,
+        view,
+        scope.include_eval,
+        scope.include_experiments,
+        references_environment,
+    )? {
+        conjuncts.push(expr);
+    }
+    if let Some(text) = present(search_text)
+        && let Some(expr) = search(view, text, scope.window, ctx).await?
+    {
+        conjuncts.push(expr);
+    }
+    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
+        frame = frame.filter(predicate).map_err(classify)?;
+    }
+    if let Some(filter) = filter {
+        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+    }
+    Ok(frame)
+}
+
 /// The list's frame, sorted and cut to `fetch` rows. A de-duplicating plan also sorts by the
 /// newest copy's `ingest_time` last, and the frame keeps only the listed columns.
 async fn list_frame(
@@ -927,9 +973,6 @@ async fn list_frame(
         Some(text) => Some(ctx.parse_filter(plan.view, text)?),
         None => None,
     };
-    let references_environment = filter
-        .as_ref()
-        .is_some_and(|filter| filter.references_environment);
     let cursor = match plan.cursor {
         Some(text) => {
             let cursor = decode(text, plan.list, plan.sort, plan.order)?;
@@ -941,35 +984,20 @@ async fn list_frame(
         None => None,
     };
 
-    let mut frame = ctx.session().table(plan.table).await.map_err(classify)?;
-    let mut conjuncts = Vec::new();
-    if let Some(window) = plan.scope.window {
-        conjuncts.push(time_window(window));
-    }
-    if plan.strict {
-        conjuncts.push(strict_exclusions(ctx, plan.view, None).await?);
-    } else if let Some(expr) = exclusions(
+    let mut frame = scope_frame(
         ctx,
         plan.view,
-        plan.scope.include_eval,
-        plan.scope.include_experiments,
-        references_environment,
-    )? {
-        conjuncts.push(expr);
-    }
-    if let Some(text) = present(plan.search)
-        && let Some(expr) = search(plan.view, text, plan.scope.window, ctx).await?
-    {
-        conjuncts.push(expr);
-    }
+        plan.table,
+        filter,
+        plan.search,
+        plan.scope,
+        plan.strict,
+    )
+    .await?;
     if let Some(cursor) = &cursor {
-        conjuncts.push(after(cursor, plan.sort, plan.ties));
-    }
-    if let Some(predicate) = conjuncts.into_iter().reduce(Expr::and) {
-        frame = frame.filter(predicate).map_err(classify)?;
-    }
-    if let Some(filter) = filter {
-        frame = filter.apply(frame, ctx).await.map_err(classify)?;
+        frame = frame
+            .filter(after(cursor, plan.sort, plan.ties))
+            .map_err(classify)?;
     }
     let mut sorts = order_by(plan.sort, plan.ties, plan.order);
     if let Some(dedup) = &plan.dedup {
