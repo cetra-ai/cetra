@@ -73,7 +73,7 @@ pub(super) fn remove(paths: &Paths, codex_home: &Path, out: &mut dyn Write) -> a
             let endpoint = format!("{}/v1/traces", file.url);
             if trace_endpoint(&doc) == Some(endpoint.as_str()) {
                 remove_our_exporter(&mut doc);
-            } else {
+            } else if trace_endpoint(&doc).is_some() {
                 writeln!(out, "{OTHER_SERVER_NOTE}")?;
             }
         }

@@ -399,7 +399,11 @@ fn claude_code_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> 
                         root.remove("env");
                     }
                 }
-            } else {
+            } else if root
+                .get("env")
+                .and_then(|env| env.get("OTEL_EXPORTER_OTLP_ENDPOINT"))
+                .is_some()
+            {
                 writeln!(out, "{OTHER_SERVER_NOTE}")?;
             }
         }
@@ -523,7 +527,11 @@ fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
                         root.remove("telemetry");
                     }
                 }
-            } else {
+            } else if root
+                .get("telemetry")
+                .and_then(|telemetry| telemetry.get("otlpEndpoint"))
+                .is_some()
+            {
                 writeln!(out, "{OTHER_SERVER_NOTE}")?;
             }
         }
@@ -533,12 +541,11 @@ fn gemini_cli_remove(paths: &Paths, out: &mut dyn Write) -> anyhow::Result<()> {
     if root != original {
         changed |= updated(&settings_path, &settings_bytes(&root)?, out)?;
     }
-    if let Some(file) = &agents {
-        if let Some(text) = read_optional_text(&env_path)? {
-            if let Some(kept) = env_without_line(&text, &gemini_header_line(&file.key)) {
-                changed |= updated(&env_path, kept.as_bytes(), out)?;
-            }
-        }
+    if let Some(file) = &agents
+        && let Some(text) = read_optional_text(&env_path)?
+        && let Some(kept) = env_without_line(&text, &gemini_header_line(&file.key))
+    {
+        changed |= updated(&env_path, kept.as_bytes(), out)?;
     }
     if !changed {
         writeln!(out, "nothing to remove")?;

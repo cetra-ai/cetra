@@ -22,7 +22,9 @@ const MIN_POST: Duration = Duration::from_millis(100);
 
 #[derive(Deserialize)]
 struct HookInput {
+    #[serde(default)]
     session_id: String,
+    #[serde(default)]
     cwd: String,
 }
 
@@ -519,11 +521,7 @@ mod tests {
     #[tokio::test]
     async fn hook_through_run_cli_exits_zero() {
         // Nothing is posted without agents.toml; skip when this machine has one.
-        if crate::agents::Paths::detect()
-            .unwrap()
-            .agents_file()
-            .exists()
-        {
+        if Paths::detect().unwrap().agents_file().exists() {
             return;
         }
         crate::run_cli(["cetra", "agents", "hook", "codex"])
