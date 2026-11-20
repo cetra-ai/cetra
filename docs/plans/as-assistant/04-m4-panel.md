@@ -623,3 +623,54 @@ AS4.2 and AS4.3 may run in parallel after AS4.1 (their Edit lists do not overlap
 2. `just check`, then `just e2e`. Fix what fails, in one commit `Make the AS M4 checks pass`.
 3. A Sonnet review of the M4 diff; fixes in `Fix the AS M4 review findings`.
 4. Push to PR #182 and update its body.
+
+---
+
+## Deviations during implementation
+
+Recorded at AS4.8 from the phase reports. Where a step conflicted with the code, the docs (spec 11, D-AS-27, D-AS-29, the design table) follow the code.
+
+**Plan fixes made during implementation**
+- `Schema` comes from `@/api/types`, not `@/api/schema` (contracts in § Contracts and AS4.1 step 2).
+- The dev-worker mock paths are absolute.
+- AS4.6 step 7 uses `from`/`to` for the window, because the trace list API has no `range`.
+
+**AS4.1 Foundations**
+- The event-stream reader delivers a final SSE block that has no blank line after it, when it holds data.
+- The dev-worker mock imports the test stream helper.
+
+**AS4.2 Org setting page**
+- `routeTree.gen.ts` is git-ignored, so it is not committed (AS4.2 step 7 was wrong).
+- No extra `UnsavedChangesGuard`: `SettingsFormCard` renders one.
+- An off setting omits `connection_id` and `model`, which are optional and not nullable in the API.
+- The settings-home card and the prefix invalidation are not asserted by tests.
+
+**AS4.3 Panel shell**
+- `KeyInfo` gained an optional `shiftKey`.
+- A new chat is prepended to the cached list before it is selected.
+- Esc closes the sheet on narrow screens. On wide screens Esc only blurs (D-AS-27, as built).
+- No auto-select of the newest chat.
+
+**AS4.4 Turns in the panel**
+- `AnswerMarkdown` takes `{text}` only.
+- Code renders through `Markdown` fenced blocks; `CodeBlock` is private.
+- A send with no chat creates one first and starts the turn when it is selected.
+- `applyEvent` sets the trace id on `start`.
+- The error notice is panel state.
+
+**AS4.5 Drafts and Apply**
+- The dashboard edit-draft take is its own effect, after the reset effect. Merging them would reset an open session whenever `canEdit` changes.
+- `initialTemplateId` is ignored inside `EvaluatorForm`.
+- `fenced` lives in `draft-card.tsx`.
+- The filter Apply test asserts the location, not the filter field.
+
+**AS4.6 Rust e2e**
+- No time window on the turn-trace lookup, as in the playground e2e.
+
+**AS4.7 Docs and screenshots**
+- `web/src/mocks/assistant.ts` needed no change.
+
+**AS4.8 Closeout (this phase)**
+- D-AS-29 as built: the page kind shows as a chip that cannot be removed; every other field is a removable chip. The plan's text said every field except `page` is a chip, which the code does not do. Spec 11 and the decision rows follow the code.
+- D-AS-27 as built: on narrow screens (sheet mode) Esc closes the sheet; on wide screens Esc only blurs. The plan's text said Esc never closes the panel. Spec 11 and the decision rows follow the code.
+- The roadmap AS row says "**Done** (PR #182)" as the plan's AS4.8 step 4 specifies. The milestone check (screenshots, `just check`, `just e2e`) has not run yet.
