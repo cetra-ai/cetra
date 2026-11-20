@@ -1,18 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage } from "@/api/problem";
+import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
 import { connectionsInit } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { MessageEditor } from "@/components/playground/message-editor";
+import { RecentRuns, RUNS_PATH } from "@/components/playground/recent-runs";
 import {
   IDLE_RUN,
   RunColumn,
   type RunState,
   applyRunEvent,
 } from "@/components/playground/run-column";
+import { SaveDialog } from "@/components/playground/save-dialog";
 import { SettingsPanel } from "@/components/playground/settings-panel";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
@@ -24,19 +29,21 @@ import {
   type Entry,
   type Message,
   blockedMessages,
+  draftFromSpan,
   emptyDraft,
   loadDraft,
   runPlayground,
   saveDraft,
   toRunRequest,
 } from "@/lib/playground";
-import { canRunPlayground } from "@/lib/roles";
+import { VIEWER_REASON as PROMPT_EDIT_REASON } from "@/lib/prompts";
+import { canManagePrompts, canRunPlayground } from "@/lib/roles";
 import { hexId } from "@/lib/shortcuts";
 import { uuidv7 } from "@/lib/uuid";
 
 type Connection = Schema<"LlmConnection">;
 
-/** The search params of the page. The sources they name are loaded in a later step. */
+/** The search params of the page. `prompt`/`version`, `trace`/`span` are loaded in a later step. */
 type PlaygroundSearch = {
   prompt?: string;
   version?: number;
@@ -128,6 +135,94 @@ function initialDraft(key: string, connections: readonly Connection[]): Draft {
   };
 }
 
+const RUN_OPEN_FAILED = "Could not open the run.";
+/** The run's metadata key that names where its draft came from (D-V-22). */
+const RUN_SOURCE_KEY = "cetra.playground.source";
+const PROMPT_SOURCE = /^prompt:(.+)@(\d+)$/;
+const SPAN_SOURCE = /^span:([0-9a-f]{32}):([0-9a-f]{16})$/;
+
+/**
+ * A run's source from its metadata: `prompt:<name>@<version>` or `span:<trace>:<span>`. Any other
+ * value is no source.
+ */
+function sourceOfRun(value: string | undefined): Draft["source"] {
+  const prompt = value === undefined ? null : PROMPT_SOURCE.exec(value);
+  if (prompt !== null) {
+    const [, name = "", digits = ""] = prompt;
+    const version = Number(digits);
+    return name !== "" && Number.isSafeInteger(version) && version >= 1
+      ? { prompt: { name, version } }
+      : undefined;
+  }
+  const span = value === undefined ? null : SPAN_SOURCE.exec(value);
+  if (span !== null) {
+    const [, traceId = "", spanId = ""] = span;
+    return { span: { trace_id: traceId, span_id: spanId } };
+  }
+  return undefined;
+}
+
+/**
+ * A past run's span as a draft (D-V-38). The column's connection is the one whose adapter matches
+ * the span's provider, else the first. The draft's source is the run's own source, not this span.
+ */
+function draftFromRun(span: Schema<"SpanDetail">, connections: readonly Connection[]): Draft {
+  const adapter = span.provider === "gcp.gemini" ? "gemini" : span.provider;
+  const connection = connections.find((item) => item.adapter === adapter) ?? connections[0];
+  const { source: _spanSource, ...draft } = draftFromSpan(span, connection?.id);
+  const source = sourceOfRun(span.metadata[RUN_SOURCE_KEY]);
+  return source === undefined ? draft : { ...draft, source };
+}
+
+/** A draft with no text, variables, placeholders or settings: replacing it asks nothing. */
+function isBlankDraft(draft: Draft): boolean {
+  return (
+    draft.entries.every(
+      (entry) =>
+        "parts" in entry &&
+        entry.parts.every((part) => part.type === "text" && "content" in part && part.content === ""),
+    ) &&
+    Object.keys(draft.variables).length === 0 &&
+    Object.keys(draft.placeholders).length === 0 &&
+    draft.tools === "" &&
+    draft.toolChoice === "" &&
+    draft.responseFormat === "" &&
+    draft.columns.length === 1 &&
+    draft.columns.every(
+      (column) => column.model === "" && column.temperature === "" && column.maxTokens === "",
+    )
+  );
+}
+
+/** Loads a past run: its trace's `llm` span, then that span's detail, as a draft (D-V-38). */
+async function loadRun(
+  queryClient: QueryClient,
+  org: string,
+  project: string,
+  traceId: string,
+  connections: readonly Connection[],
+): Promise<Draft> {
+  const trace = await queryClient.fetchQuery(traceDetailQuery(org, project, traceId));
+  const llm = trace.spans.find((row) => row.span.span_kind === "llm");
+  if (llm === undefined) {
+    throw new Error("The run has no LLM span.");
+  }
+  const span = await queryClient.fetchQuery(
+    spanDetailQuery(org, project, traceId, llm.span.span_id),
+  );
+  return draftFromRun(span, connections);
+}
+
+/** The line that says where the draft came from, or `undefined` for a draft from scratch. */
+function sourceText(source: Draft["source"]): string | undefined {
+  if (source === undefined) {
+    return undefined;
+  }
+  return "prompt" in source
+    ? `From prompt ${source.prompt.name} v${source.prompt.version}`
+    : "From a span";
+}
+
 function messageIndexOf(field: string): number | undefined {
   const match = /^messages\[(\d+)\]/.exec(field);
   return match ? Number(match[1]) : undefined;
@@ -167,6 +262,59 @@ function PlaygroundWorkspace({
   const [runs, setRuns] = useState<Record<string, RunState>>({});
   const controllers = useRef(new Map<string, AbortController>());
   const pendingSave = useRef<Draft | undefined>(undefined);
+  const { org, project, data } = useProject();
+  const queryClient = useQueryClient();
+  const navigate = Route.useNavigate();
+  const search = Route.useSearch();
+  const canManage = canManagePrompts(data.role);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [recentOpen, setRecentOpen] = useState(false);
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | undefined>();
+  // A run loaded over a draft with content waits here for the user's yes to replace it.
+  const [replacing, setReplacing] = useState<Draft | undefined>();
+  const loadedRun = useRef<string | undefined>(undefined);
+  const draftRef = useRef(draft);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
+
+  // `?run=` opens a past run once. The guard keeps StrictMode and the removal of `run` from the URL
+  // from loading it again; removing it keeps the draft's source (D-V-38).
+  useEffect(() => {
+    const runId = search.run;
+    if (runId === undefined) {
+      loadedRun.current = undefined;
+      return;
+    }
+    if (loadedRun.current === runId) {
+      return;
+    }
+    loadedRun.current = runId;
+    setOpening(true);
+    setOpenError(undefined);
+    void loadRun(queryClient, org, project, runId, connections)
+      .then(
+        (next) => {
+          if (isBlankDraft(draftRef.current)) {
+            setDraft(next);
+          } else {
+            setReplacing(next);
+          }
+        },
+        (error: unknown) => {
+          setOpenError(problemMessage(error, RUN_OPEN_FAILED));
+        },
+      )
+      .finally(() => {
+        setOpening(false);
+        void navigate({
+          search: (previous) => ({ ...previous, run: undefined }),
+          replace: true,
+        });
+      });
+  }, [search.run, queryClient, org, project, connections, navigate]);
 
   // The draft is saved 500 ms after the last change, and at unmount and page hide.
   const flush = useCallback(() => {
@@ -295,6 +443,12 @@ function PlaygroundWorkspace({
         if (isCurrent()) {
           setRun(column.id, (run) => applyRunEvent(run, event));
         }
+        // A finished run is a trace now: the recent runs list is stale.
+        if (event.event === "done" || event.event === "error") {
+          void queryClient.invalidateQueries({
+            predicate: (query) => query.queryKey[1] === RUNS_PATH,
+          });
+        }
       },
     }).then(
       () => {
@@ -351,6 +505,27 @@ function PlaygroundWorkspace({
               </Button>
             </DisabledReason>
           )}
+          <DisabledReason reason={canManage ? undefined : PROMPT_EDIT_REASON}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={!canManage}
+              onClick={() => {
+                setSaveOpen(true);
+              }}
+            >
+              Save as new version…
+            </Button>
+          </DisabledReason>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => {
+              setRecentOpen(true);
+            }}
+          >
+            Recent runs
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -362,6 +537,15 @@ function PlaygroundWorkspace({
         </div>
       </div>
       <FormError message={formError} />
+      {sourceText(draft.source) === undefined ? null : (
+        <p className="text-caption text-muted-foreground">{sourceText(draft.source)}</p>
+      )}
+      {opening ? (
+        <p role="status" className="text-caption text-muted-foreground">
+          Opening the run…
+        </p>
+      ) : null}
+      <FormError message={openError} />
       <ResizablePanelGroup id="playground-split" orientation="horizontal" className="min-h-0 flex-1">
         <ResizablePanel id="playground-editor" defaultSize="40%" minSize="25%" className="min-h-0">
           <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-3">
@@ -412,6 +596,31 @@ function PlaygroundWorkspace({
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+      <SaveDialog
+        open={saveOpen}
+        onOpenChange={setSaveOpen}
+        draft={draft}
+        connections={connections}
+      />
+      <RecentRuns open={recentOpen} onOpenChange={setRecentOpen} />
+      <ConfirmDialog
+        open={replacing !== undefined}
+        onOpenChange={(next) => {
+          if (!next) {
+            setReplacing(undefined);
+          }
+        }}
+        title="Replace the current draft?"
+        description="The messages and settings on this page are replaced by the run's."
+        confirmLabel="Replace draft"
+        pending={false}
+        onConfirm={() => {
+          if (replacing !== undefined) {
+            setDraft(replacing);
+          }
+          setReplacing(undefined);
+        }}
+      />
     </div>
   );
 }
