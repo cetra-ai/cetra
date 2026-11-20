@@ -221,6 +221,42 @@ mod tests {
     }
 
     #[test]
+    fn gemini_conversion_failure_keeps_the_generic_result() {
+        let llm_attributes = || {
+            vec![kv(
+                "gen_ai.input.messages",
+                s(r#"{"role":"user","parts":[{"text":"not a list"}]}"#),
+            )]
+        };
+        let agent = run(
+            &gemini(vec![span("llm_call", llm_attributes(), vec![])]),
+            &AgentContexts::default(),
+        );
+        let generic = run(
+            &request("app", "", vec![span("llm_call", llm_attributes(), vec![])]),
+            &AgentContexts::default(),
+        );
+        assert_eq!(agent.spans[0].input, generic.spans[0].input);
+        assert_eq!(agent.spans[0].input_format, generic.spans[0].input_format);
+    }
+
+    #[test]
+    fn gemini_tool_call_non_json_text_is_text() {
+        let tool = span(
+            "tool_call",
+            vec![
+                kv("gen_ai.tool.name", s("grep")),
+                kv("gen_ai.input.messages", s("list files")),
+            ],
+            vec![],
+        );
+        let normalized = run(&gemini(vec![tool]), &AgentContexts::default());
+        let span = &normalized.spans[0];
+        assert_eq!(span.input.as_deref(), Some("list files"));
+        assert_eq!(span.input_format, Some(PayloadFormat::Text));
+    }
+
+    #[test]
     fn gemini_process_attributes_are_dropped() {
         let mut request = gemini(vec![span("llm_call", vec![], vec![])]);
         let resource = request.resource_spans[0]

@@ -106,7 +106,7 @@ The first rule that matches wins.
 | Agent | Detected when (verified by the M1 spike on 2026-11-20, research § 6) |
 |---|---|
 | Claude Code | the span name starts with `claude_code.` (resource `service.name = claude-code`, scope `com.anthropic.claude_code.tracing`) |
-| Codex | the resource `service.name` starts with `codex` (`codex_exec` for `codex exec`; the interactive name is unverified) |
+| Codex | the resource `service.name` is `codex` or starts with `codex_` (`codex_exec` for `codex exec`; the interactive name is unverified) |
 | Gemini CLI | `gen_ai.agent.name = gemini-cli`, or the resource `service.name` is `gemini-cli` |
 | Copilot | the scope name starts with `github.copilot` or `copilot`, the resource `service.name` is `github-copilot` or `copilot-chat`, or any attribute key starts with `github.copilot.` (it still matches when a user renames `OTEL_SERVICE_NAME`) |
 

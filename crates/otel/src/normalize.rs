@@ -258,14 +258,7 @@ fn accept_span(
         None => span_kind(&mut bag),
     };
     let mut fields = fill(&mut bag, &resource.view, &mut warnings);
-    agents::context(
-        agent,
-        &span.name,
-        &span.attributes,
-        &mut bag,
-        &mut fields,
-        batch.agents,
-    );
+    agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);
     let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
         Some(counted) => counted,
         None => usage(

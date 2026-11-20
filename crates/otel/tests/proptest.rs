@@ -79,6 +79,10 @@ const PROMOTED: &[&str] = &[
     "cetra.release",
     "langfuse.release",
     "lmnr.span.release",
+];
+
+/// Coding-agent keys. Only the random key pick draws them; the over-limit strategy does not.
+const AGENT_KEYS: &[&str] = &[
     "codex.tool.phase",
     "tool_name",
     "turn.id",
@@ -215,7 +219,7 @@ fn key() -> impl Strategy<Value = String> {
         2 => Just("output.value".to_owned()),
         2 => Just(SENTINEL.to_owned()),
         2 => "[a-zA-Z0-9._]{1,24}",
-        4 => prop::sample::select(PROMOTED).prop_map(str::to_owned),
+        4 => prop::sample::select([PROMOTED, AGENT_KEYS].concat()).prop_map(str::to_owned),
     ]
 }
 

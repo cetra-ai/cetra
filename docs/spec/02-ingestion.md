@@ -227,14 +227,14 @@ Claude Code, Codex CLI, Gemini CLI and GitHub Copilot write their spans in their
 **Detection.** The first rule that matches wins. It reads the raw attributes, before any convention:
 
 1. A span name that starts with `claude_code.` is Claude Code.
-2. A resource `service.name` that starts with `codex` is Codex.
+2. A resource `service.name` that is `codex`, or starts with `codex_`, is Codex.
 3. `gen_ai.agent.name` equal to `gemini-cli`, or a `service.name` of `gemini-cli`, is Gemini CLI.
 4. A scope name that starts with `github.copilot` or `copilot`, a `service.name` of `github-copilot` or `copilot-chat`, or any attribute key that starts with `github.copilot.`, is Copilot.
 5. Otherwise the span is not a coding-agent span, and no rule below applies.
 
 **Codex discard.** Codex exports every internal `tracing` span of the process, about 700 for a one-tool prompt. A Codex span is kept only when it is `session_task.turn`, or when `codex.tool.phase` is `dispatch` and `tool_name` is a non-empty string. Every other Codex span is discarded before the id and time checks, so it is never counted as rejected. `normalize` counts it in `Normalized.discarded`. It is neither stored nor rejected, it does not appear in `partial_success`, and it is not a unit.
 
-**Re-link.** Codex's kept spans lose their real parents, so they are re-linked by rule (D-CA-6). `relink(turn id)` is the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ turn id), and when that is all zeros, its last byte is set to 1. The turn id is `turn.id`, else `turn_id`. The turn span takes `relink(turn id)` as its `span_id` and has no parent. A kept dispatch takes `relink(turn id)` as its parent and, when the turn id is known, takes its tool name. Without a turn id, nothing is re-linked.
+**Re-link.** Codex's kept spans lose their real parents, so they are re-linked by rule (D-CA-6). `relink(turn id)` is the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ turn id), and when that is all zeros, its last byte is set to 1. The turn id is `turn.id`, else `turn_id`. With a turn id, the turn span takes `relink(turn id)` as its `span_id` and has no parent, and a kept dispatch takes `relink(turn id)` as its parent. Without a turn id, nothing is re-linked: the ids and parents are kept. A kept dispatch takes its tool name in every case, with or without a turn id (§ Names).
 
 **Span kinds.** When an agent decides the kind, the generic `cetra.span.kind` is not read on that span. A span name the agent does not list uses the generic mapping.
 
@@ -286,7 +286,7 @@ Redacted content is no content. The placeholders `<REDACTED>` and `[REDACTED]` i
 
 Copilot has no session context. Its `enduser.pseudo.id` is the last source in the generic `user_id` list (§ Context fields), so it fills `user_id` when no other source does.
 
-**Session ids.** A Codex turn takes its first non-empty string `thread.id`, then `conversation.id`. An integer `thread.id` is the OS thread and is ignored. Any other Codex span takes `conversation.id`, then `thread.id` by the same rule. Gemini CLI and Claude Code use the generic `session_id` sources. The Codex request model is `model`, when no other source gives one.
+**Session ids.** A Codex span, the turn or any other kept span, takes `conversation.id`, else its first non-empty string `thread.id`. An integer `thread.id` is the OS thread and is ignored. Gemini CLI and Claude Code use the generic `session_id` sources. The Codex request model is `model`, when no other source gives one.
 
 **Metadata (D-CA-4).** Each coding-agent span gets `coding_agent`, one of `claude-code`, `codex`, `gemini-cli` or `copilot`. It also gets, when there is a value:
 

@@ -10,13 +10,15 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 use serde_json::{Map, Value as Json};
 
 use super::key::{BRANCH, REPOSITORY};
-use super::{AgentContexts, Finish, SPAN_NAME_ATTRIBUTE, is_redacted};
+use super::{
+    AgentContexts, Finish, count, is_redacted, rename_tool, set_input, set_output, take_text,
+};
 use crate::bag::AttrBag;
 use crate::context::ContextFields;
 use crate::payload::{Assembled, Payload};
 use crate::usage::{Usage, read_millis, take};
-use crate::value::{InvalidNumber, as_i64, as_str, to_json};
-use crate::warn::{Warning, Warnings};
+use crate::value::{as_str, to_json};
+use crate::warn::Warnings;
 
 const WIRE_NAME: &str = "claude-code";
 
@@ -71,22 +73,6 @@ pub(crate) fn usage(
     })
 }
 
-/// A non-negative count. A negative or non-numeric value is invalid (rule 20) and stays unread.
-fn count(bag: &mut AttrBag<'_>, name: &str, warnings: &mut Warnings) -> Option<i64> {
-    let value = bag.get(name)?;
-    match as_i64(value) {
-        Ok(Some(number)) if number >= 0 => {
-            bag.take(name);
-            Some(number)
-        }
-        Ok(Some(_)) | Err(InvalidNumber) => {
-            warnings.add(Warning::InvalidNumber);
-            None
-        }
-        Ok(None) => None,
-    }
-}
-
 /// `ttft_ms`, in milliseconds.
 pub(crate) fn ttft(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> Option<i64> {
     take(bag, "ttft_ms", warnings, read_millis)
@@ -114,8 +100,10 @@ pub(crate) fn context(bag: &mut AttrBag<'_>, fields: &mut ContextFields, agents:
     let repository = stored
         .and_then(|context| context.repository.clone())
         .or_else(|| {
-            take_text(bag, "vcs.repository.url.full")
-                .and_then(|url| super::canonical_repository(&url))
+            let url = bag.get("vcs.repository.url.full").and_then(as_str)?;
+            let canonical = super::canonical_repository(url)?;
+            bag.take("vcs.repository.url.full");
+            Some(canonical)
         });
     let branch = stored.and_then(|context| context.branch.clone());
 
@@ -128,18 +116,6 @@ pub(crate) fn context(bag: &mut AttrBag<'_>, fields: &mut ContextFields, agents:
     if let Some(branch) = branch {
         fields.metadata.insert(BRANCH.to_owned(), branch);
     }
-}
-
-/// A trimmed, non-empty string. It is taken when it is returned.
-fn take_text(bag: &mut AttrBag<'_>, name: &str) -> Option<String> {
-    let text = bag
-        .get(name)
-        .and_then(as_str)
-        .map(str::trim)
-        .filter(|text| !text.is_empty())?
-        .to_owned();
-    bag.take(name);
-    Some(text)
 }
 
 /// Interaction prompts become the input, and tool details and output become the tool's
@@ -219,20 +195,6 @@ fn tool_output(events: &[Event], assembled: &mut Assembled) {
     }
 }
 
-/// Sets the input and drops the convention's input error, which no longer applies.
-fn set_input(assembled: &mut Assembled, payload: Payload) {
-    assembled.io.input = Some(payload);
-    assembled.io.errors.retain(|code| !code.ends_with(":input"));
-}
-
-fn set_output(assembled: &mut Assembled, payload: Payload) {
-    assembled.io.output = Some(payload);
-    assembled
-        .io
-        .errors
-        .retain(|code| !code.ends_with(":output"));
-}
-
 /// The tool's name, from `gen_ai.tool.name`, else `tool_name`. Peeked, not taken.
 pub(crate) fn tool_name(bag: &AttrBag<'_>) -> Option<String> {
     ["gen_ai.tool.name", "tool_name"]
@@ -250,16 +212,9 @@ pub(crate) fn finish(span_name: &str, inputs: &Finish, built: &mut Span) {
     if span_name != "claude_code.tool" {
         return;
     }
-    let Some(name) = inputs.tool_name.as_deref() else {
-        return;
-    };
-    if built.name == name {
-        return;
+    if let Some(name) = inputs.tool_name.as_deref() {
+        rename_tool(built, name);
     }
-    let original = std::mem::replace(&mut built.name, name.to_owned());
-    built
-        .attributes
-        .insert(SPAN_NAME_ATTRIBUTE.to_owned(), original);
 }
 
 #[cfg(test)]
@@ -555,6 +510,37 @@ mod tests {
         );
         let normalized = run(&request, &AgentContexts::default());
         assert!(!normalized.spans[0].metadata.contains_key("coding_agent"));
+    }
+
+    #[test]
+    fn claude_invalid_token_count_warns_and_stays() {
+        let request = llm_request(vec![kv("input_tokens", i(-5)), kv("output_tokens", i(3))]);
+        let normalized = run(&request, &AgentContexts::default());
+        let span = &normalized.spans[0];
+        assert_eq!(span.input_tokens, None);
+        assert_eq!(span.output_tokens, Some(3));
+        assert!(
+            span.attributes
+                .get(cetra_core::names::metadata_key::NORMALIZE_WARNING)
+                .is_some_and(|warning| warning.contains("invalid_number"))
+        );
+        assert!(span.attributes.contains_key("input_tokens"));
+    }
+
+    #[test]
+    fn claude_redacted_tool_output_is_dropped() {
+        let request = claude(vec![span(
+            "claude_code.tool",
+            vec![
+                kv("gen_ai.tool.name", s("Bash")),
+                kv("full_command", s("echo hello")),
+            ],
+            vec![event("tool.output", vec![kv("output", s("<REDACTED>"))])],
+        )]);
+        let normalized = run(&request, &AgentContexts::default());
+        let span = &normalized.spans[0];
+        assert_eq!(span.output, None);
+        assert!(span.events.is_empty());
     }
 
     #[test]

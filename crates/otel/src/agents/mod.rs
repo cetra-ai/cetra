@@ -177,7 +177,7 @@ pub(crate) fn detect_agent(
     if span_name.starts_with("claude_code.") {
         return Some(CodingAgent::ClaudeCode);
     }
-    if service_name.is_some_and(|name| name.starts_with("codex")) {
+    if service_name.is_some_and(|name| name == "codex" || name.starts_with("codex_")) {
         return Some(CodingAgent::Codex);
     }
     let gemini_by_attribute =
@@ -247,7 +247,6 @@ pub(crate) fn kind(agent: Option<CodingAgent>, span_name: &str) -> Option<SpanKi
 /// The D-CA-4 metadata, and the session context's person, repository and branch (D-CA-5, D-CA-9).
 pub(crate) fn context(
     agent: Option<CodingAgent>,
-    span_name: &str,
     attributes: &[KeyValue],
     bag: &mut AttrBag<'_>,
     fields: &mut ContextFields,
@@ -261,7 +260,7 @@ pub(crate) fn context(
         .insert(key::CODING_AGENT.to_owned(), agent.wire_name().to_owned());
     match agent {
         CodingAgent::ClaudeCode => claude_code::context(bag, fields, agents),
-        CodingAgent::Codex => codex::context(span_name, attributes, bag, fields, agents),
+        CodingAgent::Codex => codex::context(attributes, bag, fields, agents),
         CodingAgent::GeminiCli => gemini_cli::context(fields, agents),
         CodingAgent::Copilot => copilot::context(bag, fields),
     }
@@ -483,6 +482,20 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn codex_detection_needs_the_prefix() {
+        let none: &[KeyValue] = &[];
+        assert_eq!(
+            detect_agent(Some("codex"), None, "x", none),
+            Some(CodingAgent::Codex)
+        );
+        assert_eq!(
+            detect_agent(Some("codex_exec"), None, "x", none),
+            Some(CodingAgent::Codex)
+        );
+        assert_eq!(detect_agent(Some("codexample"), None, "x", none), None);
     }
 
     #[test]

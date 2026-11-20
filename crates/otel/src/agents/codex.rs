@@ -55,22 +55,17 @@ pub(crate) fn turn_id(bag: &AttrBag<'_>) -> Option<String> {
 
 /// D-CA-6 session id, then the session context (D-CA-5 rank 2, D-CA-9).
 ///
-/// The turn takes its first non-empty string `thread.id`, because the bag keeps only the
-/// last duplicate. An integer `thread.id` is the OS thread and is ignored. The other spans
-/// take `conversation.id`. Each falls back to the other id when its own is absent.
-/// `model` becomes the request model when no other source set it.
+/// Every kept span takes `conversation.id`, else its first non-empty string `thread.id`. The
+/// bag keeps only the last duplicate, so `thread_id` reads the attributes itself. An integer
+/// `thread.id` is the OS thread and is ignored. `model` becomes the request model when no
+/// other source set it.
 pub(crate) fn context(
-    span_name: &str,
     attributes: &[KeyValue],
     bag: &mut AttrBag<'_>,
     fields: &mut ContextFields,
     agents: &AgentContexts,
 ) {
-    let session = if span_name == TURN {
-        thread_id(bag, attributes).or_else(|| take_text(bag, "conversation.id"))
-    } else {
-        take_text(bag, "conversation.id").or_else(|| thread_id(bag, attributes))
-    };
+    let session = take_text(bag, "conversation.id").or_else(|| thread_id(bag, attributes));
     if session.is_some() {
         fields.session_id = session;
     }
@@ -131,18 +126,20 @@ fn tokens(bag: &mut AttrBag<'_>, name: &str, warnings: &mut Warnings) -> Option<
     count(bag, &format!("{TOKENS}{name}"), warnings)
 }
 
-/// D-CA-6 re-link. The turn gets the turn's id and no parent. A kept dispatch hangs under its
-/// turn, and takes the tool's name when a turn id is known.
+/// D-CA-6 re-link. With a turn id, the turn gets it as its id and no parent, and a kept
+/// dispatch hangs under its turn. Without one, the ids are kept. A kept dispatch takes the
+/// tool's name in every case; the turn keeps its name.
 pub(crate) fn finish(span_name: &str, inputs: &Finish, built: &mut Span) {
-    let Some(turn) = inputs.turn_id.as_deref() else {
-        return;
-    };
     if span_name == TURN {
-        built.span_id = relink(turn);
-        built.parent_span_id = None;
+        if let Some(turn) = inputs.turn_id.as_deref() {
+            built.span_id = relink(turn);
+            built.parent_span_id = None;
+        }
         return;
     }
-    built.parent_span_id = Some(relink(turn));
+    if let Some(turn) = inputs.turn_id.as_deref() {
+        built.parent_span_id = Some(relink(turn));
+    }
     if let Some(name) = inputs.tool_name.as_deref() {
         rename_tool(built, name);
     }
@@ -310,6 +307,73 @@ mod tests {
         assert_eq!(
             span.metadata.get("branch").map(String::as_str),
             Some("main")
+        );
+    }
+
+    #[test]
+    fn codex_dispatch_without_phase_or_name_is_discarded() {
+        let other_phase = span(
+            "exec_command",
+            vec![
+                kv("tool_name", s("exec_command")),
+                kv("codex.tool.phase", s("other")),
+            ],
+            vec![],
+        );
+        let empty_name = span(
+            "exec_command",
+            vec![
+                kv("tool_name", s("")),
+                kv("codex.tool.phase", s("dispatch")),
+            ],
+            vec![],
+        );
+        let normalized = run(
+            &codex(vec![other_phase, empty_name]),
+            &AgentContexts::default(),
+        );
+        assert!(normalized.spans.is_empty());
+        assert_eq!(normalized.discarded, 2);
+        assert_eq!(normalized.rejections.total(), 0);
+    }
+
+    #[test]
+    fn codex_turn_id_fallback_relinks() {
+        let turn = span("session_task.turn", vec![kv("turn_id", s("t1"))], vec![]);
+        let mut tool = span(
+            "exec_command",
+            vec![
+                kv("tool_name", s("exec_command")),
+                kv("codex.tool.phase", s("dispatch")),
+                kv("turn_id", s("t1")),
+            ],
+            vec![],
+        );
+        tool.span_id = vec![0x33; 8];
+        let normalized = run(&codex(vec![turn, tool]), &AgentContexts::default());
+        let turn = &normalized.spans[0];
+        assert_eq!(turn.span_id, relink("t1"));
+        assert_eq!(turn.parent_span_id, None);
+        assert_eq!(normalized.spans[1].parent_span_id, Some(relink("t1")));
+    }
+
+    #[test]
+    fn codex_dispatch_without_turn_id_is_renamed_not_reparented() {
+        let tool = span(
+            "handle_tool",
+            vec![
+                kv("tool_name", s("exec_command")),
+                kv("codex.tool.phase", s("dispatch")),
+            ],
+            vec![],
+        );
+        let normalized = run(&codex(vec![tool]), &AgentContexts::default());
+        let span = &normalized.spans[0];
+        assert_eq!(span.parent_span_id, None);
+        assert_eq!(span.name, "exec_command");
+        assert_eq!(
+            span.attributes.get("cetra.span_name").map(String::as_str),
+            Some("handle_tool")
         );
     }
 
