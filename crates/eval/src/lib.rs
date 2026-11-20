@@ -34,7 +34,10 @@ pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,
 };
-pub use egress::{EgressClient, EgressPolicy, EgressRequest, EgressResponse, identity_http_client};
+pub use egress::{
+    EgressClient, EgressPolicy, EgressRequest, EgressResponse, EgressStream, EgressStreamRequest,
+    identity_http_client,
+};
 pub use error::{
     CheckError, ConfigError, EgressError, ErrorClass, EvalError, JudgeError, MappingError,
     TemplateError, WebhookError,
@@ -70,6 +73,9 @@ mod modes_tests;
 #[cfg(test)]
 #[path = "../tests/openai.rs"]
 mod openai_tests;
+#[cfg(test)]
+#[path = "../tests/support/stream.rs"]
+mod stream_server;
 #[cfg(test)]
 #[path = "../tests/webhook.rs"]
 mod webhook_tests;

@@ -71,6 +71,46 @@ pub struct EgressResponse {
     pub body: Bytes,
 }
 
+/// One streamed POST. The caller owns the URL, both timeouts, and the body cap.
+#[derive(Debug)]
+pub struct EgressStreamRequest<'a> {
+    /// Destination. Only http and https are allowed.
+    pub url: &'a Url,
+    /// Extra request headers, in order.
+    pub headers: Vec<(HeaderName, HeaderValue)>,
+    /// Request body, sent as is.
+    pub body: Vec<u8>,
+    /// Whole-request timeout, from connecting to the last body byte.
+    pub timeout: Duration,
+    /// Longest wait for the response head, and between two body chunks.
+    pub idle_timeout: Duration,
+    /// More body bytes than this fail with [`EgressError::TooLarge`].
+    pub max_response_bytes: usize,
+}
+
+/// A response whose body is read chunk by chunk. Dropping it closes the connection.
+///
+/// [`Debug`](std::fmt::Debug) is hand-written: `reqwest::Response`'s prints the URL.
+pub struct EgressStream {
+    status: StatusCode,
+    response: reqwest::Response,
+    host: String,
+    idle_timeout: Duration,
+    max_response_bytes: usize,
+    read: usize,
+}
+
+impl fmt::Debug for EgressStream {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EgressStream")
+            .field("status", &self.status)
+            .field("host", &self.host)
+            .field("read", &self.read)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A client for an identity provider an org registered (D-P-53): the same guarded
 /// resolver as [`EgressClient`], no redirects, no proxy, rustls, a 10 s whole-request timeout.
 ///
@@ -125,26 +165,12 @@ impl EgressClient {
     /// [`EgressError::Request`]. Their text is not the client error's `Display`,
     /// which contains the URL.
     pub async fn post(&self, req: EgressRequest<'_>) -> Result<EgressResponse, EgressError> {
-        if self.policy.restore_mode {
-            return Err(EgressError::RestoreMode);
-        }
-        if req.url.scheme() != "http" && req.url.scheme() != "https" {
-            return Err(EgressError::Scheme);
-        }
-        let host = host_label(req.url);
-        if !self.policy.allows_url(req.url) {
-            return Err(EgressError::Denied { host });
-        }
-
-        let mut builder = self
-            .http
-            .post(req.url.clone())
-            .timeout(req.timeout)
-            .body(req.body);
-        for (name, value) in req.headers {
-            builder = builder.header(name, value);
-        }
-        let response = builder.send().await.map_err(|err| classify(&err, &host))?;
+        let host = self.guard(req.url)?;
+        let response = self
+            .builder(req.url, req.headers, req.body, req.timeout)
+            .send()
+            .await
+            .map_err(|err| classify(&err, &host))?;
 
         let status = response.status();
         let mut response = response;
@@ -169,6 +195,113 @@ impl EgressClient {
             status,
             body: Bytes::from(collected),
         })
+    }
+
+    /// POSTs `req` and returns once the response head arrives. The body is read with
+    /// [`EgressStream::next_chunk`].
+    ///
+    /// # Errors
+    ///
+    /// The same refusals as [`Self::post`]. [`EgressError::Timeout`] when the head takes
+    /// longer than `idle_timeout` or `timeout`.
+    pub async fn post_stream(
+        &self,
+        req: EgressStreamRequest<'_>,
+    ) -> Result<EgressStream, EgressError> {
+        let host = self.guard(req.url)?;
+        let send = self
+            .builder(req.url, req.headers, req.body, req.timeout)
+            .send();
+        match tokio::time::timeout(req.idle_timeout, send).await {
+            Err(_) => Err(EgressError::Timeout),
+            Ok(Err(err)) => Err(classify(&err, &host)),
+            Ok(Ok(response)) => Ok(EgressStream {
+                status: response.status(),
+                response,
+                host,
+                idle_timeout: req.idle_timeout,
+                max_response_bytes: req.max_response_bytes,
+                read: 0,
+            }),
+        }
+    }
+
+    /// Restore mode, the scheme, and literal addresses (D166). Returns the host label.
+    fn guard(&self, url: &Url) -> Result<String, EgressError> {
+        if self.policy.restore_mode {
+            return Err(EgressError::RestoreMode);
+        }
+        if url.scheme() != "http" && url.scheme() != "https" {
+            return Err(EgressError::Scheme);
+        }
+        let host = host_label(url);
+        if !self.policy.allows_url(url) {
+            return Err(EgressError::Denied { host });
+        }
+        Ok(host)
+    }
+
+    fn builder(
+        &self,
+        url: &Url,
+        headers: Vec<(HeaderName, HeaderValue)>,
+        body: Vec<u8>,
+        timeout: Duration,
+    ) -> reqwest::RequestBuilder {
+        let mut builder = self.http.post(url.clone()).timeout(timeout).body(body);
+        for (name, value) in headers {
+            builder = builder.header(name, value);
+        }
+        builder
+    }
+}
+
+impl EgressStream {
+    /// HTTP status of the response.
+    #[must_use]
+    pub fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// The next body chunk, or `None` at the end of the body.
+    ///
+    /// # Errors
+    ///
+    /// [`EgressError::Timeout`] when no chunk arrives within the idle timeout or the
+    /// whole-request timeout ends, [`EgressError::TooLarge`] when the body passes the cap,
+    /// and the other client failures as in [`EgressClient::post`].
+    pub async fn next_chunk(&mut self) -> Result<Option<Bytes>, EgressError> {
+        match tokio::time::timeout(self.idle_timeout, self.response.chunk()).await {
+            Err(_) => Err(EgressError::Timeout),
+            Ok(Err(err)) => Err(classify(&err, &self.host)),
+            Ok(Ok(None)) => Ok(None),
+            Ok(Ok(Some(chunk))) => {
+                self.read = self.read.saturating_add(chunk.len());
+                if self.read > self.max_response_bytes {
+                    return Err(EgressError::TooLarge {
+                        limit: self.max_response_bytes,
+                    });
+                }
+                Ok(Some(chunk))
+            }
+        }
+    }
+
+    /// Reads the rest of the body. At most `max_bytes` (and the stream's own cap).
+    ///
+    /// # Errors
+    ///
+    /// [`EgressError::TooLarge`] with `limit: max_bytes` when the body passes `max_bytes`,
+    /// and the errors of [`Self::next_chunk`].
+    pub async fn read_to_end(mut self, max_bytes: usize) -> Result<Bytes, EgressError> {
+        let mut collected = Vec::new();
+        while let Some(chunk) = self.next_chunk().await? {
+            if collected.len().saturating_add(chunk.len()) > max_bytes {
+                return Err(EgressError::TooLarge { limit: max_bytes });
+            }
+            collected.extend_from_slice(&chunk);
+        }
+        Ok(Bytes::from(collected))
     }
 }
 
@@ -350,8 +483,12 @@ mod tests {
     use axum::response::{IntoResponse, Response};
     use reqwest::Url;
 
-    use super::{EgressClient, EgressPolicy, EgressRequest, identity_http_client, is_denied};
+    use super::{
+        EgressClient, EgressPolicy, EgressRequest, EgressStream, EgressStreamRequest,
+        identity_http_client, is_denied,
+    };
     use crate::error::{EgressError, assert_no_payload};
+    use crate::stream_server::{Step, StreamReply, StreamServer};
 
     const PLANTED: &str = "SECRET-PAYLOAD";
 
@@ -647,6 +784,285 @@ mod tests {
             .await
             .expect_err("restore mode resolves no name");
         assert_eq!(mock.hits(), 0);
+    }
+
+    #[tokio::test]
+    async fn post_stream_yields_chunks_in_order() {
+        let server = StreamServer::start().await;
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::ZERO,
+            steps: vec![
+                Step::Send(b"a".to_vec()),
+                Step::Sleep(Duration::from_millis(50)),
+                Step::Send(b"b".to_vec()),
+            ],
+        });
+        let client = client(true);
+        let mut stream = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+            64,
+        )
+        .await
+        .expect("stream");
+        assert_eq!(stream.status(), StatusCode::OK);
+        assert_eq!(read_all(&mut stream).await.expect("body"), b"ab");
+        let requests = server.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/stream");
+    }
+
+    #[tokio::test]
+    async fn post_stream_fails_after_an_idle_gap() {
+        let server = StreamServer::start().await;
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::ZERO,
+            steps: vec![
+                Step::Send(b"a".to_vec()),
+                Step::Sleep(Duration::from_millis(600)),
+                Step::Send(b"b".to_vec()),
+            ],
+        });
+        let client = client(true);
+        let mut stream = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_millis(150),
+            64,
+        )
+        .await
+        .expect("stream");
+        assert_eq!(
+            stream.next_chunk().await.expect("first chunk").as_deref(),
+            Some(&b"a"[..])
+        );
+        let err = stream.next_chunk().await.expect_err("idle gap");
+        assert_eq!(err, EgressError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn post_stream_idle_timeout_covers_the_head() {
+        let server = StreamServer::start().await;
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::from_millis(600),
+            steps: Vec::new(),
+        });
+        let client = client(true);
+        let err = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_millis(150),
+            64,
+        )
+        .await
+        .expect_err("head timeout");
+        assert_eq!(err, EgressError::Timeout);
+    }
+
+    #[tokio::test]
+    async fn post_stream_whole_timeout_ends_a_slow_drip() {
+        let server = StreamServer::start().await;
+        let mut steps = Vec::new();
+        for _ in 0..20 {
+            steps.push(Step::Send(b"x".to_vec()));
+            steps.push(Step::Sleep(Duration::from_millis(50)));
+        }
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::ZERO,
+            steps,
+        });
+        let client = client(true);
+        let mut stream = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_millis(300),
+            Duration::from_secs(1),
+            64,
+        )
+        .await
+        .expect("stream");
+        let result = loop {
+            match stream.next_chunk().await {
+                Ok(Some(_)) => {}
+                other => break other,
+            }
+        };
+        assert_eq!(result, Err(EgressError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn post_stream_caps_the_body() {
+        let server = StreamServer::start().await;
+        let body = b"0123456789".to_vec();
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::ZERO,
+            steps: vec![Step::Send(body.clone())],
+        });
+        let client = client(true);
+        let mut capped = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+            4,
+        )
+        .await
+        .expect("stream");
+        let result = loop {
+            match capped.next_chunk().await {
+                Ok(Some(_)) => {}
+                other => break other,
+            }
+        };
+        assert_eq!(result, Err(EgressError::TooLarge { limit: 4 }));
+
+        server.enqueue(StreamReply {
+            status: 200,
+            head_delay: Duration::ZERO,
+            steps: vec![Step::Send(body.clone())],
+        });
+        let mut whole = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+            10,
+        )
+        .await
+        .expect("stream");
+        assert_eq!(read_all(&mut whole).await.expect("body"), body);
+    }
+
+    #[tokio::test]
+    async fn read_to_end_reads_an_error_body_and_caps_it() {
+        let server = StreamServer::start().await;
+        server.enqueue(StreamReply {
+            status: 500,
+            head_delay: Duration::ZERO,
+            steps: vec![Step::Send(b"oops".to_vec())],
+        });
+        let client = client(true);
+        let stream = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+            64,
+        )
+        .await
+        .expect("stream");
+        assert_eq!(stream.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = stream.read_to_end(64).await.expect("error body");
+        assert_eq!(body.as_ref(), b"oops");
+
+        server.enqueue(StreamReply {
+            status: 500,
+            head_delay: Duration::ZERO,
+            steps: vec![Step::Send(b"oops".to_vec())],
+        });
+        let stream = open(
+            &client,
+            &server.url("/stream"),
+            Duration::from_secs(5),
+            Duration::from_secs(2),
+            64,
+        )
+        .await
+        .expect("stream");
+        let err = stream.read_to_end(2).await.expect_err("capped");
+        assert_eq!(err, EgressError::TooLarge { limit: 2 });
+    }
+
+    #[tokio::test]
+    async fn post_stream_keeps_the_guard() {
+        let server = StreamServer::start().await;
+        let mut literal = server.url("/stream");
+        literal.set_query(Some(&format!("token={PLANTED}")));
+        let mut name = literal.clone();
+        name.set_host(Some("localhost")).expect("host name");
+        let ftp = Url::parse(&format!("ftp://127.0.0.1/stream?token={PLANTED}")).expect("url");
+
+        let strict = client(false);
+        for url in [&literal, &name] {
+            let err = open(
+                &strict,
+                url,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+                64,
+            )
+            .await
+            .expect_err("denied");
+            assert!(matches!(err, EgressError::Denied { .. }), "{err:?}");
+            assert_no_secret(&err);
+        }
+
+        let restore = EgressClient::new(EgressPolicy {
+            allow_private_network: true,
+            restore_mode: true,
+        })
+        .expect("client");
+        let err = open(
+            &restore,
+            &literal,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            64,
+        )
+        .await
+        .expect_err("restore mode");
+        assert_eq!(err, EgressError::RestoreMode);
+        assert_no_secret(&err);
+
+        let err = open(
+            &client(true),
+            &ftp,
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+            64,
+        )
+        .await
+        .expect_err("scheme");
+        assert_eq!(err, EgressError::Scheme);
+        assert_no_secret(&err);
+
+        assert!(server.requests().is_empty(), "a request reached the server");
+    }
+
+    async fn open(
+        client: &EgressClient,
+        url: &Url,
+        timeout: Duration,
+        idle_timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Result<EgressStream, EgressError> {
+        client
+            .post_stream(EgressStreamRequest {
+                url,
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout,
+                idle_timeout,
+                max_response_bytes,
+            })
+            .await
+    }
+
+    async fn read_all(stream: &mut EgressStream) -> Result<Vec<u8>, EgressError> {
+        let mut collected = Vec::new();
+        while let Some(chunk) = stream.next_chunk().await? {
+            collected.extend_from_slice(&chunk);
+        }
+        Ok(collected)
     }
 
     async fn post(
