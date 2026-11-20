@@ -1271,14 +1271,28 @@ mod tests {
 
         // A session that holds a deleted trace is blocked too.
         commit_trace(&app, &seeded, &trace(4), &span(4), Some("s-guard")).await;
-        occur_in(&app, &seeded, src, target, &trace(4), 1, Some("s-guard")).await;
+        // Three hours ago: its own time, so the order of the occurrences is fixed (trace 1 at
+        // 1 h, trace 2 at 2 h, trace 4 at 3 h) and the guard skip is the last of the three.
+        occur_in(&app, &seeded, src, target, &trace(4), 3, Some("s-guard")).await;
         app.state
             .deletions
             .guard
             .add_traces(seeded.project.id, &[tid(4)], Uuid::now_v7(), now);
         let session = send_ok(&app, &seeded, target, json!({"queue": sessions.id})).await;
         assert_eq!(session.added, 0);
-        assert_eq!(session.skipped[0].message, "a deletion blocks this target");
+        let messages: Vec<&str> = session
+            .skipped
+            .iter()
+            .map(|skip| skip.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                "the occurrence has no session",
+                "the occurrence has no session",
+                "a deletion blocks this target",
+            ]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
