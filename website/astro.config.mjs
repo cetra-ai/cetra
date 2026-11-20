@@ -15,7 +15,7 @@ export default defineConfig({
   integrations: [
     // Starlight adds its own sitemap unless one is present; this one leaves out noindex pages.
     sitemap({
-      filter: (page) => !ALWAYS_NOINDEX.some((route) => page === `https://cetra.sh${route}`),
+      filter: (page) => !ALWAYS_NOINDEX.includes(new URL(page).pathname),
     }),
     starlight({
       title: "cetra",

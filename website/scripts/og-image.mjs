@@ -27,10 +27,9 @@ const FONTS = [
   ),
 ].join("\n");
 
-const logo = readFileSync(
-  join(SITE, "src/marketing/assets/cetra-logo-on-dark.svg"),
-  "utf8",
-).replace("<svg ", '<svg style="height:56px;width:auto" ');
+const rawLogo = readFileSync(join(SITE, "src/marketing/assets/cetra-logo-on-dark.svg"), "utf8");
+const logo = rawLogo.replace("<svg ", '<svg style="height:56px;width:auto" ');
+if (logo === rawLogo) throw Error("logo SVG did not match");
 
 const html = `<!doctype html>
 <html lang="en">
@@ -63,9 +62,14 @@ try {
     deviceScaleFactor: 1,
   });
   await page.setContent(html);
-  await page.evaluate(() => document.fonts.ready);
-  const loaded = await page.evaluate(() => document.fonts.check('600 68px "Space Grotesk"'));
-  if (!loaded) throw new Error("font did not load");
+  const headingFaces = await page.evaluate(
+    async () => (await document.fonts.load('600 68px "Space Grotesk"')).length,
+  );
+  if (headingFaces === 0) throw Error("font did not load");
+  const domainFaces = await page.evaluate(
+    async () => (await document.fonts.load('500 24px "JetBrains Mono"')).length,
+  );
+  if (domainFaces === 0) throw Error("font did not load");
   await page.screenshot({ path: OUT, type: "png" });
 } finally {
   await browser.close();
