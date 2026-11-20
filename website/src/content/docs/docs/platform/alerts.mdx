@@ -111,7 +111,7 @@ def verify(secret: str, header: str, body: bytes, tolerance: int = 300) -> bool:
 
 An email channel has 1 to 20 recipients, and cetra sends one message per recipient. It needs [SMTP](/docs/self-hosting/email/). Without SMTP the channel shows "SMTP not configured".
 
-When [`alerts.email_recipients`](/docs/self-hosting/configuration-reference/#alerts) is `"members"`, each recipient must be a verified member of the org, and an alert or test send skips any other address. It is `"members"` by default when sign-up is `open`. A channel saved before the setting changed is checked again at every send: its delivery fails with the number of addresses skipped, shown in the channel's delivery history. Each org can send 1,000 alert emails per UTC day, test sends included.
+When [`alerts.email_recipients`](/docs/self-hosting/configuration-reference/#alerts) is `"members"`, each recipient must be a verified member of the org, and an alert or test send skips any other address. It is `"members"` by default when sign-up is `open`. A channel saved before the setting changed is checked again at every send: a delivery that skips an address fails with the number skipped, and the channel shows **Last delivery failed**. Each org can send 1,000 alert emails per UTC day, test sends included.
 
 ## Delivery and history
 
