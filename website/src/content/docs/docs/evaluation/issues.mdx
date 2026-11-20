@@ -90,6 +90,36 @@ Select **View traces** on an issue to open the trace list, filtered to the trace
 
 To filter the trace list by issue, select **Has issue** in the filter bar and choose the issues.
 
+## Add examples to a dataset
+
+Copy the traces of an issue into a dataset to use them in an experiment or as regression examples.
+
+1. Open the issue and select **Add examples to dataset**. You need permission to manage datasets.
+2. In the dialog, choose a dataset, or enter a name to create one.
+3. Set the number of traces, from 1 to 100. The default is 100.
+4. Select **Add**.
+
+cetra takes the newest occurrences of the issue and of the issues merged into it, one trace each, and adds them to the dataset as one new version. An item uses the span that raised the error when there is one, and the trace root otherwise. Each item carries the metadata key `cetra.issue_id`. The result lists the traces cetra could not copy. Read more about datasets in [Datasets](/docs/evaluation/datasets/).
+
+## Create an alert
+
+1. Open the issue and select **Create alert**.
+2. The rule form opens with the metric **Issue occurrences**, the issue, a window of 1 hour, **Above** and a threshold of 0. Change what you need.
+3. Choose the channels and save the rule.
+
+An alert on an issue fires when its occurrences in the window pass the threshold. The window must be 15 minutes or more. See [Alerts](/docs/platform/alerts/#alert-on-an-issue).
+
+## Notifications
+
+An issue source can send its new and regressed issues to channels of the project. Choose the channels on the source, not on an alert rule.
+
+1. Open **Issue sources** under **Evaluate**, and select the source.
+2. Select **Edit**.
+3. In **Notifications**, check the channels to notify. The channels are the project's channels, under **Settings**, then **Channels**.
+4. Select **Save**.
+
+A new or regressed issue of the source is sent to each checked channel. A source sends at most one message per channel every 10 minutes, so messages from one source are about 9 to 10 minutes apart. Each message lists up to 20 issues, newest first. A webhook channel receives a JSON body with the type `issues.detected`, the source, the project, the listed issues with their titles, and the number of the rest. Email and Slack carry the same lines. Enabling a source, or giving it its first channel, starts from then, so you do not receive older issues.
+
 ## Grouping bad scores, feedback and topics
 
 A source can also read bad scores, user feedback or new traces. cetra summarizes each candidate with a chat model, embeds the summary, and groups the candidates into issues. The summaries and embeddings run on your LLM connections, so they cost tokens.
@@ -142,6 +172,6 @@ The embedding connection and model are fixed when you create the source. To embe
 
 The Free cloud plan allows one enabled issue source across your active projects. A disabled source does not count. Creating or enabling a second source on the Free plan fails with a message about the limit. Paid plans have no limit. See [Plans and licence](/docs/platform/plans-and-licence/).
 
-## Not in this version
+## Read issues from a coding agent
 
-Alerts and notifications on issues, adding an issue's traces to a dataset, and the MCP tools for issues are not available yet.
+The [MCP server](/docs/platform/mcp/) has a read-only `list_issues` tool. It lists the issues of a project with their state and their occurrences over the last 7 days.

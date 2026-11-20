@@ -1,6 +1,6 @@
 ---
 title: MCP server
-description: Connect a coding agent to your traces over MCP with a personal access token, using seven read-only tools.
+description: Connect a coding agent to your traces over MCP with a personal access token, using eight read-only tools.
 ---
 
 The cetra server speaks the Model Context Protocol, so a coding agent such as Claude Code or Cursor can list your projects, run SQL, search traces and read spans while it works on your code. Every tool is read-only.
@@ -71,6 +71,9 @@ In every tool, `project` is a project ID or `<org-slug>/<project-slug>`. Times (
 | `search_traces` | `project`, `from`, `to`, `view`, `filter`, `search`, `limit` (1 to 100, default 20), `include_eval`, `include_experiments`, `max_chars` | Compact trace summaries. `view` is a saved view ID or name, and explicit arguments override it. The time window is required. |
 | `get_trace` | `project`, `trace_id`, `around`, `include_payloads` (default false), `max_chars` | The span tree, with short input and output previews when `include_payloads` is true. |
 | `get_span` | `project`, `trace_id`, `span_id`, `around`, `max_chars` | One span with its full payloads, cut to fit `max_chars`. |
+| `list_issues` | `project`, `state` (`open` by default, `resolved`, `ignored` or `all`), `source`, `limit` (1 to 100, default 20), `max_chars` | The issues, newest first by last seen: ID, title, kind, state, whether they regressed, source, first and last seen, the occurrences and users of the last 7 days, and a link to the issue. |
+
+For example, ask your agent: "Which issues in support-bot are open? Read a trace of the one that happened most often this week." The agent can list the issues with `list_issues`, then find and read a trace with `search_traces` and `get_trace`.
 
 ## Limits
 

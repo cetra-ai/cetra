@@ -167,7 +167,7 @@ A backfill runner, one of the eval loops, runs each backfill to its end, oldest 
 
 Track IC (`docs/plans/ic-issue-clustering/`, D-IC-1 to D-IC-18). An **issue** is a recurring problem that a source finds in production traces. It has a title, a state and counts. M1 has one kind of source, `error`. The kinds `score`, `feedback` and `topic` (LLM-summarized, clustered by embeddings, refit periodically) come in M3, below.
 
-**Sources** (`issue_sources`, D-IC-1). A source has a `name` (unique in the project, 1 to 128 characters), a `kind` that cannot change, an optional `filter` and `enabled`. An `error` source takes a `spans` filter (at most 4 096 bytes, checked at save, `invalid_filter` otherwise). The read ANDs it with `status = 'error'`. An `error` source makes no LLM or embedding call, so it has no sample rate, cap or connection: the LLM fields are refused. Members manage sources (D-I-24).
+**Sources** (`issue_sources`, D-IC-1). A source has a `name` (unique in the project, 1 to 128 characters), a `kind` that cannot change, an optional `filter` and `enabled`. An `error` source takes a `spans` filter (at most 4 096 bytes, checked at save, `invalid_filter` otherwise). The read ANDs it with `status = 'error'`. An `error` source makes no LLM or embedding call, so it has no sample rate, cap or connection: the LLM fields are refused. Members manage sources (D-I-24). A source can notify some of the project's channels of its new and regressed issues, in one digest per 10 minutes at most; enabling it, or giving it its first channel, starts that from now, so no backlog is sent (`issue_source_channels`, D-IC-21; 07 § Channels).
 
 **Reading.** An enabled error source makes its project tracked by the completion sweeper of § Online rules (D-I-8, D-I-9). For each completed trace, the sweeper reads the error spans that pass the filter through `error_spans`: at most 50 per trace, earliest first, with their trace and span ids, start time, service name, name, status message and the type and message of their last `exception` event. A source sees traces completed from its creation on; there is no backfill. A filter that does not parse skips that source for the batch, and the other sources go on. Within a batch the error sweep runs before the online rules. In a project with no online rules, a failed error sweep retries the batch. Otherwise it skips that batch's error issues and never stops the online rules; the batch is retried only when the rules fail, and a retry re-runs the error sweep, which is idempotent.
 
@@ -194,7 +194,7 @@ Occurrence scores are not billable units and do not count toward the units cap (
 
 **Lifecycle** (D-IC-10). The states are `open`, `resolved`, `ignored` and `merged`. A member sets `open`, `resolved` or `ignored`. Only a merge sets `merged`, and it is final.
 - **Regression.** A trace of the issue that started after `resolved_at` sets a resolved issue back to `open`, marks it `regressed` and records a `regressed` event. Trace start times decide, not completion times: a trace that started before the resolution does not reopen the issue, even when it completes later.
-- **Ignored** issues keep counting their occurrences. Alerts on ignored issues are M4's.
+- **Ignored** issues keep counting their occurrences. An alert on one issue (`issue_occurrences`) counts an ignored issue; an alert on a whole source skips its ignored issues (D-IC-20; 07 § Rule model).
 - Every change records an event (`created`, `state_changed`, `renamed`, `merged`, `regressed`) with its actor (a user, or the system for `created` and `regressed`) and the values before and after. A description change records no event.
 
 **Merge** (D-IC-9). A member merges an issue into another issue of the same source that is not merged. The merged issue's state becomes `merged`, its later error spans join the target's fingerprint, and its counts are read with the target's. The chain is one level deep: an issue cannot merge into a merged target, and no issue merges into itself. There is no unmerge; renaming and setting a state cover the other mistakes.
@@ -210,6 +210,8 @@ Occurrence scores are not billable units and do not count toward the units cap (
 **Limits.** On the Free plan an org has at most one enabled issue source across its active projects, paused or not (`max_active_issue_sources`, D-IC-13). Creating or enabling one past the limit is `403 plan_limit`, checked in the write transaction. Paid plans have no limit.
 
 **Privacy.** Titles, reasons and descriptions come from span payloads. They are stored only in `meta.db` and in the scores' reason, and logs carry ids and counts only (§ Logs and privacy in the design).
+
+**Links** (D-IC-14, D-IC-20 to D-IC-24). An alert rule can count the occurrences of one issue, or of a source's live issues, over a window (07 § Rule model). A source's channels receive its new and regressed issues in digests (07 § Channels). An issue can copy its newest occurrence traces into a dataset (09 § Issues). The MCP server has a read-only `list_issues` tool (09 § MCP server). These links read issues; none of them changes an issue's state, title or merges.
 
 ## Datasets
 
