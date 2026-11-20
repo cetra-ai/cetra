@@ -209,6 +209,7 @@ async fn gemini_embed_sends_output_dimensionality() {
     assert_eq!(
         seen[0].body,
         json!({
+            "model": format!("models/{GEMINI_MODEL}"),
             "content": {"parts": [{"text": "hello"}]},
             "outputDimensionality": 512
         })

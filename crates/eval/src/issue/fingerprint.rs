@@ -9,6 +9,9 @@ use sha2::{Digest, Sha256};
 /// Longest normalized message, in characters (D-IC-2).
 pub const MAX_MESSAGE_CHARS: usize = 512;
 
+/// Only the first 8 192 characters are read; volatile parts beyond them do not matter, since the result is cut at 512.
+pub const MAX_INPUT_CHARS: usize = 8_192;
+
 /// Label hashed first in every fingerprint (D-IC-17).
 const LABEL: &[u8] = b"cetra.issue-fp.v1";
 
@@ -156,7 +159,8 @@ fn apply_rule(segments: Vec<Segment>, rule: &Rule) -> Vec<Segment> {
 
 /// Replaces volatile parts of an error message with placeholders (D-IC-2, D-IC-17).
 ///
-/// The ten rules run in order. A later rule never rewrites inside an earlier placeholder.
+/// Only the first [`MAX_INPUT_CHARS`] characters are read, so the cost is bounded. The ten rules
+/// run in order. A later rule never rewrites inside an earlier placeholder.
 /// Whitespace runs collapse to one space, the result is trimmed and cut to
 /// [`MAX_MESSAGE_CHARS`] characters.
 ///
@@ -164,8 +168,13 @@ fn apply_rule(segments: Vec<Segment>, rule: &Rule) -> Vec<Segment> {
 /// `11/20/2026` becomes path-like text; apostrophes can pair up as quotes (`don't ... can't`
 /// becomes `<str>`).
 pub fn normalize_message(message: &str) -> String {
+    // Cut at a char boundary: `char_indices` yields only boundaries, so `get` never fails here.
+    let head = match message.char_indices().nth(MAX_INPUT_CHARS) {
+        Some((end, _)) => message.get(..end).unwrap_or(message),
+        None => message,
+    };
     let mut segments = vec![Segment {
-        text: message.to_owned(),
+        text: head.to_owned(),
         frozen: false,
     }];
     for rule in RULES.iter() {
@@ -317,6 +326,17 @@ mod tests {
         let message = "é".repeat(600);
         let out = normalized(&message);
         assert_eq!(out.chars().count(), 512);
+    }
+
+    #[test]
+    fn normalize_reads_only_the_first_8192_chars() {
+        let head = "a".repeat(MAX_INPUT_CHARS);
+        let with_tail = format!("{head}123");
+        assert_eq!(normalized(&with_tail), normalized(&head));
+        // Whitespace collapses, so this differs from the uncapped result ("abc") and proves the
+        // cut: the tail is beyond the first 8 192 characters and is never read.
+        let spaces_then_word = format!("{}abc", " ".repeat(MAX_INPUT_CHARS));
+        assert_eq!(normalized(&spaces_then_word), "");
     }
 
     #[test]

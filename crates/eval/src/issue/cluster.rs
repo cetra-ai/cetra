@@ -18,6 +18,14 @@ pub enum ClusterError {
     /// [`average_linkage`] was given more than [`MAX_CLUSTER_INPUT`] vectors.
     #[error("too many vectors to cluster")]
     TooMany,
+    /// An input holds a NaN or infinite component. Such distances never form a reciprocal pair.
+    #[error("vectors must be finite")]
+    NonFinite,
+}
+
+/// True when every component of `v` is finite.
+fn is_finite(v: &[f32]) -> bool {
+    v.iter().all(|value| value.is_finite())
 }
 
 /// Scales `v` to unit length. Returns false, leaving `v` unchanged, when its norm is 0 or not finite.
@@ -40,10 +48,14 @@ pub fn l2_normalize(v: &mut [f32]) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ.
+/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ, and
+/// [`ClusterError::NonFinite`] when either vector holds a NaN or infinite value.
 pub fn cosine(a: &[f32], b: &[f32]) -> Result<f32, ClusterError> {
     if a.len() != b.len() {
         return Err(ClusterError::DimensionMismatch);
+    }
+    if !is_finite(a) || !is_finite(b) {
+        return Err(ClusterError::NonFinite);
     }
     let dot: f64 = a
         .iter()
@@ -57,11 +69,15 @@ pub fn cosine(a: &[f32], b: &[f32]) -> Result<f32, ClusterError> {
 ///
 /// # Errors
 ///
-/// Returns [`ClusterError::DimensionMismatch`] when any centroid has a different length from `v`.
+/// Returns [`ClusterError::DimensionMismatch`] when any centroid has a different length from `v`,
+/// and [`ClusterError::NonFinite`] when `v` or a centroid holds a NaN or infinite value.
 pub fn nearest<'a, I>(v: &[f32], centroids: I) -> Result<Option<(usize, f32)>, ClusterError>
 where
     I: IntoIterator<Item = &'a [f32]>,
 {
+    if !is_finite(v) {
+        return Err(ClusterError::NonFinite);
+    }
     let mut best: Option<(usize, f32)> = None;
     for (index, centroid) in centroids.into_iter().enumerate() {
         let similarity = cosine(v, centroid)?;
@@ -79,10 +95,14 @@ where
 ///
 /// # Errors
 ///
-/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ.
+/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ, and
+/// [`ClusterError::NonFinite`] when `centroid` or `v` holds a NaN or infinite value.
 pub fn add_to_centroid(centroid: &mut [f32], members: u64, v: &[f32]) -> Result<(), ClusterError> {
     if centroid.len() != v.len() {
         return Err(ClusterError::DimensionMismatch);
+    }
+    if !is_finite(centroid) || !is_finite(v) {
+        return Err(ClusterError::NonFinite);
     }
     let k = 1.0 / (members as f64 + 1.0);
     for (c, x) in centroid.iter_mut().zip(v) {
@@ -102,7 +122,8 @@ pub fn add_to_centroid(centroid: &mut [f32], members: u64, v: &[f32]) -> Result<
 ///
 /// # Errors
 ///
-/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ.
+/// Returns [`ClusterError::DimensionMismatch`] when the lengths differ, and
+/// [`ClusterError::NonFinite`] when `a` or `b` holds a NaN or infinite value.
 pub fn merge_centroids(
     a: &[f32],
     a_members: u64,
@@ -111,6 +132,9 @@ pub fn merge_centroids(
 ) -> Result<Vec<f32>, ClusterError> {
     if a.len() != b.len() {
         return Err(ClusterError::DimensionMismatch);
+    }
+    if !is_finite(a) || !is_finite(b) {
+        return Err(ClusterError::NonFinite);
     }
     let (weight_a, weight_b) = if a_members == 0 && b_members == 0 {
         (1.0_f64, 1.0_f64)
@@ -143,8 +167,9 @@ pub fn merge_centroids(
 ///
 /// # Errors
 ///
-/// Returns [`ClusterError::TooMany`] above [`MAX_CLUSTER_INPUT`] vectors, and
-/// [`ClusterError::DimensionMismatch`] when the vectors do not all have the first one's length.
+/// Returns [`ClusterError::TooMany`] above [`MAX_CLUSTER_INPUT`] vectors,
+/// [`ClusterError::DimensionMismatch`] when the vectors do not all have the first one's length,
+/// and [`ClusterError::NonFinite`] when any component of any vector is NaN or infinite.
 pub fn average_linkage(
     vectors: &[Vec<f32>],
     max_distance: f32,
@@ -156,6 +181,9 @@ pub fn average_linkage(
     let dim = vectors.first().map_or(0, Vec::len);
     if vectors.iter().any(|vector| vector.len() != dim) {
         return Err(ClusterError::DimensionMismatch);
+    }
+    if vectors.iter().any(|vector| !is_finite(vector)) {
+        return Err(ClusterError::NonFinite);
     }
     if n == 0 {
         return Ok(Vec::new());
@@ -405,6 +433,59 @@ mod tests {
         let long = [1.0_f32, 0.0, 0.0];
         let centroids: Vec<&[f32]> = vec![&short, &long];
         assert_eq!(nearest(&v, centroids), Err(ClusterError::DimensionMismatch));
+    }
+
+    #[test]
+    fn cosine_rejects_non_finite() {
+        let finite = [1.0_f32, 0.0];
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let poisoned = [bad, 0.0];
+            assert_eq!(cosine(&poisoned, &finite), Err(ClusterError::NonFinite));
+            assert_eq!(cosine(&finite, &poisoned), Err(ClusterError::NonFinite));
+        }
+    }
+
+    #[test]
+    fn centroid_functions_reject_non_finite() {
+        let finite = [1.0_f32, 0.0];
+        let poisoned = [f32::NAN, 1.0];
+        let centroids: Vec<&[f32]> = vec![&poisoned];
+        assert_eq!(nearest(&finite, centroids), Err(ClusterError::NonFinite));
+        assert_eq!(
+            nearest(&poisoned, Vec::<&[f32]>::new()),
+            Err(ClusterError::NonFinite)
+        );
+
+        let mut centroid = vec![1.0_f32, 0.0];
+        assert_eq!(
+            add_to_centroid(&mut centroid, 1, &poisoned),
+            Err(ClusterError::NonFinite)
+        );
+        assert_eq!(centroid, vec![1.0, 0.0]);
+
+        assert_eq!(
+            merge_centroids(&finite, 1, &poisoned, 1),
+            Err(ClusterError::NonFinite)
+        );
+    }
+
+    #[test]
+    fn average_linkage_rejects_nan_and_inf() {
+        let finite = unit(&[1.0, 0.0]);
+        let other = unit(&[0.0, 1.0]);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            // Anywhere in the input, including the last vector and the one-vector case.
+            let poisoned_last = vec![finite.clone(), other.clone(), vec![bad, 0.0]];
+            assert_eq!(
+                average_linkage(&poisoned_last, 0.5),
+                Err(ClusterError::NonFinite)
+            );
+            let poisoned_only = vec![vec![bad, 0.0]];
+            assert_eq!(
+                average_linkage(&poisoned_only, 0.5),
+                Err(ClusterError::NonFinite)
+            );
+        }
     }
 
     #[test]

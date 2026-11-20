@@ -114,6 +114,10 @@ async fn gemini_embed(
     let headers = gemini_headers(conn)?;
     let mut body = Map::new();
     body.insert(
+        "model".to_owned(),
+        Value::String(format!("models/{}", call.model)),
+    );
+    body.insert(
         "content".to_owned(),
         serde_json::json!({"parts": [{"text": call.text}]}),
     );

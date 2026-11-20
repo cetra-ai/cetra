@@ -285,7 +285,7 @@ pub struct EmbeddingRun {
    - **Gemini:**
      - URL: `endpoint(base, "https://generativelanguage.googleapis.com", &format!("v1beta/models/{model}:embedContent"))`, after `validate_model`.
      - Headers: the same as `gemini::headers`, shared the same way (`pub(super) fn gemini_headers`).
-     - Body: `{"content": {"parts": [{"text": text}]}}`, plus `"outputDimensionality": d` when `Some`.
+     - Body: `{"model": "models/" + m, "content": {"parts": [{"text": text}]}}`, plus `"outputDimensionality": d` when `Some`. The `model` field is in the REST docs of `embedContent`; the request body carries it besides the URL path.
      - Errors: the same mapping, with `Adapter::Gemini`.
      - Parse: `embedding.values` must be an array of numbers. Tokens come from `usageMetadata.promptTokenCount` when present, else `None`. The model is `None`.
    - **Anthropic:** returns `Err(EmbeddingUnsupported)` before any request.
@@ -363,6 +363,7 @@ pub fn fingerprint_hex(fields: &ErrorFields<'_>) -> String;
 `ErrorFields`'s derived `Debug` would print the message. Write a manual `Debug` that prints the field lengths only.
 
 **Steps:**
+0. **Bounded input.** `pub const MAX_INPUT_CHARS: usize = 8_192;` with the doc line "Only the first 8 192 characters are read; volatile parts beyond them do not matter, since the result is cut at 512." `normalize_message` first keeps only the first `MAX_INPUT_CHARS` characters: `message.char_indices().nth(MAX_INPUT_CHARS)` gives a byte index on a char boundary, and `message.get(..end)` cuts there (no panic; a shorter message is used whole). Only that head goes into step 2. The 512-character cut of step 2 still applies after the rules.
 1. **Rules.** Ten rules, each a `Regex` built once in a `std::sync::LazyLock<[Rule; 10]>` (`struct Rule { regex: Regex, kind: RuleKind }`). The `expect` on `Regex::new` carries `#[allow(clippy::expect_used)]` and the comment `// The patterns are constants, compiled by every test.`. They run in this order, with exactly these patterns:
    ```rust
    const URL: &str = r##"(?i)\b([a-z][a-z0-9+.\-]*)://([^\s/?#"'<>]+)[^\s"'<>]*"##;
@@ -406,6 +407,7 @@ pub fn fingerprint_hex(fields: &ErrorFields<'_>) -> String;
   - `"  a \n\t b  "` → `"a b"`
   - placeholders are not rewritten: `"https://h.io/2026-01-01"` → `"<url:https://h.io>"`.
 - `normalize_cuts_at_512_chars_on_a_char_boundary`: 600 `é` give 512 characters.
+- `normalize_reads_only_the_first_8192_chars`: 8 192 `a` followed by `123` give the same result as 8 192 `a` alone. A second case, 8 192 spaces followed by `abc`, gives `""`, so the test also shows the cut happens before the rules.
 - `fingerprint_golden`: a fixed `ErrorFields` gives a fixed hex string. Compute it once, check it by hand against a SHA-256 of the documented byte layout in the test (build the bytes manually, hash with `Sha256`, compare), and pin it.
 - `fingerprint_separates_fields`: `("ab", "c")` and `("a", "bc")` differ. `None` and `Some("")` hash the same by design (length 0, no bytes); callers turn empty strings into `None`.
 - `fingerprint_is_stable_across_volatile_parts`: two messages that differ only in a UUID and a number give the same fingerprint after `normalize_message`.
@@ -434,6 +436,8 @@ pub enum ClusterError {
     DimensionMismatch,
     #[error("too many vectors to cluster")]
     TooMany,
+    #[error("vectors must be finite")]
+    NonFinite,
 }
 
 /// Scales `v` to unit length. Returns false, leaving `v` unchanged, when its norm is 0 or not finite.
@@ -467,7 +471,8 @@ pub fn average_linkage(vectors: &[Vec<f32>], max_distance: f32) -> Result<Vec<Ve
 4. `add_to_centroid`: if the lengths differ, `DimensionMismatch`. Compute `k = 1 / (members + 1)` in `f64`, set `c[i] += (v[i] − c[i]) · k`, then `l2_normalize`. If that returns false (a degenerate zero), leave `c` equal to `v`.
 5. `merge_centroids`: the weighted sum `(a · na + b · nb) / (na + nb)`, normalized. With `na + nb == 0`, use equal weights. When the sum cannot be normalized (norm 0, e.g. opposite vectors), return a copy of the heavier centroid (`a` on a tie).
 6. `average_linkage`:
-   1. If `vectors.len() > MAX_CLUSTER_INPUT`, `TooMany`. All vectors must have the length of the first, else `DimensionMismatch`. With 0 vectors, return empty. With 1, return `[[0]]`.
+   1. If `vectors.len() > MAX_CLUSTER_INPUT`, `TooMany`. All vectors must have the length of the first, else `DimensionMismatch`. Any component of any vector that is NaN or infinite gives `NonFinite`; this check comes before the 0- and 1-vector cases, and it stops the chain from looping on NaN distances. With 0 vectors, return empty. With 1, return `[[0]]`.
+   `cosine`, `nearest`, `add_to_centroid` and `merge_centroids` return `NonFinite` the same way when an input holds a non-finite value (checked after their length checks).
    2. Condensed distance matrix `Vec<f32>` of `n(n−1)/2` entries, `d(i, j) = 1 − cosine` with `i < j`, at index `n·i − i(i+1)/2 + (j − i − 1)`. A helper `fn idx(n, i, j)` orders the pair.
    3. **Nearest-neighbour chain** over active clusters (initially every index, size 1):
       - Grow the chain from the lowest active index when it is empty.
@@ -483,6 +488,8 @@ pub fn average_linkage(vectors: &[Vec<f32>], max_distance: f32) -> Result<Vec<Ve
 **Tests** (unit tests in `cluster.rs`):
 - `l2_normalize_rejects_zero_and_non_finite`, and `cosine_of_identical_unit_vectors_is_one` (axis-aligned vectors such as `[1, 0, 0]`, exact equality; for a non-axis vector, within 1e-6).
 - `cosine_and_nearest_reject_dimension_mismatch`.
+- `cosine_rejects_non_finite`: NaN, `inf` and `-inf` in either argument give `NonFinite`; `centroid_functions_reject_non_finite` covers `nearest`, `add_to_centroid` (the centroid is left unchanged) and `merge_centroids`.
+- `average_linkage_rejects_nan_and_inf`: each of NaN, `inf` and `-inf`, in the last vector and as the only vector, gives `NonFinite`.
 - `nearest_breaks_ties_on_the_lowest_index`, and `nearest_of_no_centroids_is_none`.
 - `add_to_centroid_is_the_running_mean`: adding `v` to a 1-member centroid `c` gives `normalize((c + v) / 2)`.
 - `merge_centroids_weights_by_members`.
