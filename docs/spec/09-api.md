@@ -155,7 +155,7 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 
 ### Issues
 
-Track IC (spec 06 § Issues, D-IC-1, D-IC-3, D-IC-9, D-IC-10, D-IC-13). Reads need role viewer. Writes to sources, state, title, description and merges need role member (D-I-24). Only `kind: "error"` exists in M1.
+Track IC (spec 06 § Issues, D-IC-1, D-IC-3, D-IC-9, D-IC-10, D-IC-13). Reads need role viewer. Writes to sources need role member (D-I-24). Triage (state, title, description and merges) needs a signed-in session: an API key or a personal access token gets `403`. Only `kind: "error"` exists in M1.
 
 | Method & path | Notes |
 |---|---|

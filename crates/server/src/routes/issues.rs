@@ -58,7 +58,8 @@ const MAX_TITLE_CHARS: usize = 200;
 const MAX_DESCRIPTION_CHARS: usize = 2_000;
 
 /// Issue routes. Reads need project view; source writes need
-/// [`ProjectPerm::ManageEvaluation`] (D-I-24). Not session-only.
+/// [`ProjectPerm::ManageEvaluation`] (D-I-24). Triage (`PATCH` of an issue and its merge) needs a
+/// session: an API key or a personal access token is refused, as on the other session-only routes.
 pub(crate) fn routes() -> Vec<RouteDef> {
     vec![
         RouteDef {
@@ -156,7 +157,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/projects/{project}/issues/{id}",
             access: Access::Project {
                 perm: ProjectPerm::Annotate,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: patch(patch_issue),
@@ -166,7 +167,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             path: "/api/v1/projects/{project}/issues/{id}/merge",
             access: Access::Project {
                 perm: ProjectPerm::Annotate,
-                session_only: false,
+                session_only: true,
             },
             documented: true,
             handler: post(post_issue_merge),
@@ -2582,5 +2583,49 @@ mod tests {
             .map(|day| day["count"].as_u64().unwrap())
             .sum();
         assert_eq!(total, 1);
+    }
+
+    #[tokio::test]
+    async fn an_api_key_cannot_triage() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let source = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let now = app.state.clock.now_ns();
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        put_issue(
+            &app,
+            issue_row(project, source, a, "a", IssueState::Open, now),
+        )
+        .await;
+        put_issue(
+            &app,
+            issue_row(project, source, b, "b", IssueState::Open, now),
+        )
+        .await;
+        let key = app.write_key(&seeded).await;
+        let bearer = format!("Bearer {key}");
+
+        let renamed = app
+            .request(Method::PATCH, &issue_url(project, a))
+            .header(header::AUTHORIZATION.as_str(), &bearer)
+            .json(&json!({"title": "Mine"}))
+            .send()
+            .await;
+        assert_eq!(renamed.status, 403, "{}", text(&renamed));
+        let folded = app
+            .request(Method::POST, &format!("{}/merge", issue_url(project, a)))
+            .header(header::AUTHORIZATION.as_str(), &bearer)
+            .json(&json!({"into": b}))
+            .send()
+            .await;
+        assert_eq!(folded.status, 403, "{}", text(&folded));
+
+        let read = app
+            .request(Method::GET, &issue_url(project, a))
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(read.json::<Value>()["title"], "a");
     }
 }
