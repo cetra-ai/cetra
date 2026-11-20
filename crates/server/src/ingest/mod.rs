@@ -29,6 +29,7 @@ use cetra_storage::{MediaBlob, Storage};
 use futures::{StreamExt, stream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+use crate::agent_context::AgentContextStore;
 use crate::config::{IngestConfig, MediaConfig};
 use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
@@ -51,6 +52,7 @@ pub(crate) struct Ingest {
     max_spans_per_request: usize,
     limits: IngestLimits,
     commits: Arc<Commits>,
+    contexts: Arc<AgentContextStore>,
 }
 
 /// Budget held by one request from before its body is read until it is answered.
@@ -170,12 +172,18 @@ impl Ingest {
                 .unwrap_or(usize::MAX),
             limits: config.limits(media),
             commits: Arc::default(),
+            contexts: Arc::new(AgentContextStore::default()),
         }
     }
 
     /// The price tables (D-T-9). Callers pick the table of their project or org.
     pub(crate) fn prices(&self) -> &crate::prices::Prices {
         &self.prices
+    }
+
+    /// Coding-agent session contexts (D-CA-9).
+    pub(crate) fn contexts(&self) -> &Arc<AgentContextStore> {
+        &self.contexts
     }
 
     pub(crate) fn max_request_bytes(&self) -> usize {

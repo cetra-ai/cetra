@@ -600,6 +600,10 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
     state.live.publish_resync(project);
     state.clear_answers(project);
     {
+        let _writes = state.ingest.contexts().writes().lock().await;
+        state.ingest.contexts().forget_project(project);
+    }
+    {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).
         let _writes = state.ingest.prices().lock_writes().await;
         state.ingest.prices().forget_project(project);
@@ -721,6 +725,8 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
     for project in &projects {
         state.live.publish_resync(*project);
         state.clear_answers(*project);
+        let _writes = state.ingest.contexts().writes().lock().await;
+        state.ingest.contexts().forget_project(*project);
     }
     {
         // A price reload that read the rows before the delete must not reinstall them (D-T-9).
@@ -1326,6 +1332,28 @@ mod tests {
             trace_status(&app, &seeded, seeded.project.id, &trace_id(2)).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dropped_project_has_no_map() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (doomed, _key) = app.add_project(&seeded, "doomed", None).await;
+        app.state.ingest.contexts().project_or_insert(doomed.id);
+        assert!(app.state.ingest.contexts().project(doomed.id).is_some());
+        app.state.clock.advance(Duration::from_secs(1));
+
+        let mut new = new_row(&app, &doomed, DeletionKind::Project);
+        new.request = RequestDetails {
+            name: Some("doomed".to_owned()),
+            slug: Some("doomed".to_owned()),
+            ..RequestDetails::default()
+        };
+        let id = insert(&app, new, &[]).await;
+        worker(&app).await;
+
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Applied);
+        assert!(app.state.ingest.contexts().project(doomed.id).is_none());
     }
 
     #[tokio::test(flavor = "multi_thread")]
