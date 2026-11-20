@@ -7232,6 +7232,430 @@
         ]
       }
     },
+    "/api/v1/projects/{project}/assistant/conversations": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "List the caller's assistant conversations",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project.",
+        "operationId": "list_assistant_conversations",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's conversations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversationPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Create an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Takes no body. The conversation starts with an empty title.",
+        "operationId": "post_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The created conversation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/assistant/conversations/{id}": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversation with its messages, oldest first. Any other id is 404.",
+        "operationId": "get_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The conversation with its messages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversationDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Delete an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Deletes the conversation and its messages.",
+        "operationId": "delete_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Rename an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list.",
+        "operationId": "patch_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAssistantConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The renamed conversation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/projects/{project}/channels": {
       "get": {
         "tags": [
@@ -20002,6 +20426,339 @@
           "feedback"
         ]
       },
+      "AssistantConversation": {
+        "type": "object",
+        "description": "A conversation in the list (D-AS-10).",
+        "required": [
+          "id",
+          "title",
+          "message_count",
+          "created_at",
+          "last_active_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Conversation id."
+          },
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Messages stored in the conversation.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "Empty until the first message or a rename; the UI shows \"New chat\"."
+          }
+        }
+      },
+      "AssistantConversationDetail": {
+        "type": "object",
+        "description": "A conversation with its messages, oldest first.",
+        "required": [
+          "id",
+          "title",
+          "message_count",
+          "created_at",
+          "last_active_at",
+          "messages"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Conversation id."
+          },
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Messages stored in the conversation.",
+            "minimum": 0
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantMessage"
+            },
+            "description": "The messages, oldest first."
+          },
+          "title": {
+            "type": "string",
+            "description": "Empty until the first message or a rename; the UI shows \"New chat\"."
+          }
+        }
+      },
+      "AssistantConversationPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantConversation"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "AssistantDraftKind": {
+        "type": "string",
+        "description": "The kind of a draft the assistant proposes.",
+        "enum": [
+          "filter",
+          "sql",
+          "dashboard",
+          "evaluator",
+          "online_rule"
+        ]
+      },
+      "AssistantFeedback": {
+        "type": "string",
+        "description": "The user's rating of an assistant message.",
+        "enum": [
+          "up",
+          "down"
+        ]
+      },
+      "AssistantMessage": {
+        "type": "object",
+        "description": "One message of a conversation.",
+        "required": [
+          "seq",
+          "role",
+          "parts",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "context": {
+            "type": "object",
+            "description": "The page context sent with a user message (D-AS-14)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "feedback": {
+            "$ref": "#/components/schemas/AssistantFeedback",
+            "description": "The user's rating, when given."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantPart"
+            },
+            "description": "The message's parts, in order."
+          },
+          "role": {
+            "$ref": "#/components/schemas/AssistantRole",
+            "description": "Who wrote it."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Position in the conversation, from 1.",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/AssistantMessageStatus",
+            "description": "How the message ended."
+          },
+          "turn_trace_id": {
+            "type": "string",
+            "description": "The turn's trace, 32 lowercase hex characters."
+          }
+        }
+      },
+      "AssistantMessageStatus": {
+        "type": "string",
+        "description": "How a message ended.",
+        "enum": [
+          "complete",
+          "cancelled",
+          "failed"
+        ]
+      },
+      "AssistantPart": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Plain text.",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "The text."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tool the assistant called.",
+            "required": [
+              "id",
+              "name",
+              "arguments",
+              "type"
+            ],
+            "properties": {
+              "arguments": {
+                "type": "object",
+                "description": "The arguments the assistant passed."
+              },
+              "id": {
+                "type": "string",
+                "description": "The call's id, unique within the message."
+              },
+              "name": {
+                "type": "string",
+                "description": "The tool's name."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_call"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The answer of a tool call.",
+            "required": [
+              "id",
+              "name",
+              "ok",
+              "size_bytes",
+              "stubbed",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The id of the call this answers."
+              },
+              "name": {
+                "type": "string",
+                "description": "The tool's name."
+              },
+              "ok": {
+                "type": "boolean",
+                "description": "Whether the tool succeeded."
+              },
+              "result": {
+                "type": "object",
+                "description": "The tool's answer; omitted once stubbed (D-AS-12)."
+              },
+              "rows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Rows in the answer, when it has rows.",
+                "minimum": 0
+              },
+              "size_bytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Size of the answer in bytes.",
+                "minimum": 0
+              },
+              "stubbed": {
+                "type": "boolean",
+                "description": "Whether the answer was replaced by a stub (D-AS-12)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A draft the assistant proposes, for the user to apply.",
+            "required": [
+              "id",
+              "kind",
+              "draft",
+              "type"
+            ],
+            "properties": {
+              "draft": {
+                "type": "object",
+                "description": "The draft's content."
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's id, unique within the message."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/AssistantDraftKind",
+                "description": "What the draft is."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "draft"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One part of a message (spec 04 § Assistant)."
+      },
+      "AssistantRole": {
+        "type": "string",
+        "description": "Who wrote a message.",
+        "enum": [
+          "user",
+          "assistant",
+          "tool"
+        ]
+      },
       "AuthConfig": {
         "type": "object",
         "description": "Login methods the UI should offer.\n\n`GET /api/auth/config`. Spec 08 § Sign-up policy and spec 09 § Auth.",
@@ -29229,6 +29986,20 @@
         },
         "additionalProperties": false
       },
+      "UpdateAssistantConversationRequest": {
+        "type": "object",
+        "description": "`PATCH …/assistant/conversations/{id}`.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "1–80 characters after trimming."
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateChannelRequest": {
         "type": "object",
         "description": "Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map.",
@@ -30236,6 +31007,10 @@
     {
       "name": "alerts",
       "description": "Alert rules, alert events and notification channels."
+    },
+    {
+      "name": "assistant",
+      "description": "The in-app assistant's conversations, private to their author (D-AS-10)."
     },
     {
       "name": "internal",

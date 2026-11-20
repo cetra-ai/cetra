@@ -102,6 +102,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | View traces, sessions, dashboards, datasets, experiments, SQL console | ✓ | ✓ | ✓ | ✓ |
 | Annotate (human scores), add to dataset, edit datasets, run SQL exports (an `sk` key with `read` may export, D-H-5), share saved views (D-H-6) | | ✓ | ✓ | ✓ |
 | Manage evaluators, online rules, alert rules, channels, score definitions, dashboards (D-C-16) | | ✓ | ✓ | ✓ |
+| Use the in-app assistant: chat and manage one's own conversations, with a session only (D-AS-4) | | ✓ | ✓ | ✓ |
 | Manage API keys, LLM connections, project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |

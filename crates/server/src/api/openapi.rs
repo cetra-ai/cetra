@@ -39,6 +39,11 @@ use super::alerts::{
     CreateAlertRuleRequest, CreateChannelRequest, DeliveryStatus, LatencyTarget,
     NotificationChannel, ScoreAggregation, UpdateAlertRuleRequest, UpdateChannelRequest,
 };
+use super::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
+    AssistantMessage, AssistantMessageStatus, AssistantPart, AssistantRole,
+    UpdateAssistantConversationRequest,
+};
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
@@ -327,6 +332,16 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
     set.insert_page::<DashboardSummary>("DashboardPage");
+    set.insert::<AssistantConversation>();
+    set.insert::<AssistantConversationDetail>();
+    set.insert::<AssistantMessage>();
+    set.insert::<AssistantPart>();
+    set.insert::<AssistantRole>();
+    set.insert::<AssistantMessageStatus>();
+    set.insert::<AssistantFeedback>();
+    set.insert::<AssistantDraftKind>();
+    set.insert::<UpdateAssistantConversationRequest>();
+    set.insert_page::<AssistantConversation>("AssistantConversationPage");
     set.insert::<EvaluatorKind>();
     set.insert::<OutputScoreBody>();
     set.insert::<Evaluator>();
@@ -565,6 +580,10 @@ pub fn openapi() -> OpenApi {
             tag(
                 "alerts",
                 "Alert rules, alert events and notification channels.",
+            ),
+            tag(
+                "assistant",
+                "The in-app assistant's conversations, private to their author (D-AS-10).",
             ),
             tag(
                 "internal",
@@ -890,6 +909,7 @@ fn paths() -> Paths {
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
+    let paths = assistant_paths(paths);
     media_paths(paths).build()
 }
 
@@ -4291,6 +4311,136 @@ const EXCLUSIONS: &str = concat!(
     cetra_core::cetra_name!("-eval"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
+
+/// The access of the assistant routes (D-AS-4, D-AS-10).
+const ASSISTANT_ACCESS: &str =
+    "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10).";
+
+fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation(
+        "list_assistant_conversations",
+        "assistant",
+        "List the caller's assistant conversations",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "AssistantConversationPage",
+            "The caller's conversations.",
+        ),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_assistant_conversation",
+        "assistant",
+        "Create an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Takes no body. The conversation starts with an empty title."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "201",
+        json_of::<AssistantConversation>("The created conversation."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let get = operation(
+        "get_assistant_conversation",
+        "assistant",
+        "Get an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversation with its messages, oldest first. Any other id is 404."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversationDetail>("The conversation with its messages."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let update = operation(
+        "patch_assistant_conversation",
+        "assistant",
+        "Rename an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("UpdateAssistantConversationRequest")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversation>("The renamed conversation."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_assistant_conversation",
+        "assistant",
+        "Delete an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Deletes the conversation and its messages."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+}
 
 fn operation(id: &str, tag_name: &str, summary: &str) -> OperationBuilder {
     OperationBuilder::new()

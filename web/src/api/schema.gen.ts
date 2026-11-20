@@ -1247,6 +1247,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/assistant/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the caller's assistant conversations
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project.
+         */
+        get: operations["list_assistant_conversations"];
+        put?: never;
+        /**
+         * Create an assistant conversation
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Takes no body. The conversation starts with an empty title.
+         */
+        post: operations["post_assistant_conversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/assistant/conversations/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an assistant conversation
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversation with its messages, oldest first. Any other id is 404.
+         */
+        get: operations["get_assistant_conversation"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an assistant conversation
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Deletes the conversation and its messages.
+         */
+        delete: operations["delete_assistant_conversation"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename an assistant conversation
+         * @description Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list.
+         */
+        patch: operations["patch_assistant_conversation"];
+        trace?: never;
+    };
     "/api/v1/projects/{project}/channels": {
         parameters: {
             query?: never;
@@ -3194,6 +3246,158 @@ export interface components {
          * @enum {string}
          */
         ApiKeyScope: "ingest" | "read" | "write" | "feedback";
+        /** @description A conversation in the list (D-AS-10). */
+        AssistantConversation: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Conversation id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            last_active_at: string;
+            /**
+             * Format: int32
+             * @description Messages stored in the conversation.
+             */
+            message_count: number;
+            /** @description Empty until the first message or a rename; the UI shows "New chat". */
+            title: string;
+        };
+        /** @description A conversation with its messages, oldest first. */
+        AssistantConversationDetail: {
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /**
+             * Format: uuid
+             * @description Conversation id.
+             */
+            id: string;
+            /**
+             * Format: date-time
+             * @description Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            last_active_at: string;
+            /**
+             * Format: int32
+             * @description Messages stored in the conversation.
+             */
+            message_count: number;
+            /** @description The messages, oldest first. */
+            messages: components["schemas"]["AssistantMessage"][];
+            /** @description Empty until the first message or a rename; the UI shows "New chat". */
+            title: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AssistantConversationPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AssistantConversation"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description The kind of a draft the assistant proposes.
+         * @enum {string}
+         */
+        AssistantDraftKind: "filter" | "sql" | "dashboard" | "evaluator" | "online_rule";
+        /**
+         * @description The user's rating of an assistant message.
+         * @enum {string}
+         */
+        AssistantFeedback: "up" | "down";
+        /** @description One message of a conversation. */
+        AssistantMessage: {
+            /** @description The page context sent with a user message (D-AS-14). */
+            context?: Record<string, never>;
+            /**
+             * Format: date-time
+             * @description Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The user's rating, when given. */
+            feedback?: components["schemas"]["AssistantFeedback"];
+            /** @description The message's parts, in order. */
+            parts: components["schemas"]["AssistantPart"][];
+            /** @description Who wrote it. */
+            role: components["schemas"]["AssistantRole"];
+            /**
+             * Format: int32
+             * @description Position in the conversation, from 1.
+             */
+            seq: number;
+            /** @description How the message ended. */
+            status: components["schemas"]["AssistantMessageStatus"];
+            /** @description The turn's trace, 32 lowercase hex characters. */
+            turn_trace_id?: string;
+        };
+        /**
+         * @description How a message ended.
+         * @enum {string}
+         */
+        AssistantMessageStatus: "complete" | "cancelled" | "failed";
+        /** @description One part of a message (spec 04 § Assistant). */
+        AssistantPart: {
+            /** @description The text. */
+            content: string;
+            /** @enum {string} */
+            type: "text";
+        } | {
+            /** @description The arguments the assistant passed. */
+            arguments: Record<string, never>;
+            /** @description The call's id, unique within the message. */
+            id: string;
+            /** @description The tool's name. */
+            name: string;
+            /** @enum {string} */
+            type: "tool_call";
+        } | {
+            /** @description The id of the call this answers. */
+            id: string;
+            /** @description The tool's name. */
+            name: string;
+            /** @description Whether the tool succeeded. */
+            ok: boolean;
+            /** @description The tool's answer; omitted once stubbed (D-AS-12). */
+            result?: Record<string, never>;
+            /**
+             * Format: int64
+             * @description Rows in the answer, when it has rows.
+             */
+            rows?: number;
+            /**
+             * Format: int64
+             * @description Size of the answer in bytes.
+             */
+            size_bytes: number;
+            /** @description Whether the answer was replaced by a stub (D-AS-12). */
+            stubbed: boolean;
+            /** @enum {string} */
+            type: "tool_result";
+        } | {
+            /** @description The draft's content. */
+            draft: Record<string, never>;
+            /** @description The draft's id, unique within the message. */
+            id: string;
+            /** @description What the draft is. */
+            kind: components["schemas"]["AssistantDraftKind"];
+            /** @enum {string} */
+            type: "draft";
+        };
+        /**
+         * @description Who wrote a message.
+         * @enum {string}
+         */
+        AssistantRole: "user" | "assistant" | "tool";
         /**
          * @description Login methods the UI should offer.
          *
@@ -8155,6 +8359,11 @@ export interface components {
             name?: string;
             /** @description New `notify_while_firing` flag. */
             notify_while_firing?: boolean;
+        };
+        /** @description `PATCH …/assistant/conversations/{id}`. */
+        UpdateAssistantConversationRequest: {
+            /** @description 1–80 characters after trimming. */
+            title: string;
         };
         /** @description Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map. */
         UpdateChannelRequest: {
@@ -14163,6 +14372,318 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_assistant_conversations: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The caller's conversations. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationPage"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_assistant_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The created conversation. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversation"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_assistant_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Conversation id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The conversation with its messages. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversationDetail"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_assistant_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Conversation id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_assistant_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Conversation id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateAssistantConversationRequest"];
+            };
+        };
+        responses: {
+            /** @description The renamed conversation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssistantConversation"];
+                };
             };
             /** @description The request is malformed or a filter is invalid. */
             400: {

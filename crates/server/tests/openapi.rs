@@ -415,6 +415,31 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "list_assistant_conversations",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "post_assistant_conversation",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "get_assistant_conversation",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "patch_assistant_conversation",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "delete_assistant_conversation",
+    ),
     ("get", "/api/v1/projects/{project}/facets", "get_facets"),
     (
         "get",
@@ -851,6 +876,7 @@ const TAGS: &[&str] = &[
     "internal",
     "deletions",
     "alerts",
+    "assistant",
 ];
 
 const METHODS: &[&str] = &[
@@ -980,6 +1006,11 @@ fn document_lint() {
                 | "delete_org_sso_domain"
                 | "delete_org"
                 | "delete_project"
+                | "list_assistant_conversations"
+                | "post_assistant_conversation"
+                | "get_assistant_conversation"
+                | "patch_assistant_conversation"
+                | "delete_assistant_conversation"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1051,6 +1082,7 @@ fn document_lint() {
             || *id == "test_channel"
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
+            || *id == "patch_assistant_conversation"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
@@ -1250,6 +1282,7 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("DashboardPage", "DashboardSummary"),
+        ("AssistantConversationPage", "AssistantConversation"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1534,6 +1567,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "DashboardPage",
+        "AssistantConversationPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",

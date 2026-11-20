@@ -1,5 +1,4 @@
 //! Assistant conversations and messages (track AS, D-AS-10, D-AS-12).
-#![cfg_attr(not(test), allow(dead_code))] // used by the expiry job (AS1.2) and the routes (AS1.3); AS1.3 removes this line
 
 use std::fmt;
 

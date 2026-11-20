@@ -124,6 +124,8 @@ pub(crate) enum ProjectPerm {
     Delete,
     /// Delete the project. The handler also requires org admin (spec 08, D-M-4).
     Drop,
+    /// Chat with the in-app assistant and manage one's own conversations (D-AS-4).
+    UseAssistant,
 }
 
 /// Scope on a project API key. Track D enforces [`Self::Read`] (D140).
@@ -227,7 +229,8 @@ impl ProjectPerm {
             | Self::ManageEvaluation
             | Self::ManageAlerts
             | Self::ManageDatasets
-            | Self::ManageDashboards => Role::Member,
+            | Self::ManageDashboards
+            | Self::UseAssistant => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
     }
@@ -243,7 +246,8 @@ impl ProjectPerm {
             | Self::ManageAlerts
             | Self::ManageDashboards
             | Self::ViewMembers
-            | Self::Drop => None,
+            | Self::Drop
+            | Self::UseAssistant => None,
         }
     }
 }
@@ -333,6 +337,9 @@ mod tests {
         // Dashboards: member and above; an API key cannot manage them (D-C-16).
         assert_eq!(ProjectPerm::ManageDashboards.min_role(), Role::Member);
         assert!(ProjectPerm::ManageDashboards.key_scope().is_none());
+        // Assistant conversations: member and above; an API key cannot use them (D-AS-4).
+        assert_eq!(ProjectPerm::UseAssistant.min_role(), Role::Member);
+        assert!(ProjectPerm::UseAssistant.key_scope().is_none());
         let viewer =
             effective_project_role(OrgRole::Viewer, None).expect("viewer sees the project");
         assert!(viewer < ProjectPerm::Annotate.min_role());

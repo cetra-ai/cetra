@@ -1,0 +1,12 @@
+{
+  "data": [
+    {
+      "id": "01900000-0000-7000-8000-000000001a01",
+      "title": "Why did checkout errors spike?",
+      "message_count": 4,
+      "created_at": "2026-01-01T00:00:00.000000000Z",
+      "last_active_at": "2026-01-01T00:00:04.000000000Z"
+    }
+  ],
+  "next_cursor": null
+}

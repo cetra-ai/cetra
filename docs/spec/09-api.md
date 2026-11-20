@@ -153,6 +153,12 @@ Track J ([`plans/j-datasets/00-design.md`](../plans/j-datasets/00-design.md) § 
 | `GET/POST /alert-rules` · `GET/PATCH/DELETE /alert-rules/{id}` · `GET /alert-rules/{id}/events` | rules and their state; events newest first, paged, with their deliveries. Reads: role viewer; writes: member (07, D-K-9). `GET /alert-events` lists the events of all the project's rules, newest first, paged, with their deliveries; role viewer. The lists of rules and channels are not paged (at most 100 and 20 per project). |
 | `GET/POST /channels` · `PATCH/DELETE /channels/{id}` · `POST /channels/{id}/test` | channel configs are write-only (D-K-6); the test sends one sample message synchronously and answers `{ok, error?}` |
 
+### Assistant
+
+| Method & path | Notes |
+|---|---|
+| `GET/POST /assistant/conversations` · `GET/PATCH/DELETE /assistant/conversations/{id}` | the caller's own conversations, private to their author (another user's id is `404`); project members and above with a session (`ProjectPerm::UseAssistant`, D-AS-4); the list is newest activity first and not paged (at most 100); `POST` takes no body; `PATCH` takes `{title}` (1–80 characters); the detail holds the messages, oldest first, with their parts (spec 04 § Assistant) (D-AS-10) |
+
 ### Pricing & GDPR
 
 | Method & path | Notes |
