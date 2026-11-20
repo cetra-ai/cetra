@@ -149,7 +149,9 @@ describe("labelChoices and tagChoices", () => {
   ];
 
   it("offers latest and production first, then the other labels sorted", () => {
-    expect(labelChoices(rows, ["production", "prod"], undefined)).toEqual([
+    expect(
+      labelChoices(["production", "staging", "canary"], ["production", "prod"], undefined),
+    ).toEqual([
       "latest",
       "production",
       "canary",
@@ -160,6 +162,14 @@ describe("labelChoices and tagChoices", () => {
 
   it("keeps the selected label even when no loaded row has it", () => {
     expect(labelChoices([], [], "archived")).toEqual(["latest", "production", "archived"]);
+  });
+
+  it("offers each label once, even when it is given more than once", () => {
+    expect(labelChoices(["canary", "canary", "latest"], ["canary"], undefined)).toEqual([
+      "latest",
+      "production",
+      "canary",
+    ]);
   });
 
   it("offers the loaded tags and the selected tag, sorted, once each", () => {

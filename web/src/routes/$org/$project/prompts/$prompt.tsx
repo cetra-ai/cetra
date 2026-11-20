@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, notFound } from "@tanstack/react-router";
 import { FileText } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { problemOf } from "@/api/problem";
 import {
@@ -22,7 +22,13 @@ import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { type PromptTab, parsePromptSearch, withPromptTab, withPromptVersion } from "@/lib/prompts";
+import {
+  DEFAULT_PROTECTED_LABELS,
+  type PromptTab,
+  parsePromptSearch,
+  withPromptTab,
+  withPromptVersion,
+} from "@/lib/prompts";
 import { atLeast, canManagePrompts } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/prompts/$prompt")({
@@ -93,7 +99,7 @@ function PromptContent({
   const canManage = canManagePrompts(data.role);
   const canProtect = atLeast(data.role, "admin");
   const settings = useQuery(promptSettingsQuery(org, project));
-  const protectedLabels = settings.data?.protected_labels ?? [];
+  const protectedLabels = settings.data?.protected_labels ?? DEFAULT_PROTECTED_LABELS;
   const name = prompt.name;
   const latest = prompt.latest_version;
   const shown = pinned ?? latest;
@@ -111,6 +117,21 @@ function PromptContent({
   const version = useQuery(promptVersionQuery(org, project, name, shown));
   // Set by the template tab while its edit has unsaved changes.
   const [dirty, setDirty] = useState(false);
+  // The version and latest state when the page last had no unsaved edit. An unsaved edit keeps the
+  // version it started from, so a newer version saved meanwhile does not drop it.
+  const editStart = useRef({ version: shown, atLatest });
+  if (!dirty) {
+    editStart.current = { version: shown, atLatest };
+  }
+  const templateFrom = dirty ? editStart.current.version : shown;
+  const templateBase = useQuery({
+    ...promptVersionQuery(org, project, name, templateFrom),
+    enabled: templateFrom !== shown,
+  });
+  const templateVersion = templateFrom === shown ? version.data : templateBase.data;
+  // The edit started at the latest version, and a newer one has been saved since.
+  const newerSaved =
+    dirty && editStart.current.atLatest && prompt.latest_version > editStart.current.version;
   // The navigation that waits for the user to confirm dropping the unsaved edit.
   const [leaving, setLeaving] = useState<(() => void) | undefined>();
 
@@ -182,6 +203,12 @@ function PromptContent({
         onChooseVersion={chooseVersion}
       />
 
+      {newerSaved ? (
+        <div role="status" className="border-b bg-muted/40 px-3 py-1 text-body">
+          <p>A newer version exists. Saving creates a version after it.</p>
+        </div>
+      ) : null}
+
       {atLatest ? null : (
         <div
           role="status"
@@ -237,12 +264,12 @@ function PromptContent({
             forceMount
             className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-3"
           >
-            {version.data ? (
+            {templateVersion ? (
               // Keyed by version: an edit belongs to the version it started from.
               <TemplateTab
-                key={version.data.version}
+                key={templateVersion.version}
                 prompt={prompt}
-                version={version.data}
+                version={templateVersion}
                 canManage={canManage}
                 canProtect={canProtect}
                 protectedLabels={protectedLabels}
@@ -253,7 +280,9 @@ function PromptContent({
             )}
           </TabsContent>
           <TabsContent value="versions" className="min-h-0 flex-1 overflow-auto px-3 pt-3 pb-3">
+            {/* Keyed by version: a Diff choice does not outlive the version it was made on. */}
             <VersionsTab
+              key={shown}
               prompt={prompt}
               shown={shown}
               versions={loaded}

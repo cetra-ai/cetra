@@ -155,18 +155,22 @@ function positionOf(value: unknown): Position | undefined {
   return typeof line === "number" && typeof column === "number" ? { line, column } : undefined;
 }
 
+/** The protected labels until the project's settings load: `production` is protected by default. */
+export const DEFAULT_PROTECTED_LABELS: string[] = ["production"];
+
 /**
  * The label filter's choices: `latest` and `production` first, then the other labels sorted. They
- * are the protected labels, the labels of the loaded rows and the selected label, without repeats.
+ * are the labels given (the labels seen so far), the protected labels and the selected label,
+ * without repeats.
  */
 export function labelChoices(
-  rows: readonly { labels: readonly { label: string }[] }[],
+  labelNames: readonly string[],
   protectedLabels: readonly string[],
   selected: string | undefined,
 ): string[] {
   const labels = new Set<string>([
     ...protectedLabels,
-    ...rows.flatMap((row) => row.labels.map((item) => item.label)),
+    ...labelNames,
     ...(selected !== undefined ? [selected] : []),
   ]);
   labels.delete("latest");

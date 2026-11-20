@@ -19,10 +19,21 @@ import { isValidLabel, LABEL_FORBIDDEN_TEXT, PROTECTED_REASON } from "@/lib/prom
 const LABEL_RULE_TEXT =
   'Use 1 to 64 lowercase letters, digits, _, . or -. "latest" and numbers alone are not labels.';
 
+/** What the user typed in the dialog. The caller keeps it, so it survives the dialog closing. */
+export type SaveFormState = {
+  message: string;
+  /** The labels checked, in the order they were checked. */
+  checked: string[];
+  newLabel: string;
+};
+
+export const EMPTY_SAVE_FORM: SaveFormState = { message: "", checked: [], newLabel: "" };
+
 /**
  * Asks for the commit message and the labels to move to a new version. The save itself is the
  * caller's: `onSave` gets the message and the labels. Errors of the commit message and the labels
- * come in `errors` by field.
+ * come in `errors` by field. The typed values are the caller's `form`, so they survive the dialog
+ * closing on a server error.
  */
 export function SaveVersionDialog({
   open,
@@ -33,6 +44,8 @@ export function SaveVersionDialog({
   pending,
   errors,
   error,
+  form,
+  onFormChange,
   onSave,
 }: {
   open: boolean;
@@ -44,6 +57,8 @@ export function SaveVersionDialog({
   pending: boolean;
   errors: Record<string, string>;
   error: string | undefined;
+  form: SaveFormState;
+  onFormChange: (form: SaveFormState) => void;
   onSave: (input: { commitMessage: string | undefined; labels: string[] }) => void;
 }) {
   return (
@@ -69,6 +84,8 @@ export function SaveVersionDialog({
           pending={pending}
           errors={errors}
           error={error}
+          form={form}
+          onFormChange={onFormChange}
           onSave={onSave}
         />
       </DialogContent>
@@ -83,6 +100,8 @@ function SaveVersionForm({
   pending,
   errors,
   error,
+  form,
+  onFormChange,
   onSave,
 }: {
   labels: string[];
@@ -91,12 +110,12 @@ function SaveVersionForm({
   pending: boolean;
   errors: Record<string, string>;
   error: string | undefined;
+  form: SaveFormState;
+  onFormChange: (form: SaveFormState) => void;
   onSave: (input: { commitMessage: string | undefined; labels: string[] }) => void;
 }) {
   const idPrefix = useId();
-  const [message, setMessage] = useState("");
-  const [checked, setChecked] = useState<string[]>([]);
-  const [newLabel, setNewLabel] = useState("");
+  const { message, checked, newLabel } = form;
   const [newLabelError, setNewLabelError] = useState<string | undefined>();
   const labelsMessage = newLabelError ?? errors.labels ?? errors["labels[0]"];
 
@@ -125,7 +144,9 @@ function SaveVersionForm({
         id={`${idPrefix}-message`}
         label="Commit message"
         value={message}
-        onChange={setMessage}
+        onChange={(next) => {
+          onFormChange({ ...form, message: next });
+        }}
         error={errors.commit_message}
         maxLength={500}
       />
@@ -141,11 +162,13 @@ function SaveVersionForm({
                   checked={checked.includes(label)}
                   disabled={locked}
                   onCheckedChange={(next) => {
-                    setChecked((current) =>
-                      next === true
-                        ? [...current.filter((item) => item !== label), label]
-                        : current.filter((item) => item !== label),
-                    );
+                    onFormChange({
+                      ...form,
+                      checked:
+                        next === true
+                          ? [...checked.filter((item) => item !== label), label]
+                          : checked.filter((item) => item !== label),
+                    });
                   }}
                 />
                 <Label htmlFor={id}>{label}</Label>
@@ -163,7 +186,7 @@ function SaveVersionForm({
             className="h-7 text-body"
             aria-invalid={labelsMessage ? true : undefined}
             onChange={(event) => {
-              setNewLabel(event.target.value);
+              onFormChange({ ...form, newLabel: event.target.value });
             }}
           />
           <p className="text-caption text-muted-foreground">

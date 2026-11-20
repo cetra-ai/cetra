@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import { invalidatePrompt } from "@/api/queries-prompts";
 import { server } from "@/mocks/node";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
@@ -256,4 +257,192 @@ it("asks before dropping unsaved edits when another version is shown", async () 
   const again = await screen.findByRole("alertdialog", { name: "Discard your edits?" });
   await user.click(within(again).getByRole("button", { name: "Discard" }));
   expect(await screen.findByText("Viewing version 1.")).toBeInTheDocument();
+});
+
+it("shows the template and config errors, and keeps the dialog values", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.post("/api/v1/projects/:project/prompts/:prompt/versions", () =>
+      problemResponse(400, "bad_request", {
+        errors: [
+          {
+            field: "template[1].content",
+            message: "content is required",
+            position: { line: 1, column: 4 },
+          },
+          { field: "config.params.temperature", message: "must be between 0 and 2" },
+        ],
+      }),
+    ),
+  );
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Save as new version…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Save as new version" });
+  await user.type(within(dialog).getByLabelText("Commit message"), "Shorter");
+  await user.click(within(dialog).getByRole("button", { name: "Save version" }));
+
+  // The dialog closes so the editor shows the problems: the placeholder row of message 2 and config.
+  const message = await screen.findByText(/content is required/);
+  expect(screen.getByLabelText("Name of placeholder 2").closest("li")).toContainElement(message);
+  expect(message).toHaveTextContent("(line 1, column 4)");
+  expect(screen.getByText("must be between 0 and 2")).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog", { name: "Save as new version" })).toBeNull(),
+  );
+
+  // Editing the template clears its errors; the config error stays until the next save.
+  await user.type(screen.getByLabelText("Name of placeholder 2"), "x");
+  expect(screen.queryByText(/content is required/)).toBeNull();
+  expect(screen.getByText("must be between 0 and 2")).toBeInTheDocument();
+
+  // The dialog keeps what was typed in it.
+  await user.click(screen.getByRole("button", { name: "Save as new version…" }));
+  const again = await screen.findByRole("dialog", { name: "Save as new version" });
+  expect(within(again).getByLabelText("Commit message")).toHaveValue("Shorter");
+});
+
+it("keeps an unsaved edit when a newer version is saved meanwhile", async () => {
+  const user = userEvent.setup();
+  let latestVersion = 2;
+  server.use(
+    http.get("/api/v1/projects/:project/prompts/:prompt", () =>
+      HttpResponse.json({ ...promptFixture, latest_version: latestVersion }),
+    ),
+    http.get("/api/v1/projects/:project/prompts/:prompt/versions/:version", ({ params }) =>
+      HttpResponse.json(
+        params.version === "3"
+          ? { ...versionTwoFixture, version: 3, labels: ["latest"] }
+          : versionTwoFixture,
+      ),
+    ),
+  );
+  const { queryClient } = await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  const system = screen.getByLabelText("Content of message 1") as HTMLTextAreaElement;
+  const original = system.value;
+  await user.type(system, " Be brief.");
+
+  latestVersion = 3;
+  act(() => {
+    invalidatePrompt(queryClient, "acme", "support-bot", "support-reply");
+  });
+
+  expect(await screen.findByRole("status")).toHaveTextContent(
+    "A newer version exists. Saving creates a version after it.",
+  );
+  expect(screen.getByLabelText("Content of message 1")).toHaveValue(`${original} Be brief.`);
+});
+
+it("shows the problem's detail when a label removal is refused for an unprotected label", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.delete("/api/v1/projects/:project/prompts/:prompt/labels/:label", () =>
+      problemResponse(403, "forbidden", { detail: "Labels are frozen for this project." }),
+    ),
+  );
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Remove label staging" }));
+  const confirm = await screen.findByRole("alertdialog", { name: "Remove label staging?" });
+  await user.click(within(confirm).getByRole("button", { name: "Remove label" }));
+
+  expect(
+    await within(confirm).findByText("Labels are frozen for this project."),
+  ).toBeInTheDocument();
+});
+
+it("shows the problem's detail when a label move is refused for an unprotected label", async () => {
+  const user = userEvent.setup();
+  server.use(
+    http.put("/api/v1/projects/:project/prompts/:prompt/labels/:label", () =>
+      problemResponse(403, "forbidden", { detail: "Labels are frozen for this project." }),
+    ),
+  );
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("tab", { name: "Versions" }));
+  const list = await screen.findByRole("list", { name: "Versions" });
+  await user.click(within(rowOf(list, "v1")).getByRole("button", { name: "Set label…" }));
+  const dialog = await screen.findByRole("dialog", { name: "Set label" });
+  await user.type(within(dialog).getByLabelText("Label"), "canary");
+  await user.click(within(dialog).getByRole("button", { name: "Save" }));
+
+  expect(
+    await within(dialog).findByText("Labels are frozen for this project."),
+  ).toBeInTheDocument();
+});
+
+it("deletes the prompt once its name is typed, and returns to the list", async () => {
+  const user = userEvent.setup();
+  const requests = recordRequests();
+  server.use(
+    http.delete("/api/v1/projects/:project/prompts/:prompt", () =>
+      new HttpResponse(null, { status: 204 }),
+    ),
+  );
+  const { router } = await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Delete prompt" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Delete prompt?" });
+  await user.type(
+    within(dialog).getByLabelText('Type the prompt name "support-reply" to confirm'),
+    "support-reply",
+  );
+  await user.click(within(dialog).getByRole("button", { name: "Delete prompt" }));
+
+  await waitFor(() =>
+    expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"),
+  );
+  expect(requests.calls.some((call) => call.method === "DELETE")).toBe(true);
+  requests.stop();
+});
+
+it("reads a deleted prompt again when it is opened after the delete", async () => {
+  const user = userEvent.setup();
+  const reads: string[] = [];
+  server.use(
+    http.get("/api/v1/projects/:project/prompts/:prompt", ({ params }) => {
+      reads.push(String(params.prompt));
+      return HttpResponse.json(promptFixture);
+    }),
+    http.delete("/api/v1/projects/:project/prompts/:prompt", () =>
+      new HttpResponse(null, { status: 204 }),
+    ),
+  );
+  const { router } = await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("button", { name: "Delete prompt" }));
+  const dialog = await screen.findByRole("alertdialog", { name: "Delete prompt?" });
+  await user.type(
+    within(dialog).getByLabelText('Type the prompt name "support-reply" to confirm'),
+    "support-reply",
+  );
+  await user.click(within(dialog).getByRole("button", { name: "Delete prompt" }));
+  await waitFor(() =>
+    expect(router.state.location.pathname).toBe("/acme/support-bot/prompts"),
+  );
+
+  const grid = await screen.findByRole("grid", { name: "Prompts" });
+  const before = reads.length;
+  await user.click(within(grid).getByText("support-reply"));
+  await waitFor(() => expect(reads.length).toBeGreaterThan(before));
+});
+
+it("shows the changes of the version shown after a Diff of another version", async () => {
+  const user = userEvent.setup();
+  await renderApp("/acme/support-bot/prompts/support-reply");
+
+  await user.click(await screen.findByRole("combobox", { name: "Version" }));
+  await user.click(await screen.findByRole("option", { name: "v1" }));
+  await user.click(await screen.findByRole("tab", { name: "Versions" }));
+  const list = await screen.findByRole("list", { name: "Versions" });
+  await user.click(within(rowOf(list, "v1")).getByRole("button", { name: "Diff" }));
+  expect(await screen.findByRole("heading", { name: "Changes in v1" })).toBeInTheDocument();
+
+  await user.click(screen.getByRole("combobox", { name: "Version" }));
+  await user.click(await screen.findByRole("option", { name: "Latest (v2)" }));
+  expect(await screen.findByRole("heading", { name: "Changes in v2" })).toBeInTheDocument();
 });

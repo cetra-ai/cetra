@@ -218,3 +218,11 @@ it("shows the empty state texts when the project has no prompts", async () => {
   ).toBeInTheDocument();
   expect(screen.queryByRole("grid", { name: "Prompts" })).toBeNull();
 });
+
+it("does not open the new prompt dialog for a viewer", async () => {
+  asRole("viewer");
+  await renderApp("/acme/support-bot/prompts?create=1");
+
+  await screen.findByRole("grid", { name: "Prompts" });
+  expect(screen.queryByRole("dialog", { name: "New prompt" })).toBeNull();
+});

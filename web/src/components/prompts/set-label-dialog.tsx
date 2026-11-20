@@ -98,7 +98,10 @@ function SetLabelForm({
   const typed = label.trim();
   const locked = typed !== "" && protectedLabels.includes(typed) && !canProtect;
   const serverErrors = put.error ? fieldErrors(put.error) : {};
-  const forbidden = put.error ? problemOf(put.error)?.status === 403 : false;
+  // The fixed text is for a refused move of a protected label (D-V-10); others show the problem.
+  const forbidden = put.error
+    ? problemOf(put.error)?.status === 403 && protectedLabels.includes(typed)
+    : false;
   const fieldMessage = localError ?? serverErrors.label;
   const formMessage =
     localError === undefined && fieldMessage === undefined && put.error

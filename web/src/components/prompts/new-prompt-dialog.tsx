@@ -4,13 +4,17 @@ import { type FormEvent, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { promptSettingsQuery, promptsKey } from "@/api/queries-prompts";
+import { invalidatePrompt, promptSettingsQuery, promptsKey } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { SubmitButton } from "@/components/form/submit-button";
 import { TextField } from "@/components/form/text-field";
-import { TemplateEditor } from "@/components/prompts/template-editor";
+import {
+  TemplateEditor,
+  fieldMessage,
+  withoutTemplate,
+} from "@/components/prompts/template-editor";
 import { useProject } from "@/components/shell/project-context";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -26,6 +30,7 @@ import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField } from "@/lib/datasets";
 import {
+  DEFAULT_PROTECTED_LABELS,
   type ChatEntry,
   emptyChat,
   fieldPositions,
@@ -133,8 +138,12 @@ function NewPromptForm({
   const [error, setError] = useState<string | undefined>();
 
   // Below admin, a protected `production` cannot be set on create: the box is unchecked and off.
-  const productionProtected = settings.data?.protected_labels.includes("production") ?? false;
+  const protectedLabels = settings.data?.protected_labels ?? DEFAULT_PROTECTED_LABELS;
+  const productionProtected = protectedLabels.includes("production");
   const productionLocked = productionProtected && !atLeast(data.role, "admin");
+  const configField = Object.keys(errors).find((field) => /^config(\W|$)/.test(field));
+  const configMessage =
+    configField === undefined ? undefined : fieldMessage(configField, errors, positions);
 
   function switchType(next: PromptKind) {
     if (next === type) {
@@ -181,14 +190,21 @@ function NewPromptForm({
     if (message !== "") {
       body.commit_message = message;
     }
+    const touchesProtected = body.labels.some((label) => protectedLabels.includes(label));
     create.mutate(
       { params: { path: { project: projectRef(org, project) } }, body },
-      { onSuccess: saved, onError },
+      {
+        onSuccess: saved,
+        onError: (caught) => {
+          onError(caught, touchesProtected);
+        },
+      },
     );
   }
 
   function saved(prompt: Schema<"PromptVersion">) {
     void queryClient.invalidateQueries({ queryKey: promptsKey(org, project) });
+    invalidatePrompt(queryClient, org, project, prompt.name);
     // The new prompt opens on its own page; the dialog goes with the list page it was opened from.
     void navigate({
       to: "/$org/$project/prompts/$prompt",
@@ -196,7 +212,7 @@ function NewPromptForm({
     });
   }
 
-  function onError(caught: unknown) {
+  function onError(caught: unknown, touchesProtected: boolean) {
     const problem = problemOf(caught);
     const next: Record<string, string> = {};
     let placed = false;
@@ -212,7 +228,7 @@ function NewPromptForm({
     }
     setErrors(next);
     setPositions(fieldPositions(caught));
-    if (problem?.status === 403) {
+    if (problem?.status === 403 && touchesProtected) {
       setError(PROTECTED_PRODUCTION_TEXT);
     } else if (!placed) {
       setError(problemMessage(caught, FALLBACK));
@@ -220,6 +236,11 @@ function NewPromptForm({
   }
 
   const labelsError = errors["labels[0]"] ?? errors.labels;
+  // A template edit clears the template's errors, which describe the template as it was sent.
+  const clearTemplateErrors = () => {
+    setErrors(withoutTemplate);
+    setPositions(withoutTemplate);
+  };
 
   return (
     <form onSubmit={onSubmit} className="flex flex-col gap-4" noValidate>
@@ -261,6 +282,7 @@ function NewPromptForm({
           type="text"
           value={text}
           onChange={(value) => {
+            clearTemplateErrors();
             setText(value);
             onDirty();
           }}
@@ -272,6 +294,7 @@ function NewPromptForm({
           type="chat"
           value={chat}
           onChange={(value) => {
+            clearTemplateErrors();
             setChat(value);
             onDirty();
           }}
@@ -287,7 +310,7 @@ function NewPromptForm({
           spellCheck={false}
           rows={4}
           value={configText}
-          aria-invalid={errors.config ? true : undefined}
+          aria-invalid={configMessage ? true : undefined}
           aria-describedby="prompt-config-hint"
           onChange={(event) => {
             setConfigText(event.target.value);
@@ -297,7 +320,7 @@ function NewPromptForm({
         <p id="prompt-config-hint" className="text-caption text-muted-foreground">
           A JSON object with the model and its parameters. Leave empty for none.
         </p>
-        {errors.config ? <p className="text-caption text-destructive">{errors.config}</p> : null}
+        {configMessage ? <p className="text-caption text-destructive">{configMessage}</p> : null}
       </div>
       <TextField
         id="prompt-commit-message"

@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { ChatEntry, ChatRole, Position } from "@/lib/prompts";
 
 const ROLES: readonly ChatRole[] = ["system", "user", "assistant"];
+const TEMPLATE_FIELD = /^template(\W|$)/;
 
 type TemplateEditorProps = {
   /** Field errors by field path, such as `template` or `template[1].content`. */
@@ -36,6 +37,16 @@ export function fieldMessage(
   }
   const position = positions?.[field];
   return position ? `${message} (line ${position.line}, column ${position.column})` : message;
+}
+
+/**
+ * The errors or positions without the template's: an edit of the template clears them, since they
+ * describe the template as it was sent.
+ */
+export function withoutTemplate<T>(record: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).filter(([field]) => !TEMPLATE_FIELD.test(field)),
+  );
 }
 
 /** The text template or the chat messages of a prompt, with its field errors under each part. */

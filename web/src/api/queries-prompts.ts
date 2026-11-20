@@ -35,6 +35,13 @@ export function promptQuery(org: string, project: string, prompt: string) {
   });
 }
 
+/** Prefix of every metrics query of one prompt, for invalidation. */
+export function promptMetricsKey(org: string, project: string, prompt: string) {
+  return $api.queryOptions("get", "/api/v1/projects/{project}/prompts/{prompt}/metrics", {
+    params: { path: { project: projectRef(org, project), prompt } },
+  }).queryKey;
+}
+
 export function promptKey(org: string, project: string, prompt: string) {
   return promptQuery(org, project, prompt).queryKey;
 }
@@ -103,7 +110,41 @@ export function promptWriteKeys(org: string, project: string, prompt: string): Q
     promptKey(org, project, prompt),
     promptVersionsKey(org, project, prompt),
     promptLabelEventsKey(org, project, prompt),
+    promptMetricsKey(org, project, prompt),
   ];
+}
+
+/** Whether a query is the single-version query of one prompt of the project. */
+function isVersionQueryOf(queryKey: QueryKey, org: string, project: string, prompt: string) {
+  const init = queryKey[2] as { params?: { path?: { project?: string; prompt?: string } } };
+  return (
+    queryKey[1] === VERSION_PATH &&
+    init?.params?.path?.project === projectRef(org, project) &&
+    init.params.path.prompt === prompt
+  );
+}
+
+/**
+ * Drops the cached queries of a deleted prompt, so a prompt of the same name opened later is read
+ * again, then marks the list stale.
+ */
+export function removePrompt(
+  queryClient: QueryClient,
+  org: string,
+  project: string,
+  prompt: string,
+) {
+  for (const queryKey of [
+    promptKey(org, project, prompt),
+    promptVersionsKey(org, project, prompt),
+    promptLabelEventsKey(org, project, prompt),
+  ]) {
+    queryClient.removeQueries({ queryKey });
+  }
+  queryClient.removeQueries({
+    predicate: (query) => isVersionQueryOf(query.queryKey, org, project, prompt),
+  });
+  void queryClient.invalidateQueries({ queryKey: promptsKey(org, project) });
 }
 
 /** Marks stale, after a prompt write, every query that the write can change. */

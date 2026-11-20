@@ -8,8 +8,16 @@ import { invalidatePrompt } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
 import { CreatedBy } from "@/components/created-by";
 import { DisabledReason } from "@/components/disabled-reason";
-import { SaveVersionDialog } from "@/components/prompts/save-version-dialog";
-import { TemplateEditor } from "@/components/prompts/template-editor";
+import {
+  EMPTY_SAVE_FORM,
+  SaveVersionDialog,
+  type SaveFormState,
+} from "@/components/prompts/save-version-dialog";
+import {
+  fieldMessage,
+  TemplateEditor,
+  withoutTemplate,
+} from "@/components/prompts/template-editor";
 import { RelativeTime } from "@/components/relative-time";
 import { UnsavedChangesGuard } from "@/components/settings/unsaved-changes";
 import { useProject } from "@/components/shell/project-context";
@@ -38,6 +46,7 @@ type Draft = { text: string; chat: ChatEntry[]; config: string };
 const FALLBACK = "Could not save the prompt.";
 /** Field errors the editor shows under its own parts. */
 const EDITOR_FIELD = /^(template|config)(\W|$)/;
+const CONFIG_FIELD = /^config(\W|$)/;
 /** Field errors the save dialog shows. */
 const SAVE_FIELD = /^(commit_message|labels)(\W|$)/;
 
@@ -84,9 +93,18 @@ export function TemplateTab({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [positions, setPositions] = useState<Record<string, Position>>({});
   const [saveOpen, setSaveOpen] = useState(false);
+  const [saveForm, setSaveForm] = useState<SaveFormState>(EMPTY_SAVE_FORM);
   const [saveErrors, setSaveErrors] = useState<Record<string, string>>({});
   const [saveError, setSaveError] = useState<string | undefined>();
   const changed = editing && draftKey(draft, version.type) !== baseline;
+  // The template's errors go once it changes: they describe the template as it was sent.
+  const clearTemplateErrors = () => {
+    setErrors(withoutTemplate);
+    setPositions(withoutTemplate);
+  };
+  const configField = Object.keys(errors).find((field) => CONFIG_FIELD.test(field));
+  const configMessage =
+    configField === undefined ? undefined : fieldMessage(configField, errors, positions);
 
   useEffect(() => {
     onDirtyChange(changed);
@@ -116,6 +134,7 @@ export function TemplateTab({
                 const next = draftOf(version);
                 setDraft(next);
                 setBaseline(draftKey(next, version.type));
+                setSaveForm(EMPTY_SAVE_FORM);
                 setErrors({});
                 setPositions({});
                 setEditing(true);
@@ -153,6 +172,7 @@ export function TemplateTab({
       template: version.type === "text" ? draft.text : draft.chat,
       labels: input.labels,
     };
+    const touchesProtected = input.labels.some((label) => protectedLabels.includes(label));
     if (config.value !== undefined) {
       body.config = config.value as Schema<"CreateVersionRequest">["config"];
     }
@@ -169,6 +189,7 @@ export function TemplateTab({
           // The page then shows the latest version, which is the one just saved.
           setEditing(false);
           setSaveOpen(false);
+          setSaveForm(EMPTY_SAVE_FORM);
           void navigate({
             to: "/$org/$project/prompts/$prompt",
             params: { org, project, prompt: prompt.name },
@@ -176,12 +197,14 @@ export function TemplateTab({
             state: true,
           });
         },
-        onError: failed,
+        onError: (caught) => {
+          failed(caught, touchesProtected);
+        },
       },
     );
   }
 
-  function failed(caught: unknown) {
+  function failed(caught: unknown, touchesProtected: boolean) {
     const fields = fieldErrors(caught);
     const editorErrors: Record<string, string> = {};
     const dialogErrors: Record<string, string> = {};
@@ -200,7 +223,7 @@ export function TemplateTab({
       return;
     }
     setSaveErrors(dialogErrors);
-    if (problemOf(caught)?.status === 403) {
+    if (problemOf(caught)?.status === 403 && touchesProtected) {
       setSaveError(LABEL_FORBIDDEN_TEXT);
     } else if (Object.keys(dialogErrors).length === 0) {
       setSaveError(problemMessage(caught, FALLBACK));
@@ -217,6 +240,7 @@ export function TemplateTab({
           errors={errors}
           positions={positions}
           onChange={(value) => {
+            clearTemplateErrors();
             setDraft((current) => ({ ...current, text: value }));
           }}
         />
@@ -227,6 +251,7 @@ export function TemplateTab({
           errors={errors}
           positions={positions}
           onChange={(value) => {
+            clearTemplateErrors();
             setDraft((current) => ({ ...current, chat: value }));
           }}
         />
@@ -239,13 +264,13 @@ export function TemplateTab({
           spellCheck={false}
           rows={4}
           value={draft.config}
-          aria-invalid={errors.config ? true : undefined}
+          aria-invalid={configMessage ? true : undefined}
           onChange={(event) => {
             const value = event.target.value;
             setDraft((current) => ({ ...current, config: value }));
           }}
         />
-        {errors.config ? <p className="text-caption text-destructive">{errors.config}</p> : null}
+        {configMessage ? <p className="text-caption text-destructive">{configMessage}</p> : null}
       </div>
       <div className="flex flex-wrap gap-2">
         <Button
@@ -272,6 +297,8 @@ export function TemplateTab({
         pending={create.isPending}
         errors={saveErrors}
         error={saveError}
+        form={saveForm}
+        onFormChange={setSaveForm}
         onSave={save}
       />
     </div>

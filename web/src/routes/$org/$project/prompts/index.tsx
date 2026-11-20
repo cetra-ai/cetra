@@ -1,7 +1,7 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { FileText } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { promptSettingsQuery, promptsInit } from "@/api/queries-prompts";
 import { DataTable } from "@/components/data-table/data-table";
@@ -22,7 +22,12 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useBackState } from "@/lib/list-return";
-import { labelChoices, parsePromptsSearch, tagChoices } from "@/lib/prompts";
+import {
+  DEFAULT_PROTECTED_LABELS,
+  labelChoices,
+  parsePromptsSearch,
+  tagChoices,
+} from "@/lib/prompts";
 import { atLeast, canManagePrompts } from "@/lib/roles";
 
 export const Route = createFileRoute("/$org/$project/prompts/")({
@@ -46,15 +51,24 @@ function PromptsPage() {
   const canProtect = atLeast(data.role, "admin");
   const [text, setText] = useState(q ?? "");
   const [protecting, setProtecting] = useState(false);
+  // True from a keystroke until the text reaches the URL, so the URL does not overwrite it.
+  const typing = useRef(false);
+  // Every label seen in the loaded rows during this page's life, so a filter keeps its choices.
+  const seenLabels = useRef(new Set<string>());
 
-  // The search text follows the URL when it changes from elsewhere (back, another link).
+  // The search text follows the URL when it changes from elsewhere (back, another link), unless
+  // the user is typing.
   useEffect(() => {
+    if (typing.current) {
+      return;
+    }
     setText((current) => (current.trim() === (q ?? "") ? current : (q ?? "")));
   }, [q]);
 
   // The search text reaches the URL after a pause, so typing does not request on every key.
   useEffect(() => {
     const timer = setTimeout(() => {
+      typing.current = false;
       const next = text.trim() || undefined;
       if (next !== q) {
         void navigate({
@@ -86,8 +100,13 @@ function PromptsPage() {
   }
 
   const rows = useMemo(() => query.data?.pages.flatMap((page) => page.data) ?? [], [query.data]);
-  const protectedLabels = settings.data?.protected_labels ?? [];
-  const labels = labelChoices(rows, protectedLabels, label);
+  for (const row of rows) {
+    for (const item of row.labels) {
+      seenLabels.current.add(item.label);
+    }
+  }
+  const protectedLabels = settings.data?.protected_labels ?? DEFAULT_PROTECTED_LABELS;
+  const labels = labelChoices([...seenLabels.current], protectedLabels, label);
   const tags = tagChoices(rows, tag);
   const filtered = q !== undefined || label !== undefined || tag !== undefined;
   const fetchNextPage = useCallback(() => {
@@ -145,6 +164,7 @@ function PromptsPage() {
           placeholder="Search by name"
           value={text}
           onChange={(event) => {
+            typing.current = true;
             setText(event.target.value);
           }}
           className="h-7 max-w-xs text-body"

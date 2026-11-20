@@ -5,7 +5,7 @@ import { useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
-import { invalidatePrompt, promptsKey } from "@/api/queries-prompts";
+import { invalidatePrompt, removePrompt } from "@/api/queries-prompts";
 import type { Schema } from "@/api/types";
 import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -33,12 +33,21 @@ export const LOAD_MORE = "load-more";
 const FALLBACK_DELETE = "Could not delete the prompt.";
 const FALLBACK_REMOVE = "Could not remove the label.";
 
-/** The message of a failed write: the fixed text for `403`, else the problem's own message. */
-function writeMessage(error: unknown, forbidden: string, fallback: string): string | undefined {
+/**
+ * The message of a failed write. A `403` on a write that touched a protected label gets the fixed
+ * `forbidden` text; any other failure shows the problem's own message.
+ */
+function writeMessage(
+  error: unknown,
+  forbidden: string | undefined,
+  fallback: string,
+): string | undefined {
   if (error === null || error === undefined) {
     return undefined;
   }
-  return problemOf(error)?.status === 403 ? forbidden : problemMessage(error, fallback);
+  return problemOf(error)?.status === 403 && forbidden !== undefined
+    ? forbidden
+    : problemMessage(error, fallback);
 }
 
 /**
@@ -116,7 +125,7 @@ export function PromptHeader({
       { params: { path: { project: projectRef(org, project), prompt: prompt.name } } },
       {
         onSuccess: () => {
-          void queryClient.invalidateQueries({ queryKey: promptsKey(org, project) });
+          removePrompt(queryClient, org, project, prompt.name);
           void navigate({ to: "/$org/$project/prompts", params: { org, project } });
         },
       },
@@ -220,7 +229,12 @@ export function PromptHeader({
         confirmLabel="Remove label"
         destructive
         pending={removeLabel.isPending}
-        error={writeMessage(removeLabel.error, LABEL_FORBIDDEN_TEXT, FALLBACK_REMOVE)}
+        error={writeMessage(
+          removeLabel.error,
+          // Only a protected label is the project admins' to move (D-V-10).
+          protectedLabels.includes(removing ?? "") ? LABEL_FORBIDDEN_TEXT : undefined,
+          FALLBACK_REMOVE,
+        )}
         onConfirm={confirmRemove}
       />
       <TypeToConfirmDialog
@@ -240,7 +254,9 @@ export function PromptHeader({
         error={writeMessage(
           deletePrompt.error,
           // A prompt with a protected label is deleted by project admins only (D-V-10).
-          PROTECTED_REASON,
+          prompt.labels.some((item) => protectedLabels.includes(item.label))
+            ? PROTECTED_REASON
+            : undefined,
           FALLBACK_DELETE,
         )}
         onConfirm={confirmDelete}
