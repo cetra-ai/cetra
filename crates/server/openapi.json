@@ -17024,6 +17024,129 @@
         ]
       }
     },
+    "/api/v1/projects/{project}/issues/{id}/dataset-items": {
+      "post": {
+        "tags": [
+          "issues"
+        ],
+        "summary": "Add an issue's occurrences to a dataset",
+        "description": "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.",
+        "operationId": "post_issue_dataset_items",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Issue id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueDatasetItemsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The new version, the items added and the traces skipped.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FromTracesResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/projects/{project}/issues/{id}/events": {
       "get": {
         "tags": [
@@ -24880,6 +25003,11 @@
             "type": "string",
             "description": "Filter DSL expression over `traces`. Absent means every trace."
           },
+          "issue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`issue_occurrences` only: count one issue and the issues merged into it. Exactly one of\n`issue_id` and `source_id` is set for that metric."
+          },
           "metric": {
             "$ref": "#/components/schemas/AlertMetric",
             "description": "What is measured."
@@ -24887,11 +25015,16 @@
           "min_count": {
             "type": "integer",
             "format": "int64",
-            "description": "Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`."
+            "description": "Fewer samples than this gives `no_data`. Not for `cost` or `issue_occurrences`. Defaults:\n20, or 10 for `score`."
           },
           "score_name": {
             "type": "string",
             "description": "`score` only: the score name."
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "`issue_occurrences` only: count every issue of the source that is not ignored or merged,\nand the issues merged into them."
           },
           "target": {
             "$ref": "#/components/schemas/LatencyTarget",
@@ -24900,7 +25033,7 @@
           "threshold": {
             "type": "number",
             "format": "double",
-            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target)."
+            "description": "Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`\n(below the window length for a `trace` target), occurrences for `issue_occurrences`."
           },
           "window": {
             "$ref": "#/components/schemas/AlertWindow",
@@ -25083,7 +25216,8 @@
           "error_rate",
           "cost",
           "latency_p95",
-          "score"
+          "score",
+          "issue_occurrences"
         ]
       },
       "AlertRule": {
@@ -26665,6 +26799,14 @@
             "type": "number",
             "format": "double",
             "description": "Spend limit per `budget_period`, in USD. Needs `budget_period`, and the models must be\npriced."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Channels notified of new and regressed issues, at most 10 channels of this project.\nDefault none."
           },
           "chat_connection_id": {
             "type": "string",
@@ -30293,6 +30435,26 @@
           }
         }
       },
+      "IssueDatasetItemsRequest": {
+        "type": "object",
+        "description": "`POST …/issues/{id}/dataset-items` body (D-IC-22).",
+        "required": [
+          "dataset"
+        ],
+        "properties": {
+          "dataset": {
+            "type": "string",
+            "description": "The dataset: its id or its name."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Most traces to add, 1 to 100. Default 100.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "IssueDay": {
         "type": "object",
         "description": "One UTC day of an issue's occurrences.",
@@ -30556,6 +30718,7 @@
           "name",
           "kind",
           "enabled",
+          "channel_ids",
           "created_at",
           "updated_at",
           "open_issues"
@@ -30573,6 +30736,14 @@
           "candidates_24h": {
             "$ref": "#/components/schemas/IssueCandidateCounts",
             "description": "Candidates created in the last 24 hours, by status. LLM kinds only."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "Channels notified of new and regressed issues. Ordered by id."
           },
           "chat_connection_id": {
             "type": "string",
@@ -36694,6 +36865,14 @@
             "type": "number",
             "format": "double",
             "description": "Spend limit per `budget_period`, in USD. Give it with `budget_period` when the source has\nno budget yet."
+          },
+          "channel_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "description": "New channels, at most 10 of this project. `[]` removes every channel. Absent keeps them."
           },
           "chat_connection_id": {
             "type": "string",

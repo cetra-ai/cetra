@@ -2512,6 +2512,26 @@ export interface paths {
         patch: operations["patch_issue"];
         trace?: never;
     };
+    "/api/v1/projects/{project}/issues/{id}/dataset-items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Add an issue's occurrences to a dataset
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-IC-22). Copies the most recent occurrence traces of the issue and of the issues merged into it, one item per trace and up to `limit` (default and maximum 100), into the dataset as one new version, as `items/from-traces` does. An occurrence with an error span uses that span, else the trace root. Items get the metadata `cetra.issue_id`. A trace that cannot be copied is listed in `skipped`; no occurrence in the data window or no copyable trace is a 400.
+         */
+        post: operations["post_issue_dataset_items"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/issues/{id}/events": {
         parameters: {
             query?: never;
@@ -3663,21 +3683,34 @@ export interface components {
             comparator: components["schemas"]["Comparator"];
             /** @description Filter DSL expression over `traces`. Absent means every trace. */
             filter?: string;
+            /**
+             * Format: uuid
+             * @description `issue_occurrences` only: count one issue and the issues merged into it. Exactly one of
+             *     `issue_id` and `source_id` is set for that metric.
+             */
+            issue_id?: string;
             /** @description What is measured. */
             metric: components["schemas"]["AlertMetric"];
             /**
              * Format: int64
-             * @description Fewer samples than this gives `no_data`. Not for `cost`. Defaults: 20, or 10 for `score`.
+             * @description Fewer samples than this gives `no_data`. Not for `cost` or `issue_occurrences`. Defaults:
+             *     20, or 10 for `score`.
              */
             min_count?: number;
             /** @description `score` only: the score name. */
             score_name?: string;
+            /**
+             * Format: uuid
+             * @description `issue_occurrences` only: count every issue of the source that is not ignored or merged,
+             *     and the issues merged into them.
+             */
+            source_id?: string;
             /** @description `latency_p95` only. Default `trace`. */
             target?: components["schemas"]["LatencyTarget"];
             /**
              * Format: double
              * @description Fraction for `error_rate` and `pass_rate`, USD for `cost`, milliseconds for `latency_p95`
-             *     (below the window length for a `trace` target).
+             *     (below the window length for a `trace` target), occurrences for `issue_occurrences`.
              */
             threshold: number;
             /** @description Sliding window. */
@@ -3783,7 +3816,7 @@ export interface components {
          * @description What a rule measures (D-K-2).
          * @enum {string}
          */
-        AlertMetric: "error_rate" | "cost" | "latency_p95" | "score";
+        AlertMetric: "error_rate" | "cost" | "latency_p95" | "score" | "issue_occurrences";
         /** @description One alert rule (D-K-2, D-K-4). */
         AlertRule: {
             /** @description Channels notified on fired, resolved and reminder events. Ordered by id. */
@@ -4610,6 +4643,11 @@ export interface components {
              *     priced.
              */
             budget_usd?: number;
+            /**
+             * @description Channels notified of new and regressed issues, at most 10 channels of this project.
+             *     Default none.
+             */
+            channel_ids?: string[];
             /**
              * Format: uuid
              * @description Connection of the chat model. Required for LLM kinds.
@@ -6559,6 +6597,16 @@ export interface components {
              */
             skipped: number;
         };
+        /** @description `POST …/issues/{id}/dataset-items` body (D-IC-22). */
+        IssueDatasetItemsRequest: {
+            /** @description The dataset: its id or its name. */
+            dataset: string;
+            /**
+             * Format: int32
+             * @description Most traces to add, 1 to 100. Default 100.
+             */
+            limit?: number;
+        };
         /** @description One UTC day of an issue's occurrences. */
         IssueDay: {
             /**
@@ -6717,6 +6765,8 @@ export interface components {
             budget_usd?: number;
             /** @description Candidates created in the last 24 hours, by status. LLM kinds only. */
             candidates_24h?: components["schemas"]["IssueCandidateCounts"];
+            /** @description Channels notified of new and regressed issues. Ordered by id. */
+            channel_ids: string[];
             /**
              * Format: uuid
              * @description Connection of the chat model that summarizes and names. LLM kinds only.
@@ -10140,6 +10190,8 @@ export interface components {
              *     no budget yet.
              */
             budget_usd?: number;
+            /** @description New channels, at most 10 of this project. `[]` removes every channel. Absent keeps them. */
+            channel_ids?: string[];
             /**
              * Format: uuid
              * @description Connection of the chat model. LLM kinds only.
@@ -23417,6 +23469,98 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_issue_dataset_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueDatasetItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version, the items added and the traces skipped. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FromTracesResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -3,6 +3,7 @@
   "kind": "topic",
   "filter": "environment = 'production'",
   "enabled": true,
+  "channel_ids": [],
   "sample_rate": 0.5,
   "chat_connection_id": "01900000-0000-7000-8000-000000000400",
   "chat_model": "gpt-5-mini",

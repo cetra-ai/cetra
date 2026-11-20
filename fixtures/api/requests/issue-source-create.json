@@ -2,5 +2,6 @@
   "name": "Errors",
   "kind": "error",
   "filter": "status = 'error'",
-  "enabled": true
+  "enabled": true,
+  "channel_ids": []
 }
