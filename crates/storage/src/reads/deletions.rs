@@ -259,12 +259,71 @@ async fn eval_scan(
     Ok(found.into_iter().collect())
 }
 
-fn arrow_failure(error: ArrowError) -> RunError {
+/// The distinct non-null `session_id`s of the spans of `traces` (D-AQ-9: annotation-queue
+/// session items follow the deletion of any of their traces). Sorted, no duplicates. One scan
+/// of the project's spans; the match against `traces` is done in memory, batch by batch. An
+/// empty `traces` returns at once without a query.
+///
+/// # Errors
+///
+/// [`RunError::Timeout`]; the query's other errors as `ctx.fail` classifies them.
+pub async fn session_ids_of_traces(
+    ctx: &QueryContext,
+    traces: &HashSet<TraceId>,
+    timeout: Duration,
+) -> Result<Vec<String>, RunError> {
+    if traces.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(timeout, session_scan(ctx, traces)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn session_scan(
+    ctx: &QueryContext,
+    traces: &HashSet<TraceId>,
+) -> Result<Vec<String>, RunError> {
+    let frame = ctx
+        .session()
+        .table("spans")
+        .await
+        .map_err(classify)?
+        .filter(col(spans::SESSION_ID).is_not_null())
+        .map_err(classify)?
+        .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
+        .map_err(classify)?;
+    let mut stream = frame
+        .execute_stream()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let mut found = BTreeSet::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| ctx.fail(error))?;
+        let ids = utf8(batch.column(0))?;
+        let ids = ids.as_string::<i32>();
+        let sessions = utf8(batch.column(1))?;
+        let sessions = sessions.as_string::<i32>();
+        for row in 0..batch.num_rows() {
+            if sessions.is_null(row) {
+                continue;
+            }
+            let trace = TraceId::from_str(ids.value(row)).map_err(|_| bad_id())?;
+            if traces.contains(&trace) {
+                found.insert(sessions.value(row).to_owned());
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+pub(super) fn arrow_failure(error: ArrowError) -> RunError {
     RunError::Internal(DataFusionError::ArrowError(Box::new(error), None))
 }
 
 /// The column as `Utf8`, whether the view yields `Utf8` or `Utf8View`.
-fn utf8(column: &ArrayRef) -> Result<ArrayRef, RunError> {
+pub(super) fn utf8(column: &ArrayRef) -> Result<ArrayRef, RunError> {
     cast(column, &DataType::Utf8).map_err(arrow_failure)
 }
 
@@ -286,7 +345,7 @@ fn collect_ids(
     Ok(())
 }
 
-fn bad_id() -> RunError {
+pub(super) fn bad_id() -> RunError {
     RunError::Internal(DataFusionError::Internal(
         "a view returned an invalid trace id".to_owned(),
     ))
@@ -302,7 +361,7 @@ mod tests {
 
     use super::{
         FilterDeletionRequest, RunError, UserDeletionScope, eval_trace_ids, filter_trace_ids,
-        user_deletion_scope,
+        session_ids_of_traces, user_deletion_scope,
     };
     use crate::test_support::{example_query, span_row, spans_table, traces_table};
     use crate::views::{QueryContext, TimeWindow};
@@ -588,5 +647,28 @@ mod tests {
             .await
             .expect("empty");
         assert_eq!(found, []);
+    }
+
+    #[tokio::test]
+    async fn session_ids_of_traces_collects_sessions() {
+        let mut t1 = span_row(1, 0, 1_000, 0);
+        t1.session_id = Some("s2".to_owned());
+        let mut t2 = span_row(2, 0, 2_000, 0);
+        t2.session_id = Some("s1".to_owned());
+        let t3 = span_row(3, 0, 3_000, 0);
+        let mut t4 = span_row(4, 0, 4_000, 0);
+        t4.session_id = Some("s3".to_owned());
+        let ctx = context_of(&[t1, t2, t3, t4]);
+
+        let traces: HashSet<TraceId> = [id(1), id(2), id(3)].into_iter().collect();
+        let sessions = session_ids_of_traces(&ctx, &traces, TIMEOUT)
+            .await
+            .expect("sessions");
+        assert_eq!(sessions, ["s1", "s2"]);
+
+        let found = session_ids_of_traces(&ctx, &HashSet::new(), TIMEOUT)
+            .await
+            .expect("empty");
+        assert_eq!(found, Vec::<String>::new());
     }
 }
