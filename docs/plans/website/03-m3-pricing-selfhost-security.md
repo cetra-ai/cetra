@@ -297,7 +297,7 @@ export function suggestedPlan(units) {
 1. Write the components and the page as above. Add `"/pricing/"` to `MARKETING_ROUTES`.
 1a. In `home/CloudOrSelfHost.astro` (M2), after the two cards, add a centred row with `Button href="/pricing/" variant="ghost"` `See pricing →`. P3 adds `Self-hosting →` and `Security →` next to it.
 2. Build, run `node scripts/check-marketing.mjs` from `website/`, and fix the findings.
-3. Screenshot the page at 1440 px and 390 px (as in M2's H3 step 4). Check the calculator by typing 300000 spans and 0 scores: Starter shows `$34` and Pro `$158`. Report what you saw.
+3. Screenshot the page at 1440 px and 390 px (as in M2's H3 step 4). Check the calculator by typing 300000 spans and 0 scores: Starter shows `$34` and Pro `$154`. Report what you saw.
 
 **Tests:** `formatUnits` in `pricing.test.mjs` (100000 → "100,000", 0 → "0"). `check-marketing.mjs` covers the page.
 
