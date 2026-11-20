@@ -2,12 +2,11 @@
 //! each one on a worker slot, and the startup and janitor interruption of candidates left
 //! `running`.
 
-use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
-use cetra_core::ids::{SpanId, TraceId};
+use cetra_core::ids::TraceId;
 use cetra_core::score::Score;
 use cetra_core::span::Span;
 use cetra_eval::issue::cluster;
@@ -359,7 +358,7 @@ async fn load(job: &Job<'_>) -> Result<Loaded, Exit> {
         }
         Err(_) => return Err(fail("permanent")),
     };
-    let root = root_span(&loaded.spans).ok_or_else(|| fail("permanent"))?;
+    let root = prompts::root(&loaded.spans).ok_or_else(|| fail("permanent"))?;
     let trace_start = root.start_time;
     let user_id = root.user_id.clone();
     let session_id = root.session_id.clone();
@@ -1092,19 +1091,6 @@ async fn read_context(state: &AppState, project: &ProjectRow, around: i64) -> Op
     QueryContext::new(source, None).ok()
 }
 
-/// The root span of a trace: the earliest, by `(start_time, span_id)`, of the spans without a
-/// parent or whose parent is not among them. The same rule as the prompts' root.
-fn root_span(spans: &[Span]) -> Option<&Span> {
-    let ids: HashSet<SpanId> = spans.iter().map(|span| span.span_id).collect();
-    spans
-        .iter()
-        .filter(|span| {
-            span.parent_span_id
-                .is_none_or(|parent| !ids.contains(&parent))
-        })
-        .min_by_key(|span| (span.start_time, span.span_id))
-}
-
 /// Writes a finish with the spend of the run, in its own meta write.
 async fn write_finish(
     state: &AppState,
@@ -1186,15 +1172,32 @@ pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u32) -> TraceId {
 
 #[cfg(test)]
 mod tests {
-    use cetra_core::ids::{ProjectId, TraceId};
+    use axum::http::{Method, header};
+    use cetra_core::enums::PayloadFormat;
+    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::score::ScoreValue;
+    use cetra_core::span::Span;
+    use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{REQUEUE_NS, STALE_NS, call_trace_id, janitor_once, run_candidate};
+    use super::{REQUEUE_NS, STALE_NS, call_trace_id, janitor_once, run_candidate, run_pass};
     use crate::issues::triggers::{Place, queued};
     use crate::meta::issues::{
-        CandidateRow, SourceKind, SourceRow, claim_candidate, insert_candidate, insert_source,
+        CandidateRow, IssueRow, IssueState, SourceKind, SourceRow, claim_candidate, get_issue,
+        insert_candidate, insert_issue, insert_source,
     };
-    use crate::test_support::TestApp;
+    use crate::meta::projects::ProjectRow;
+    use crate::test_support::mock_llm::{MockLlm, completion, embedding, error as error_reply};
+    use crate::test_support::{
+        Seeded, TestApp, TestScore, dataset_span, put_score, raw_span_count,
+    };
+
+    const QUESTION: &str = "Why was my refund refused?";
+    const ANSWER: &str = "Refunds are allowed within 30 days.";
+    /// A chat model with a price, so a budget applies (as the eval tests' `PRICED`).
+    const PRICED: &str = "gpt-4o-mini";
+    const SUMMARY: &str = "Login fails on refresh.";
+    const SUMMARY_JSON: &str = r#"{"summary": "Login fails on refresh.", "is_issue": true}"#;
 
     fn trace(n: u8) -> TraceId {
         TraceId::from_slice(&[n; 16]).expect("not all zero")
@@ -1397,5 +1400,570 @@ mod tests {
             let id = call_trace_id(Uuid::from_u128(n), 0, u32::try_from(n).unwrap_or(0));
             assert_ne!(id.as_bytes(), &[0u8; 16]);
         }
+    }
+
+    /// An app that may reach a mock on `127.0.0.1`, its clock at the real time, and its seed (as
+    /// the eval execute tests do).
+    async fn llm_app() -> (TestApp, Seeded) {
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let real_now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("after the epoch")
+                .as_nanos(),
+        )
+        .expect("fits i64");
+        app.state.clock.set(real_now);
+        let seeded = app.seed().await;
+        (app, seeded)
+    }
+
+    /// A chat and embedding connection of `acme` that reaches `mock`, created through the API.
+    async fn connection(app: &TestApp, seeded: &Seeded, mock: &MockLlm) -> Uuid {
+        let response = app
+            .request(Method::POST, "/api/v1/orgs/acme/llm-connections")
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({
+                "name": "Mocked",
+                "adapter": "openai",
+                "api_key": "sk-test-key-0123456789",
+                "base_url": mock.base_url(),
+                "default_model": "gpt-test"
+            }))
+            .send()
+            .await;
+        assert_eq!(
+            response.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        let value: Value = response.json();
+        Uuid::parse_str(value["id"].as_str().expect("id")).expect("uuid")
+    }
+
+    /// A `score` source that summarizes with `gpt-test` and embeds with `text-embedding-test`,
+    /// both through `connection`, with floor 0.9 and no budget. Not stored.
+    fn judged_row(project: ProjectId, connection: Uuid, now: i64) -> SourceRow {
+        SourceRow {
+            id: Uuid::now_v7(),
+            project_id: project,
+            name: format!("Judged {}", Uuid::now_v7()),
+            kind: SourceKind::Score,
+            filter: None,
+            enabled: true,
+            paused_reason: None,
+            paused_at: None,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+            sample_rate: Some(1.0),
+            daily_cap: Some(100),
+            score_names: vec!["quality".to_owned()],
+            feedback_sources: Vec::new(),
+            chat_connection_id: Some(connection),
+            chat_model: Some("gpt-test".to_owned()),
+            embed_connection_id: Some(connection),
+            embed_model: Some("text-embedding-test".to_owned()),
+            embed_dimension: None,
+            floor: Some(0.9),
+            min_issue_size: Some(2),
+            budget_usd: None,
+            budget_period: None,
+            paused_detail: None,
+            next_refit_at: None,
+        }
+    }
+
+    /// `row`, stored.
+    async fn store_source(app: &TestApp, row: SourceRow) -> SourceRow {
+        let stored = row.clone();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_source(conn, &row).await }))
+            .await
+            .expect("source stored");
+        stored
+    }
+
+    /// An open issue of `source` with `centroid` and `member_count` members, stored.
+    async fn existing_issue(
+        app: &TestApp,
+        project: ProjectId,
+        source: Uuid,
+        centroid: Vec<f32>,
+        member_count: u64,
+    ) -> Uuid {
+        let now = app.state.clock.now_ns();
+        let id = Uuid::now_v7();
+        let row = IssueRow {
+            id,
+            project_id: project,
+            source_id: source,
+            fingerprint: None,
+            title: "Refund questions".to_owned(),
+            description: None,
+            state: IssueState::Open,
+            regressed: false,
+            merged_into: None,
+            first_seen: now,
+            last_seen: now,
+            resolved_at: None,
+            resolved_by: None,
+            created_at: now,
+            updated_at: now,
+            centroid: Some(centroid),
+            member_count,
+        };
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_issue(conn, &row).await }))
+            .await
+            .expect("issue stored");
+        id
+    }
+
+    /// A root span of `on` (a question and its answer) that started half a minute ago, stored.
+    async fn store_trace(app: &TestApp, project: &ProjectRow, on: TraceId) {
+        let now = app.state.clock.now_ns();
+        let mut row: Span = dataset_span(0);
+        row.trace_id = on;
+        row.span_id = SpanId::from_bytes(1_u64.to_be_bytes()).expect("not all zero");
+        row.parent_span_id = None;
+        row.input = Some(QUESTION.to_owned());
+        row.input_format = Some(PayloadFormat::Text);
+        row.output = Some(ANSWER.to_owned());
+        row.output_format = Some(PayloadFormat::Text);
+        row.session_id = Some("session-7".to_owned());
+        row.user_id = Some("user-7".to_owned());
+        row.start_time = now - 30_000_000_000;
+        row.end_time = now - 20_000_000_000;
+        app.commit_spans(project, vec![row]).await;
+    }
+
+    /// A stored boolean score `quality` = false, created now. Returns its id.
+    async fn bad_score(app: &TestApp, project: ProjectId) -> Uuid {
+        let id = Uuid::now_v7();
+        put_score(
+            app,
+            project,
+            TestScore {
+                name: "quality",
+                value: ScoreValue::Boolean(false),
+                evaluator_id: None,
+                experiment_id: None,
+                created_at: app.state.clock.now_ns(),
+                deleted: false,
+                score_id: Some(id),
+                updated_at: None,
+            },
+        )
+        .await;
+        id
+    }
+
+    /// A queued candidate of `source` for trace `on` and score `score`, stored.
+    async fn scored_candidate(
+        app: &TestApp,
+        source: &SourceRow,
+        on: TraceId,
+        score: Uuid,
+    ) -> CandidateRow {
+        let now = app.state.clock.now_ns();
+        let row = queued(
+            now,
+            source.project_id,
+            source.id,
+            Place::Trace {
+                trace: on,
+                session: None,
+            },
+            None,
+            None,
+            Some(score),
+        );
+        let stored = row.clone();
+        app.state
+            .meta
+            .write(move |conn| Box::pin(async move { insert_candidate(conn, &row).await }))
+            .await
+            .expect("candidate stored");
+        stored
+    }
+
+    /// Claims `row` and runs it once, as the loop does.
+    async fn run_once(app: &TestApp, row: &CandidateRow) {
+        let claims = claim(app, row.id).await;
+        run_candidate(&app.state, row.clone(), claims).await;
+    }
+
+    /// The status, error class, issue id, summary and attempts of candidate `id`.
+    async fn outcome_of(
+        app: &TestApp,
+        id: Uuid,
+    ) -> (String, Option<String>, Option<String>, Option<String>, i64) {
+        sqlx::query_as(
+            "SELECT status, error_class, issue_id, summary, attempts \
+             FROM issue_candidates WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .expect("candidate read")
+    }
+
+    /// The embedding dimension stored on `source`.
+    async fn stored_dimension(app: &TestApp, source: Uuid) -> Option<i64> {
+        let stored: Option<i64> =
+            sqlx::query_scalar("SELECT embed_dimension FROM issue_sources WHERE id = ?")
+                .bind(source.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .expect("source read");
+        stored
+    }
+
+    /// The names of the occurrence scores of `on`, through the scores route.
+    async fn occurrence_names(app: &TestApp, seeded: &Seeded, on: TraceId) -> Vec<String> {
+        let response = app
+            .request(
+                Method::GET,
+                &format!(
+                    "/api/v1/projects/{}/scores?trace_id={on}&source=issue",
+                    seeded.project.id
+                ),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200);
+        let page: Value = response.json();
+        page["data"]
+            .as_array()
+            .expect("data")
+            .iter()
+            .map(|item| item["name"].as_str().expect("a name").to_owned())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_bad_score_is_summarized_embedded_and_left_pending_without_an_issue() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(10);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        let spans_before = raw_span_count(&app.state.storage, seeded.project.id).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, issue, summary, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "pending", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+        assert_eq!(issue, None);
+        assert_eq!(stored_dimension(&app, source.id).await, Some(3));
+        let chat = mock.requests();
+        assert_eq!(chat.len(), 1);
+        assert_eq!(chat[0].1["model"], "gpt-test");
+        let embeds = mock.embedding_requests();
+        assert_eq!(embeds.len(), 1);
+        assert_eq!(embeds[0].1["model"], "text-embedding-test");
+        assert_eq!(embeds[0].1["dimensions"], 512);
+        assert_eq!(embeds[0].1["input"], SUMMARY);
+        // Both call traces are committed to the project.
+        assert!(raw_span_count(&app.state.storage, seeded.project.id).await >= spans_before + 2);
+    }
+
+    #[tokio::test]
+    async fn a_candidate_joins_the_nearest_issue_above_the_floor() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[0.6, 0.8, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                floor: Some(0.5),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let issue =
+            existing_issue(&app, seeded.project.id, source.id, vec![1.0, 0.0, 0.0], 4).await;
+        let on_trace = trace(11);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, assigned, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "assigned", "{error:?}");
+        assert_eq!(assigned, Some(issue.to_string()));
+        let joined = get_issue(app.state.meta.reader(), seeded.project.id, issue)
+            .await
+            .expect("issue read")
+            .expect("the issue exists");
+        assert_eq!(joined.member_count, 5);
+        let centroid = joined.centroid.expect("a centroid");
+        assert!(
+            centroid[1] > 0.0,
+            "the centroid moved toward the new member: {centroid:?}"
+        );
+        assert_eq!(
+            occurrence_names(&app, &seeded, on_trace).await,
+            vec![format!("issue:{issue}")]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_candidate_below_the_floor_stays_pending_beside_an_issue() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[0.0, 1.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                floor: Some(0.5),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let issue =
+            existing_issue(&app, seeded.project.id, source.id, vec![1.0, 0.0, 0.0], 4).await;
+        let on_trace = trace(12);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, assigned, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "pending", "{error:?}");
+        assert_eq!(assigned, None);
+        let untouched = get_issue(app.state.meta.reader(), seeded.project.id, issue)
+            .await
+            .expect("issue read")
+            .expect("the issue exists");
+        assert_eq!(untouched.member_count, 4);
+        assert!(occurrence_names(&app, &seeded, on_trace).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_summary_that_is_not_an_issue_is_dropped_before_the_embedding() {
+        let mock = MockLlm::start(vec![completion(r#"{"summary": "", "is_issue": false}"#)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(13);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "dropped", "{error:?}");
+        assert_eq!(mock.requests().len(), 1);
+        assert!(mock.embedding_requests().is_empty());
+    }
+
+    /// A `status` on the summary call is retried; the second attempt stores the summary and the
+    /// candidate is pending.
+    async fn retried_then_pending(status: u16) {
+        let mock = MockLlm::start_with_embeddings(
+            vec![error_reply(status, "try again"), completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(14);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+        let (state_after, error, _, _, attempts) = outcome_of(&app, row.id).await;
+        assert_eq!(state_after, "queued", "{error:?}");
+        assert_eq!(attempts, 1);
+
+        run_once(&app, &row).await;
+        let (state_after, error, _, summary, _) = outcome_of(&app, row.id).await;
+        assert_eq!(state_after, "pending", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+        assert_eq!(mock.requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_server_error_on_the_summary_is_retried_then_stored() {
+        retried_then_pending(500).await;
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_on_the_summary_is_retried_then_stored() {
+        retried_then_pending(429).await;
+    }
+
+    #[tokio::test]
+    async fn an_unauthorized_key_fails_the_candidate_as_pause() {
+        let mock = MockLlm::start(vec![error_reply(401, "bad key")]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(15);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(error_class.as_deref(), Some("pause"));
+        assert_eq!(mock.requests().len(), 1);
+        assert!(mock.embedding_requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_run_over_the_budget_is_skipped_before_any_call() {
+        let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                chat_model: Some(PRICED.to_owned()),
+                budget_usd: Some(0.0000001),
+                budget_period: Some("day".to_owned()),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let on_trace = trace(16);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "skipped");
+        assert_eq!(error_class.as_deref(), Some("budget"));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_candidate_on_a_saturated_connection_is_not_claimed() {
+        let mock = MockLlm::start(vec![completion(SUMMARY_JSON)]).await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(17);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+        // Takes the connection's only slot, so the connection is saturated for the pass.
+        let _slot = app
+            .state
+            .eval
+            .try_connection_permit(conn, (1, 1000), now)
+            .expect("the slot is free");
+
+        let started = run_pass(&app.state).await.expect("the pass runs");
+
+        assert_eq!(started, 0);
+        let (status, _, _, _, attempts) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "queued");
+        assert_eq!(attempts, 0);
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_embedding_failure_after_the_summary_retries_without_a_second_summary() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![error_reply(500, "busy"), embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(&app, judged_row(seeded.project.id, conn, now)).await;
+        let on_trace = trace(18);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+        let (state_after, error, _, summary, _) = outcome_of(&app, row.id).await;
+        assert_eq!(state_after, "queued", "{error:?}");
+        assert_eq!(summary.as_deref(), Some(SUMMARY));
+
+        // The loop reads the row again with its stored summary, so the summary is not asked again.
+        let mut again = row.clone();
+        again.summary = summary;
+        run_once(&app, &again).await;
+        let (state_after, error, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(state_after, "pending", "{error:?}");
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(mock.embedding_requests().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_changed_embedding_dimension_fails_the_candidate() {
+        let mock = MockLlm::start_with_embeddings(
+            vec![completion(SUMMARY_JSON)],
+            vec![embedding(&[1.0, 0.0, 0.0])],
+        )
+        .await;
+        let (app, seeded) = llm_app().await;
+        let conn = connection(&app, &seeded, &mock).await;
+        let now = app.state.clock.now_ns();
+        let source = store_source(
+            &app,
+            SourceRow {
+                embed_dimension: Some(2),
+                ..judged_row(seeded.project.id, conn, now)
+            },
+        )
+        .await;
+        let on_trace = trace(19);
+        store_trace(&app, &seeded.project, on_trace).await;
+        let score = bad_score(&app, seeded.project.id).await;
+        let row = scored_candidate(&app, &source, on_trace, score).await;
+
+        run_once(&app, &row).await;
+
+        let (status, error_class, _, _, _) = outcome_of(&app, row.id).await;
+        assert_eq!(status, "failed");
+        assert_eq!(error_class.as_deref(), Some("embedding_dimension_changed"));
+        assert_eq!(stored_dimension(&app, source.id).await, Some(2));
     }
 }

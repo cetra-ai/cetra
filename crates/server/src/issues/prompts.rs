@@ -152,7 +152,7 @@ pub(crate) fn first_user_message(spans: &[Span]) -> String {
 
 /// The root span: the earliest, by `(start_time, span_id)`, of the spans without a parent or
 /// whose parent is not among `spans`.
-fn root(spans: &[Span]) -> Option<&Span> {
+pub(crate) fn root(spans: &[Span]) -> Option<&Span> {
     let ids: HashSet<SpanId> = spans.iter().map(|span| span.span_id).collect();
     spans
         .iter()
