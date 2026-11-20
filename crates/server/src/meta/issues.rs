@@ -1859,7 +1859,7 @@ pub(crate) async fn pause_sources_of_connection(
     .bind(connection.to_string())
     .fetch_all(&mut *conn)
     .await?;
-    source_ids(ids)
+    source_ids(&ids)
 }
 
 /// Clears the `connection` pauses of the sources whose chat or embedding connection is
@@ -1880,7 +1880,7 @@ pub(crate) async fn resume_connection_pauses(
     .bind(connection.to_string())
     .fetch_all(&mut *conn)
     .await?;
-    source_ids(ids)
+    source_ids(&ids)
 }
 
 /// Clears the `budget` pauses whose period has turned (as `online_rules::clear_budget_pauses`):
@@ -2044,8 +2044,50 @@ pub(crate) async fn any_pending(
     Ok(false)
 }
 
+/// Candidates of a source by status.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct CandidateCounts {
+    pub(crate) queued: u64,
+    pub(crate) pending: u64,
+    pub(crate) assigned: u64,
+    pub(crate) dropped: u64,
+    pub(crate) failed: u64,
+    pub(crate) skipped: u64,
+}
+
+/// The candidates of `source` created at or after `since`, by status. `running` and `outlier`
+/// candidates are not counted.
+pub(crate) async fn candidate_counts(
+    pool: &SqlitePool,
+    source: Uuid,
+    since: i64,
+) -> Result<CandidateCounts, MetaError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM issue_candidates \
+         WHERE source_id = ? AND created_at >= ? GROUP BY status",
+    )
+    .bind(source.to_string())
+    .bind(since)
+    .fetch_all(pool)
+    .await?;
+    let mut counts = CandidateCounts::default();
+    for (status, count) in rows {
+        let count = u64::try_from(count).unwrap_or_default();
+        match status.as_str() {
+            "queued" => counts.queued = count,
+            "pending" => counts.pending = count,
+            "assigned" => counts.assigned = count,
+            "dropped" => counts.dropped = count,
+            "failed" => counts.failed = count,
+            "skipped" => counts.skipped = count,
+            _ => {}
+        }
+    }
+    Ok(counts)
+}
+
 /// Parses the ids a `RETURNING id` update gave back.
-fn source_ids(ids: Vec<String>) -> Result<Vec<Uuid>, MetaError> {
+fn source_ids(ids: &[String]) -> Result<Vec<Uuid>, MetaError> {
     ids.iter().map(|id| parse_uuid(id, SOURCES, "id")).collect()
 }
 
@@ -2354,13 +2396,12 @@ pub(crate) fn decode_vector(
     if !bytes.len().is_multiple_of(4) {
         return Err(corrupt(table, column));
     }
-    bytes
-        .chunks_exact(4)
-        .map(|chunk| -> Result<f32, MetaError> {
-            let array: [u8; 4] = chunk.try_into().map_err(|_| corrupt(table, column))?;
-            Ok(f32::from_le_bytes(array))
-        })
-        .collect()
+    Ok(bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect())
 }
 
 /// A list as a JSON array of strings, or NULL when it is empty.
@@ -3740,7 +3781,8 @@ mod tests {
         let embed_busy = ready_candidates(db.reader(), NOW, &[embed], 10)
             .await
             .unwrap();
-        assert_eq!(ids(&embed_busy), vec![6]);
+        // Only `ok` uses the busy embed connection; the sources that use `saturated` stay ready.
+        assert_eq!(ids(&embed_busy), vec![6, 4, 5]);
         let limited = ready_candidates(db.reader(), NOW, &[], 1).await.unwrap();
         assert_eq!(ids(&limited), vec![6]);
     }

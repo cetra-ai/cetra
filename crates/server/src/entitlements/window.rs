@@ -185,6 +185,8 @@ mod tests {
                 "eval/trace_load.rs",
                 "eval/trigger.rs",
                 "issues/errors.rs",
+                "issues/topics.rs",
+                "issues/worker.rs",
                 "eval/backfill.rs",
                 "test_support/mod.rs",
             ],

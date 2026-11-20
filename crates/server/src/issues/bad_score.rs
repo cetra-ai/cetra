@@ -53,7 +53,7 @@ pub(crate) fn is_bad(value: &ScoreValue, definition: Option<&DefinitionRow>) -> 
 
 /// Position of `value` in `[min, max]`, clamped to `[0, 1]`. `None` when the range is empty.
 fn position(value: f64, min: f64, max: f64) -> Option<f64> {
-    if !(max > min) {
+    if max.partial_cmp(&min) != Some(std::cmp::Ordering::Greater) {
         return None;
     }
     Some(((value - min) / (max - min)).clamp(0.0, 1.0))

@@ -994,7 +994,7 @@ mod tests {
 
     /// One count from `meta.db`.
     async fn count(app: &TestApp, sql: &str) -> i64 {
-        sqlx::query_scalar(sql)
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql.to_owned()))
             .fetch_one(app.state.meta.reader())
             .await
             .expect("count read")

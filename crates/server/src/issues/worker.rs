@@ -151,10 +151,7 @@ async fn claim_all(
 /// `meta.db` failure that leaves the candidate `running` for the janitor (A5, A12).
 enum Exit {
     End(CandidateFinish),
-    Paused {
-        finish: CandidateFinish,
-        pause: SourcePause,
-    },
+    Paused(Box<(CandidateFinish, SourcePause)>),
     Lost,
     Meta(MetaError),
 }
@@ -240,7 +237,10 @@ async fn execute_candidate(
     let (finish, pause) = match steps(state, candidate, claims, &mut spent_usd).await {
         Ok(()) => return Ok(()),
         Err(Exit::End(finish)) => (finish, None),
-        Err(Exit::Paused { finish, pause }) => (finish, Some(pause)),
+        Err(Exit::Paused(paused)) => {
+            let (finish, pause) = *paused;
+            (finish, Some(pause))
+        }
         Err(Exit::Lost) => {
             tracing::debug!(candidate_id = %candidate.id, "issue candidate claim is no longer current");
             return Ok(());
@@ -1002,10 +1002,10 @@ impl BudgetStop {
     /// budget (M3.6a), a requeue while the spend loads.
     fn exit(self, now: i64) -> Exit {
         match self {
-            Self::Over => Exit::Paused {
-                finish: CandidateFinish::Skipped { class: "budget" },
-                pause: SourcePause::Budget,
-            },
+            Self::Over => Exit::Paused(Box::new((
+                CandidateFinish::Skipped { class: "budget" },
+                SourcePause::Budget,
+            ))),
             Self::NotLoaded => Exit::End(CandidateFinish::Requeue { not_before: now }),
             Self::Meta(error) => Exit::Meta(error),
         }
@@ -1127,10 +1127,10 @@ fn failure(
     match class {
         ErrorClass::Retryable => Exit::End(retry_or_fail(candidate, attempts, now)),
         ErrorClass::Permanent => Exit::End(CandidateFinish::Failed { class: "permanent" }),
-        ErrorClass::Pause => Exit::Paused {
-            finish: CandidateFinish::PauseRequeue { not_before: now },
-            pause: pause(),
-        },
+        ErrorClass::Pause => Exit::Paused(Box::new((
+            CandidateFinish::PauseRequeue { not_before: now },
+            pause(),
+        ))),
     }
 }
 
@@ -1305,6 +1305,7 @@ pub(crate) fn call_trace_id(owner: Uuid, claims: u32, call: u32) -> TraceId {
         bytes[15] = 1;
     }
     // The all-zero case is replaced above, so the only error of `from_bytes` cannot happen.
+    #[allow(clippy::expect_used)]
     TraceId::from_bytes(bytes).expect("a non-zero trace id")
 }
 

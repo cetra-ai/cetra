@@ -111,8 +111,8 @@ pub(crate) fn previews(spans: &[Span]) -> (String, String) {
         return (String::new(), String::new());
     };
     (
-        cut(render(root.input.as_deref(), root.input_format)),
-        cut(render(root.output.as_deref(), root.output_format)),
+        cut(&render(root.input.as_deref(), root.input_format)),
+        cut(&render(root.output.as_deref(), root.output_format)),
     )
 }
 
@@ -133,9 +133,9 @@ pub(crate) fn first_user_message(spans: &[Span]) -> String {
             .find(|message| message.role == Role::User)
             .map(text_parts)
             .unwrap_or_default();
-        return cut(first);
+        return cut(&first);
     }
-    cut(render(root.input.as_deref(), root.input_format))
+    cut(&render(root.input.as_deref(), root.input_format))
 }
 
 /// The root span: the earliest, by `(start_time, span_id)`, of the spans without a parent or
@@ -189,7 +189,7 @@ fn text_parts(message: &Message) -> String {
 }
 
 /// The first [`PAYLOAD_CHARS`] characters of `text`.
-fn cut(text: String) -> String {
+fn cut(text: &str) -> String {
     text.chars().take(PAYLOAD_CHARS).collect()
 }
 

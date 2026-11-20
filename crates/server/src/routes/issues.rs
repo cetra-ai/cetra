@@ -19,7 +19,7 @@ use cetra_storage::{
     TimeWindow, ViewName,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{SqliteConnection, SqlitePool};
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, PageParams, TimeParam};
@@ -1789,7 +1789,15 @@ async fn llm_figures(
     if !row.kind.is_llm() {
         return Ok(None);
     }
-    let candidates = candidate_counts(state.meta.reader(), row.id, now - DAY_NS).await?;
+    let counts = store::candidate_counts(state.meta.reader(), row.id, now - DAY_NS).await?;
+    let candidates = IssueCandidateCounts {
+        queued: counts.queued,
+        pending: counts.pending,
+        assigned: counts.assigned,
+        dropped: counts.dropped,
+        failed: counts.failed,
+        skipped: counts.skipped,
+    };
     let today = day_start(now);
     let spent_today_usd =
         store::spent_between(state.meta.reader(), row.id, today, today + DAY_NS).await?;
@@ -1797,37 +1805,6 @@ async fn llm_figures(
         candidates,
         spent_today_usd,
     }))
-}
-
-/// The candidates of `source` created at or after `since`, by status. `running` and `outlier`
-/// candidates are not counted.
-async fn candidate_counts(
-    pool: &SqlitePool,
-    source: Uuid,
-    since: i64,
-) -> Result<IssueCandidateCounts, MetaError> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) FROM issue_candidates \
-         WHERE source_id = ? AND created_at >= ? GROUP BY status",
-    )
-    .bind(source.to_string())
-    .bind(since)
-    .fetch_all(pool)
-    .await?;
-    let mut counts = IssueCandidateCounts::default();
-    for (status, count) in rows {
-        let count = u64::try_from(count).unwrap_or_default();
-        match status.as_str() {
-            "queued" => counts.queued = count,
-            "pending" => counts.pending = count,
-            "assigned" => counts.assigned = count,
-            "dropped" => counts.dropped = count,
-            "failed" => counts.failed = count,
-            "skipped" => counts.skipped = count,
-            _ => {}
-        }
-    }
-    Ok(counts)
 }
 
 /// The source as the API shows it. The LLM fields are set for the LLM kinds, and the score
@@ -3374,8 +3351,6 @@ mod tests {
         expected.sort();
         assert_eq!(example_ids, expected);
     }
-
-    const HOUR_NS: i64 = 3_600_000_000_000;
 
     /// An LLM connection of the seeded org, named after its adapter.
     async fn connection(app: &TestApp, seeded: &Seeded, adapter: &'static str) -> Uuid {
