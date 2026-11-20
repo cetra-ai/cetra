@@ -1042,6 +1042,8 @@ fn document_lint() {
                 | "delete_org_sso_domain"
                 | "delete_org"
                 | "delete_project"
+                | "patch_issue"
+                | "post_issue_merge"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
