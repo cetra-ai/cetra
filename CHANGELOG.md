@@ -125,7 +125,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
-- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens (D-C-23).
+- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens without a filter or search (D-C-23).
 - The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
 - The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
   cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.

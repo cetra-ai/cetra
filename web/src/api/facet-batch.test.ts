@@ -118,7 +118,10 @@ describe("askFacet", () => {
     expect(bodies).toHaveLength(2);
     // The two requests may be recorded in either order.
     const byFilter = [...bodies].sort((a, b) => (a.filter ?? "").localeCompare(b.filter ?? ""));
-    expect(byFilter.map((body) => body.fields)).toEqual([[{ field: "span_kind" }], [{ field: "name" }]]);
+    expect(byFilter.map((body) => body.fields)).toEqual([
+      [{ field: "span_kind" }],
+      [{ field: "name" }],
+    ]);
     expect(byFilter.map((body) => body.filter)).toEqual([undefined, "status = 'error'"]);
   });
 

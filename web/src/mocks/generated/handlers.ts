@@ -945,12 +945,8 @@ function facetAnswer(
   };
 }
 
-/** One field of a batch that fails its own checks: a `bad_request` naming `fields[<index>]`. */
-function fieldError(
-  field: string,
-  index: number,
-  message: string,
-): Schema<"FacetResult"> {
+/** One field of a batch that fails its own checks: a `bad_request` with the reason, as the server answers it. */
+function fieldError(field: string, message: string): Schema<"FacetResult"> {
   return {
     field,
     error: {
@@ -958,7 +954,7 @@ function fieldError(
       title: "Bad Request",
       status: 400,
       code: "bad_request",
-      errors: [{ field: `fields[${index}]`, message }],
+      detail: message,
     },
   };
 }
@@ -1004,18 +1000,19 @@ async function facets(dataset: Dataset, request: Request): Promise<Response> {
     return parsed;
   }
   const rows = facetRows(dataset, view, parsed);
-  const results = asks.map((ask, index): Schema<"FacetResult"> => {
-    const field = parseFacetField(view, ask.field);
-    if (!field) {
-      return fieldError(ask.field, index, "field cannot be faceted");
-    }
+  // The server's order: limit, then q, then the field.
+  const results = asks.map((ask): Schema<"FacetResult"> => {
     const limit = ask.limit ?? 10;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
-      return fieldError(ask.field, index, "must be 1 to 100");
+      return fieldError(ask.field, "limit must be between 1 and 100");
     }
     const search = ask.q === undefined ? undefined : ask.q.trim();
     if (search !== undefined && (search.length < 1 || [...search].length > 200)) {
-      return fieldError(ask.field, index, "must be 1 to 200 characters");
+      return fieldError(ask.field, "q must be 1 to 200 characters");
+    }
+    const field = parseFacetField(view, ask.field);
+    if (!field) {
+      return fieldError(ask.field, "field cannot be faceted");
     }
     return { field: ask.field, facet: facetAnswer(view, field, rows, search, limit) };
   });

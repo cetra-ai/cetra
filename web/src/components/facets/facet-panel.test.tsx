@@ -286,6 +286,9 @@ it("opening the spans page sends one facet request, and opening a section sends 
   await waitFor(() => {
     expect(bodies).toHaveLength(1);
   });
+  // No straggler follows: a section or chip mounting late would send a second batch.
+  await new Promise((resolve) => setTimeout(resolve, FACET_BATCH_MS * 5));
+  expect(bodies).toHaveLength(1);
   expect(fieldsAsked(bodies)).toEqual(
     expect.arrayContaining(["cost_total", "duration_ms", "name", "span_kind", "status"]),
   );
@@ -331,8 +334,7 @@ it("shows the last counts at once when coming back to the list", async () => {
     expect(status.querySelector('[data-slot="skeleton"]')).toBeNull();
     await waitFor(() => {
       const asked = bodies.filter(
-        (body) =>
-          body.view === "traces" && body.fields.some((field) => field.field === "status"),
+        (body) => body.view === "traces" && body.fields.some((field) => field.field === "status"),
       );
       expect(asked.at(-1)?.from).not.toBe(firstFrom);
     });

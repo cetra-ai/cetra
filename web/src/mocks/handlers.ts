@@ -26,10 +26,7 @@ const widgetQueryFixture = http.post(
   },
 );
 
-const FACETS_EXAMPLES: Record<
-  Schema<"FacetsRequest">["view"],
-  Schema<"FacetsResponse">
-> = {
+const FACETS_EXAMPLES: Record<Schema<"FacetsRequest">["view"], Schema<"FacetsResponse">> = {
   traces: facetsTraces as Schema<"FacetsResponse">,
   spans: facetsSpans as Schema<"FacetsResponse">,
   sessions: facetsSessions as Schema<"FacetsResponse">,

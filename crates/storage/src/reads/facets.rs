@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 use datafusion::common::{NullHandling, UnnestOptions};
@@ -44,6 +46,8 @@ pub enum FacetView {
 
 /// Most fields one facet batch asks.
 pub const MAX_FACET_FIELDS: usize = 20;
+/// Fields of one batch computed at the same time (D-C-23).
+const FIELDS_AT_ONCE: usize = 4;
 
 /// One field of a facet batch.
 #[derive(Debug, Clone, Copy)]
@@ -304,16 +308,16 @@ fn unescape_key(escaped: &str) -> Option<String> {
     (1..=MAX_FACET_KEY).contains(&length).then_some(key)
 }
 
+/// A field that passed its checks: the parsed field, its trimmed `q` and its limit.
+type CheckedField<'a> = (ParsedField, Option<&'a str>, usize);
+
 /// The limit and `q` of one field, and the parsed field. The limit is checked first, then `q`,
 /// then the field name.
 ///
 /// # Errors
 ///
 /// [`RunError::InvalidRequest`] for a bad limit, `q` or field.
-fn check_field<'a>(
-    view: FacetView,
-    field: &FacetField<'a>,
-) -> Result<(ParsedField, Option<&'a str>, usize), RunError> {
+fn check_field<'a>(view: FacetView, field: &FacetField<'a>) -> Result<CheckedField<'a>, RunError> {
     if !(1..=MAX_FACET_LIMIT).contains(&field.limit) {
         return Err(RunError::InvalidRequest(format!(
             "limit must be between 1 and {MAX_FACET_LIMIT}"
@@ -366,7 +370,7 @@ pub async fn facets(
         Some(text) => Some(ctx.parse_filter(filter_view(request.view), text)?),
         None => None,
     };
-    let checked: Vec<Result<(ParsedField, Option<&str>, usize), RunError>> = request
+    let checked: Vec<Result<CheckedField<'_>, RunError>> = request
         .fields
         .iter()
         .map(|field| check_field(request.view, field))
@@ -398,7 +402,12 @@ pub async fn facets(
             }
         }
     });
-    Ok(futures::future::join_all(futures).await)
+    // At most `FIELDS_AT_ONCE` fields run at a time, so one batch does not take the scans of
+    // twenty readers; `buffered` keeps the request order.
+    Ok(futures::stream::iter(futures)
+        .buffered(FIELDS_AT_ONCE)
+        .collect()
+        .await)
 }
 
 fn filter_view(view: FacetView) -> FilterView {
@@ -1450,6 +1459,42 @@ mod tests {
             FacetKind::Histogram
         );
         assert_eq!(results[2].as_ref().expect("metadata").kind, FacetKind::Keys);
+    }
+
+    /// More fields than run at once still come back in request order.
+    #[tokio::test]
+    async fn more_fields_than_run_at_once_keep_their_order() {
+        let ctx = context();
+        let names = [
+            "status",
+            "duration_ms",
+            "metadata",
+            "name",
+            "cost_total",
+            "tags",
+            "input",
+        ];
+        assert!(names.len() > FIELDS_AT_ONCE);
+        let fields: Vec<FacetField<'_>> = names.iter().map(|name| field(name)).collect();
+        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+            .await
+            .expect("batch");
+        let kinds: Vec<Option<FacetKind>> = results
+            .iter()
+            .map(|result| result.as_ref().ok().map(|data| data.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(FacetKind::Values),
+                Some(FacetKind::Histogram),
+                Some(FacetKind::Keys),
+                Some(FacetKind::Values),
+                Some(FacetKind::Histogram),
+                Some(FacetKind::Values),
+                None,
+            ]
+        );
     }
 
     #[tokio::test]
