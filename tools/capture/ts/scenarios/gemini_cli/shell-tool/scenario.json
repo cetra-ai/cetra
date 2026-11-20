@@ -1,0 +1,58 @@
+{
+  "description": "Gemini CLI 0.68.0 in -p mode: a model-routing call, then one run_shell_command tool call; traces with prompts.",
+  "spec_refs": ["02 § Convention detection"],
+  "instrumentation": "@google/gemini-cli",
+  "libraries": ["@google/gemini-cli"],
+  "timing_attributes": [
+    "gen_ai.input.messages",
+    "gen_ai.system_instructions",
+    "gen_ai.output.messages"
+  ],
+  "volatile_attributes": [
+    "gen_ai.conversation.id",
+    "gen_ai.prompt.name",
+    "gen_ai.tool.call_id",
+    "session.id"
+  ],
+  "turns": [
+    {
+      "api": "gemini.generate_content",
+      "model": "gemini-3.5-flash-lite",
+      "message": {
+        "text": "{\"complexity_reasoning\": \"simple\", \"complexity_score\": 5}",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": { "input": 400, "output": 20, "cache_read": 0, "cache_write": 0, "reasoning": 0 }
+    },
+    {
+      "api": "gemini.generate_content",
+      "model": "gemini-3.8-flash",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "gemini_capture_1",
+            "name": "run_shell_command",
+            "arguments": { "command": "echo hello", "description": "Print hello" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 900, "output": 20, "cache_read": 100, "cache_write": 0, "reasoning": 5 }
+    },
+    {
+      "api": "gemini.generate_content",
+      "model": "gemini-3.8-flash",
+      "message": {
+        "text": "Done: the command printed hello.",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": { "input": 950, "output": 15, "cache_read": 100, "cache_write": 0, "reasoning": 0 }
+    }
+  ]
+}

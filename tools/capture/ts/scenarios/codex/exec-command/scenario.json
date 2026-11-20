@@ -1,0 +1,56 @@
+{
+  "description": "Codex CLI 0.167.2 `codex exec` runs one exec_command tool call; trace export, filtered to the turn's spans.",
+  "spec_refs": ["02 § Convention detection"],
+  "instrumentation": "@openai/codex",
+  "libraries": ["@openai/codex"],
+  "span_names": [
+    "turn/start",
+    "session_task.turn",
+    "run_turn",
+    "codex.sampling",
+    "handle_responses",
+    "exec_command"
+  ],
+  "timing_attributes": [
+    "codex.response.receive_wait_ms",
+    "busy_ns",
+    "idle_ns",
+    "thread.id",
+    "dispatch_to_result_ready_ms"
+  ],
+  "volatile_attributes": [
+    "thread.id",
+    "conversation.id",
+    "turn.id",
+    "turn_id",
+    "thread_id",
+    "submission.id",
+    "unified_exec_process_id"
+  ],
+  "turns": [
+    {
+      "api": "openai.responses",
+      "model": "gpt-5.5-codex",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          { "id": "call_capture_1", "name": "exec_command", "arguments": { "cmd": "echo hello" } }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 400, "output": 30, "cache_read": 300, "cache_write": 0, "reasoning": 10 }
+    },
+    {
+      "api": "openai.responses",
+      "model": "gpt-5.5-codex",
+      "message": {
+        "text": "Done: the command printed hello.",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": { "input": 420, "output": 25, "cache_read": 300, "cache_write": 0, "reasoning": 5 }
+    }
+  ]
+}

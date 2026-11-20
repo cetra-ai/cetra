@@ -1,0 +1,16 @@
+{
+  "description": "Gemini CLI 0.68.0 in -p mode: a model-routing call, then one run_shell_command tool call; traces with prompts.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@google/gemini-cli",
+    "instrumentation_version": "0.68.0",
+    "language": "typescript",
+    "libraries": {
+      "@google/gemini-cli": "0.68.0"
+    },
+    "captured_at": "2026-11-20T09:51:09Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection"
+  ]
+}

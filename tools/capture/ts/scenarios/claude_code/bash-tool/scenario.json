@@ -1,0 +1,39 @@
+{
+  "description": "Claude Code 2.1.323 in -p mode runs one Bash tool call; beta trace export with prompt and tool content.",
+  "spec_refs": ["02 § Convention detection"],
+  "instrumentation": "@anthropic-ai/claude-code",
+  "libraries": ["@anthropic-ai/claude-code"],
+  "env": {},
+  "timing_attributes": ["duration_ms", "ttft_ms", "first_content_ms", "interaction.duration_ms"],
+  "volatile_attributes": ["session.id", "gen_ai.conversation.id", "user.id"],
+  "turns": [
+    {
+      "api": "anthropic.messages",
+      "model": "claude-opus-5-5",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "toolu_capture_1",
+            "name": "Bash",
+            "arguments": { "command": "echo hello", "description": "Print hello" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 420, "output": 12, "cache_read": 300, "cache_write": 20, "reasoning": 0 }
+    },
+    {
+      "api": "anthropic.messages",
+      "model": "claude-opus-5-5",
+      "message": {
+        "text": "Done: the command printed hello.",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": { "input": 450, "output": 9, "cache_read": 300, "cache_write": 0, "reasoning": 0 }
+    }
+  ]
+}

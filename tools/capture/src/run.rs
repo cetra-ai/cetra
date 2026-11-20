@@ -795,6 +795,8 @@ fn json_differences(
     let mut produced_input = produced_input.clone();
     mask_captured_at(&mut committed_case);
     mask_captured_at(&mut produced_case);
+    sort_resource_attributes(&mut committed_input);
+    sort_resource_attributes(&mut produced_input);
     let keys = attribute_keys(scenario);
     mask_tree(&mut committed_input, &keys);
     mask_tree(&mut produced_input, &keys);
@@ -825,6 +827,28 @@ fn mask_captured_at(value: &mut Value) {
     };
     if source.contains_key("captured_at") {
         source.insert("captured_at".to_owned(), Value::Null);
+    }
+}
+
+/// Sorts each `resourceSpans[*].resource.attributes` array by `key`, so that the
+/// order an exporter writes its resource attributes in is not a difference.
+/// The sort is stable, so duplicate keys keep their order.
+fn sort_resource_attributes(value: &mut Value) {
+    let Some(resource_spans) = value.get_mut("resourceSpans").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for resource_span in resource_spans {
+        let Some(attributes) = resource_span
+            .pointer_mut("/resource/attributes")
+            .and_then(Value::as_array_mut)
+        else {
+            continue;
+        };
+        attributes.sort_by(|left, right| {
+            let left = left.get("key").and_then(Value::as_str);
+            let right = right.get("key").and_then(Value::as_str);
+            left.cmp(&right)
+        });
     }
 }
 
@@ -1281,6 +1305,36 @@ mod tests {
         };
         let text = format!("{error} {error:?}");
         assert!(!text.contains("SECRET"));
+    }
+
+    #[test]
+    fn check_ignores_resource_attribute_order() {
+        let scenario = scenario(json!({}), None);
+        let mut committed_input = input_export("chat", "100", "200", "150", "9", "gpt", "t0");
+        committed_input["resourceSpans"][0]["resource"] = json!({"attributes": [
+            {"key": "service.name", "value": {"stringValue": "codex_exec"}},
+            {"key": "service.version", "value": {"stringValue": "0.167.2"}},
+            {"key": "telemetry.sdk.language", "value": {"stringValue": "rust"}},
+        ]});
+        let mut produced_input = committed_input.clone();
+        produced_input["resourceSpans"][0]["resource"]["attributes"]
+            .as_array_mut()
+            .expect("resource attributes are an array")
+            .reverse();
+        let case = case_file("A chat turn.", "2026-01-01T00:00:00Z");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert!(paths.is_empty(), "{paths:?}");
+
+        // A changed value still shows, at its sorted position.
+        produced_input["resourceSpans"][0]["resource"]["attributes"][1]["value"]["stringValue"] =
+            json!("0.168.0");
+        let paths = json_differences(&case, &case, &committed_input, &produced_input, &scenario);
+        assert_eq!(
+            paths,
+            vec![
+                "input.json: resourceSpans[0].resource.attributes[1].value.stringValue".to_owned()
+            ]
+        );
     }
 
     #[test]
