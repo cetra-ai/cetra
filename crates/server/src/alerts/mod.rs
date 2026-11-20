@@ -8,6 +8,9 @@ pub(crate) mod issue_notify;
 pub(crate) mod message;
 pub(crate) mod quota;
 
+#[cfg(test)]
+mod issue_links_tests;
+
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
