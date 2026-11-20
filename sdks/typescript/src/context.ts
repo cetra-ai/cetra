@@ -19,6 +19,7 @@ import {
 
 import { debug } from "./log.js";
 import { applyMask } from "./mask.js";
+import { Prompt } from "./prompt.js";
 
 /** README § Names: one OTel context key for all context values. */
 export const CONTEXT_KEY = createContextKey("cetra.context");
@@ -35,6 +36,8 @@ export interface ContextOptions {
   metadata?: Readonly<Record<string, unknown>>;
   /** Also set the session/user baggage entries for W3C propagation. */
   propagate?: boolean;
+  /** Stamps `cetra.prompt.name` and, when the prompt has one, `cetra.prompt.version` (D-V-15). */
+  prompt?: Prompt;
 }
 
 /** The experiment and dataset item of an `evaluate` run (D-J-16). Internal. */
@@ -43,12 +46,19 @@ export interface ExperimentLink {
   readonly datasetItemId: string;
 }
 
+/** The prompt of a context block: its name, and its version unless it is a fallback. */
+export interface PromptLink {
+  readonly name: string;
+  readonly version: number | undefined;
+}
+
 export interface ContextValues {
   readonly sessionId: string | undefined;
   readonly userId: string | undefined;
   readonly tags: readonly string[];
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly experiment: ExperimentLink | undefined;
+  readonly prompt: PromptLink | undefined;
 }
 
 const EMPTY_VALUES: ContextValues = Object.freeze({
@@ -57,6 +67,7 @@ const EMPTY_VALUES: ContextValues = Object.freeze({
   tags: Object.freeze([]),
   metadata: Object.freeze({}) as Readonly<Record<string, unknown>>,
   experiment: undefined,
+  prompt: undefined,
 });
 
 /**
@@ -101,6 +112,7 @@ function contextFor(options: ContextOptions): Context {
       tags: Object.freeze(unionTags(outer.tags, inner.tags)),
       metadata: Object.freeze({ ...outer.metadata, ...inner.metadata }),
       experiment: outer.experiment,
+      prompt: inner.prompt ?? outer.prompt,
     });
     let ctx = context.active().setValue(CONTEXT_KEY, merged);
     if (raw.propagate) {
@@ -126,6 +138,7 @@ function validOptions(raw: Record<string, unknown>): {
   userId: string | undefined;
   tags: string[];
   metadata: Record<string, unknown>;
+  prompt: PromptLink | undefined;
 } {
   const sessionId = validString(raw.sessionId, "sessionId");
   const userId = validString(raw.userId, "userId");
@@ -140,7 +153,19 @@ function validOptions(raw: Record<string, unknown>): {
   } else if (source !== undefined) {
     debug("cetra: withContext metadata option dropped");
   }
-  return { sessionId, userId, tags, metadata };
+  return { sessionId, userId, tags, metadata, prompt: validPrompt(raw.prompt) };
+}
+
+/** The link of a `Prompt`; anything else is dropped with a debug log. */
+function validPrompt(value: unknown): PromptLink | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (value instanceof Prompt) {
+    return Object.freeze({ name: value.name, version: value.version });
+  }
+  debug("cetra: withContext prompt option dropped");
+  return undefined;
 }
 
 function validString(value: unknown, name: string): string | undefined {
@@ -201,6 +226,22 @@ function coerceValues(raw: unknown): ContextValues {
     tags,
     metadata,
     experiment: coerceLink(record.experiment),
+    prompt: coercePrompt(record.prompt),
+  };
+}
+
+/** A prompt link with a string name; anything else is no link. */
+function coercePrompt(raw: unknown): PromptLink | undefined {
+  if (typeof raw !== "object" || raw === null) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.name !== "string") {
+    return undefined;
+  }
+  return {
+    name: record.name,
+    version: typeof record.version === "number" ? record.version : undefined,
   };
 }
 

@@ -221,7 +221,12 @@ function classify(entry: unknown): Entry {
   }
   const fields = entry as { readonly [key: string]: unknown };
   if (fields.type === "placeholder" && typeof fields.name === "string") {
-    return { kind: "placeholder", name: fields.name };
+    // The tag-name rule of precision 24: trimmed of spaces and tabs, then an ASCII name.
+    const name = trimTags(fields.name);
+    if (!NAME.test(name)) {
+      throw new PromptCompileError("invalid", { reason: "not_a_name" });
+    }
+    return { kind: "placeholder", name };
   }
   const role = fields.role;
   const content = fields.content;

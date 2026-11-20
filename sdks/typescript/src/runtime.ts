@@ -37,6 +37,7 @@ import { disableInstrumentations, enableInstrumentations } from "./instrument.js
 import { debug, resetWarningsForTests, warnOnce } from "./log.js";
 import { MaskingExporter } from "./mask.js";
 import { CetraSpanProcessor } from "./processor.js";
+import { setPromptCacheForTests } from "./prompts.js";
 import { QuotaState } from "./quota.js";
 import { ScoreQueue } from "./scores.js";
 import { type FetchLike, runtimeGlobals } from "./web.js";
@@ -255,6 +256,7 @@ export async function resetForTests(): Promise<void> {
   trace.disable();
   propagation.disable();
   resetWarningsForTests();
+  setPromptCacheForTests(undefined);
   initCalled = false;
 }
 

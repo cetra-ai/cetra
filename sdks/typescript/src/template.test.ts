@@ -138,6 +138,21 @@ describe("errors", () => {
     );
   });
 
+  it("check placeholder names with the tag-name rule", () => {
+    const notAName = { kind: "invalid", reason: "not_a_name", line: undefined, column: undefined };
+    const spaced: ChatEntry[] = [{ type: "placeholder", name: " \thistory\t " }];
+    expect(chatNames(spaced)).toEqual({ variables: [], placeholders: ["history"] });
+    expect(
+      projected(thrown(() => chatNames([{ type: "placeholder", name: "chat history" }]))),
+    ).toEqual({ ...notAName, variable: undefined });
+    expect(
+      projected(thrown(() => renderChat([{ type: "placeholder", name: "a\nb" }], {}, {}))),
+    ).toEqual({ ...notAName, variable: undefined });
+    expect(
+      projected(thrown(() => renderChat([{ type: "placeholder", name: "" }], {}, {}))),
+    ).toEqual({ ...notAName, variable: undefined });
+  });
+
   it("read only the given values, not inherited properties", () => {
     expect(projected(thrown(() => render("{{constructor}}", {})))).toEqual({
       kind: "missing_variable",
