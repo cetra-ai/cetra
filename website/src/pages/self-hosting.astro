@@ -1,0 +1,182 @@
+---
+import Button from "../marketing/components/Button.astro";
+import Card from "../marketing/components/Card.astro";
+import CopyCommand from "../marketing/components/CopyCommand.astro";
+import Section from "../marketing/components/Section.astro";
+import SectionHeading from "../marketing/components/SectionHeading.astro";
+import { SELF_HOSTED } from "../marketing/data/pricing.mjs";
+import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+import { CONTACT_EMAIL, INSTALL_COMMANDS } from "../marketing/site";
+
+const needs = [
+  {
+    label: "Memory",
+    value: "8 GiB with the default settings; 2 to 4 GiB with the small-machine settings",
+  },
+  { label: "Disk", value: "A local SSD or NVMe for the data folder" },
+  { label: "Object storage", value: "Optional: keep Parquet files and media in S3" },
+  { label: "Ports", value: "8080 for the UI and API, 4317 and 4318 for OTLP" },
+];
+---
+
+<MarketingLayout
+  title="Self-hosting"
+  description="Run cetra on one machine: one binary, Docker or Helm. What it needs, how to upgrade and back up, and what a licence adds."
+  route="/self-hosting/"
+>
+  <Section tone="ink" labelledby="sh-hero-title">
+    <SectionHeading
+      level={1}
+      eyebrow="Self-hosting"
+      title="One binary on one machine."
+      id="sh-hero-title"
+      lede="cetra runs as a single process with one data folder. No database server, no queue, no cache to run next to it."
+    />
+    <div class="install">
+      <CopyCommand id="sh-install" commands={INSTALL_COMMANDS} note="Install guide" noteHref="/docs/self-hosting/install/" />
+    </div>
+  </Section>
+
+  <Section tone="raised" divider labelledby="sh-ways-title">
+    <SectionHeading title="Ways to run it" id="sh-ways-title" />
+    <div class="cards cards--four">
+      <Card title="Binary" href="/docs/self-hosting/install/">
+        <p>An install script for Linux and macOS on Apple silicon, or a tarball with checksums.</p>
+      </Card>
+      <Card title="Docker" href="/docs/self-hosting/install/#docker">
+        <p>A multi-arch image that runs as a non-root user on a read-only file system.</p>
+      </Card>
+      <Card title="docker-compose" href="/docs/self-hosting/docker-compose/">
+        <p>One server, optionally with a local S3-compatible store.</p>
+      </Card>
+      <Card title="Kubernetes" href="/docs/self-hosting/kubernetes/">
+        <p>A Helm chart for clusters.</p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section tone="ink" divider labelledby="sh-needs-title">
+    <SectionHeading
+      title="What it needs"
+      id="sh-needs-title"
+      lede="From the resources guide. Budgets are configurable."
+    />
+    <dl class="needs">
+      {
+        needs.map((need) => (
+          <div>
+            <dt class="eyebrow">{need.label}</dt>
+            <dd>{need.value}</dd>
+          </div>
+        ))
+      }
+    </dl>
+    <div class="more">
+      <Button href="/docs/self-hosting/resources/" variant="ghost">Sizing guide →</Button>
+    </div>
+  </Section>
+
+  <Section tone="teal" divider labelledby="sh-day2-title">
+    <SectionHeading title="Day two" id="sh-day2-title" />
+    <div class="cards cards--three">
+      <Card title="Upgrades" href="/docs/self-hosting/upgrade/">
+        <p>Replace the binary or the image. Database migrations run on start, and Parquet files are never rewritten.</p>
+      </Card>
+      <Card title="Backups" href="/docs/self-hosting/backup/">
+        <p>Back up a running server with one command, keep the secret key with it, and rehearse the restore.</p>
+      </Card>
+      <Card title="Monitoring" href="/docs/self-hosting/monitoring/">
+        <p>Health and readiness endpoints, and Prometheus metrics on a private port.</p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section tone="ink" divider labelledby="sh-licence-title">
+    <SectionHeading
+      eyebrow="For companies"
+      title="Add a licence for single sign-on."
+      id="sh-licence-title"
+      lede="The core is MIT and free. A licence key, checked offline with no call home, unlocks the enterprise features in the same binary."
+    />
+    <ul class="points">
+      {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
+    </ul>
+    <div class="actions">
+      <Button href={`mailto:${CONTACT_EMAIL}`}>Talk to us</Button>
+      <Button href="/pricing/" variant="secondary">See pricing</Button>
+    </div>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .install {
+    margin-top: var(--space-7);
+    max-width: 46rem;
+  }
+  .cards {
+    display: grid;
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+  .cards--four {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .cards--three {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .needs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-6) var(--space-7);
+    margin: var(--space-7) 0 0;
+  }
+  .needs dt {
+    margin: 0;
+  }
+  .needs dd {
+    margin: var(--space-2) 0 0;
+    font-size: var(--text-lg);
+  }
+  .more {
+    margin-top: var(--space-6);
+  }
+  .points {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-6) 0 0;
+    display: grid;
+    gap: var(--space-2);
+  }
+  .points li {
+    position: relative;
+    padding-left: var(--space-4);
+  }
+  .points li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-6);
+  }
+  @media (max-width: 960px) {
+    .cards--four {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 720px) {
+    .cards--four,
+    .cards--three,
+    .needs {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

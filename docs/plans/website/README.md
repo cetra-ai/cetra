@@ -6,7 +6,7 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 |---|---|---|
 | M1 Foundation | [`01-m1-foundation.md`](01-m1-foundation.md) | done (F1–F4) |
 | M2 Homepage | [`02-m2-homepage.md`](02-m2-homepage.md) | done (H1–H3) |
-| M3 Pricing, self-hosting, security | [`03-m3-pricing-selfhost-security.md`](03-m3-pricing-selfhost-security.md) | planned |
+| M3 Pricing, self-hosting, security | [`03-m3-pricing-selfhost-security.md`](03-m3-pricing-selfhost-security.md) | done (P1–P3) |
 | M4 Integrations | `04-m4-integrations.md` | — |
 | M5 Compare | `05-m5-compare.md` | — |
 | M6 Benchmarks | not planned (waits for the benchmark, design §9.2) | — |
