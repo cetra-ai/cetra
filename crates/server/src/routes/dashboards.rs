@@ -600,7 +600,7 @@ fn decode_cursor(text: &str) -> Result<(String, Uuid), ApiError> {
 }
 
 /// Answers every collected error at once as `400 bad_request`.
-fn refuse_if_any(errors: Vec<FieldError>) -> Result<(), ApiError> {
+pub(crate) fn refuse_if_any(errors: Vec<FieldError>) -> Result<(), ApiError> {
     if errors.is_empty() {
         Ok(())
     } else {
@@ -620,7 +620,7 @@ fn field(path: impl Into<String>, message: impl Into<String>) -> FieldError {
 }
 
 /// Trimmed, 1 to 100 characters. Returns the trimmed name when it is valid.
-fn checked_name(name: &str, path: &str, errors: &mut Vec<FieldError>) -> Option<String> {
+pub(crate) fn checked_name(name: &str, path: &str, errors: &mut Vec<FieldError>) -> Option<String> {
     let trimmed = name.trim();
     let length = trimmed.chars().count();
     if (1..=MAX_NAME_CHARS).contains(&length) {
@@ -633,7 +633,7 @@ fn checked_name(name: &str, path: &str, errors: &mut Vec<FieldError>) -> Option<
 
 /// 0 to 500 characters after trimming. Returns the trimmed text when it is valid; blank text
 /// comes back empty, which the callers store as none.
-fn checked_description(
+pub(crate) fn checked_description(
     text: Option<&str>,
     path: &str,
     errors: &mut Vec<FieldError>,
@@ -649,7 +649,7 @@ fn checked_description(
 
 /// Checks a whole definition: its size, its widget count, and every widget's rules. Errors are
 /// appended with paths under `path`. Expressions are checked later, once the rest passed.
-fn check_definition(definition: &Definition, path: &str, errors: &mut Vec<FieldError>) {
+pub(crate) fn check_definition(definition: &Definition, path: &str, errors: &mut Vec<FieldError>) {
     match serde_json::to_vec(definition) {
         Ok(bytes) if bytes.len() <= MAX_DEFINITION_BYTES => {}
         _ => errors.push(field(path, "must be at most 262144 bytes")),
@@ -875,7 +875,7 @@ fn check_query(query: &WidgetQueryBody, widget: &Widget, base: &str, errors: &mu
 
 /// Parses every chart widget's expressions against their views (spec 05). Runs only when the
 /// shape checks passed. Stops at the first invalid expression.
-async fn check_expressions(
+pub(crate) async fn check_expressions(
     state: &AppState,
     access: &ProjectAccess,
     definition: &Definition,

@@ -1,6 +1,7 @@
 //! The assistant's tools (track AS M2, D-AS-5, D-AS-6).
 #![cfg_attr(not(test), allow(dead_code))] // used by the turn loop (M3); M3 removes this line
 
+mod drafts;
 mod reads;
 mod shape;
 
@@ -221,6 +222,31 @@ pub(crate) fn specs() -> Vec<ToolSpec> {
             reads::QUERY_METRICS_DESCRIPTION,
             reads::query_metrics_schema(),
         ),
+        spec(
+            drafts::DRAFT_FILTER,
+            drafts::DRAFT_FILTER_DESCRIPTION,
+            drafts::draft_filter_schema(),
+        ),
+        spec(
+            drafts::DRAFT_SQL,
+            drafts::DRAFT_SQL_DESCRIPTION,
+            drafts::draft_sql_schema(),
+        ),
+        spec(
+            drafts::DRAFT_DASHBOARD,
+            drafts::DRAFT_DASHBOARD_DESCRIPTION,
+            drafts::draft_dashboard_schema(),
+        ),
+        spec(
+            drafts::DRAFT_EVALUATOR,
+            drafts::DRAFT_EVALUATOR_DESCRIPTION,
+            drafts::draft_evaluator_schema(),
+        ),
+        spec(
+            drafts::DRAFT_ONLINE_RULE,
+            drafts::DRAFT_ONLINE_RULE_DESCRIPTION,
+            drafts::draft_online_rule_schema(),
+        ),
     ]
 }
 
@@ -252,6 +278,24 @@ fn counted(
     let value = outcome?;
     let rows = rows(&value);
     Ok((value, rows))
+}
+
+/// A draft tool's answer: an accepted draft is the result's draft (D-AS-6); a refused one is an error, as for any tool.
+fn draft_answer(outcome: Result<(Value, (AssistantDraftKind, Value)), ToolError>) -> ToolResult {
+    match outcome {
+        Ok((value, draft)) => ToolResult {
+            ok: true,
+            value,
+            rows: None,
+            draft: Some(draft),
+        },
+        Err(error) => ToolResult {
+            ok: false,
+            value: error.body(),
+            rows: None,
+            draft: None,
+        },
+    }
 }
 
 /// Runs `name` with `arguments` for `scope`. The six MCP tools take the scope's project; the read tools take
@@ -303,6 +347,31 @@ pub(crate) async fn run(
         reads::LIST_DASHBOARDS => reads::list_dashboards(state, scope, arguments).await,
         reads::GET_DASHBOARD => reads::get_dashboard(state, scope, arguments).await,
         reads::QUERY_METRICS => reads::query_metrics(state, scope, arguments).await,
+        drafts::DRAFT_FILTER => {
+            return Ok(draft_answer(
+                drafts::draft_filter(state, scope, arguments).await,
+            ));
+        }
+        drafts::DRAFT_SQL => {
+            return Ok(draft_answer(
+                drafts::draft_sql(state, scope, arguments).await,
+            ));
+        }
+        drafts::DRAFT_DASHBOARD => {
+            return Ok(draft_answer(
+                drafts::draft_dashboard(state, scope, arguments).await,
+            ));
+        }
+        drafts::DRAFT_EVALUATOR => {
+            return Ok(draft_answer(
+                drafts::draft_evaluator(state, scope, arguments).await,
+            ));
+        }
+        drafts::DRAFT_ONLINE_RULE => {
+            return Ok(draft_answer(
+                drafts::draft_online_rule(state, scope, arguments).await,
+            ));
+        }
         _ => return Err(UnknownTool),
     };
     Ok(match outcome {
@@ -384,9 +453,14 @@ mod tests {
                 "list_dashboards",
                 "get_dashboard",
                 "query_metrics",
+                "draft_filter",
+                "draft_sql",
+                "draft_dashboard",
+                "draft_evaluator",
+                "draft_online_rule",
             ]
         );
-        assert_eq!(names.len(), 19);
+        assert_eq!(names.len(), 24);
         let mut unique = names.clone();
         unique.sort_unstable();
         unique.dedup();

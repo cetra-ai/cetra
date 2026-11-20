@@ -831,7 +831,7 @@ async fn broken_rules(
 
 /// The checks that need `meta.db`: a judge's connection is in the org, and the output fits
 /// the live score definition of its name (spec 06 § Evaluator contract).
-async fn check_against_store(
+pub(crate) async fn check_against_store(
     reader: &SqlitePool,
     org: OrgId,
     project: ProjectId,
@@ -905,7 +905,7 @@ fn version_json(row: &store::EvaluatorVersionRow) -> Result<EvaluatorVersion, Ap
     })
 }
 
-fn output_of(body: &OutputScoreBody) -> OutputScore {
+pub(crate) fn output_of(body: &OutputScoreBody) -> OutputScore {
     OutputScore {
         name: body.name.clone(),
         data_type: body.data_type,

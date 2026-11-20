@@ -135,19 +135,19 @@ struct IdPath {
 }
 
 /// A rule as it would be stored: the request's values, or the stored ones merged with a PATCH.
-struct Draft {
-    name: String,
-    target: RuleTarget,
+pub(crate) struct RuleDraft {
+    pub(crate) name: String,
+    pub(crate) target: RuleTarget,
     /// Trimmed; `None` when blank.
-    filter: Option<String>,
-    mapping: BTreeMap<String, String>,
-    sample_rate: f64,
-    budget_usd: Option<f64>,
-    budget_period: Option<BudgetPeriod>,
-    enabled: bool,
+    pub(crate) filter: Option<String>,
+    pub(crate) mapping: BTreeMap<String, String>,
+    pub(crate) sample_rate: f64,
+    pub(crate) budget_usd: Option<f64>,
+    pub(crate) budget_period: Option<BudgetPeriod>,
+    pub(crate) enabled: bool,
 }
 
-impl Draft {
+impl RuleDraft {
     fn fields(&self) -> Result<RuleFields, ApiError> {
         Ok(RuleFields {
             name: self.name.clone(),
@@ -392,7 +392,7 @@ async fn create_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
-    let draft = Draft {
+    let draft = RuleDraft {
         name: body.name.trim().to_owned(),
         target: body.target,
         filter: normalize_filter(body.filter),
@@ -759,11 +759,11 @@ async fn update_checked(
 /// Runs § Rule validation for `draft` against `evaluator` (the stored row, or `None` when the
 /// id names none). Every check runs and all errors come back together; the filter is checked
 /// last, by storage (check 3).
-async fn validate(
+pub(crate) async fn validate(
     state: &AppState,
     org: OrgId,
     project: ProjectId,
-    draft: &Draft,
+    draft: &RuleDraft,
     evaluator: Option<&EvaluatorRow>,
     now: i64,
 ) -> Result<(), ApiError> {
@@ -802,7 +802,7 @@ async fn validate(
 
 /// The checks that need no store (checks 1, 4–7, 11–13, 16). Returns the parsed mapping when it
 /// parses, so the rule checks that need it can run on it.
-fn check_fields(draft: &Draft, errors: &mut Vec<FieldError>) -> Option<VariableMapping> {
+fn check_fields(draft: &RuleDraft, errors: &mut Vec<FieldError>) -> Option<VariableMapping> {
     if !(1..=128).contains(&draft.name.chars().count()) {
         errors.push(field_error("name", "name must be 1 to 128 characters"));
     }
@@ -891,7 +891,7 @@ pub(crate) async fn judge_adapter(
 
 /// The rule a PATCH would store: the body's values over the stored ones. `filter: ""` clears
 /// the filter; `clear_budget` removes the budget.
-fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiError> {
+fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<RuleDraft, ApiError> {
     let target = RuleTarget::from_name(&stored.target).ok_or_else(|| corrupt("target"))?;
     let stored_mapping: BTreeMap<String, String> =
         serde_json::from_str(&stored.variable_mapping).map_err(|_| corrupt("variable_mapping"))?;
@@ -908,7 +908,7 @@ fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiEr
             body.budget_period.or(stored_period),
         )
     };
-    Ok(Draft {
+    Ok(RuleDraft {
         name: body
             .name
             .map_or_else(|| stored.name.clone(), |name| name.trim().to_owned()),
@@ -926,7 +926,7 @@ fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiEr
 }
 
 /// The filter as stored: trimmed, and absent when blank.
-fn normalize_filter(text: Option<String>) -> Option<String> {
+pub(crate) fn normalize_filter(text: Option<String>) -> Option<String> {
     text.map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
 }
