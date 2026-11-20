@@ -42,5 +42,17 @@
     "path": "/acme/support-bot/alerts",
     "waitFor": "High error rate",
     "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "prompts",
+    "path": "/acme/support-bot/prompts",
+    "waitFor": "support-reply",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "prompt",
+    "path": "/acme/support-bot/prompts/support-reply",
+    "waitFor": "Friendlier tone",
+    "now": "2026-01-01T11:00:00Z"
   }
 ]

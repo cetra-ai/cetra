@@ -32,6 +32,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Prompts pages (D-V-32): the prompt list with search, label and tag filters, protected labels and a create dialog; the prompt page with the template editor (saving a version), versions with labels and line diffs, label history and per-version metrics; prompt links, facets and columns on traces and spans.
 - Playground API (D-V-20 to D-V-26, D-V-33 to D-V-37): POST /playground/runs streams a model run over SSE through the org's LLM connection, traces it into the reserved cetra-playground environment (not billed), with per-user and per-org limits; cetra-playground is reserved everywhere cetra-eval is.
 - Prompt links on spans and traces (D-V-15, D-V-16): `cetra.prompt.name`/`version` and Langfuse's prompt attributes fill `prompt_name`, `prompt_version` and the traces' `prompts` list (filter with `prompts @> ['name@version']`); `GET /prompts/{name}/metrics` gives per-version cost, latency, errors and scores (D-V-17). Spans are now normalized with `schema_version` 2.
 - Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
