@@ -23,6 +23,7 @@ pub(crate) mod experiments;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
+pub(crate) mod issue_links;
 pub(crate) mod issues;
 pub(crate) mod members;
 pub(crate) mod model_prices;

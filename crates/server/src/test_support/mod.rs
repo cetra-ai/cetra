@@ -2,6 +2,7 @@
 #![cfg(test)]
 
 pub(crate) mod hook_receiver;
+pub(crate) mod issues;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
