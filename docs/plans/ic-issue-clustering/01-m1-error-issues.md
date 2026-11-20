@@ -940,7 +940,7 @@ pub struct IssueEventPage { pub data: Vec<IssueEvent> }
 **Edit:** `web/src/components/trace/trace-header.tsx` (or the component under it that holds header chips: put the chips row there), new `web/src/components/issues/issue-chips.tsx` (+ test), `web/src/api/queries-issues.ts`, `web/src/components/facets/preset-chips.tsx` (+ its test).
 
 **Steps:**
-1. `traceIssuesQuery(org, project, traceId)`: `GET …/scores?trace_id=<id>&source=issue`, using the same scores query parameters `scoresQuery` uses, plus `source`, with limit 100. The issue ids come from the names (`issue:` prefix), and their titles and states from one `GET …/issues?state=all&ids=<ids>` (M1.8a). A merged issue's chip links to the issue page, which shows the merge banner.
+1. `traceIssuesQuery(org, project, traceId)`: `GET …/scores?trace_id=<id>&source=issue`, using the same scores query parameters `scoresQuery` uses, plus `source`, with limit 100. The issue ids come from the names (`issue:` prefix), and their titles and states from one `GET …/issues?state=open,resolved,ignored,merged&ids=<ids>` (M1.8a; `all` leaves out merged issues). A merged issue's chip links to the issue page, which shows the merge banner.
 2. `issue-chips.tsx`: one chip per issue (state colour: open red, resolved green, ignored grey), with the title truncated to 40 characters and a link to the issue page. It renders nothing when there are no issues. It sits in the trace header's chip row.
 3. `preset-chips.tsx`: a "Has issue" menu next to "Has score". It lists the 20 most recent open issues (`GET …/issues?state=open&limit=20`), and picking one appends `has_score('issue:<id>')` to the filter, the same way "Has score" appends its call.
 
