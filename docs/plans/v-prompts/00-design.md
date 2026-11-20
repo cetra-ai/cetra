@@ -1,4 +1,4 @@
-Status: design doc in review (2026-11-20). No plan is written yet.
+Status: implemented (M1–M7).
 
 # V · Prompt registry and playground — design
 
@@ -190,6 +190,7 @@ Options marked "(user)" were chosen by the user on 2026-11-20. The others are pr
 | D-V-35 | **Interactive connection permits.** `crate::eval::interactive::acquire(state, connection, wait)` waits up to `wait` for the connection's concurrency slot (tokio's FIFO semaphore puts the waiter ahead of the dispatcher's polling `try_acquire`), then for a rate token, and returns a permit that frees the slot on drop; it fails with `Busy` at the deadline. The dispatcher and the interactive path share one `ConnectionLimit` per connection. The playground passes 10 s. | A separate limit for the playground: it would not share the provider's limits (D-V-24). |
 | D-V-36 | **Playground runs and connection status.** A run uses the connection whatever its `status` (as connection tests and test runs do) and never marks it `failing`: a pause-class error is reported to the user in the `error` event only. | Marking the connection failing: one bad run would stop the rules that share it. |
 | D-V-37 | **Playground request shape.** `messages` are canonical messages (spec 01) or `{type: "placeholder", name}` entries; a placeholder is replaced, in place, by the messages given under its name in `placeholders`; every `text` part of the resulting messages that came from `messages` (not from a placeholder) is rendered with `variables` (D-V-3); a missing variable or placeholder is a 400 before the stream starts. Trace ids are random. The run's trace is committed after the stream ends, also when the client cancelled (status error, message `cancelled`). Rendered text is at most 4 MiB. | — |
+| D-V-38 | **Playground precision.** Runs use raw `fetch` with same-origin credentials and a small SSE reader; openapi-react-query is not used for the stream. A message is edited as a role and its text, or as its parts' JSON when it holds non-text parts. Models are free text, defaulting to the connection's default model (there is no model list endpoint). The go-key is `l`. `render_variables` (default `true`; off for span and run sources) sends a request's messages as written, placeholders still expanded (amends D-V-37). The source search keys are removed from the URL after loading; the draft keeps the source (amends D-V-28). | — |
 
 ## Open questions for the user
 

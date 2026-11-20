@@ -54,5 +54,13 @@
     "path": "/acme/support-bot/prompts/support-reply",
     "waitFor": "Friendlier tone",
     "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "playground",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
+    "waitFor": "Run all",
+    "now": "2026-01-01T11:00:00Z",
+    "actions": [{ "click": "button:has-text('Run all')" }],
+    "waitAfter": "Open trace"
   }
 ]
