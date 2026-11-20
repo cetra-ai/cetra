@@ -1,12 +1,12 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { delay, HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
-import type { Schema } from "@/api/types";
 import { FACET_BATCH_MS } from "@/api/facet-batch";
+import type { Schema } from "@/api/types";
 import { FiltersToggle } from "@/components/facets/facet-panel";
 import { server } from "@/mocks/node";
-import { renderApp } from "@/test/render";
 import { facetsHandler } from "@/test/facets";
+import { renderApp } from "@/test/render";
 
 const TRACES = "/acme/support-bot/traces?range=15m";
 
