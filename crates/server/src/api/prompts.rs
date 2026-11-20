@@ -1,0 +1,288 @@
+//! Prompt registry request and response types (spec 09 § Prompts, D-V-2 to D-V-13).
+
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
+
+use super::common::{Limit, any_json, open_object};
+
+/// `text` or `chat` (D-V-5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptKind {
+    /// One template text.
+    Text,
+    /// A list of messages and placeholders.
+    Chat,
+}
+
+/// A label and the version it points at (D-V-8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PromptLabel {
+    /// The label, `[a-z0-9][a-z0-9_.-]{0,63}`.
+    pub label: String,
+    /// The version the label points at.
+    pub version: i64,
+    /// When the label last moved.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub updated_at: i64,
+}
+
+/// A prompt (D-V-2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct Prompt {
+    /// Prompt id.
+    pub id: Uuid,
+    /// Unique in the project, 1 to 200 characters. Immutable.
+    pub name: String,
+    /// `text` or `chat`. Immutable.
+    #[serde(rename = "type")]
+    pub kind: PromptKind,
+    /// Free text, up to 2 000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Tags, in the order they were given.
+    pub tags: Vec<String>,
+    /// The highest version. `latest` always resolves to it (D-V-8).
+    pub latest_version: i64,
+    /// Stored labels, ordered by label. `latest` is not listed.
+    pub labels: Vec<PromptLabel>,
+    /// Who created the prompt. Absent for an API key or a removed user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When the prompt was created.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+    /// When the prompt was last edited or versioned.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub updated_at: i64,
+}
+
+/// One version, as the fetch and the version routes return it (D-V-7, D-V-12).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PromptVersion {
+    /// The prompt's name.
+    pub name: String,
+    /// `text` or `chat`.
+    #[serde(rename = "type")]
+    pub kind: PromptKind,
+    /// The version number, 1, 2, …
+    pub version: i64,
+    /// The template: a string for `text`, an array of messages for `chat`.
+    #[schema(schema_with = any_json)]
+    pub template: Value,
+    /// The model configuration (D-V-6): `model`, `connection_id`, `params`, `tools`,
+    /// `tool_choice`, `response_format`, and any other keys as given.
+    #[schema(schema_with = open_object)]
+    pub config: Value,
+    /// Labels that point at this version, ordered. Includes `latest` when this is the latest
+    /// version.
+    pub labels: Vec<String>,
+    /// Variable names, in order of first appearance.
+    pub variables: Vec<String>,
+    /// Placeholder names (chat), in order of first appearance.
+    pub placeholders: Vec<String>,
+    /// The commit message, up to 500 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    /// Who created the version. Absent for an API key or a removed user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<String>,
+    /// When the version was created.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub created_at: i64,
+}
+
+/// `POST /api/v1/projects/{project}/prompts` body (D-V-2, D-V-5 to D-V-7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreatePromptRequest {
+    /// Unique in the project, 1 to 200 characters: letters, digits, `_`, `.`, `-`, starting with
+    /// a letter or digit.
+    pub name: String,
+    /// `text` or `chat`.
+    #[serde(rename = "type")]
+    pub kind: PromptKind,
+    /// The first version's template: a string for `text`, an array of messages for `chat`.
+    #[schema(schema_with = any_json)]
+    pub template: Value,
+    /// The first version's model configuration (D-V-6). Absent: an empty object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = open_object)]
+    pub config: Option<Value>,
+    /// Labels to point at the first version. The API never adds `production` by itself.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// The first version's commit message, up to 500 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+    /// Free text, up to 2 000 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Tags: at most 20, each 1 to 64 characters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// `POST /api/v1/projects/{project}/prompts/{prompt}/versions` body (D-V-7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CreateVersionRequest {
+    /// The new version's template: a string for `text`, an array of messages for `chat`.
+    #[schema(schema_with = any_json)]
+    pub template: Value,
+    /// The new version's model configuration (D-V-6). Absent: an empty object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(schema_with = open_object)]
+    pub config: Option<Value>,
+    /// Labels to move to the new version. Protected labels need a project admin or a `write`
+    /// key (D-V-10).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    /// The commit message, up to 500 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit_message: Option<String>,
+}
+
+/// `PATCH /api/v1/projects/{project}/prompts/{prompt}` body. An absent field is unchanged.
+/// The name, the type and the versions never change (D-V-2, D-V-7).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePromptRequest {
+    /// New description, when present. `null` clears it.
+    #[serde(default, deserialize_with = "present")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
+    /// New tags, when present. Replaces the whole list.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+}
+
+/// `PUT /api/v1/projects/{project}/prompts/{prompt}/labels/{label}` body (D-V-8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SetLabelRequest {
+    /// The version the label moves to.
+    pub version: i64,
+}
+
+/// One entry of a label's history (D-V-8).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct PromptLabelEvent {
+    /// The label that moved.
+    pub label: String,
+    /// The version it pointed at before. Absent when the label was new.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_version: Option<i64>,
+    /// The version it points at now. Absent when the label was removed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_version: Option<i64>,
+    /// Who moved the label. Absent for an API key or a removed user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// When the label moved.
+    #[serde(with = "cetra_core::time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub at: i64,
+}
+
+/// The prompt settings of a project, read and written by the settings routes (D-V-10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PromptSettings {
+    /// Labels only project admins and `write` keys may move. At most 20 (D-V-10).
+    pub protected_labels: Vec<String>,
+}
+
+/// `GET /api/v1/projects/{project}/prompts` query.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct PromptListParams {
+    /// Name contains this text, ignoring case.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Only prompts with this label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Only prompts with this tag.
+    #[serde(default)]
+    pub tag: Option<String>,
+    /// Maximum number of prompts to return (1–1000, default 50).
+    #[serde(default)]
+    #[param(minimum = 1, maximum = 1000, default = 50)]
+    pub limit: Limit,
+    /// Opaque cursor from a previous page.
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// `GET …/prompts/{prompt}/resolve` query (D-V-9, D-V-12).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveParams {
+    /// A label. Default `production`. `latest` resolves the highest version.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// A version number. Not together with `label`.
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
+/// Present JSON is `Some(value)`, including null. An absent field stays the default `None`.
+fn present<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn requests_refuse_unknown_fields() {
+        let with_extra = json!({"name": "a", "type": "text", "template": "x", "foo": 1});
+        assert!(serde_json::from_value::<CreatePromptRequest>(with_extra).is_err());
+        let ok = json!({"name": "a", "type": "text", "template": "x"});
+        assert!(serde_json::from_value::<CreatePromptRequest>(ok).is_ok());
+        assert!(
+            serde_json::from_value::<CreateVersionRequest>(json!({"template": "x", "foo": 1}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<UpdatePromptRequest>(json!({"name": "renamed"})).is_err());
+    }
+
+    #[test]
+    fn update_tri_state() {
+        let absent: UpdatePromptRequest = serde_json::from_value(json!({})).expect("parses");
+        assert_eq!(absent.description, None);
+        let cleared: UpdatePromptRequest =
+            serde_json::from_value(json!({"description": null})).expect("parses");
+        assert_eq!(cleared.description, Some(None));
+        let set: UpdatePromptRequest =
+            serde_json::from_value(json!({"description": "x"})).expect("parses");
+        assert_eq!(set.description, Some(Some("x".to_owned())));
+    }
+
+    #[test]
+    fn kind_spelling() {
+        assert_eq!(
+            serde_json::from_value::<PromptKind>(json!("text")).expect("text"),
+            PromptKind::Text
+        );
+        assert_eq!(
+            serde_json::from_value::<PromptKind>(json!("chat")).expect("chat"),
+            PromptKind::Chat
+        );
+        assert!(serde_json::from_value::<PromptKind>(json!("Text")).is_err());
+    }
+}

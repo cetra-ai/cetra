@@ -89,6 +89,11 @@ export function canManageDatasets(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::ManagePrompts`: members and above create and label prompts (D-V-13). */
+export function canManagePrompts(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Overrides apply only to org members and viewers (D139). */
 export function canHaveOverride(orgRole: OrgRole): boolean {
   return orgRole === "member" || orgRole === "viewer";

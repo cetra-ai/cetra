@@ -114,6 +114,9 @@ pub(crate) enum ProjectPerm {
     /// Datasets and experiments: create, edit, delete, items, import, add from trace, experiment
     /// results (D-J-5). Member and above; a `write` API key; a read-write personal access token.
     ManageDatasets,
+    /// Prompts: create, version, label (unprotected; D-V-10 for protected ones), edit, delete
+    /// (D-V-13). Member and above; a `write` API key; a read-write personal access token.
+    ManagePrompts,
     /// Create, edit and delete dashboards (D-C-16). Member and above; no API key; a read-only
     /// personal access token cannot write (the access layer).
     ManageDashboards,
@@ -227,6 +230,7 @@ impl ProjectPerm {
             | Self::ManageEvaluation
             | Self::ManageAlerts
             | Self::ManageDatasets
+            | Self::ManagePrompts
             | Self::ManageDashboards => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
@@ -236,7 +240,9 @@ impl ProjectPerm {
     pub(crate) fn key_scope(self) -> Option<KeyScope> {
         match self {
             Self::View | Self::Query => Some(KeyScope::Read),
-            Self::Annotate | Self::Delete | Self::ManageDatasets => Some(KeyScope::Write),
+            Self::Annotate | Self::Delete | Self::ManageDatasets | Self::ManagePrompts => {
+                Some(KeyScope::Write)
+            }
             Self::ManageEvaluation
             | Self::ManageSettings
             | Self::ManageMembers
@@ -328,6 +334,12 @@ mod tests {
         assert_eq!(ProjectPerm::ManageDatasets.min_role(), Role::Member);
         assert_eq!(
             ProjectPerm::ManageDatasets.key_scope(),
+            Some(KeyScope::Write)
+        );
+        // Prompts: member and above, and a `write` key (D-V-13).
+        assert_eq!(ProjectPerm::ManagePrompts.min_role(), Role::Member);
+        assert_eq!(
+            ProjectPerm::ManagePrompts.key_scope(),
             Some(KeyScope::Write)
         );
         // Dashboards: member and above; an API key cannot manage them (D-C-16).

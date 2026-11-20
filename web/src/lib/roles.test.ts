@@ -9,6 +9,7 @@ import {
   canManageDashboards,
   canManageDatasets,
   canManageEvaluation,
+  canManagePrompts,
   canRemoveMember,
   grantableRoles,
   overrideLabel,
@@ -93,6 +94,14 @@ it("lets members and above manage datasets", () => {
   expect(canManageDatasets("member")).toBe(true);
   expect(canManageDatasets("viewer")).toBe(false);
   expect(canManageDatasets(undefined)).toBe(false);
+});
+
+it("lets members and above manage prompts", () => {
+  expect(canManagePrompts("owner")).toBe(true);
+  expect(canManagePrompts("admin")).toBe(true);
+  expect(canManagePrompts("member")).toBe(true);
+  expect(canManagePrompts("viewer")).toBe(false);
+  expect(canManagePrompts(undefined)).toBe(false);
 });
 
 it("overrides only members and viewers", () => {
