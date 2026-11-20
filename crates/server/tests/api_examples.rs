@@ -20,6 +20,11 @@ use cetra_server::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
     NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
 };
+use cetra_server::api::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantFeedbackRequest,
+    AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
+    UpdateAssistantConversationRequest,
+};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -491,6 +496,10 @@ fn static_files_match_their_types() {
 #[test]
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
+    roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
+    roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
+    roundtrip::<AssistantTurnRequest>("requests/assistant-turn.json");
+    roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
@@ -590,6 +599,12 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("patch_issue", "requests/issue-update.json"),
         ("post_issue_merge", "requests/issue-merge.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "patch_assistant_conversation",
+            "requests/assistant-conversation-rename.json",
+        ),
+        ("put_org_assistant", "requests/assistant-settings.json"),
+        ("put_assistant_feedback", "requests/assistant-feedback.json"),
         (
             "post_online_rule_preview",
             "requests/online-rule-preview.json",
@@ -724,6 +739,12 @@ fn generated_files_roundtrip() {
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "list_assistant_conversations" => {
+                roundtrip::<Page<AssistantConversation>>(&example.file);
+            }
+            "get_assistant_conversation" => roundtrip::<AssistantConversationDetail>(&example.file),
+            "get_org_assistant" => roundtrip::<AssistantSettings>(&example.file),
+            "get_project_assistant" => roundtrip::<AssistantStatus>(&example.file),
             "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
             | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {

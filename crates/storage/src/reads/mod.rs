@@ -122,14 +122,16 @@ pub(crate) fn present(text: Option<&str>) -> Option<&str> {
 /// # Errors
 ///
 /// [`RunError::Invalid`] when the text does not parse or names an unknown column;
-/// [`RunError::InvalidRequest`] for a view other than traces or spans.
+/// [`RunError::InvalidRequest`] for a view other than traces, spans, sessions or scores.
 pub fn validate_filter(ctx: &QueryContext, view: ViewName, text: &str) -> Result<(), RunError> {
     let view = match view {
         ViewName::Traces => FilterView::Traces,
         ViewName::Spans => FilterView::Spans,
+        ViewName::Sessions => FilterView::Sessions,
+        ViewName::Scores => FilterView::Scores,
         _ => {
             return Err(RunError::InvalidRequest(
-                "filters are checked for traces and spans only".to_owned(),
+                "filters are checked for traces, spans, sessions and scores only".to_owned(),
             ));
         }
     };
@@ -186,9 +188,30 @@ mod tests {
         ));
         assert!(validate_filter(&ctx, ViewName::Traces, "error_count > 0").is_ok());
         assert!(validate_filter(&ctx, ViewName::Spans, "span_kind = 'llm'").is_ok());
-        assert!(matches!(
-            validate_filter(&ctx, ViewName::Sessions, "error_count > 0"),
-            Err(RunError::InvalidRequest(_))
-        ));
+    }
+
+    #[test]
+    fn validate_filter_accepts_sessions_and_scores() {
+        let ctx = QueryContext::new(example_query(), None).expect("context");
+        assert!(validate_filter(&ctx, ViewName::Sessions, "trace_count > 1").is_ok());
+        assert!(validate_filter(&ctx, ViewName::Scores, "name = 'x'").is_ok());
+        for view in [ViewName::Sessions, ViewName::Scores] {
+            match validate_filter(&ctx, view, "no_such_column > 0") {
+                Err(RunError::Invalid(error)) => assert!(error.position.is_some(), "{view:?}"),
+                other => panic!("{view:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn validate_filter_refuses_other_views() {
+        let ctx = QueryContext::new(example_query(), None).expect("context");
+        match validate_filter(&ctx, ViewName::ExperimentItems, "name = 'x'") {
+            Err(RunError::InvalidRequest(message)) => assert_eq!(
+                message,
+                "filters are checked for traces, spans, sessions and scores only"
+            ),
+            other => panic!("{other:?}"),
+        }
     }
 }

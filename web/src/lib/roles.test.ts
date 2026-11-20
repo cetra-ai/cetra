@@ -14,6 +14,7 @@ import {
   canRemoveMember,
   canReview,
   canRunPlayground,
+  canUseAssistant,
   grantableRoles,
   overrideLabel,
   roleLabel,
@@ -113,6 +114,14 @@ it("lets members and above run the playground", () => {
   expect(canRunPlayground("member")).toBe(true);
   expect(canRunPlayground("viewer")).toBe(false);
   expect(canRunPlayground(undefined)).toBe(false);
+});
+
+it("lets members and above use the assistant", () => {
+  expect(canUseAssistant("owner")).toBe(true);
+  expect(canUseAssistant("admin")).toBe(true);
+  expect(canUseAssistant("member")).toBe(true);
+  expect(canUseAssistant("viewer")).toBe(false);
+  expect(canUseAssistant(undefined)).toBe(false);
 });
 
 it("overrides only members and viewers", () => {

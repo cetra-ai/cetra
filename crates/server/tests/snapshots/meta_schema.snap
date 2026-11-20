@@ -160,6 +160,41 @@ CREATE TABLE api_keys (
 index api_keys_project
 CREATE INDEX api_keys_project ON api_keys(project_id)
 
+table assistant_conversations
+CREATE TABLE assistant_conversations (
+  id TEXT PRIMARY KEY,                 -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',      -- '' until the first user message (M3) or a rename
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+)
+
+index assistant_conversations_idle
+CREATE INDEX assistant_conversations_idle ON assistant_conversations(last_active_at)
+
+index assistant_conversations_owner
+CREATE INDEX assistant_conversations_owner ON assistant_conversations(project_id, user_id, last_active_at)
+
+table assistant_messages
+CREATE TABLE assistant_messages (
+  conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,                -- 1, 2, … within the conversation
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+  parts TEXT NOT NULL,                 -- JSON array of message parts (spec 04 § Assistant)
+  context TEXT,                        -- JSON page context of a user message (D-AS-14)
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'cancelled', 'failed')),
+  feedback TEXT CHECK (feedback IN ('up', 'down')),
+  turn_trace_id TEXT,                  -- 32 lowercase hex characters
+  stub_after INTEGER,                  -- tool messages: when their results become stubs; NULL once stubbed
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+)
+
+index assistant_messages_stub
+CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL
+
 table backfills
 CREATE TABLE backfills (
   id TEXT PRIMARY KEY,
@@ -746,6 +781,16 @@ CREATE TABLE online_rules (
 index online_rules_evaluator
 CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id)
 
+table org_assistant_settings
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+)
+
 table org_entitlements
 CREATE TABLE org_entitlements (
     org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
@@ -1012,6 +1057,10 @@ index sqlite_autoindex_api_keys_1
 
 index sqlite_autoindex_api_keys_2
 
+index sqlite_autoindex_assistant_conversations_1
+
+index sqlite_autoindex_assistant_messages_1
+
 index sqlite_autoindex_backfills_1
 
 index sqlite_autoindex_dashboards_1
@@ -1091,6 +1140,8 @@ index sqlite_autoindex_notification_deliveries_1
 index sqlite_autoindex_online_rules_1
 
 index sqlite_autoindex_online_rules_2
+
+index sqlite_autoindex_org_assistant_settings_1
 
 index sqlite_autoindex_org_entitlements_1
 

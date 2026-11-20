@@ -74,5 +74,24 @@
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
     "waitFor": "Complete and next",
     "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "assistant-panel",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "actions": [
+      { "click": "button[aria-label=\"Assistant\"]" },
+      {
+        "click": "textarea[aria-label=\"Message the assistant\"]",
+        "type": "Which traces failed in the last day?"
+      },
+      { "click": "button[aria-label=\"Send\"]" }
+    ],
+    "waitAfter": "Open in traces"
+  },
+  {
+    "name": "assistant-setting",
+    "path": "/acme/settings/assistant",
+    "waitFor": "Turn on the assistant"
   }
 ]

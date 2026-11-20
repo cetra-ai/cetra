@@ -179,16 +179,22 @@ async fn list_evaluators(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<Evaluator>>, ApiError> {
+    Ok(error::Json(evaluator_page(&state, &access, params).await?))
+}
+
+/// One page of the project's evaluators, ordered by `(name, id)`. Also served to the assistant's
+/// `list_evaluators` tool (AS M2).
+pub(crate) async fn evaluator_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: PageParams,
+) -> Result<Page<Evaluator>, ApiError> {
     let rows = store::list_evaluators(state.meta.reader(), access.project.id).await?;
     let items = rows
         .iter()
         .map(|row| Ok((row.name.clone(), row.id.to_string(), evaluator_json(row)?)))
         .collect::<Result<Vec<_>, ApiError>>()?;
-    Ok(error::Json(page_named(
-        items,
-        params.cursor.as_deref(),
-        params.limit.get(),
-    )?))
+    page_named(items, params.cursor.as_deref(), params.limit.get())
 }
 
 /// The ids of `evaluator_ids`: 1 to 50 distinct UUIDs, comma-separated. `None` when absent.
@@ -220,7 +226,19 @@ async fn get_evaluator_stats(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<EvaluatorStatsParams>,
 ) -> Result<error::Json<EvaluatorStatsResponse>, ApiError> {
-    let wanted = stats_ids(params.evaluator_ids.as_deref())?;
+    Ok(error::Json(
+        evaluator_stats(&state, &access, params.evaluator_ids.as_deref()).await?,
+    ))
+}
+
+/// The 7-day figures of every evaluator, or of the ids named (D-I-48). Also served to the assistant's
+/// evaluator tools (AS M2).
+pub(crate) async fn evaluator_stats(
+    state: &AppState,
+    access: &ProjectAccess,
+    evaluator_ids: Option<&str>,
+) -> Result<EvaluatorStatsResponse, ApiError> {
+    let wanted = stats_ids(evaluator_ids)?;
     let deadline = Deadline::start();
     let project = access.project.id;
     let org = access.project.org_id;
@@ -234,10 +252,10 @@ async fn get_evaluator_stats(
     }
     rows.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
     if rows.is_empty() {
-        return Ok(error::Json(EvaluatorStatsResponse {
+        return Ok(EvaluatorStatsResponse {
             window,
             data: Vec::new(),
-        }));
+        });
     }
     let outputs = rows
         .iter()
@@ -255,7 +273,7 @@ async fn get_evaluator_stats(
         .iter()
         .any(|output| output.data_type == ScoreDataType::Categorical);
     let scores_ctx =
-        open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
+        open_query_windowed(state, org, project, Some(TimeWindow::new(from, to)?)).await?;
     let aggregates = stats::read_scores(
         &scores_ctx,
         stats::ScoreGroup::Evaluator,
@@ -276,7 +294,7 @@ async fn get_evaluator_stats(
             .collect()
     });
     let experiment_ctx = open_query_windowed(
-        &state,
+        state,
         org,
         project,
         Some(TimeWindow::new(
@@ -293,7 +311,7 @@ async fn get_evaluator_stats(
         .collect::<BTreeSet<Uuid>>()
         .into_iter()
         .collect();
-    let visible = visible_from(&state, org);
+    let visible = visible_from(state, org);
     let mut experiments: HashMap<Uuid, ExperimentRow> = HashMap::new();
     for chunk in experiment_ids.chunks(1000) {
         for row in experiment_store::get_many(state.meta.reader(), project, chunk, visible).await? {
@@ -346,7 +364,7 @@ async fn get_evaluator_stats(
             experiments_with_score,
         });
     }
-    Ok(error::Json(EvaluatorStatsResponse { window, data }))
+    Ok(EvaluatorStatsResponse { window, data })
 }
 
 async fn get_evaluator(
@@ -354,10 +372,20 @@ async fn get_evaluator(
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<error::Json<Evaluator>, ApiError> {
+    Ok(error::Json(evaluator_detail(&state, &access, id).await?))
+}
+
+/// One evaluator with its configuration (`GET /evaluators/{id}`). Also served to the assistant's
+/// `get_evaluator` tool (AS M2).
+pub(crate) async fn evaluator_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+    id: Uuid,
+) -> Result<Evaluator, ApiError> {
     let row = store::get_evaluator(state.meta.reader(), access.project.id, id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    Ok(error::Json(evaluator_json(&row)?))
+    evaluator_json(&row)
 }
 
 async fn list_evaluator_versions(
@@ -803,7 +831,7 @@ async fn broken_rules(
 
 /// The checks that need `meta.db`: a judge's connection is in the org, and the output fits
 /// the live score definition of its name (spec 06 § Evaluator contract).
-async fn check_against_store(
+pub(crate) async fn check_against_store(
     reader: &SqlitePool,
     org: OrgId,
     project: ProjectId,
@@ -877,7 +905,7 @@ fn version_json(row: &store::EvaluatorVersionRow) -> Result<EvaluatorVersion, Ap
     })
 }
 
-fn output_of(body: &OutputScoreBody) -> OutputScore {
+pub(crate) fn output_of(body: &OutputScoreBody) -> OutputScore {
     OutputScore {
         name: body.name.clone(),
         data_type: body.data_type,

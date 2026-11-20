@@ -1,0 +1,102 @@
+{
+  "id": "01900000-0000-7000-8000-000000001a01",
+  "title": "Why did checkout errors spike?",
+  "message_count": 4,
+  "created_at": "2026-01-01T00:00:00.000000000Z",
+  "last_active_at": "2026-01-01T00:00:04.000000000Z",
+  "messages": [
+    {
+      "seq": 1,
+      "role": "user",
+      "parts": [
+        {
+          "type": "text",
+          "content": "Why did checkout errors spike yesterday?"
+        }
+      ],
+      "context": {
+        "page": "traces",
+        "filter": "status = 'error'",
+        "range": "24h"
+      },
+      "status": "complete",
+      "created_at": "2026-01-01T00:00:01.000000000Z"
+    },
+    {
+      "seq": 2,
+      "role": "assistant",
+      "parts": [
+        {
+          "type": "tool_call",
+          "id": "call_1",
+          "name": "query_sql",
+          "arguments": {
+            "query": "SELECT name, count(*) AS errors FROM traces WHERE status = 'error' GROUP BY name ORDER BY errors DESC LIMIT 5",
+            "from": "2026-01-01T00:00:00Z",
+            "to": "2026-01-02T00:00:00Z"
+          }
+        }
+      ],
+      "status": "complete",
+      "created_at": "2026-01-01T00:00:02.000000000Z"
+    },
+    {
+      "seq": 3,
+      "role": "tool",
+      "parts": [
+        {
+          "type": "tool_result",
+          "id": "call_1",
+          "name": "query_sql",
+          "ok": true,
+          "result": {
+            "columns": [
+              {
+                "name": "name",
+                "type": "VARCHAR"
+              },
+              {
+                "name": "errors",
+                "type": "BIGINT"
+              }
+            ],
+            "rows": [
+              {
+                "name": "checkout",
+                "errors": 3
+              }
+            ]
+          },
+          "size_bytes": 120,
+          "rows": 1,
+          "stubbed": false
+        }
+      ],
+      "status": "complete",
+      "created_at": "2026-01-01T00:00:03.000000000Z"
+    },
+    {
+      "seq": 4,
+      "role": "assistant",
+      "parts": [
+        {
+          "type": "text",
+          "content": "Most errors come from the checkout trace (3 of them)."
+        },
+        {
+          "type": "draft",
+          "id": "draft_1",
+          "kind": "filter",
+          "draft": {
+            "view": "traces",
+            "filter": "name = 'checkout' AND status = 'error'",
+            "range": "24h"
+          }
+        }
+      ],
+      "status": "complete",
+      "turn_trace_id": "0af7651916cd43dd8448eb211c80319c",
+      "created_at": "2026-01-01T00:00:04.000000000Z"
+    }
+  ]
+}

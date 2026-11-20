@@ -16,7 +16,8 @@ fmt-check:
 
 # Lint (warnings are errors)
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # `--all-targets` skips the storage `test = false` targets (benchmarks, S3 probes); name them.
+    cargo clippy --workspace --all-targets --all-features --test ingest_bench --test trace_bench --test s3_chaos --test s3_probe -- -D warnings
 
 # Run all Rust tests
 test:
@@ -120,9 +121,9 @@ fetch-corpus:
     echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
     mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
 
-# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/soak.rs
+# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/it/soak.rs
 soak:
-    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
+    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test it -- --ignored --nocapture --exact soak::soak
 
 # Plots of a soak run's samples into <out>/plots
 soak-plot out:

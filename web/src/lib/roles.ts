@@ -109,6 +109,11 @@ export function canRunPlayground(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::UseAssistant`: members and above, with a session (D-AS-4). */
+export function canUseAssistant(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Overrides apply only to org members and viewers (D139). */
 export function canHaveOverride(orgRole: OrgRole): boolean {
   return orgRole === "member" || orgRole === "viewer";

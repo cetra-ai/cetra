@@ -11,7 +11,7 @@
 //! - `CETRA_TEST_TOXIPROXY`: the toxiproxy API, e.g. `http://127.0.0.1:8474`;
 //! - `CETRA_TEST_TOXIPROXY_TOKEN`: optional, sent as a bearer token.
 //!
-//! Setup. Versity Gateway serves a directory as S3 (see `tests/s3.rs`):
+//! Setup. Versity Gateway serves a directory as S3 (see `tests/it/s3.rs`):
 //!
 //! ```text
 //! docker run --rm --name cetra-s3 -p 7070:7070 --tmpfs /data:rw,mode=1777,size=4g -e ROOT_ACCESS_KEY=cetra -e ROOT_SECRET_KEY=cetra-secret -e VGW_BACKEND=posix -e VGW_BACKEND_ARGS=/data -e VGW_ARGS="--port :7070" versity/versitygw:v1.11.0
@@ -490,7 +490,7 @@ fn curl_credentials(key: &str, secret: &str) -> String {
         .replace('"', "\\\"")
 }
 
-/// Deletes every object under `prefix`, calling Versity directly (copied from `tests/s3.rs`).
+/// Deletes every object under `prefix`, calling Versity directly (copied from `tests/it/s3.rs`).
 async fn delete_prefix(env: &Env, prefix: &str) -> Result<(), String> {
     let http = env.endpoint.starts_with("http://");
     let store = AmazonS3Builder::from_env()
@@ -521,7 +521,7 @@ fn project() -> ProjectId {
     "018f6b4e-7c1a-7c1a-8c1a-000000000001".parse().unwrap()
 }
 
-/// `rows` spans of one trace, each with `payload` bytes of output (copied from `tests/s3.rs`).
+/// `rows` spans of one trace, each with `payload` bytes of output (copied from `tests/it/s3.rs`).
 fn spans(rows: usize, payload: usize) -> arrow::array::RecordBatch {
     static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let base = NEXT_ID.fetch_add(rows as u64, std::sync::atomic::Ordering::Relaxed);
@@ -597,7 +597,7 @@ fn spans(rows: usize, payload: usize) -> arrow::array::RecordBatch {
     spans_to_record_batch(&spans).unwrap()
 }
 
-/// Printable bytes that do not compress (copied from `tests/s3.rs`).
+/// Printable bytes that do not compress (copied from `tests/it/s3.rs`).
 fn filler(row: usize, len: usize) -> String {
     let mut state = u64::try_from(row)
         .unwrap_or(1)

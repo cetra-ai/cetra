@@ -52,3 +52,22 @@ rustix = { workspace = true, features = ["process"] }
 reqwest = { workspace = true }
 tempfile.workspace = true
 toml.workspace = true
+
+# Benchmarks and S3 probes: built and run only when named with `--test` (just s3-chaos, the
+# commands in their module docs). `just lint` names them, since `--all-targets` skips them.
+# Every other integration test is in `tests/it/`, one binary.
+[[test]]
+name = "ingest_bench"
+test = false
+
+[[test]]
+name = "trace_bench"
+test = false
+
+[[test]]
+name = "s3_chaos"
+test = false
+
+[[test]]
+name = "s3_probe"
+test = false

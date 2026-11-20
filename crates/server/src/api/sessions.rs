@@ -129,7 +129,7 @@ pub struct SessionListParams {
     /// Opaque cursor from a previous page.
     #[serde(default)]
     pub cursor: Option<String>,
-    /// Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.
+    /// Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false. Spec 05 § Default exclusions.

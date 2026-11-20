@@ -47,6 +47,12 @@ use super::annotation_queues::{
     QueueMatchingPreview, QueueMatchingRequest, QueueTarget, SkipQueueItem, SkippedQueueItem,
     UpdateAnnotationQueue,
 };
+use super::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
+    AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
+    AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
+    AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
+};
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
 use super::connections::{
@@ -373,6 +379,23 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert_page::<PersonalToken>("PersonalTokenPage");
     set.insert_page::<SavedView>("SavedViewPage");
     set.insert_page::<DashboardSummary>("DashboardPage");
+    set.insert::<AssistantConversation>();
+    set.insert::<AssistantConversationDetail>();
+    set.insert::<AssistantMessage>();
+    set.insert::<AssistantPart>();
+    set.insert::<AssistantRole>();
+    set.insert::<AssistantMessageStatus>();
+    set.insert::<AssistantFeedback>();
+    set.insert::<AssistantDraftKind>();
+    set.insert::<UpdateAssistantConversationRequest>();
+    set.insert::<AssistantFeedbackRequest>();
+    set.insert::<AssistantTurnRequest>();
+    set.insert_page::<AssistantConversation>("AssistantConversationPage");
+    set.insert::<AssistantSettings>();
+    set.insert::<PutAssistantSettings>();
+    set.insert::<AssistantTestRequest>();
+    set.insert::<AssistantUnavailable>();
+    set.insert::<AssistantStatus>();
     set.insert_page::<AnnotationQueue>("AnnotationQueuePage");
     set.insert_page::<AnnotationQueueItem>("AnnotationQueueItemPage");
     set.insert::<EvaluatorKind>();
@@ -663,6 +686,10 @@ pub fn openapi() -> OpenApi {
             ),
             tag("issues", "Issue sources and the issues they find."),
             tag(
+                "assistant",
+                "The in-app assistant's conversations, private to their author (D-AS-10).",
+            ),
+            tag(
                 "internal",
                 "Endpoints the cloud control plane calls on a cell.",
             ),
@@ -716,6 +743,7 @@ fn drop_null_from_omitted_optionals(openapi: &mut OpenApi) {
 /// on a request means "keep data forever", while an absent field leaves the default
 /// (spec 09). The server takes both (`api/account.rs`).
 const NULL_IS_A_VALUE: &[(&str, &str)] = &[
+    ("AssistantFeedbackRequest", "feedback"),
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
     ("UpdateDatasetRequest", "description"),
@@ -997,6 +1025,8 @@ fn paths() -> Paths {
     let paths = deletion_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
+    let paths = assistant_paths(paths);
+    let paths = assistant_settings_paths(paths);
     media_paths(paths).build()
 }
 
@@ -4960,7 +4990,7 @@ fn dashboard_paths(paths: PathsBuilder) -> PathsBuilder {
         .build();
     let query = operation("query_widget", "dashboards", "Get one widget's data")
         .description(Some(
-            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+            "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         ))
         .parameters(Some(vec![project_param()]))
         .request_body(Some(json_body("WidgetQueryRequest")))
@@ -5353,12 +5383,291 @@ fn media_paths(paths: PathsBuilder) -> PathsBuilder {
 }
 
 const EXCLUSIONS: &str = concat!(
-    "Evaluation and playground traces (`environment = ",
+    "Evaluation, playground and assistant traces (`environment = ",
     cetra_core::cetra_name!("-eval"),
-    "` or `environment = ",
+    "`, `environment = ",
     cetra_core::cetra_name!("-playground"),
+    "` or `environment = ",
+    cetra_core::cetra_name!("-assistant"),
     "`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set."
 );
+
+/// The access of the assistant routes (D-AS-4, D-AS-10).
+const ASSISTANT_ACCESS: &str =
+    "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10).";
+
+fn assistant_paths(paths: PathsBuilder) -> PathsBuilder {
+    let list = operation(
+        "list_assistant_conversations",
+        "assistant",
+        "List the caller's assistant conversations",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_named(
+            "AssistantConversationPage",
+            "The caller's conversations.",
+        ),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let create = operation(
+        "post_assistant_conversation",
+        "assistant",
+        "Create an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Takes no body. The conversation starts with an empty title."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "201",
+        json_of::<AssistantConversation>("The created conversation."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let get = operation(
+        "get_assistant_conversation",
+        "assistant",
+        "Get an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} The conversation with its messages, oldest first. Any other id is 404."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversationDetail>("The conversation with its messages."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let update = operation(
+        "patch_assistant_conversation",
+        "assistant",
+        "Rename an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list."
+    )))
+    .securities(Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("UpdateAssistantConversationRequest")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantConversation>("The renamed conversation."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete = operation(
+        "delete_assistant_conversation",
+        "assistant",
+        "Delete an assistant conversation",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Deletes the conversation and its messages."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Deleted.").build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let seq = ParameterBuilder::new()
+        .name("seq")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Message position, from 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let turn = operation(
+        "post_assistant_turn",
+        "assistant",
+        "Stream an assistant turn",
+    )
+    .description(Some(
+        "Members and above, with a session (D-AS-4). Streams one turn (D-AS-9); aborting the request cancels it. Not units (D-AS-11).",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+    ]))
+    .request_body(Some(json_body("AssistantTurnRequest")))
+    .responses(responses(
+        "200",
+        sse("The turn's events, as `text/event-stream`: `start`, `text`, `tool_call`, `tool_result` and `draft` events, then one `done` or `error`. A `ping` comes every 15 seconds."),
+        &[400, 401, 403, 404, 409, 413, 429, 503],
+    ))
+    .build();
+    let feedback = operation(
+        "put_assistant_feedback",
+        "assistant",
+        "Rate an assistant message",
+    )
+    .description(Some(format!(
+        "{ASSISTANT_ACCESS} Sets the rating of an assistant message to `up` or `down`; `null` clears it. A user or tool message is `400`. Any other message is `404`."
+    )))
+    .securities(Some(vec![SecurityRequirement::new(
+        "session",
+        [] as [&str; 0],
+    )]))
+    .parameters(Some(vec![
+        project_param(),
+        path_string("id", "Conversation id."),
+        seq,
+    ]))
+    .request_body(Some(json_body("AssistantFeedbackRequest")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Saved.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Patch, update),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/messages/{{seq}}/feedback"),
+            PathItem::new(HttpMethod::Put, feedback),
+        )
+        .path(
+            format!("{PROJECT}/assistant/conversations/{{id}}/turns"),
+            PathItem::new(HttpMethod::Post, turn),
+        )
+}
+
+/// The org's assistant setting and its test, and the panel's status (D-AS-3, D-AS-4, D-AS-24).
+fn assistant_settings_paths(paths: PathsBuilder) -> PathsBuilder {
+    let org = path_string("org", "Org UUID or slug.");
+    let session = || Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]);
+    let get = operation(
+        "get_org_assistant",
+        "assistant",
+        "Get the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization members and above, and viewers. Answers `enabled: false` while the org never saved one (D-AS-3).",
+    ))
+    .parameters(Some(vec![org.clone()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The setting."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let put = operation(
+        "put_org_assistant",
+        "assistant",
+        "Save the organization's assistant setting",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Enabling needs a connection and a model, and runs the tool-calling test first; a failed test saves nothing (D-AS-3, D-AS-24). Disabling needs no test.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("PutAssistantSettings")))
+    .responses(responses(
+        "200",
+        json_of::<AssistantSettings>("The saved setting."),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let test = operation(
+        "post_org_assistant_test",
+        "assistant",
+        "Test a connection for the assistant",
+    )
+    .description(Some(
+        "Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.",
+    ))
+    .securities(session())
+    .parameters(Some(vec![org]))
+    .request_body(Some(json_body("AssistantTestRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429, 503],
+    ))
+    .build();
+    let status = operation(
+        "get_project_assistant",
+        "assistant",
+        "Get whether the caller can use the assistant",
+    )
+    .description(Some(
+        "Project members and above, with a session. Answers `usable` and, when it is false, the reason: `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16).",
+    ))
+    .securities(session())
+    .parameters(Some(vec![project_param()]))
+    .responses(responses(
+        "200",
+        json_of::<AssistantStatus>("The caller's status."),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let mut setting = PathItem::new(HttpMethod::Get, get);
+    setting.put = Some(put);
+    paths
+        .path("/api/v1/orgs/{org}/assistant", setting)
+        .path(
+            "/api/v1/orgs/{org}/assistant/test",
+            PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            format!("{PROJECT}/assistant"),
+            PathItem::new(HttpMethod::Get, status),
+        )
+}
 
 fn operation(id: &str, tag_name: &str, summary: &str) -> OperationBuilder {
     OperationBuilder::new()

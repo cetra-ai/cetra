@@ -1,8 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { ChevronDown, MoreHorizontal } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { dashboardsQuery } from "@/api/dashboards";
+import { projectRef } from "@/api/project-ref";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +13,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { peekDraft, subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
+import type { DashboardDraft } from "@/lib/assistant/types";
 import { OVERVIEW } from "@/lib/dashboards/overview";
 import { useDashboardStore } from "@/lib/dashboards/store";
 import type { Dashboard } from "@/lib/dashboards/types";
@@ -59,9 +62,33 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
   const { store, local } = useDashboardStore(org, project);
   const list = useQuery(dashboardsQuery(org, project, store));
   const [creating, setCreating] = useState(false);
+  // The new dashboard's prefill: an assistant's draft handed over (D-AS-28).
+  const [initial, setInitial] = useState<DashboardDraft | undefined>();
   // A demo-org viewer manages the dashboards kept in this browser (D-C-17).
   const canManage = local || canManageDashboards(data.role);
   const current = dashboard?.name ?? "Overview";
+  const ref = projectRef(org, project);
+
+  function setCreatingOpen(next: boolean) {
+    setCreating(next);
+    if (!next) {
+      setInitial(undefined);
+    }
+  }
+
+  // A new-dashboard draft opens the dialog prefilled, on mount and when handed over while open.
+  useEffect(() => {
+    function takeNewDraft() {
+      const draft = peekDraft(ref, "dashboard");
+      if (draft !== undefined && draft.dashboard_id === undefined && canManage) {
+        takeDraft(ref, "dashboard");
+        setInitial(draft);
+        setCreating(true);
+      }
+    }
+    takeNewDraft();
+    return subscribeDrafts(ref, takeNewDraft);
+  }, [ref, canManage]);
 
   return (
     <>
@@ -88,7 +115,9 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
           {canManage ? (
             <>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => setCreating(true)}>New dashboard</DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setCreatingOpen(true)}>
+                New dashboard
+              </DropdownMenuItem>
             </>
           ) : null}
         </DropdownMenuContent>
@@ -98,9 +127,10 @@ export function DashboardSwitcher({ dashboard }: { dashboard: Dashboard | undefi
           org={org}
           project={project}
           open={creating}
-          onOpenChange={setCreating}
+          onOpenChange={setCreatingOpen}
+          initial={initial}
           onCreated={(created) => {
-            setCreating(false);
+            setCreatingOpen(false);
             open(created.id);
           }}
         />

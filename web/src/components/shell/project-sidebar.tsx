@@ -9,7 +9,7 @@ import {
   Table2,
   Waypoints,
 } from "lucide-react";
-import { Fragment, type ReactNode, useEffect, useState } from "react";
+import { Fragment, type ReactNode, useState } from "react";
 import { GenAiLogsHint } from "@/components/shell/genai-logs-hint";
 import { NAV_SECTIONS, projectNav } from "@/components/shell/nav";
 import { useProject } from "@/components/shell/project-context";
@@ -36,12 +36,11 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { useNarrowViewport } from "@/hooks/use-narrow-viewport";
 import { goKeyOf } from "@/lib/shortcuts";
 import { STORAGE_PREFIX } from "@/product";
 
 const SIDEBAR_KEY = `${STORAGE_PREFIX}sidebar`;
-/** Below this width the sidebar starts collapsed. The shadcn primitive switches to a sheet below 768. */
-const NARROW_WIDTH = 1024;
 
 function readSidebarOpen(): boolean {
   try {
@@ -57,26 +56,6 @@ function writeSidebarOpen(open: boolean): void {
   } catch {
     // Private mode can throw. The choice still applies for this page.
   }
-}
-
-function isNarrowWindow(): boolean {
-  return window.innerWidth < NARROW_WIDTH;
-}
-
-/** Whether the window is narrower than NARROW_WIDTH, updated on resize. */
-function useNarrowViewport(): boolean {
-  const [narrow, setNarrow] = useState(isNarrowWindow);
-  useEffect(() => {
-    const onResize = () => {
-      setNarrow(isNarrowWindow());
-    };
-    onResize();
-    window.addEventListener("resize", onResize);
-    return () => {
-      window.removeEventListener("resize", onResize);
-    };
-  }, []);
-  return narrow;
 }
 
 const RECENT_ICONS: Record<RecentItem["kind"], LucideIcon> = {

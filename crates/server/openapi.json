@@ -3231,6 +3231,293 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/assistant": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get the organization's assistant setting",
+        "description": "Organization members and above, and viewers. Answers `enabled: false` while the org never saved one (D-AS-3).",
+        "operationId": "get_org_assistant",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The setting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Save the organization's assistant setting",
+        "description": "Organization admins and owners, with a session. Enabling needs a connection and a model, and runs the tool-calling test first; a failed test saves nothing (D-AS-3, D-AS-24). Disabling needs no test.",
+        "operationId": "put_org_assistant",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAssistantSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The saved setting.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/assistant/test": {
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Test a connection for the assistant",
+        "description": "Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.",
+        "operationId": "post_org_assistant_test",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The outcome. A provider failure is ok: false, not an error status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmConnectionTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/deletions": {
       "get": {
         "tags": [
@@ -9218,6 +9505,754 @@
         ]
       }
     },
+    "/api/v1/projects/{project}/assistant": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get whether the caller can use the assistant",
+        "description": "Project members and above, with a session. Answers `usable` and, when it is false, the reason: `forbidden`, `restore_mode`, `disabled` or `no_connection` (D-AS-4, D-AS-16).",
+        "operationId": "get_project_assistant",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantStatus"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/assistant/conversations": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "List the caller's assistant conversations",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversations, newest activity first, without their messages. Not paged: at most 100 per user and project.",
+        "operationId": "list_assistant_conversations",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The caller's conversations.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversationPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Create an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Takes no body. The conversation starts with an empty title.",
+        "operationId": "post_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "The created conversation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversation"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/assistant/conversations/{id}": {
+      "get": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Get an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). The conversation with its messages, oldest first. Any other id is 404.",
+        "operationId": "get_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The conversation with its messages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversationDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Delete an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Deletes the conversation and its messages.",
+        "operationId": "delete_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Rename an assistant conversation",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the title, 1 to 80 characters after trimming. The conversation keeps its place in the list.",
+        "operationId": "patch_assistant_conversation",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateAssistantConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The renamed conversation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssistantConversation"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback": {
+      "put": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Rate an assistant message",
+        "description": "Project members and above, with a session; only the conversation's author (D-AS-4, D-AS-10). Sets the rating of an assistant message to `up` or `down`; `null` clears it. A user or tool message is `400`. Any other message is `404`.",
+        "operationId": "put_assistant_feedback",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "seq",
+            "in": "path",
+            "description": "Message position, from 1.",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantFeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Saved."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/projects/{project}/assistant/conversations/{id}/turns": {
+      "post": {
+        "tags": [
+          "assistant"
+        ],
+        "summary": "Stream an assistant turn",
+        "description": "Members and above, with a session (D-AS-4). Streams one turn (D-AS-9); aborting the request cancels it. Not units (D-AS-11).",
+        "operationId": "post_assistant_turn",
+        "parameters": [
+          {
+            "name": "project",
+            "in": "path",
+            "description": "Project UUID, URL-encoded org-slug/project-slug, or `current`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Conversation id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantTurnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The turn's events, as `text/event-stream`: `start`, `text`, `tool_call`, `tool_result` and `draft` events, then one `done` or `error`. A `ping` comes every 15 seconds.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body is larger than the limit.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/projects/{project}/channels": {
       "get": {
         "tags": [
@@ -10197,7 +11232,7 @@
           "dashboards"
         ],
         "summary": "Get one widget's data",
-        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
+        "description": "Answers one widget query over `[from, to)`: a series (one value per bucket) or a total (one value over the range, with `compare` also the previous range). Spec 05 § Dashboard queries. The dashboard's `filter` is a traces expression, and the default exclusions apply: evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are left out unless `include_eval` or `include_experiments` is set. A read: a read-only personal access token and a `read` key may call it. Results are cached for 10 seconds per project and body.",
         "operationId": "query_widget",
         "parameters": [
           {
@@ -15731,7 +16766,7 @@
           "traces"
         ],
         "summary": "Get facets",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.",
         "operationId": "get_facets",
         "parameters": [
           {
@@ -15800,7 +16835,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -22759,7 +23794,7 @@
           "sessions"
         ],
         "summary": "List sessions",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_sessions",
         "parameters": [
           {
@@ -22838,7 +23873,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -22944,7 +23979,7 @@
           "sessions"
         ],
         "summary": "Get a session",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Turns are the session's traces by start time, at most 1000. `input` and `output` are the root span's payloads, omitted when the trace has no root.",
         "operationId": "get_session",
         "parameters": [
           {
@@ -22968,7 +24003,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -23074,7 +24109,7 @@
           "spans"
         ],
         "summary": "List spans",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_spans",
         "parameters": [
           {
@@ -23162,7 +24197,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include spans from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include spans from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -23417,7 +24452,7 @@
           "traces"
         ],
         "summary": "List traces",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.",
         "operationId": "list_traces",
         "parameters": [
           {
@@ -23505,7 +24540,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -23611,7 +24646,7 @@
           "traces"
         ],
         "summary": "Stream traces",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Server-sent events: `trace` data is a TraceSummary; `resync` and `ping` data are `{}`. `ping` is sent every 15 seconds.",
         "operationId": "stream_traces",
         "parameters": [
           {
@@ -23644,7 +24679,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -24083,7 +25118,7 @@
           "users"
         ],
         "summary": "List users",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. The filter runs on the `traces` view before traces are grouped by user.",
         "operationId": "list_users",
         "parameters": [
           {
@@ -24162,7 +25197,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -24268,7 +25303,7 @@
           "users"
         ],
         "summary": "Get a user",
-        "description": "Evaluation and playground traces (`environment = cetra-eval` or `environment = cetra-playground`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
+        "description": "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Sessions are the user's 100 most recent.",
         "operationId": "get_user",
         "parameters": [
           {
@@ -24310,7 +25345,7 @@
           {
             "name": "include_eval",
             "in": "query",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false. Spec 05 § Default exclusions.",
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. Spec 05 § Default exclusions.",
             "required": false,
             "schema": {
               "type": "boolean"
@@ -25653,6 +26688,461 @@
           "read",
           "write",
           "feedback"
+        ]
+      },
+      "AssistantConversation": {
+        "type": "object",
+        "description": "A conversation in the list (D-AS-10).",
+        "required": [
+          "id",
+          "title",
+          "message_count",
+          "created_at",
+          "last_active_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Conversation id."
+          },
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it."
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Messages stored in the conversation.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "Empty until the first message or a rename; the UI shows \"New chat\"."
+          }
+        }
+      },
+      "AssistantConversationDetail": {
+        "type": "object",
+        "description": "A conversation with its messages, oldest first.",
+        "required": [
+          "id",
+          "title",
+          "message_count",
+          "created_at",
+          "last_active_at",
+          "messages"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Conversation id."
+          },
+          "last_active_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it."
+          },
+          "message_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Messages stored in the conversation.",
+            "minimum": 0
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantMessage"
+            },
+            "description": "The messages, oldest first."
+          },
+          "title": {
+            "type": "string",
+            "description": "Empty until the first message or a rename; the UI shows \"New chat\"."
+          }
+        }
+      },
+      "AssistantConversationPage": {
+        "type": "object",
+        "description": "One page of results. `next_cursor` is null when there is no next page.",
+        "required": [
+          "data",
+          "next_cursor"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantConversation"
+            },
+            "description": "Items in this page."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Opaque cursor for the next page, or null when this is the last page."
+          }
+        }
+      },
+      "AssistantDraftKind": {
+        "type": "string",
+        "description": "The kind of a draft the assistant proposes.",
+        "enum": [
+          "filter",
+          "sql",
+          "dashboard",
+          "evaluator",
+          "online_rule"
+        ]
+      },
+      "AssistantFeedback": {
+        "type": "string",
+        "description": "The user's rating of an assistant message.",
+        "enum": [
+          "up",
+          "down"
+        ]
+      },
+      "AssistantFeedbackRequest": {
+        "type": "object",
+        "description": "`PUT …/assistant/conversations/{id}/messages/{seq}/feedback`: the rating of an assistant message.",
+        "properties": {
+          "feedback": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AssistantFeedback",
+                "description": "`up` or `down`. `null` clears the rating."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "AssistantMessage": {
+        "type": "object",
+        "description": "One message of a conversation.",
+        "required": [
+          "seq",
+          "role",
+          "parts",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "context": {
+            "type": "object",
+            "description": "The page context sent with a user message (D-AS-14)."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Creation time, nanoseconds since the Unix epoch. JSON is RFC 3339."
+          },
+          "feedback": {
+            "$ref": "#/components/schemas/AssistantFeedback",
+            "description": "The user's rating, when given."
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssistantPart"
+            },
+            "description": "The message's parts, in order."
+          },
+          "role": {
+            "$ref": "#/components/schemas/AssistantRole",
+            "description": "Who wrote it."
+          },
+          "seq": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Position in the conversation, from 1.",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/AssistantMessageStatus",
+            "description": "How the message ended."
+          },
+          "turn_trace_id": {
+            "type": "string",
+            "description": "The turn's trace, 32 lowercase hex characters."
+          }
+        }
+      },
+      "AssistantMessageStatus": {
+        "type": "string",
+        "description": "How a message ended.",
+        "enum": [
+          "complete",
+          "cancelled",
+          "failed"
+        ]
+      },
+      "AssistantPart": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Plain text.",
+            "required": [
+              "content",
+              "type"
+            ],
+            "properties": {
+              "content": {
+                "type": "string",
+                "description": "The text."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A tool the assistant called.",
+            "required": [
+              "id",
+              "name",
+              "arguments",
+              "type"
+            ],
+            "properties": {
+              "arguments": {
+                "type": "object",
+                "description": "The arguments the assistant passed."
+              },
+              "id": {
+                "type": "string",
+                "description": "The call's id, unique within the message."
+              },
+              "name": {
+                "type": "string",
+                "description": "The tool's name."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_call"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The answer of a tool call.",
+            "required": [
+              "id",
+              "name",
+              "ok",
+              "size_bytes",
+              "stubbed",
+              "type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The id of the call this answers."
+              },
+              "name": {
+                "type": "string",
+                "description": "The tool's name."
+              },
+              "ok": {
+                "type": "boolean",
+                "description": "Whether the tool succeeded."
+              },
+              "result": {
+                "type": "object",
+                "description": "The tool's answer; omitted once stubbed (D-AS-12)."
+              },
+              "rows": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Rows in the answer, when it has rows.",
+                "minimum": 0
+              },
+              "size_bytes": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Size of the answer in bytes.",
+                "minimum": 0
+              },
+              "stubbed": {
+                "type": "boolean",
+                "description": "Whether the answer was replaced by a stub (D-AS-12)."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "tool_result"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A draft the assistant proposes, for the user to apply.",
+            "required": [
+              "id",
+              "kind",
+              "draft",
+              "type"
+            ],
+            "properties": {
+              "draft": {
+                "type": "object",
+                "description": "The draft's content."
+              },
+              "id": {
+                "type": "string",
+                "description": "The draft's id, unique within the message."
+              },
+              "kind": {
+                "$ref": "#/components/schemas/AssistantDraftKind",
+                "description": "What the draft is."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "draft"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One part of a message (spec 04 § Assistant)."
+      },
+      "AssistantRole": {
+        "type": "string",
+        "description": "Who wrote a message.",
+        "enum": [
+          "user",
+          "assistant",
+          "tool"
+        ]
+      },
+      "AssistantSettings": {
+        "type": "object",
+        "description": "The org's assistant setting (D-AS-3).",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org's LLM connection the assistant calls."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the assistant is on for the org."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model the assistant calls on that connection."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the setting was last saved. Absent while the org never saved one."
+          }
+        }
+      },
+      "AssistantStatus": {
+        "type": "object",
+        "description": "`GET /projects/{project}/assistant`: whether the caller can chat, and why not.",
+        "required": [
+          "usable"
+        ],
+        "properties": {
+          "adapter": {
+            "type": "string",
+            "description": "The connection's adapter, when `usable`."
+          },
+          "connection_name": {
+            "type": "string",
+            "description": "The connection's name, when `usable`, for the panel's notice (D-AS-18)."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model, when `usable`."
+          },
+          "reason": {
+            "$ref": "#/components/schemas/AssistantUnavailable",
+            "description": "Why the caller cannot chat. Omitted when `usable`."
+          },
+          "usable": {
+            "type": "boolean",
+            "description": "Whether the caller can chat now."
+          }
+        }
+      },
+      "AssistantTestRequest": {
+        "type": "object",
+        "description": "`POST /orgs/{org}/assistant/test`: runs the tool-calling test without saving anything.",
+        "required": [
+          "connection_id",
+          "model"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The org's connection to test."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model to test. 1 to 256 bytes after trimming."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AssistantTurnRequest": {
+        "type": "object",
+        "description": "`POST …/assistant/conversations/{id}/turns`: one user message and its page context.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "context": {
+            "type": "object",
+            "description": "The page context (D-AS-14): a JSON object with a string `page` (1–64 characters), at most\n8 KiB as compact JSON."
+          },
+          "message": {
+            "type": "string",
+            "description": "1–16,384 bytes after trimming (D-AS-15)."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AssistantUnavailable": {
+        "type": "string",
+        "description": "Why the caller cannot use the assistant.",
+        "enum": [
+          "forbidden",
+          "restore_mode",
+          "disabled",
+          "no_connection"
         ]
       },
       "AuthConfig": {
@@ -33650,6 +35140,29 @@
           }
         }
       },
+      "PutAssistantSettings": {
+        "type": "object",
+        "description": "`PUT /orgs/{org}/assistant`: the whole setting.",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Required when `enabled` is true."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Turns the assistant on or off. Turning it on runs the tool-calling test (D-AS-24)."
+          },
+          "model": {
+            "type": "string",
+            "description": "Required when `enabled` is true. 1 to 256 bytes after trimming."
+          }
+        },
+        "additionalProperties": false
+      },
       "PutOrgSsoProvider": {
         "type": "object",
         "description": "`PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.",
@@ -36713,6 +38226,20 @@
         },
         "additionalProperties": false
       },
+      "UpdateAssistantConversationRequest": {
+        "type": "object",
+        "description": "`PATCH …/assistant/conversations/{id}`.",
+        "required": [
+          "title"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "description": "1–80 characters after trimming."
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateChannelRequest": {
         "type": "object",
         "description": "Body of `PATCH /channels/{id}`. An absent field keeps its value; `headers` replaces the whole map.",
@@ -37590,7 +39117,7 @@
           },
           "include_eval": {
             "type": "boolean",
-            "description": "Include traces from the evaluation and playground environments (`cetra-eval`, `cetra-playground`). Default false."
+            "description": "Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false."
           },
           "include_experiments": {
             "type": "boolean",
@@ -37880,6 +39407,10 @@
     {
       "name": "issues",
       "description": "Issue sources and the issues they find."
+    },
+    {
+      "name": "assistant",
+      "description": "The in-app assistant's conversations, private to their author (D-AS-10)."
     },
     {
       "name": "internal",

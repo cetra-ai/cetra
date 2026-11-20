@@ -112,6 +112,11 @@ export function CommandPalette() {
         setHelp(true);
         return;
       }
+      if (action === "assistant") {
+        event.preventDefault();
+        dispatchShortcut("assistant", event);
+        return;
+      }
       if (action === "dismiss") {
         if (isOverlayOpen()) {
           return;

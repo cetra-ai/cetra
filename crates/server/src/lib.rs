@@ -11,6 +11,7 @@ pub mod admin_socket;
 pub(crate) mod agent_context;
 pub(crate) mod alerts;
 pub mod api;
+pub(crate) mod assistant;
 pub(crate) mod auth;
 pub mod backup;
 pub(crate) mod bootstrap;

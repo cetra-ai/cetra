@@ -576,6 +576,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         spawn_prune(state.clone()),
         spawn_purge(state.clone()),
         spawn_last_used(state.clone()),
+        crate::assistant::spawn_expiry(state.clone()),
     ];
     tasks.extend(crate::alerts::spawn_loops(
         &state,

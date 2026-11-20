@@ -29,7 +29,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   `/healthz`; the Helm chart already does.
 - `/healthz` now fails on a storage failure that a restart clears (a WAL, object fsync or catalog
   failure), so a liveness probe on it restarts the server.
-- Migration `0028` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`.
+- Migration `0030` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`.
 
 ### Added
 
@@ -40,6 +40,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Issue sources for bad scores, user feedback and topics: LLM summaries and embeddings group them into issues, refreshed every 6 hours (D-IC-4, D-IC-8).
 - MCP tools `list_prompts` and `get_prompt` (D-V-39): coding agents read the project's prompts, their labels and a version's template, config and variables, with the same access and limits as the other MCP tools.
 - Prompts pages (D-V-32): the prompt list with search, label and tag filters, protected labels and a create dialog; the prompt page with the template editor (saving a version), versions with labels and line diffs, label history and per-version metrics; prompt links, facets and columns on traces and spans.
+- In-app assistant (D193, D-AS-1 to D-AS-31): a chat panel in each project (`Ctrl/Cmd+I`) that answers questions over traces, metrics, evaluations and settings with the organization's LLM connection, and drafts filters, SQL, dashboards, evaluators and online rules that you apply.
+- Organization setting Assistant (D-AS-3, D-AS-24): off until an admin picks a connection and a model; turning it on runs a tool-calling test.
+- Assistant API (D-AS-9, D-AS-10): conversations, turns streamed over SSE, feedback, and the org setting under `/api/v1/…/assistant`.
 - Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
 - Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.
 - Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).

@@ -1,4 +1,5 @@
 import { Link, useMatch, useRouterState } from "@tanstack/react-router";
+import { AssistantButton } from "@/components/assistant/assistant-button";
 import { CetraMark } from "@/components/brand/cetra-mark";
 import { CommandPalette } from "@/components/command/palette";
 import { OrgSwitcher } from "@/components/org-switcher";
@@ -64,6 +65,7 @@ export function TopBar() {
       <div className="flex-1" />
       {project ? (
         <>
+          <AssistantButton org={project.params.org} project={project.params.project} />
           <IngestDot org={project.params.org} project={project.params.project} />
           <AlertBell org={project.params.org} project={project.params.project} />
         </>

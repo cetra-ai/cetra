@@ -56,6 +56,15 @@ async fn list_sessions(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<SessionListParams>,
 ) -> Result<error::Json<Page<SessionSummary>>, ApiError> {
+    Ok(error::Json(session_page(&state, &access, params).await?))
+}
+
+/// One page of sessions: the body of `GET /sessions`. The assistant's `list_sessions` tool shares it (AS M2).
+pub(crate) async fn session_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: SessionListParams,
+) -> Result<Page<SessionSummary>, ApiError> {
     let scope = list_scope(
         params.from,
         params.to,
@@ -63,7 +72,7 @@ async fn list_sessions(
         params.include_experiments,
     )?;
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let ctx = open_query(state, access.project.org_id, access.project.id, None).await?;
     let page = storage::session_list(
         &ctx,
         storage::SessionListRequest {
@@ -80,10 +89,10 @@ async fn list_sessions(
     let mut data = convert::session_summaries(&page.batches)?;
     attach_session_extras(&ctx, &mut data, scope, deadline).await?;
     attach_session_scores(&ctx, &mut data, deadline).await?;
-    Ok(error::Json(Page {
+    Ok(Page {
         data,
         next_cursor: page.next_cursor,
-    }))
+    })
 }
 
 async fn get_session(
@@ -92,11 +101,24 @@ async fn get_session(
     error::Path(path): error::Path<SessionPath>,
     error::Query(params): error::Query<ExclusionParams>,
 ) -> Result<error::Json<SessionDetail>, ApiError> {
+    Ok(error::Json(
+        session_detail(&state, &access, &path.session_id, params).await?,
+    ))
+}
+
+/// One session's summary and turns: the body of `GET /sessions/{session_id}`. The assistant's `get_session`
+/// tool shares it (AS M2).
+pub(crate) async fn session_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+    session_id: &str,
+    params: ExclusionParams,
+) -> Result<SessionDetail, ApiError> {
     let deadline = Deadline::start();
-    let ctx = open_query(&state, access.project.org_id, access.project.id, None).await?;
+    let ctx = open_query(state, access.project.org_id, access.project.id, None).await?;
     let data = storage::session_detail(
         &ctx,
-        &path.session_id,
+        session_id,
         params.include_eval,
         params.include_experiments,
         deadline.remaining()?,
@@ -128,11 +150,11 @@ async fn get_session(
             }
         })
         .collect();
-    Ok(error::Json(SessionDetail {
+    Ok(SessionDetail {
         session,
         turns,
         truncated: data.truncated,
-    }))
+    })
 }
 
 /// Fills the extras of each session (spec 09 § Observability data): its error trace count and

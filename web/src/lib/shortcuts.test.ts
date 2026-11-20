@@ -26,8 +26,29 @@ it("lists every shortcut the help dialog shows", () => {
     "⌘⇧↵",
     "g then a letter",
     "⌘K",
+    "⌘I",
     "?",
   ]);
+});
+
+it("opens the assistant on Ctrl+I or Cmd+I, also while typing", () => {
+  expect(reduceShortcut(null, { ...plain, key: "i", ctrlKey: true }, false)).toEqual({
+    chord: null,
+    action: "assistant",
+  });
+  expect(reduceShortcut(null, { ...plain, key: "i", metaKey: true }, false).action).toBe(
+    "assistant",
+  );
+  expect(reduceShortcut(null, { ...plain, key: "I", metaKey: true }, true).action).toBe(
+    "assistant",
+  );
+  expect(
+    reduceShortcut(null, { ...plain, key: "i", altKey: true, ctrlKey: true }, false).action,
+  ).toBe(null);
+  expect(
+    reduceShortcut(null, { ...plain, key: "I", ctrlKey: true, shiftKey: true }, false).action,
+  ).toBe(null);
+  expect(reduceShortcut(null, { ...plain, key: "i" }, false).action).toBe(null);
 });
 
 it("recognizes keys, chords, and modifiers", () => {

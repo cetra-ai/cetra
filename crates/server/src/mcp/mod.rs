@@ -4,11 +4,11 @@
 //! own by a fresh [`McpServer`] that holds the caller. Only personal access tokens reach it.
 
 mod issues;
-mod output;
+pub(crate) mod output;
 mod prompts;
-mod sql;
-mod tools;
-mod traces;
+pub(crate) mod sql;
+pub(crate) mod tools;
+pub(crate) mod traces;
 
 use std::sync::Arc;
 use std::time::Instant;

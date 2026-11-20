@@ -129,6 +129,12 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/orgs/{org}/llm-connections/{id}/test",
   },
+  { operationId: "put_org_assistant", method: "put", path: "/api/v1/orgs/{org}/assistant" },
+  {
+    operationId: "post_org_assistant_test",
+    method: "post",
+    path: "/api/v1/orgs/{org}/assistant/test",
+  },
   { operationId: "post_org_model_price", method: "post", path: "/api/v1/orgs/{org}/models" },
   {
     operationId: "patch_org_model_price",
@@ -614,6 +620,23 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...llmConnectionDocument, ...named(body) }),
   delete_llm_connection: () => noContent(),
   post_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
+  put_org_assistant: ({ body }) => {
+    const enabled = body.enabled === true;
+    const connectionId = trimmed(body.connection_id);
+    if (enabled && connectionId === undefined) {
+      return problem(400, "bad_request", undefined, [
+        { field: "connection_id", message: "required when enabled" },
+      ]);
+    }
+    const model = trimmed(body.model);
+    return HttpResponse.json({
+      enabled,
+      ...(connectionId !== undefined ? { connection_id: connectionId } : {}),
+      ...(model !== undefined ? { model } : {}),
+      updated_at: new Date().toISOString(),
+    });
+  },
+  post_org_assistant_test: () => HttpResponse.json(llmConnectionTestDocument),
   post_org_model_price: ({ body }) =>
     HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body) }, { status: 201 }),
   patch_org_model_price: ({ body, params }) =>

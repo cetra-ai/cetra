@@ -139,6 +139,16 @@
     "file": "static/annotation-queue-item.json"
   },
   {
+    "operation_id": "get_assistant_conversation",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json"
+  },
+  {
     "operation_id": "get_auth_config",
     "path_params": {},
     "query": {},
@@ -561,6 +571,16 @@
     "file": "static/org.json"
   },
   {
+    "operation_id": "get_org_assistant",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/org-assistant.json"
+  },
+  {
     "operation_id": "get_org_entitlements",
     "path_params": {
       "org": "acme"
@@ -605,6 +625,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/project.json"
+  },
+  {
+    "operation_id": "get_project_assistant",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/project-assistant.json"
   },
   {
     "operation_id": "get_prompt",
@@ -1048,6 +1076,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/api-keys.json"
+  },
+  {
+    "operation_id": "list_assistant_conversations",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations.json"
   },
   {
     "operation_id": "list_backfills",
