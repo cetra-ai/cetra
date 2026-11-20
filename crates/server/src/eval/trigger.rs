@@ -860,7 +860,7 @@ mod tests {
             add_rule(&app, project, false).await;
             assert!(refresh_tracked(&app.state).await.unwrap().0.is_empty());
             add_rule(&app, project, true).await;
-            let tracked = refresh_tracked(&app.state).await.unwrap();
+            let tracked = refresh_tracked(&app.state).await.unwrap().0;
             assert_eq!(tracked.len(), 1);
             assert_eq!(tracked[&project].rules.len(), 1);
             assert_eq!(tracked[&project].timeout_ns, 60 * SECOND);
