@@ -7,7 +7,7 @@ Both SDKs are thin layers over OpenTelemetry: tracing goes out as OTLP/HTTP (pro
 1. **Own `TracerProvider` by default.** `init()` creates a dedicated provider + `BatchSpanProcessor` + OTLP exporter and never registers it as the global provider, so we don't hijack the app's existing OTel setup. `cetra.tracer_provider()` (TS `cetra.tracerProvider()`) returns the provider in use (a no-op provider before `init()` or when disabled), for libraries that emit OTel spans themselves and accept a provider or tracer (pydantic-ai, the Vercel AI SDK, …). Spans such libraries send to the global provider reach cetra only with `use_global_provider=True`. With `use_global_provider=True` (TS `useGlobalProvider: true`), Python adds our processor to the global SDK `TracerProvider` when one is set, otherwise registers ours as the global one; TypeScript (OTel JS 2.x providers cannot take processors after construction) registers ours as the global provider when none is set, otherwise logs one warning and stays private. Both SDKs expose `span_processor()` (TS `spanProcessor()`), our processor, for apps that build their own OTel pipeline. The OTel *context* is always the global one, so instrumentor spans nest under ours in both modes. `sample_rate` applies only to our own provider; in global mode with an existing provider a rate below 1 logs one warning and is ignored (D-F-4). With our own provider every span is exported (only our tracer and the instrumentors we bind create spans there). In global mode the default filter exports a span when its instrumentation scope is `cetra` or `ai`, or one of its attribute keys starts with `cetra.`, `gen_ai.`, `llm.`, `openinference.`, `ai.`, `traceloop.`, `langfuse.`, `lmnr.` or `gcp.vertex.agent.`, or is exactly `input.value` or `output.value`. A span without an instrumentation scope counts as not `cetra`. `export_filter=` (TS `exportFilter`) replaces the rule in both modes; it gets the finished span and returns a boolean; if it raises, the span is exported. LLM spans whose parent was filtered out arrive as detached roots, which spec 01 already handles (`has_root = false`) (D-F-5).
 2. **No custom instrumentation for frameworks.** Auto-instrumentation reuses OpenInference instrumentors (and OpenLLMetry where OpenInference lacks one), installed as optional extras and activated by `init(instrument=[…])`. Python takes instrumentor names from a fixed registry (§ Instrumentors): an unknown name or a missing package raises `ConfigError` naming the extra to install. TypeScript takes instrumentation objects (anything with `setTracerProvider`, `enable` and `disable` functions); the subpath helpers `cetra/openai`, `cetra/anthropic`, `cetra/langchain` build the OpenInference instrumentor and call `manuallyInstrument(module)`, so ESM works without loader flags. The OpenInference packages are optional peer dependencies (D-F-7).
 3. **Emit the standard.** Our spans use OTel GenAI attributes where a standard exists; `cetra.*` only for what has no standard (kind, input/output for non-LLM spans, tags, metadata, environment, release, experiment linkage).
-4. **Never break the app after `init()`.** `init()` raises `ConfigError` for an invalid configuration; a missing API key is not one: with no key given (argument and `CETRA_API_KEY` both unset) `init()` logs one warning (`cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled`) and the SDK runs in no-op mode (D-F-3). Every other invalid value, including a key without the `sk-cetra-` prefix, still raises `ConfigError`: a misconfigured deployment fails at startup, where it is noticed. Use `enabled=false` to run without cetra. Decorators, context managers and `score()` used before `init()` or with `enabled=false` do nothing. After `init()` returns, nothing the SDK does raises into the app: exporter errors are logged at debug level, serialization failures fall back to `repr()`, and full buffers drop data (§ Lifecycle). The SDK has no required dependencies beyond `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and an HTTP client. Programming errors raise: an invalid `kind` given to `observe`/`span`, or an invalid `provider`/`model` given to `llm_span`, raises `ValueError` (Python) / `TypeError` (TS) when the API is called (decoration time for `observe`), before the user function runs. These are the only cases where the SDK raises after `init()`. Re-entering an already entered Python `context` object is a no-op logged at debug level.
+4. **Never break the app after `init()`.** `init()` raises `ConfigError` for an invalid configuration; a missing API key is not one: with no key given (argument and `CETRA_API_KEY` both unset) `init()` logs one warning (`cetra: no API key; set CETRA_API_KEY, or CETRA_ENABLED=false to silence this; tracing is disabled`) and the SDK runs in no-op mode (D-F-3). Every other invalid value, including a key without the `sk-cetra-` prefix, still raises `ConfigError`: a misconfigured deployment fails at startup, where it is noticed. Use `enabled=false` to run without cetra. Decorators, context managers and `score()` used before `init()` or with `enabled=false` do nothing. After `init()` returns, nothing the SDK does raises into the app: exporter errors are logged at debug level, serialization failures fall back to `repr()`, and full buffers drop data (§ Lifecycle). The SDK has no required dependencies beyond `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and an HTTP client. Programming errors raise: an invalid `kind` given to `observe`/`span`, or an invalid `provider`/`model` given to `llm_span`, raises `ValueError` (Python) / `TypeError` (TS) when the API is called (decoration time for `observe`), before the user function runs. These are the only cases where the SDK raises after `init()`, plus `PromptNotAvailable` and `PromptCompileError` from the prompt API (D-V-14). Re-entering an already entered Python `context` object is a no-op logged at debug level.
 5. **Same concepts, idiomatic APIs** in both languages.
 6. **Init once.** Any `init()` after the first, whatever the first did, logs one warning and changes nothing (D-F-15).
 
@@ -66,6 +66,7 @@ Everything in this section is identical in both SDKs; the conformance fixtures p
 | `service.name` and other resource attributes | Python: OTel's `Resource.create`, which reads `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES` from `os.environ`. TypeScript: `OTEL_SERVICE_NAME` from the config's env source only (`OTEL_RESOURCE_ATTRIBUTES` is not read). This is a known difference (§ Language differences) |
 | OTLP traces URL | `<base_url>/v1/traces`. The server also accepts `/v1/logs` and `/v1/metrics` and drops them (spec 02, D-G-40): GenAI content that an instrumentation sends as log events is not stored, so configure it to capture message content on spans |
 | Score URL | `<base_url>/api/v1/scores` |
+| Prompt URL (fetch) | `<base_url>/api/v1/projects/current/prompts/{name}/resolve?label=<label>` or `?version=<n>`; sent with `GET`, and `If-None-Match` set to the stored `ETag` on a revalidation (D-V-12). Used by `get_prompt` / `getPrompt` and `client.prompts.get` |
 | Feedback URL (browser) | `<baseUrl>/api/public/feedback` |
 | Auth header | `Authorization: Bearer <key>` |
 | OTel context key for context values | Python `opentelemetry.context.create_key("cetra.context")`; TS `createContextKey("cetra.context")` |
@@ -81,9 +82,11 @@ Everything in this section is identical in both SDKs; the conformance fixtures p
 | `cetra.tags` | string array | context processor | merged tags; omitted when empty |
 | `cetra.metadata.<key>` | string, bool, int or double | context processor, `set_metadata` | a `str` stays a string; `bool` → bool; an integer within ±(2^53−1) → int; a finite float → double; anything else → compact JSON string from § Serialization |
 | `cetra.environment`, `cetra.release` | string | context processor | from `init()`, when set |
+| `cetra.prompt.name` | string | context processor, `compile` | the prompt of `context(prompt=…)` / `withContext({ prompt }, …)`, stamped on every span started inside; `compile` stamps the current recording span (D-V-15). A fallback writes the name only |
+| `cetra.prompt.version` | int | same | the registry version of that prompt; omitted for a fallback |
 | `gen_ai.*`, `cetra.cost.total`, `cetra.ttft_ns` | see D-F-13 | `llm_span` | § LLM span |
 
-**Programming errors raise.** An invalid `kind` given to `observe`/`span`, or an invalid `provider`/`model` given to `llm_span`, raises `ValueError` (Python) / `TypeError` (TS) when the API is called (decoration time for `observe`), before the user function runs. These are the only cases where the SDK raises after `init()`. Re-entering an already entered Python `context` object is a no-op logged at debug level.
+**Programming errors raise.** An invalid `kind` given to `observe`/`span`, or an invalid `provider`/`model` given to `llm_span`, raises `ValueError` (Python) / `TypeError` (TS) when the API is called (decoration time for `observe`), before the user function runs. These are the only cases where the SDK raises after `init()`, plus `PromptNotAvailable` and `PromptCompileError` from the prompt API (D-V-14). Re-entering an already entered Python `context` object is a no-op logged at debug level.
 
 **Errors.** When the user function (or the body of `span`/`llm_span`) raises, the SDK adds one event itself (it does not call OTel's `record_exception`/`recordException`, whose `exception.type` differs between languages): name `exception`, attributes `exception.type` (Python `type(e).__name__`; TS `e.name` for an `Error`, else `"Error"`), `exception.message` (Python `str(e)`; TS `e.message` for an `Error`, else `String(e)`), `exception.stacktrace` (Python `"".join(traceback.format_exception(e))`; TS `e.stack ?? ""`). The span status becomes error with message `"<exception.type>: <exception.message>"`. The exception is re-raised unchanged. A `GeneratorExit` (Python) or an early `return()` (TS) is not an error. A Python `BaseException` that is not an `Exception` (`KeyboardInterrupt`, `asyncio.CancelledError`, …) ends the span with the status unset, records no output, and is re-raised — through `observe` (functions, coroutine functions and both generator wrappers) exactly as inside `span()`/`llm_span()`. TypeScript has no equivalent class of exceptions: every throw, an aborted call included, goes through the error rule above.
 
@@ -165,6 +168,7 @@ Known, accepted differences that the fixtures do not cover. The SDK guides list 
 - **Zero-argument functions and `None`/`undefined`** (§ Testing).
 - **Integral floats.** JavaScript has one number type, and OTel JS encodes an integral number as `intValue`. So Python `params={"temperature": 1.0}`, `set_cost(1.0)` or metadata `2.0` give a double, TypeScript gives an int. Python always converts `set_cost`'s argument with `float()`. The server reads both (spec 02 rule 20).
 - **Large integers.** Python ints beyond ±(2^53−1) inside JSON payloads are written as JSON numbers; TypeScript `bigint` becomes a decimal string. As attributes (metadata) both write a JSON string.
+- **Number text in `compile`.** A non-integral number in a prompt variable is written with the language's shortest form: Python `repr` and TypeScript `String` differ, so `0.00000015` is `1.5e-07` in Python and `1.5e-7` in TypeScript. No shared fixture covers it.
 - **Usage counts.** TypeScript `setUsage` records only safe integers (`Number.isSafeInteger`, at most 2^53−1); larger values, non-integers and negatives are skipped with a debug line. Python `set_usage` records any non-negative `int` (not `bool`), including values beyond 2^53.
 - **Resource attributes:** see § Names.
 - **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to cetra too; TypeScript sends only ours. The Python guide warns about it (https://cetra.sh/docs/reference/python/opentelemetry/#known-limits).
@@ -207,6 +211,13 @@ with cetra.context(session_id="chat-42", user_id="u-17", tags=["beta"], metadata
 trace_id = cetra.current_trace_id()
 score_id = cetra.score(trace_id=trace_id, name="user_feedback", value=True, reason="thumbs up")
 score_id = cetra.score(span_id=cetra.current_span_id(), trace_id=trace_id, name="accuracy", value=0.8)
+
+# Prompts (D-V-14, D-V-15): fetched by label, cached, with a fallback; compile links the current span
+prompt = cetra.get_prompt("support-bot", label="production", fallback="Answer: {{ question }}")
+with cetra.context(prompt=prompt):    # every span inside carries cetra.prompt.name / .version
+    messages = prompt.compile(question="How do I rotate a key?")   # str, or a message list for chat
+
+client.prompts.get("support-bot", version=3)   # uncached read; also list(), create(), create_version(), set_label()
 
 cetra.flush()      # blocks until spans and scores are exported (shutdown is registered atexit)
 cetra.shutdown()
@@ -278,6 +289,16 @@ result.assert_min("exact", 0.8)           # raises for CI gating
 - The client retries only reads, deletes, the results post and finish; creates are sent once. It raises `ApiError` on an error answer. Task and scorer exceptions never raise: they are recorded per run.
 - Experiments have no server evaluators: a judge runs inside a scorer (D-J-11). `summary()` prints per-score aggregates and the experiment id; `assert_min(name, threshold)` raises when a score's mean is below the threshold.
 
+### Prompts
+
+Both SDKs follow these rules (D-V-14, D-V-15):
+- The cache is per process, keyed by `(base URL, name, label or version)`. A version entry never expires, whatever `cache_ttl_s` is. A label entry is fresh for `cache_ttl_s` (60 s by default; `0` turns the label cache off). Then it is served stale, and one background refresh per key revalidates it with `If-None-Match`. The cache holds at most 1,000 entries and drops the least recently used first.
+- The first fetch of a key waits for the server: 5 s per attempt, and 2 retries on network errors, 429 and 5xx. A `Retry-After` header that is digits only replaces the wait, capped at 5 s; otherwise the waits are 0.5 s and then 1 s.
+- A failed refresh keeps the stale entry and logs one warning a minute, with the prompt name and the status only. A failed first fetch returns the fallback (a text template or a message list, with no version and `is_fallback` true). With no fallback it raises `PromptNotAvailable`, whose reason is `not found`, `status <code>`, `network`, `invalid response` or `sdk disabled`. A 200 answer that is not a prompt is `invalid response` and is not retried.
+- Before `init()`, or with the SDK disabled (no key), a fetch is a failed first fetch with the reason `sdk disabled`. The 402 pause (D-P-34) does not apply to fetches.
+- `compile` takes strings, numbers and booleans for variables, and lists of `{role, content}` mappings for placeholders. Any other value is a programming error (`TypeError`). A missing variable or placeholder, or an invalid template (including an invalid fallback, on the fetch), raises `PromptCompileError`, which names the prompt and never quotes the template or the values.
+- `client.prompts` is not cached. It uses the client's timeouts and retries: reads retry, writes are sent once.
+
 ## TypeScript API (`npm i @cetra-ai/sdk`; ESM only; Node ≥ 22.12, Bun, Deno; edge runtimes via the fetch-based exporter)
 
 ```ts
@@ -314,6 +335,13 @@ await cetra.withLlmSpan("call", {
 await cetra.withContext({ sessionId: "chat-42", userId: "u-17", tags: ["beta"] }, async () => {
   await agent.run();
 });
+
+// Prompts (D-V-14, D-V-15): the same rules as Python; the prompt goes through withContext
+const prompt = await cetra.getPrompt("support-bot", { label: "production", fallback: "Answer: {{ question }}" });
+await cetra.withContext({ prompt }, async () => {
+  const messages = prompt.compile({ question: "How do I rotate a key?" }); // string, or a message list for chat
+});
+await client.prompts.get("support-bot", { version: 3 }); // uncached read; also list, create, createVersion, setLabel
 
 const scoreId = cetra.score({ traceId: cetra.currentTraceId(), name: "user_feedback", value: true });
 await cetra.flush();
