@@ -90,6 +90,8 @@ pub(crate) struct TurnSetup {
     pub(crate) trace_id: TraceId,
     /// How long a model call waits for the connection (the route sets [`PERMIT_WAIT`]; tests shorten it).
     pub(crate) permit_wait: Duration,
+    /// How long the turn may run before its time limit (the route sets [`TURN_DEADLINE`]; tests shorten it).
+    pub(crate) turn_deadline: Duration,
 }
 
 /// What the turn emits; the route turns each into an SSE event named `name()` whose data is
@@ -222,7 +224,7 @@ pub(crate) async fn run_turn(
         closed: state.live.closed(),
         trace_hex: setup.trace_id.to_hex(),
         started_ns,
-        deadline: Instant::now() + TURN_DEADLINE,
+        deadline: Instant::now() + setup.turn_deadline,
         system: String::new(),
         rows: Vec::new(),
         model_calls: Vec::new(),
@@ -323,7 +325,16 @@ impl Turn<'_> {
         .await;
         self.rows = match loaded {
             Ok(Some((_, rows))) => rows,
-            _ => return Outcome::error(PERMANENT, CONVERSATION_NOT_FOUND),
+            Ok(None) => return Outcome::error(PERMANENT, CONVERSATION_NOT_FOUND),
+            Err(error) => {
+                tracing::error!(
+                    conversation_id = %self.setup.conversation,
+                    trace_id = %self.trace_hex,
+                    error_class = meta_error_class(&error),
+                    "assistant turn could not load its conversation"
+                );
+                return internal();
+            }
         };
         self.system = system_message(self.setup, self.state.clock.now_ns());
         loop {
@@ -339,6 +350,8 @@ impl Turn<'_> {
             };
             let step = match self.model_call(request).await {
                 Ok(step) => step,
+                // The call ran past the turn's deadline: the same limit as the top of the loop (D-AS-23).
+                Err(Outcome::Limit) => return self.limit(LIMIT_TIME).await,
                 Err(outcome) => return outcome,
             };
             if step.cancelled {
@@ -432,7 +445,12 @@ impl Turn<'_> {
             Some(Err(error)) => {
                 drop(permit);
                 let record = bare_record(started_ns, self.state.clock.now_ns(), error.to_string());
-                self.settle(record, "", &[], MessageStatus::Failed).await?;
+                let status = if self.past_deadline(&error) {
+                    MessageStatus::Cancelled
+                } else {
+                    MessageStatus::Failed
+                };
+                self.settle(record, "", &[], status).await?;
                 return Err(self.call_outcome(&error));
             }
             Some(Ok(stream)) => stream,
@@ -514,7 +532,13 @@ impl Turn<'_> {
                 failure.as_ref().map(|error| error.to_string())
             },
         };
-        let status = if cancelled {
+        // A call that ran into the turn's deadline keeps its partial answer as cancelled, then the
+        // turn stores the limit message (D-AS-23).
+        let status = if cancelled
+            || failure
+                .as_ref()
+                .is_some_and(|error| self.past_deadline(error))
+        {
             MessageStatus::Cancelled
         } else if failure.is_some() {
             MessageStatus::Failed
@@ -539,12 +563,17 @@ impl Turn<'_> {
         })
     }
 
-    /// The outcome of a failed call. A timeout after the turn's deadline is the time limit
+    /// Whether a call failed on its whole-call timeout, which the clamp to the turn's time left
+    /// makes the deadline, and the deadline has passed (D-AS-23).
+    fn past_deadline(&self, error: &ChatError) -> bool {
+        matches!(error, ChatError::Transport(EgressError::Timeout))
+            && Instant::now() >= self.deadline
+    }
+
+    /// The outcome of a failed call. A timeout past the turn's deadline is the time limit
     /// (D-AS-23); any other failure is its class and its payload-free text.
     fn call_outcome(&self, error: &ChatError) -> Outcome {
-        if matches!(error, ChatError::Transport(EgressError::Timeout))
-            && Instant::now() >= self.deadline
-        {
+        if self.past_deadline(error) {
             return Outcome::Limit;
         }
         Outcome::error(class_name(error.class()), error.to_string())
@@ -615,7 +644,7 @@ impl Turn<'_> {
                 draft,
             } = result;
             self.tool_calls.push(ToolCallRecord {
-                name: call.name.clone(),
+                name: trace_tool_name(&call.name).to_owned(),
                 started_ns,
                 ended_ns,
                 size_bytes,
@@ -779,14 +808,17 @@ impl Turn<'_> {
             .prices()
             .for_project(self.setup.project.org_id, self.setup.project.id);
         let normalized = build_assistant_trace(&trace, &ingest, &prices);
-        // The cost of the model calls, read before the spans move into the commit.
-        let costs: Vec<f64> = normalized
-            .spans
-            .iter()
-            .filter(|span| span.span_kind == SpanKind::Llm)
-            .filter_map(|span| span.cost_total)
-            .collect();
-        let cost_usd = (!costs.is_empty()).then(|| costs.iter().sum::<f64>());
+        // The cost of the turn, read before the spans move into the commit.
+        let cost_usd = turn_cost(
+            normalized
+                .spans
+                .iter()
+                .filter(|span| span.span_kind == SpanKind::Llm)
+                .map(|span| {
+                    let has_usage = span.input_tokens.is_some() || span.output_tokens.is_some();
+                    (has_usage, span.cost_total)
+                }),
+        );
         if commit_judge_trace(self.state, &self.setup.project, ended_ns, normalized)
             .await
             .is_err()
@@ -900,11 +932,12 @@ fn bare_record(started_ns: i64, ended_ns: i64, error: impl Into<String>) -> Mode
     }
 }
 
-/// A result that says the call did not run.
+/// A result that says the call did not run. Its error has the shape of the other tool errors, so
+/// the summary and the trace read its `not_run` code.
 fn not_run(message: &str) -> ToolResult {
     ToolResult {
         ok: false,
-        value: json!({ "error": message }),
+        value: json!({"error": {"code": "not_run", "message": message}}),
         rows: None,
         draft: None,
     }
@@ -931,6 +964,45 @@ async fn run_tool_call(state: &AppState, scope: &ToolScope, call: &ToolCall) -> 
     }
 }
 
+/// The tool name the trace records: the assistant's own name, or `unknown` for a name the model
+/// made up, so that no model output reaches the trace (D-AS-11).
+fn trace_tool_name(name: &str) -> &'static str {
+    specs()
+        .iter()
+        .find(|spec| spec.name == name)
+        .map_or("unknown", |spec| spec.name)
+}
+
+/// The turn's cost (D-AS-11), from each model call as (has usage, cost): the sum of the costs of
+/// the calls that have usage, when every one of them has a cost. `None` otherwise, and when no
+/// call has usage.
+fn turn_cost(calls: impl Iterator<Item = (bool, Option<f64>)>) -> Option<f64> {
+    let mut total = 0.0;
+    let mut any_usage = false;
+    for (has_usage, cost) in calls {
+        if !has_usage {
+            continue;
+        }
+        any_usage = true;
+        total += cost?;
+    }
+    any_usage.then_some(total)
+}
+
+/// The class of a store error for the log: its variant, never its text.
+fn meta_error_class(error: &MetaError) -> &'static str {
+    match error {
+        MetaError::Open { .. } => "open",
+        MetaError::Migrate { .. } => "migrate",
+        MetaError::NotInitialized => "not_initialized",
+        MetaError::PreMigrationIo(_) | MetaError::PreMigrationDb(_) => "pre_migration",
+        MetaError::SchemaMismatch { .. } => "schema_mismatch",
+        MetaError::Db(_) => "db",
+        MetaError::Conflict(_) => "conflict",
+        MetaError::Corrupt { .. } => "corrupt",
+    }
+}
+
 /// The error class names the events and the trace use (`ErrorClass`).
 fn class_name(class: ErrorClass) -> &'static str {
     match class {
@@ -950,6 +1022,7 @@ mod tests {
 
     use axum::http::{Method, header};
     use cetra_capture::{Mock, Turn as MockTurn};
+    use cetra_core::message::Part;
     use serde_json::{Value, json};
     use tokio::sync::mpsc;
 
@@ -1016,6 +1089,21 @@ mod tests {
 
     fn text_turn(text: &str, chunks: u32) -> MockTurn {
         turn(json!({"text": text}), "stop", chunks, 0)
+    }
+
+    /// A text answer of `chunks` pieces, each sent `chunk_delay_ms` after the last.
+    fn slow_text_turn(text: &str, chunks: u32, chunk_delay_ms: u64) -> MockTurn {
+        serde_json::from_value(json!({
+            "api": "openai.chat",
+            "model": "gpt-test",
+            "message": {"text": text},
+            "finish": "stop",
+            "usage": {"input": 10, "output": 3},
+            "chunks": chunks,
+            "ttft_ms": 0,
+            "chunk_delay_ms": chunk_delay_ms,
+        }))
+        .expect("a turn")
     }
 
     #[allow(clippy::needless_pass_by_value)] // `json!` reads the value by reference.
@@ -1135,6 +1223,7 @@ mod tests {
             model: "gpt-test".to_owned(),
             trace_id,
             permit_wait: Duration::from_secs(1),
+            turn_deadline: TURN_DEADLINE,
         }
     }
 
@@ -1458,6 +1547,97 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn time_limit_stores_the_limit_message() {
+        // Thirty chunks 100 ms apart run past the 300 ms deadline. The call's whole-call timeout is
+        // at least a second (MIN_CALL_TIMEOUT), so the timeout ends the call with part of the answer.
+        let base = provider(vec![slow_text_turn(
+            "one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen",
+            30,
+            100,
+        )])
+        .await;
+        let (app, seeded) = new_app().await;
+        let connection = connection(&app, &seeded, &base, 4).await;
+        let conversation = new_conversation(&app, &seeded).await;
+        let user_seq = add_user_message(&app, conversation, "Count slowly.").await;
+
+        let mut setup =
+            turn_setup(&app, &seeded, connection, conversation, user_seq, trace(16)).await;
+        setup.turn_deadline = Duration::from_millis(300);
+        let events = drive(&app, setup, &seeded).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, TurnEvent::Text { .. })),
+            "the partial answer streamed"
+        );
+        assert!(matches!(
+            events.last(),
+            Some(TurnEvent::Done { finish_reason, steps: 1, .. }) if finish_reason == "limit"
+        ));
+
+        let rows = stored(&app, &seeded, conversation).await;
+        assert_eq!(
+            rows.len(),
+            3,
+            "the user message, the partial answer, the limit"
+        );
+        assert_eq!(rows[1].role, MessageRole::Assistant);
+        assert_eq!(rows[1].status, MessageStatus::Cancelled);
+        assert!(
+            matches!(parts_of(&rows[1]).first(), Some(AssistantPart::Text { content }) if !content.is_empty()),
+            "the partial answer holds its text"
+        );
+        assert_eq!(rows[2].role, MessageRole::Assistant);
+        assert_eq!(rows[2].status, MessageStatus::Complete);
+        let text = match parts_of(&rows[2]).first() {
+            Some(AssistantPart::Text { content }) => content.clone(),
+            _ => String::new(),
+        };
+        assert!(text.contains("limit of 10 minutes"), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_tool_name_is_not_traced() {
+        const CANARY: &str = "canary_tool_name_7f3a";
+        let base = provider(vec![
+            calls_turn(json!([call("call_1", CANARY, json!({}))])),
+            text_turn("Sorry.", 1),
+        ])
+        .await;
+        let (app, seeded) = new_app().await;
+        let connection = connection(&app, &seeded, &base, 4).await;
+        let conversation = new_conversation(&app, &seeded).await;
+        let user_seq = add_user_message(&app, conversation, "Use a tool.").await;
+
+        let setup = turn_setup(&app, &seeded, connection, conversation, user_seq, trace(18)).await;
+        let events = drive(&app, setup, &seeded).await;
+        assert!(matches!(events.last(), Some(TurnEvent::Done { .. })));
+
+        let detail = trace_detail(&app, &seeded, &trace(18).to_hex()).await;
+        let names: Vec<&str> = detail["spans"]
+            .as_array()
+            .expect("the spans")
+            .iter()
+            .filter_map(|span| span["span"]["name"].as_str())
+            .collect();
+        assert!(names.contains(&"tool unknown"), "{names:?}");
+        assert!(!detail.to_string().contains(CANARY), "{detail}");
+    }
+
+    #[test]
+    fn turn_cost_needs_a_cost_for_every_call_with_usage() {
+        let cost = |calls: &[(bool, Option<f64>)]| turn_cost(calls.iter().copied());
+        assert_eq!(
+            cost(&[(true, Some(0.5)), (false, None), (true, Some(1.0))]),
+            Some(1.5)
+        );
+        assert_eq!(cost(&[(true, Some(0.5)), (true, None)]), None);
+        assert_eq!(cost(&[(false, None)]), None, "no call reported usage");
+        assert_eq!(cost(&[]), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn length_finish_ends_the_turn() {
         let base = provider(vec![turn(json!({"text": "Cut off"}), "length", 1, 0)]).await;
         let (app, seeded) = new_app().await;
@@ -1504,27 +1684,71 @@ mod tests {
         let user_seq = add_user_message(&app, conversation, "Read three.").await;
 
         let setup = turn_setup(&app, &seeded, connection, conversation, user_seq, trace(9)).await;
-        let (tx, mut rx) = mpsc::channel(256);
+        // One slot: the turn waits for each event to be read. After the three tool-call events are
+        // read, the turn runs the first tool and waits to send its result, so the third never runs.
+        let (tx, mut rx) = mpsc::channel(1);
         let task = tokio::spawn(run_turn(
             app.state.clone(),
             setup,
             tx,
             guard(&seeded, conversation),
         ));
-        while let Some(event) = rx.recv().await {
-            if matches!(event, TurnEvent::ToolCall { .. }) {
-                break;
+        let mut tool_call_events = 0;
+        while tool_call_events < 3 {
+            match rx.recv().await {
+                Some(TurnEvent::ToolCall { .. }) => tool_call_events += 1,
+                Some(_) => {}
+                None => panic!("the turn ended before its tool calls"),
             }
         }
+        tokio::time::sleep(Duration::from_millis(200)).await;
         drop(rx);
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
             .expect("the turn ends within 2 s")
             .expect("the turn does not panic");
 
-        // Every call stored in an assistant message is answered once the history is built.
+        // The tool message holds results only for the calls that ran, in call order. The third
+        // never ran, so at most two results are stored.
+        let expected = ["call_1", "call_2", "call_3"];
         let rows = stored(&app, &seeded, conversation).await;
-        history::provider_messages(SYSTEM_PROMPT, &rows).expect("the history builds");
+        let stored_ids: Vec<String> = rows
+            .iter()
+            .filter(|row| row.role == MessageRole::Tool)
+            .flat_map(parts_of)
+            .filter_map(|part| match part {
+                AssistantPart::ToolResult { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert!(stored_ids.len() <= 2, "{stored_ids:?}");
+        let ids: Vec<&str> = stored_ids.iter().map(String::as_str).collect();
+        assert_eq!(ids, expected[..stored_ids.len()].to_vec());
+
+        // The history answers each of the three calls. A call with no stored result gets the
+        // not-run error, in the shape of the other tool errors.
+        let sent = history::provider_messages(SYSTEM_PROMPT, &rows).expect("the history builds");
+        let answers: Vec<(String, Value)> = sent
+            .iter()
+            .flat_map(|message| message.parts.iter())
+            .filter_map(|part| match part {
+                Part::ToolCallResponse {
+                    id: Some(id),
+                    response,
+                    ..
+                } => Some((id.clone(), response.clone())),
+                _ => None,
+            })
+            .collect();
+        let answered: Vec<&str> = answers.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(answered, expected);
+        for (id, response) in &answers {
+            if stored_ids.contains(id) {
+                assert_ne!(response["error"]["code"], "not_run", "{id}");
+            } else {
+                assert_eq!(response["error"]["code"], "not_run", "{id}");
+            }
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

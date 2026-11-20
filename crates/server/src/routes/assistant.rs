@@ -26,7 +26,9 @@ use crate::api::assistant::{
 use crate::api::common::{FieldError, Page};
 use crate::api::connections::{LlmConnectionTestResult, TestErrorClass};
 use crate::assistant::settings::{self as assistant_settings, Resolved};
-use crate::assistant::turn::{PERMIT_WAIT, TURN_MESSAGES_MAX, TurnEvent, TurnSetup, run_turn};
+use crate::assistant::turn::{
+    PERMIT_WAIT, TURN_DEADLINE, TURN_MESSAGES_MAX, TurnEvent, TurnSetup, run_turn,
+};
 use crate::auth::limits::{AssistantRefusal, RetryAfter};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm, Role};
@@ -569,6 +571,8 @@ async fn post_turn(
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The room is checked here, not only above: another turn may have appended since.
+                store::ensure_room(conn, id, TURN_MESSAGES_MAX).await?;
                 let seq = store::append_message(conn, id, user_message, now).await?;
                 store::set_title_if_empty(conn, id, &title).await?;
                 Ok::<i64, MetaError>(seq)
@@ -588,6 +592,7 @@ async fn post_turn(
         model,
         trace_id,
         permit_wait: PERMIT_WAIT,
+        turn_deadline: TURN_DEADLINE,
     };
     let timing = state.live.timing;
     let (turn_tx, turn_rx) = mpsc::channel::<TurnEvent>(TURN_BUFFER);

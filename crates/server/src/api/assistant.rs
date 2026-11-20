@@ -1,6 +1,8 @@
 //! Assistant conversations: their list, their detail and the rename body (spec 09, spec 04
 //! § Assistant, D-AS-10). A conversation is private to its author.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -96,7 +98,7 @@ pub enum AssistantDraftKind {
 }
 
 /// One part of a message (spec 04 § Assistant).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AssistantPart {
     /// Plain text.
@@ -147,7 +149,7 @@ pub enum AssistantPart {
 }
 
 /// One message of a conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AssistantMessage {
     /// Position in the conversation, from 1.
     pub seq: u32,
@@ -190,7 +192,7 @@ pub struct AssistantFeedbackRequest {
 }
 
 /// `POST …/assistant/conversations/{id}/turns`: one user message and its page context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AssistantTurnRequest {
     /// 1–16,384 bytes after trimming (D-AS-15).
@@ -278,4 +280,140 @@ pub struct AssistantStatus {
     /// The model, when `usable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+}
+
+/// The size of a JSON value as compact JSON, in bytes. Zero when it cannot be written.
+fn json_len(value: &serde_json::Value) -> usize {
+    serde_json::to_string(value).map_or(0, |text| text.len())
+}
+
+/// Prints the size of the message and whether the context is sent, never the text or the context
+/// (AGENTS.md § Privacy).
+impl fmt::Debug for AssistantTurnRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssistantTurnRequest")
+            .field("message_bytes", &self.message.len())
+            .field("has_context", &self.context.is_some())
+            .field("context_bytes", &self.context.as_ref().map_or(0, json_len))
+            .finish()
+    }
+}
+
+/// Prints the variant, the ids, names and sizes, never the text, the arguments, the result or the
+/// draft (AGENTS.md § Privacy).
+impl fmt::Debug for AssistantPart {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { content } => f
+                .debug_struct("Text")
+                .field("bytes", &content.len())
+                .finish(),
+            Self::ToolCall {
+                id,
+                name,
+                arguments,
+            } => f
+                .debug_struct("ToolCall")
+                .field("id", id)
+                .field("name", name)
+                .field("arguments_bytes", &json_len(arguments))
+                .finish(),
+            Self::ToolResult {
+                id,
+                name,
+                ok,
+                result,
+                size_bytes,
+                rows,
+                stubbed,
+            } => f
+                .debug_struct("ToolResult")
+                .field("id", id)
+                .field("name", name)
+                .field("ok", ok)
+                .field("has_result", &result.is_some())
+                .field("size_bytes", size_bytes)
+                .field("rows", rows)
+                .field("stubbed", stubbed)
+                .finish(),
+            Self::Draft { id, kind, draft } => f
+                .debug_struct("Draft")
+                .field("id", id)
+                .field("kind", kind)
+                .field("draft_bytes", &json_len(draft))
+                .finish(),
+        }
+    }
+}
+
+/// Prints the position, the role, the status and the number of parts, never the parts or the
+/// context (AGENTS.md § Privacy).
+impl fmt::Debug for AssistantMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AssistantMessage")
+            .field("seq", &self.seq)
+            .field("role", &self.role)
+            .field("status", &self.status)
+            .field("parts_len", &self.parts.len())
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    const CANARY: &str = "canary-payload-7f3a";
+
+    #[test]
+    fn debug_holds_no_payload() {
+        let request = AssistantTurnRequest {
+            message: CANARY.to_owned(),
+            context: Some(json!({"page": "traces", "filter": CANARY})),
+        };
+        let parts = vec![
+            AssistantPart::Text {
+                content: CANARY.to_owned(),
+            },
+            AssistantPart::ToolCall {
+                id: "call_1".to_owned(),
+                name: "query_sql".to_owned(),
+                arguments: json!({"query": CANARY}),
+            },
+            AssistantPart::ToolResult {
+                id: "call_1".to_owned(),
+                name: "query_sql".to_owned(),
+                ok: true,
+                result: Some(json!({"rows": [CANARY]})),
+                size_bytes: 21,
+                rows: Some(1),
+                stubbed: false,
+            },
+            AssistantPart::Draft {
+                id: "draft_call_1".to_owned(),
+                kind: AssistantDraftKind::Sql,
+                draft: json!({"sql": CANARY}),
+            },
+        ];
+        let message = AssistantMessage {
+            seq: 2,
+            role: AssistantRole::Assistant,
+            parts: parts.clone(),
+            context: Some(json!(CANARY)),
+            status: AssistantMessageStatus::Complete,
+            feedback: None,
+            turn_trace_id: None,
+            created_at: 1,
+        };
+
+        let mut texts = vec![format!("{request:?}"), format!("{message:?}")];
+        texts.extend(parts.iter().map(|part| format!("{part:?}")));
+        for text in &texts {
+            assert!(!text.contains(CANARY), "{text}");
+        }
+        assert!(format!("{request:?}").contains(&format!("message_bytes: {}", CANARY.len())));
+        assert!(format!("{message:?}").contains("parts_len: 4"));
+    }
 }

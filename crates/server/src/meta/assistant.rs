@@ -428,6 +428,31 @@ pub(crate) async fn get_conversation_with_messages(
     Ok(Some((row, messages)))
 }
 
+/// Refuses with [`MetaError::Conflict`] and [`TOO_MANY_MESSAGES`] unless `conversation` has room
+/// for `needed` more messages (D-AS-25). Call it inside the write that appends them, so the count
+/// is read in the same transaction as the append.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] when the messages would not fit, [`MetaError::Corrupt`] when the
+/// conversation has no count, or [`MetaError::Db`] when the query fails.
+pub(crate) async fn ensure_room(
+    conn: &mut SqliteConnection,
+    conversation: Uuid,
+    needed: i64,
+) -> Result<(), MetaError> {
+    let count: Option<i64> =
+        sqlx::query_scalar("SELECT message_count FROM assistant_conversations WHERE id = ?")
+            .bind(conversation.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    let count = count.ok_or_else(|| corrupt_conversation("message_count"))?;
+    if count + needed > MESSAGES_PER_CONVERSATION {
+        return Err(MetaError::Conflict(TOO_MANY_MESSAGES));
+    }
+    Ok(())
+}
+
 /// Appends a message to `conversation` and returns its `seq`. Read the count, refuse at
 /// [`MESSAGES_PER_CONVERSATION`] (a conflict), then insert the message and set the count and
 /// `last_active_at = now`.

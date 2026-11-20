@@ -202,7 +202,7 @@ fn push_answers(
                 rows,
                 ..
             }) => stub_object(name, *size_bytes, *rows),
-            _ => json!({ "error": NOT_RUN }),
+            _ => json!({"error": {"code": "not_run", "message": NOT_RUN}}),
         };
         parts.push(Part::ToolCallResponse {
             id: Some(call.clone()),
@@ -467,7 +467,7 @@ mod tests {
         );
         assert_eq!(
             response_of(&out[3], 0),
-            json!({"error": NOT_RUN}),
+            json!({"error": {"code": "not_run", "message": NOT_RUN}}),
             "a call with no stored result is answered"
         );
     }
@@ -508,7 +508,10 @@ mod tests {
                 Role::Tool,
             ]
         );
-        assert_eq!(response_of(&out[3], 0), json!({"error": NOT_RUN}));
+        assert_eq!(
+            response_of(&out[3], 0),
+            json!({"error": {"code": "not_run", "message": NOT_RUN}})
+        );
         assert_eq!(response_of(&out[5], 0), json!({"ok": 2}));
     }
 

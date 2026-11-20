@@ -348,7 +348,7 @@ CREATE TABLE org_assistant_settings (
 
 > `parts` is a JSON array of parts. The message parts of spec 01 are used where they fit: `{type: "text", content}` and `{type: "tool_call", id, name, arguments}`. Two parts are the assistant's own: `{type: "tool_result", id, name, ok, result, size_bytes, rows?, stubbed}` (the tool's JSON answer, `null` once stubbed) and `{type: "draft", id, kind, draft}` (`kind` is `filter`, `sql`, `dashboard`, `evaluator` or `online_rule`; D-AS-6). A user message holds text parts and its page context in `context`; an assistant message holds text and tool calls; a tool message holds tool results, each followed by the draft it produced (D-AS-21, draft id `draft_<tool call id>`).
 >
-> Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3); a turn starts only when 34 more messages fit (D-AS-25). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). Both run at startup, then hourly. Conversations are deleted with their project, org or author.
+> Limits: 100 conversations per user and project (creating one more deletes the least recently active), 200 messages per conversation (enforced when turns append them, M3); a turn starts only when 34 more messages fit (D-AS-25). A conversation is deleted 30 days after `last_active_at`; tool results are stubbed from `stub_after`, 24 hours after their turn (D-AS-12). The expiry and the stubbing run at startup, then hourly, so a result can stay whole for up to about 25 hours. Conversations are deleted with their project, org or author.
 
 ## Datasets & experiments
 

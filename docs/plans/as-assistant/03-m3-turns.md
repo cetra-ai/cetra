@@ -95,11 +95,11 @@ Plan-level choices. They are recorded in the design and in `docs/mvp-decisions.m
   - A cancelled or failed model call stores its partial assistant message with status `cancelled` or `failed`, or an empty one when nothing came.
 - **D-AS-22, history sent to the model.**
   - A stubbed tool result goes to the model as `{"stubbed": true, "tool": <name>, "size_bytes": <n>, "rows": <n or null>, "note": "result removed after 24 hours; call the tool again if you need it"}`.
-  - A stored tool call that has no stored result goes to the model with the result `{"error": "not run: the turn ended before this call"}`.
+  - A stored tool call that has no stored result goes to the model with the result `{"error": {"code": "not_run", "message": "not run: the turn ended before this call"}}`.
   - Draft parts are not sent.
   - The page context is sent only for the latest user message.
 - **D-AS-25, room for a turn.** A turn starts only when the conversation has room for its worst case (34 messages), so its answer is never lost to the 200-message cap.
-- **D-AS-23, a turn limit.** Reaching 16 model calls, 32 tool calls or 10 minutes ends the turn. The server appends an assistant message whose text names the limit, and sends `done` with `finish_reason: "limit"`. Tool calls beyond the 32nd are not run; each gets the result `{"error": "not run: the turn's limit of 32 tool calls was reached"}`.
+- **D-AS-23, a turn limit.** Reaching 16 model calls, 32 tool calls or 10 minutes ends the turn. The server appends an assistant message whose text names the limit, and sends `done` with `finish_reason: "limit"`. Tool calls beyond the 32nd are not run; each gets the result `{"error": {"code": "not_run", "message": "not run: the turn's limit of 32 tool calls was reached"}}`.
 - **D-AS-24, the setting test.**
   - The call: a system message, a user message asking to call `ping`, the one tool `ping` with `{"ok": boolean}`, and `tool_choice = Tool("ping")`. It allows 256 tokens and 30 s.
   - It passes when a `ping` tool call arrives before the stream ends.
@@ -516,7 +516,7 @@ pub fn build_assistant_trace(input: &AssistantTurnTrace<'_>, ingest: &IngestCont
       - tool rows become one `Role::Tool` message with a `Part::ToolCallResponse { id: Some(id), response }` per tool result, where `response` is the stored `result`, or the stub object of D-AS-22 when `result` is absent or `stubbed`; drafts are skipped.
       - An assistant message with no parts left is dropped.
    2b. Merge consecutive messages of role `User` into one (parts in order).
-   3. Pair calls with results per assistant message: the calls of an assistant message are answered only by the tool message stored right after it (provider-assigned ids such as `call_1` repeat across steps). For each call without a response there, add `{"error": "not run: the turn ended before this call"}` to that following tool message, or insert a new `Role::Tool` message right after the assistant message when none follows. Drop responses whose id matches no call of the preceding assistant message.
+   3. Pair calls with results per assistant message: the calls of an assistant message are answered only by the tool message stored right after it (provider-assigned ids such as `call_1` repeat across steps). For each call without a response there, add `{"error": {"code": "not_run", "message": "not run: the turn ended before this call"}}` to that following tool message, or insert a new `Role::Tool` message right after the assistant message when none follows. Drop responses whose id matches no call of the preceding assistant message.
    3b. A stored call's `arguments` go to the provider as `Some(object)` when the value is a JSON object, or a string that parses to one (sent as the parsed object); anything else is sent as `None` (the providers then see `{}`). This keeps a model's malformed call from making every later turn of the conversation fail.
    4. Prepend `Message { role: System, parts: [Text(system)] }`.
    5. Fit: measure the characters of every text, and the compact JSON of every argument and response.
@@ -674,7 +674,7 @@ pub fn build_assistant_trace(input: &AssistantTurnTrace<'_>, ingest: &IngestCont
          When the append fails with `TOO_MANY_MESSAGES`, the outcome is `error(permanent, TOO_MANY_MESSAGES)`; leave.
       9. Leave when the outcome is `cancelled` or `error`, or when the step had no tool calls (outcome `done`, finish reason from `done`, else `stop`).
       10. Run the tool calls in order through `run_tool_call(state: &AppState, scope: &ToolScope, call: &ToolCall, started_ns: i64) -> (ToolResult, ToolCallRecord)` (a private function of `turn.rs`, so the argument checks can be unit-tested without the mock), each call raced against `shutdown` and `sink.closed()` in a `biased` `select!`; a cancel drops the running tool. For each one:
-          - When `tool_count == MAX_TOOL_CALLS`, its result is `ToolResult { ok: false, value: {"error": "not run: the turn's limit of 32 tool calls was reached"} }`, and the outcome after this step becomes `limit`.
+          - When `tool_count == MAX_TOOL_CALLS`, its result is `ToolResult { ok: false, value: {"error": {"code": "not_run", "message": "not run: the turn's limit of 32 tool calls was reached"}} }`, and the outcome after this step becomes `limit`.
           - Otherwise `tool_count += 1` (`ToolCallRecord.call` = the index of the current model call in `calls`). When `arguments` is not a JSON object, the result is `ok: false`, `{"error": {"code": "bad_request", "message": "arguments must be a JSON object"}}`. Otherwise call `tools::run(&state, &ToolScope { user, project: project.id }, name, object)`. `Err(UnknownTool)` gives `ok: false` with `{"error": {"code": "not_found", "message": "unknown tool"}}`.
           - On a cancel while tools run: append the tool message with the results so far (step 11 shape), then leave with outcome `cancelled`; the calls without results are answered by `history` later (D-AS-22).
           - For each result: `size_bytes` is the length of `serde_json::to_string(&result.value)`; push a `ToolCallRecord` with the error code read from `value["error"]["code"]` when `!ok`; send `ToolResult { id, ok, summary }`.
@@ -813,3 +813,13 @@ Then the milestone check: `just check` once (with the nvm `PATH` export), `just 
   - The roadmap AS row reads "M1–M3 implemented", as step 3 says, before the milestone checks have run.
   - The API omits `result` on a stubbed tool result, where the stored JSON holds `null` (spec 04 and spec 09 say so).
   - A turn is refused with `409` when the assistant is off or has no connection; spec 09 names this status.
+- **Review fixes (code review of AS M3).**
+  - A model call that runs into the turn's deadline stores its partial answer as `cancelled`, not `failed`, then the turn stores the time-limit message and ends as `done` with `finish_reason: "limit"`, as the top-of-loop deadline does (D-AS-23). The plan's step 7 said `failed` for this case. The deadline is the field `TurnSetup::turn_deadline`, set by the route to `TURN_DEADLINE` and by the test helper; the test `time_limit_stores_the_limit_message` uses 300 ms.
+  - The user message's write re-reads the conversation's count in the same write (`store::ensure_room`, with `TURN_MESSAGES_MAX`) and refuses with `409` `TOO_MANY_MESSAGES`, so a turn that started in the meantime does not overfill the conversation. The early check stays, before the limiter slots are taken.
+  - `cancel_around_tools` asserts the stored results (a prefix of the calls, at most two) and that the history answers every call, with `not_run` for those without a result. Its channel holds one event, so the turn stops after the second tool.
+  - `AssistantTurnRequest`, `AssistantPart` and `AssistantMessage` have hand-written `Debug` impls that print sizes, kinds, ids and counts only (test `debug_holds_no_payload`).
+  - The trace's tool span is named `tool <name>` for the assistant's own tool names only; any other name is recorded as `unknown` (test `unknown_tool_name_is_not_traced`).
+  - A `not_run` result has the shape of the other tool errors: `{"error": {"code": "not_run", "message": ...}}`, so the summary's `error_code` is `not_run` and the tool span has an error status. D-AS-22 and D-AS-23 quote the new shape.
+  - A failed load of the conversation logs the store error's class and returns the internal error. Only `Ok(None)` is `conversation not found`.
+  - `cost_usd` is the sum over the model calls that have usage when each of them has a cost; it is `null` when one has none, and also when no call reported usage (the review did not say; the sum of nothing is not a cost). Test `turn_cost_needs_a_cost_for_every_call_with_usage`.
+  - Docs: spec 09 says restore mode is `503` only when `enabled` is true; `{}` (no `feedback` key) clears a rating; D-AS-12 (design, `mvp-decisions.md`, spec 04 and spec 09) says a result can stay whole for up to about 25 hours, because the sweep is hourly.
