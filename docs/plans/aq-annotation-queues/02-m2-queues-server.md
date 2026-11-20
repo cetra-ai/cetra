@@ -275,7 +275,8 @@ Rules for every phase:
    pub(crate) struct NewItem { pub(crate) trace_id: Option<String>, pub(crate) span_id: Option<String>, pub(crate) session_id: Option<String>, pub(crate) target_time: i64 }
    pub(crate) enum ItemsInsert { Done { added: u64, existing: u64 }, TooMany }
 
-   pub(crate) enum ReviewOutcome { Done(ItemRow), Missing, NotPending, Pending, HeldBy(Uuid) }
+   pub(crate) enum ReviewOutcome { Done(Box<ItemRow>), Missing, NotPending, Pending, HeldBy(Uuid) } // boxed: clippy::large_enum_variant
+   pub(crate) enum Finish { Complete, Skip(Option<String>) }
    ```
    The `Target`, `Status` and `AddedByKind` enums each get `fn as_str(self) -> &'static str` and `fn parse(text: &str) -> Option<Self>`.
 3. Functions, with their exact signatures. Times are passed in, never read from a clock. `visible_from: Option<i64>` means "leave out items with `target_time < visible_from`".
@@ -354,10 +355,9 @@ Rules for every phase:
      - Only when that row was updated, release the user's other leases in the queue (`id <> item`), then return `Done(row)`. A failed lease never drops the reviewer's current lease, because the transaction commits on `Ok`.
      - If no row is updated, read the item (`get_item_on`) to name the cause: `Missing` (absent or hidden), `NotPending`, or `HeldBy(holder)`.
    - `pub(crate) async fn release_tx(conn, queue: Uuid, item: Uuid, user: Uuid) -> Result<(), MetaError>`: clears the lease when the user holds it, and does nothing otherwise.
-   - `pub(crate) async fn finish_tx(conn, queue: Uuid, item: Uuid, user: Uuid, status: Status, skip_reason: Option<String>, visible_from: Option<i64>, now: i64) -> Result<ReviewOutcome, MetaError>`. `status` is `Completed` or `Skipped`.
+   - `pub(crate) async fn finish_tx(conn, queue: Uuid, item: Uuid, user: Uuid, finish: Finish, visible_from: Option<i64>, now: i64) -> Result<ReviewOutcome, MetaError>`. `Finish::Complete` stores `completed`; `Finish::Skip(reason)` stores `skipped` with the reason.
      - Run one `UPDATE … SET status = ?, skip_reason = ?, done_by_user_id = ?, done_at = ?, leased_by_user_id = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ? AND queue_id = ? AND status = 'pending' AND (leased_by_user_id IS NULL OR lease_expires_at <= ? OR leased_by_user_id = ?) AND (? IS NULL OR target_time >= ?) RETURNING …`.
      - If no row comes back, answer `Missing`, `NotPending` or `HeldBy` as `lease_tx` does.
-     - `skip_reason` is stored only for `Skipped`.
    - `pub(crate) async fn reopen_tx(conn, queue: Uuid, item: Uuid, visible_from: Option<i64>, now: i64) -> Result<ReviewOutcome, MetaError>`.
      - Set `status = 'pending'` and clear `skip_reason`, `done_by_user_id`, `done_at` and the lease, where the status is `completed` or `skipped`.
      - If no row is updated, answer `Missing`, or `Pending` for an item that is already pending.
@@ -458,6 +458,7 @@ Rules for every phase:
 - `crates/server/src/http/access.rs` (route registration line only)
 - `crates/server/src/api/openapi.rs`
 - `crates/server/src/api_examples.rs` and `crates/server/tests/api_examples.rs`
+- `crates/server/tests/openapi.rs` (the `OPERATIONS` tuples, the `TAGS` list and the expected-error arms of `document_lint` for the new operations)
 - `fixtures/api/static/annotation-queue*.json` (new), `fixtures/api/requests/annotation-queue*.json` (new), `fixtures/api/manifest.json` (generated) and `fixtures/api/README.md`
 - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (generated)
 - `docs/spec/08-auth.md` and `docs/spec/09-api.md`
@@ -472,7 +473,7 @@ Rules for every phase:
 2. **Errors:**
    - `ApiError::StaleVersion { current }` becomes `StaleVersion { what: &'static str, current: i64 }`, rendering `"the {what} changed; current version is {current}"`. The existing constructors (`routes/dashboards.rs` around lines 460 and 533) and the test in `http/error.rs` (around line 638) pass `what: "dashboard"`, so the dashboards text and `fixtures/api/static/dashboard-stale.json` are unchanged.
    - Add `ProblemCode::TooManyItems` (serde `too_many_items`, status 422, the same reason phrase as `TooManyTraces`), to the status test.
-   - Add `ApiError::TooManyItems`, whose problem has detail `"the queue would hold more than 100000 items"`.
+   - `ApiError::TooManyItems` (detail `"the queue would hold more than 100000 items"`) is added by Q4b, its first user (dead code here fails clippy).
 3. **API types** in `api/annotation_queues.rs`. Use the derives and attributes of `api/dashboards.rs`: `ToSchema`, `deny_unknown_fields` on bodies, optional fields omitted when `None`, and times as RFC 3339 through `cetra_core::time_serde` with `#[schema(value_type = String, format = DateTime)]`.
    ```rust
    #[derive(..., ToSchema)] #[serde(rename_all = "snake_case")]
@@ -613,11 +614,12 @@ Rules for every phase:
 - `crates/server/src/routes/annotation_queues.rs`
 - `crates/server/src/api/openapi.rs`
 - `crates/server/src/api_examples.rs` and `crates/server/tests/api_examples.rs`
+- `crates/server/tests/openapi.rs` (the `OPERATIONS` tuples, the `TAGS` list and the expected-error arms of `document_lint` for the new operations)
 - `fixtures/api/static/annotation-queue-items.json`, `fixtures/api/static/annotation-queue-item.json`, `fixtures/api/static/annotation-queue-items-added.json` and `fixtures/api/requests/annotation-queue-items-add.json` (new), `fixtures/api/manifest.json` (generated) and `fixtures/api/README.md`
 - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (generated)
 - `docs/spec/09-api.md`
 
-**Steps.** The four item rows of Q4a's step 4 table, and their handlers:
+**Steps.** Add `ApiError::TooManyItems` to `crates/server/src/http/error.rs` (add that file to this phase's Edit list), whose problem has code `too_many_items` and detail `"the queue would hold more than 100000 items"`. Then the four item rows of Q4a's step 4 table, and their handlers:
 1. **`list_items`:** 404 when the queue is absent. The cursor is the base64 JSON `{id}`; `limit` is 1–1 000, default 50. The window applies.
    - `leased_by_user_id` and `lease_expires_at` are emitted only when `lease_expires_at > now`.
     - `added_by_id` is the user, PAT or key id.
@@ -686,6 +688,7 @@ Rules for every phase:
 - `crates/server/src/routes/annotation_queues.rs`
 - `crates/server/src/api/openapi.rs`
 - `crates/server/src/api_examples.rs` and `crates/server/tests/api_examples.rs`
+- `crates/server/tests/openapi.rs` (the `OPERATIONS` tuples, the `TAGS` list and the expected-error arms of `document_lint` for the new operations)
 - `fixtures/api/requests/annotation-queue-next.json` and `fixtures/api/requests/annotation-queue-skip.json` (new), and `fixtures/api/manifest.json`
 - `docs/spec/09-api.md`
 - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (generated)

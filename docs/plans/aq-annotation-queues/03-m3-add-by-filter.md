@@ -173,6 +173,7 @@ Both are Rust and run in order.
 - `crates/server/src/routes/annotation_queues.rs`
 - `crates/server/src/api/openapi.rs`
 - `crates/server/src/api_examples.rs` and `crates/server/tests/api_examples.rs`
+- `crates/server/tests/openapi.rs` (the `OPERATIONS` tuples, the `TAGS` list and the expected-error arms of `document_lint` for the new operations)
 - `fixtures/api/requests/annotation-queue-matching.json`, `fixtures/api/static/annotation-queue-matching-preview.json` and `fixtures/api/static/annotation-queue-matching-added.json` (new), `fixtures/api/manifest.json` and `fixtures/api/README.md` (if it lists files or ids)
 - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (generated)
 - `docs/spec/09-api.md`
