@@ -12,7 +12,7 @@ Track AS milestone M3 (design: [`00-design.md`](00-design.md), D-AS-2, D-AS-3, D
 
 **Checks (the user's rule, 2026-11-20):** no phase compiles, tests or builds anything (only `cargo fmt` is allowed). Each phase writes its code and tests carefully and commits. When AS3.7 is committed, the milestone runs `just check` once and fixes what fails.
 
-**Not cleared to start.** The user decided (2026-11-20) that M3 starts only once track V's M6 is on `main`, because M3 calls V's shared APIs. This plan was written against V's M6 plan as it stood in cold review (`docs/plans/v-prompts/06-m6-playground-api.md` on `claude/v-prompts-design-e375a1`, commit `d6b3c62`). Before AS3.1, the coordinating session rebases this branch on `main` and re-checks § Assumed V interfaces against the merged code. Any difference goes into this plan first.
+**Cleared to start (2026-11-20).** Track V's M5 and M6 are on `main` (PR #181), merged into this branch. Every interface in § Assumed V interfaces was checked against the merged code and matches, names included. The assistant's migrations are `0024_assistant.sql` (M1, renumbered after V's `0023_prompts.sql`) and `0025_assistant_settings.sql` (AS3.3). Phases AS3.2 and AS3.3 may run in parallel; the others run in order.
 
 ## Prerequisites
 
@@ -30,7 +30,7 @@ grep -n "pub(crate) fn span_id" crates/eval/src/trace.rs
 grep -n "pub(crate) async fn run" crates/server/src/assistant/tools/mod.rs
 ```
 
-## Assumed V interfaces (from V's M6 plan; re-check before AS3.1)
+## Assumed V interfaces (checked against the merged code on 2026-11-20)
 
 | What | Where (as V's plan names it) | Used by |
 |---|---|---|
