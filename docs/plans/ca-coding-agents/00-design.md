@@ -1,4 +1,4 @@
-Status: design, in review with the user (2026-11-20). No milestone plan is written yet.
+Status: implemented on 2026-11-20 (M1–M5b), with a Sonnet review and fixes per milestone.
 
 # CA · Coding-agent tracing — design
 
