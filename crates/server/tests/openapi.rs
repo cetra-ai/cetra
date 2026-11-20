@@ -750,6 +750,43 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/models/{id}",
         "delete_model_price",
     ),
+    ("get", "/api/v1/projects/{project}/prompts", "list_prompts"),
+    ("post", "/api/v1/projects/{project}/prompts", "post_prompt"),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "get_prompt",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "patch_prompt",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "delete_prompt",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/resolve",
+        "get_prompt_resolve",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "list_prompt_versions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "post_prompt_version",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}",
+        "get_prompt_version",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -792,6 +829,9 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_score_definitions",
     "list_datasets",
     "list_dataset_versions",
+    "list_prompts",
+    "get_prompt_resolve",
+    "list_prompt_versions",
     "list_dataset_items",
     "list_dataset_version_changes",
     "list_experiment_trends",
@@ -841,6 +881,7 @@ const TAGS: &[&str] = &[
     "evaluation",
     "score_definitions",
     "datasets",
+    "prompts",
     "experiments",
     "model_prices",
     "schema",
@@ -1124,7 +1165,10 @@ fn document_lint() {
             || *id == "delete_org_model_price"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
+        } else if *id == "get_evaluator"
+            || *id == "delete_score_definition"
+            || *id == "get_prompt_version"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
@@ -1140,9 +1184,14 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
+        } else if *id == "post_dataset"
+            || *id == "patch_dataset"
+            || *id == "post_dataset_items"
+            || *id == "post_prompt"
+            || *id == "post_prompt_version"
+        {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
-        } else if *id == "patch_dataset_item" {
+        } else if *id == "patch_dataset_item" || *id == "patch_prompt" {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1258,6 +1307,8 @@ fn document_lint() {
         ("DatasetPage", "Dataset"),
         ("DatasetVersionPage", "DatasetVersion"),
         ("DatasetItemPage", "DatasetItem"),
+        ("PromptPage", "Prompt"),
+        ("PromptVersionPage", "PromptVersion"),
         ("ExperimentPage", "Experiment"),
         ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
@@ -1492,6 +1543,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("UpdatePromptRequest", &["description"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()
@@ -1543,6 +1595,8 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DatasetVersionPage",
         "DatasetItemPage",
         "ItemChangePage",
+        "PromptPage",
+        "PromptVersionPage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",

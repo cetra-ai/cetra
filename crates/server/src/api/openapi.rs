@@ -112,6 +112,10 @@ use super::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
     PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
 };
+use super::prompts::{
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptListParams,
+    PromptVersion, ResolveParams, UpdatePromptRequest,
+};
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::score_definitions::{
@@ -353,6 +357,15 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateDatasetRequest>();
     set.insert::<UpdateDatasetRequest>();
     set.insert_page::<Dataset>("DatasetPage");
+    set.insert::<PromptKind>();
+    set.insert::<PromptLabel>();
+    set.insert::<Prompt>();
+    set.insert::<PromptVersion>();
+    set.insert::<CreatePromptRequest>();
+    set.insert::<CreateVersionRequest>();
+    set.insert::<UpdatePromptRequest>();
+    set.insert_page::<Prompt>("PromptPage");
+    set.insert_page::<PromptVersion>("PromptVersionPage");
     set.insert::<DatasetVersion>();
     set.insert::<DatasetItem>();
     set.insert::<NewDatasetItem>();
@@ -549,6 +562,10 @@ pub fn openapi() -> OpenApi {
             ),
             tag("datasets", "Versioned datasets and their items."),
             tag(
+                "prompts",
+                "The prompt registry: versioned prompts with labels (D-V-2).",
+            ),
+            tag(
                 "experiments",
                 "Experiments run by the SDK and their results.",
             ),
@@ -623,6 +640,7 @@ const NULL_IS_A_VALUE: &[(&str, &str)] = &[
     ("CreateProjectRequest", "retention_days"),
     ("UpdateProjectRequest", "retention_days"),
     ("UpdateDatasetRequest", "description"),
+    ("UpdatePromptRequest", "description"),
     ("UpdateDatasetRequest", "input_schema"),
     ("UpdateDatasetRequest", "expected_schema"),
 ];
@@ -881,6 +899,7 @@ fn paths() -> Paths {
     let paths = backfill_paths(paths);
     let paths = score_definition_paths(paths);
     let paths = dataset_paths(paths);
+    let paths = prompt_paths(paths);
     let paths = experiment_paths(paths);
     let paths = model_price_paths(paths);
     let paths = org_model_price_paths(paths);
@@ -3513,6 +3532,177 @@ fn import_upload_body() -> utoipa::openapi::request_body::RequestBody {
         ))
         .content("multipart/form-data", Content::new(Some(schema)))
         .build()
+}
+
+const PROMPT_READ: &str = "Any project member, or an API key with `read`.";
+const PROMPT_WRITE: &str = "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).";
+
+/// The prompt routes (D-V-2, D-V-7, D-V-9, D-V-12, D-V-13). Reads need project view; writes
+/// need `ManagePrompts`.
+fn prompt_paths(paths: PathsBuilder) -> PathsBuilder {
+    let prompt = path_string("prompt", "Prompt name.");
+    let version = ParameterBuilder::new()
+        .name("version")
+        .parameter_in(ParameterIn::Path)
+        .required(Required::True)
+        .description(Some("Version number, starting at 1."))
+        .schema(Some(ObjectBuilder::new().schema_type(Type::Integer)))
+        .build();
+    let list = operation("list_prompts", "prompts", "List prompts")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(with_query::<PromptListParams>(vec![project_param()])))
+        .responses(responses(
+            "200",
+            json_named("PromptPage", "One page of prompts."),
+            QUERY_ERRORS,
+        ))
+        .build();
+    let create = operation("post_prompt", "prompts", "Create a prompt")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("CreatePromptRequest")))
+        .responses(responses(
+            "201",
+            json_of::<PromptVersion>("The prompt's first version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let get = operation("get_prompt", "prompts", "Get a prompt")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The prompt."),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let patch = operation("patch_prompt", "prompts", "Update a prompt")
+        .description(Some(
+            "Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Changes the description and the tags. The name, the type and the versions never change.",
+        ))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .request_body(Some(json_body("UpdatePromptRequest")))
+        .responses(responses(
+            "200",
+            json_of::<Prompt>("The updated prompt."),
+            &[400, 401, 403, 404, 413, 429],
+        ))
+        .build();
+    let delete = operation("delete_prompt", "prompts", "Delete a prompt")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new().description("Deleted.").build(),
+            &[401, 403, 404, 429],
+        ))
+        .build();
+    let resolve = operation(
+        "get_prompt_resolve",
+        "prompts",
+        "Resolve a prompt to a version",
+    )
+    .description(Some(
+        "Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12).",
+    ))
+    .parameters(Some(with_query::<ResolveParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses_with(
+        [
+            (
+                "200",
+                ResponseBuilder::new()
+                    .description("The resolved version. The `ETag` header holds its strong tag.")
+                    .content(
+                        "application/json",
+                        Content::new(Some(Ref::from_schema_name("PromptVersion"))),
+                    )
+                    .build(),
+            ),
+            (
+                "304",
+                ResponseBuilder::new()
+                    .description("Not modified: the If-None-Match tag matches.")
+                    .build(),
+            ),
+        ],
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let version_list = operation(
+        "list_prompt_versions",
+        "prompts",
+        "List the versions of a prompt",
+    )
+    .description(Some(PROMPT_READ))
+    .parameters(Some(with_query::<PageParams>(vec![
+        project_param(),
+        prompt.clone(),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("PromptVersionPage", "One page of versions, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let version_create = operation("post_prompt_version", "prompts", "Create a version")
+        .description(Some(PROMPT_WRITE))
+        .parameters(Some(vec![project_param(), prompt.clone()]))
+        .request_body(Some(json_body("CreateVersionRequest")))
+        .responses(responses(
+            "201",
+            json_of::<PromptVersion>("The new version."),
+            &[400, 401, 403, 404, 409, 413, 429],
+        ))
+        .build();
+    let version_get = operation("get_prompt_version", "prompts", "Get a version")
+        .description(Some(PROMPT_READ))
+        .parameters(Some(vec![project_param(), prompt, version]))
+        .responses(responses(
+            "200",
+            json_of::<PromptVersion>("The version."),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    paths
+        .path(
+            format!("{PROJECT}/prompts"),
+            PathItem::new(HttpMethod::Get, list),
+        )
+        .path(
+            format!("{PROJECT}/prompts"),
+            PathItem::new(HttpMethod::Post, create),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Get, get),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Patch, patch),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}"),
+            PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/resolve"),
+            PathItem::new(HttpMethod::Get, resolve),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions"),
+            PathItem::new(HttpMethod::Get, version_list),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions"),
+            PathItem::new(HttpMethod::Post, version_create),
+        )
+        .path(
+            format!("{PROJECT}/prompts/{{prompt}}/versions/{{version}}"),
+            PathItem::new(HttpMethod::Get, version_get),
+        )
 }
 
 const EXPERIMENT_READ: &str = "Any project member, or an API key with `read`.";

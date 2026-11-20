@@ -50,6 +50,9 @@ use cetra_server::api::online_rules::{
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
+use cetra_server::api::prompts::{
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptVersion,
+};
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
 use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
@@ -472,6 +475,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
+    roundtrip::<CreatePromptRequest>("requests/prompt-create.json");
+    roundtrip::<CreateVersionRequest>("requests/prompt-version-create.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
@@ -558,6 +563,8 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_backfill", "requests/backfill-create.json"),
         ("post_model_price", "requests/model-price-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
+        ("post_prompt", "requests/prompt-create.json"),
+        ("post_prompt_version", "requests/prompt-version-create.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -711,6 +718,12 @@ fn generated_files_roundtrip() {
             "post_dataset_items_from_traces" => roundtrip::<FromTracesResult>(&example.file),
             "list_dataset_version_changes" => roundtrip::<Page<ItemChange>>(&example.file),
             "list_experiment_trends" => roundtrip::<ExperimentTrends>(&example.file),
+            "list_prompts" => roundtrip::<Page<Prompt>>(&example.file),
+            "get_prompt" => roundtrip::<Prompt>(&example.file),
+            "get_prompt_resolve" | "get_prompt_version" | "post_prompt" | "post_prompt_version" => {
+                roundtrip::<PromptVersion>(&example.file);
+            }
+            "list_prompt_versions" => roundtrip::<Page<PromptVersion>>(&example.file),
             other => panic!("{other} has no round-trip"),
         }
     }

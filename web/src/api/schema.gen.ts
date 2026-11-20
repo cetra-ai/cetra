@@ -2411,6 +2411,122 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/prompts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List prompts
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_prompts"];
+        put?: never;
+        /**
+         * Create a prompt
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).
+         */
+        post: operations["post_prompt"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/prompts/{prompt}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a prompt
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_prompt"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a prompt
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).
+         */
+        delete: operations["delete_prompt"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a prompt
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Changes the description and the tags. The name, the type and the versions never change.
+         */
+        patch: operations["patch_prompt"];
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/prompts/{prompt}/resolve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve a prompt to a version
+         * @description Any project member, or an API key with `read`. Answers the version that a label (default `production`), `latest` or `version` points at (D-V-9). The answer carries a strong `ETag`; a request whose `If-None-Match` matches gets `304` (D-V-12).
+         */
+        get: operations["get_prompt_resolve"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/prompts/{prompt}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the versions of a prompt
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["list_prompt_versions"];
+        put?: never;
+        /**
+         * Create a version
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-V-13). Protected labels need a project admin or a `write` key (D-V-10).
+         */
+        post: operations["post_prompt_version"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get a version
+         * @description Any project member, or an API key with `read`.
+         */
+        get: operations["get_prompt_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/saved-views": {
         parameters: {
             query?: never;
@@ -3849,6 +3965,29 @@ export interface components {
             /** @description URL slug. Absent derives one from the name. `settings` is reserved. */
             slug?: string;
         };
+        /** @description `POST /api/v1/projects/{project}/prompts` body (D-V-2, D-V-5 to D-V-7). */
+        CreatePromptRequest: {
+            /** @description The first version's commit message, up to 500 characters. */
+            commit_message?: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            /** @description Free text, up to 2 000 characters. */
+            description?: string;
+            /** @description Labels to point at the first version. The API never adds `production` by itself. */
+            labels?: string[];
+            /**
+             * @description Unique in the project, 1 to 200 characters: letters, digits, `_`, `.`, `-`, starting with
+             *     a letter or digit.
+             */
+            name: string;
+            /** @description Tags: at most 20, each 1 to 64 characters. */
+            tags?: string[];
+            /** @description Any JSON value. */
+            template: unknown;
+            /** @description `text` or `chat`. */
+            type: components["schemas"]["PromptKind"];
+        };
         /**
          * @description Body of `POST /api/v1/projects/{project}/saved-views`.
          *
@@ -3891,6 +4030,21 @@ export interface components {
             min_value?: number;
             /** @description Score name, 1 to 255 bytes after trimming. */
             name: string;
+        };
+        /** @description `POST /api/v1/projects/{project}/prompts/{prompt}/versions` body (D-V-7). */
+        CreateVersionRequest: {
+            /** @description The commit message, up to 500 characters. */
+            commit_message?: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description Labels to move to the new version. Protected labels need a project admin or a `write`
+             *     key (D-V-10).
+             */
+            labels?: string[];
+            /** @description Any JSON value. */
+            template: unknown;
         };
         /**
          * @description `POST /api/v1/admin/users` returns 201.
@@ -6608,6 +6762,110 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description A prompt (D-V-2). */
+        Prompt: {
+            /**
+             * Format: date-time
+             * @description When the prompt was created.
+             */
+            created_at: string;
+            /** @description Who created the prompt. Absent for an API key or a removed user. */
+            created_by?: string;
+            /** @description Free text, up to 2 000 characters. */
+            description?: string;
+            /**
+             * Format: uuid
+             * @description Prompt id.
+             */
+            id: string;
+            /** @description Stored labels, ordered by label. `latest` is not listed. */
+            labels: components["schemas"]["PromptLabel"][];
+            /**
+             * Format: int64
+             * @description The highest version. `latest` always resolves to it (D-V-8).
+             */
+            latest_version: number;
+            /** @description Unique in the project, 1 to 200 characters. Immutable. */
+            name: string;
+            /** @description Tags, in the order they were given. */
+            tags: string[];
+            /** @description `text` or `chat`. Immutable. */
+            type: components["schemas"]["PromptKind"];
+            /**
+             * Format: date-time
+             * @description When the prompt was last edited or versioned.
+             */
+            updated_at: string;
+        };
+        /**
+         * @description `text` or `chat` (D-V-5).
+         * @enum {string}
+         */
+        PromptKind: "text" | "chat";
+        /** @description A label and the version it points at (D-V-8). */
+        PromptLabel: {
+            /** @description The label, `[a-z0-9][a-z0-9_.-]{0,63}`. */
+            label: string;
+            /**
+             * Format: date-time
+             * @description When the label last moved.
+             */
+            updated_at: string;
+            /**
+             * Format: int64
+             * @description The version the label points at.
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        PromptPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["Prompt"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /** @description One version, as the fetch and the version routes return it (D-V-7, D-V-12). */
+        PromptVersion: {
+            /** @description The commit message, up to 500 characters. */
+            commit_message?: string;
+            config: {
+                [key: string]: unknown;
+            };
+            /**
+             * Format: date-time
+             * @description When the version was created.
+             */
+            created_at: string;
+            /** @description Who created the version. Absent for an API key or a removed user. */
+            created_by?: string;
+            /**
+             * @description Labels that point at this version, ordered. Includes `latest` when this is the latest
+             *     version.
+             */
+            labels: string[];
+            /** @description The prompt's name. */
+            name: string;
+            /** @description Placeholder names (chat), in order of first appearance. */
+            placeholders: string[];
+            /** @description Any JSON value. */
+            template: unknown;
+            /** @description `text` or `chat`. */
+            type: components["schemas"]["PromptKind"];
+            /** @description Variable names, in order of first appearance. */
+            variables: string[];
+            /**
+             * Format: int64
+             * @description The version number, 1, 2, …
+             */
+            version: number;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        PromptVersionPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["PromptVersion"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
         /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
         PutOrgSsoProvider: {
             /** @description The OAuth client id; 1 to 255 characters. */
@@ -8337,6 +8595,16 @@ export interface components {
              *     Absent leaves it unchanged.
              */
             trace_completion_timeout_s?: number;
+        };
+        /**
+         * @description `PATCH /api/v1/projects/{project}/prompts/{prompt}` body. An absent field is unchanged.
+         *     The name, the type and the versions never change (D-V-2, D-V-7).
+         */
+        UpdatePromptRequest: {
+            /** @description New description, when present. `null` clears it. */
+            description?: string | null;
+            /** @description New tags, when present. Replaces the whole list. */
+            tags?: string[];
         };
         /**
          * @description Body of `PATCH /api/v1/projects/{project}/saved-views/{id}`.
@@ -20685,6 +20953,699 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OnlineRule"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_prompts: {
+        parameters: {
+            query?: {
+                /** @description Name contains this text, ignoring case. */
+                q?: string;
+                /** @description Only prompts with this label. */
+                label?: string;
+                /** @description Only prompts with this tag. */
+                tag?: string;
+                /** @description Maximum number of prompts to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of prompts. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_prompt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePromptRequest"];
+            };
+        };
+        responses: {
+            /** @description The prompt's first version. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_prompt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The prompt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Prompt"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_prompt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    patch_prompt: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePromptRequest"];
+            };
+        };
+        responses: {
+            /** @description The updated prompt. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Prompt"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_prompt_resolve: {
+        parameters: {
+            query?: {
+                /** @description A label. Default `production`. `latest` resolves the highest version. */
+                label?: string;
+                /** @description A version number. Not together with `label`. */
+                version?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The resolved version. The `ETag` header holds its strong tag. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersion"];
+                };
+            };
+            /** @description Not modified: the If-None-Match tag matches. */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_prompt_versions: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (1–1000, default 50). */
+                limit?: components["schemas"]["Limit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of versions, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersionPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_prompt_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVersionRequest"];
+            };
+        };
+        responses: {
+            /** @description The new version. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersion"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_prompt_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Prompt name. */
+                prompt: string;
+                /** @description Version number, starting at 1. */
+                version: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PromptVersion"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

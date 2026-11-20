@@ -518,6 +518,60 @@
     "file": "static/project.json"
   },
   {
+    "operation_id": "get_prompt",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "label": "staging"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve-staging.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "1"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "2"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
+  },
+  {
     "operation_id": "get_saved_view",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000211"
@@ -1123,6 +1177,24 @@
     "file": "static/projects.json"
   },
   {
+    "operation_id": "list_prompt_versions",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions.json"
+  },
+  {
+    "operation_id": "list_prompts",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts.json"
+  },
+  {
     "operation_id": "list_saved_views",
     "path_params": {},
     "query": {},
@@ -1428,6 +1500,24 @@
     "status": 201,
     "content_type": "application/json",
     "file": "static/personal-token-created.json"
+  },
+  {
+    "operation_id": "post_prompt",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "post_prompt_version",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
   },
   {
     "operation_id": "post_score_definition",

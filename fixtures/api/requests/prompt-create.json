@@ -1,0 +1,29 @@
+{
+  "name": "support-reply",
+  "type": "chat",
+  "template": [
+    {
+      "role": "system",
+      "content": "You are a support agent for {{ product }}."
+    },
+    {
+      "type": "placeholder",
+      "name": "history"
+    },
+    {
+      "role": "user",
+      "content": "{{ question }}"
+    }
+  ],
+  "config": {
+    "model": "gpt-4o",
+    "params": {
+      "temperature": 0.3,
+      "max_tokens": 512
+    }
+  },
+  "labels": [
+    "production"
+  ],
+  "commit_message": "First version"
+}
