@@ -2,9 +2,9 @@
 import Button from "../components/Button.astro";
 import Section from "../components/Section.astro";
 import SectionHeading from "../components/SectionHeading.astro";
-import { loadIntegrations } from "../data/integrations.mjs";
+import { loadIntegrations, MIGRATING_GROUP } from "../data/integrations.mjs";
 
-const items = loadIntegrations().filter((item) => item.group !== "Migrating");
+const items = loadIntegrations().filter((item) => item.group !== MIGRATING_GROUP);
 ---
 
 <Section tone="ink" divider labelledby="integrations-title">

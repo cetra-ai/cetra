@@ -28,6 +28,29 @@ test("a stale file is reported", () => {
   ]);
 });
 
+test("a date in the future is reported, a date one day ahead is not", () => {
+  const now = new Date("2026-11-20T00:00:00Z");
+  const p = langfuse();
+  p.checkedOn = "2026-11-25";
+  assert.deepEqual(validate(p, "langfuse", now), ["checkedOn is in the future"]);
+  p.checkedOn = "2026-11-21";
+  assert.deepEqual(validate(p, "langfuse", now), []);
+});
+
+test("an empty value is reported", () => {
+  const p = langfuse();
+  p.facts.otel.value = "";
+  assert.deepEqual(validate(p, "langfuse", today()), ["otel: empty value"]);
+});
+
+test("a long chooseThem item is reported", () => {
+  const p = langfuse();
+  p.chooseThem = ["a".repeat(121)];
+  assert.deepEqual(validate(p, "langfuse", today()), [
+    "chooseThem item is 121 characters, the limit is 120",
+  ]);
+});
+
 test("a missing source is reported", () => {
   const p = langfuse();
   p.facts.otel.sources = [];

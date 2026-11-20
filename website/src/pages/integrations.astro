@@ -13,14 +13,10 @@ const sections = groups(items).map((group) => ({
   items: items.filter((item) => item.group === group),
 }));
 
-/** The badges say what the repository tests, not which language each covers; the docs page has the detail. */
-function testBadges(tested: string): string[] {
-  if (tested.includes("captured") && tested.includes("SDK test")) {
-    return ["Recorded traces", "SDK test"];
-  }
-  if (tested.startsWith("captured")) return ["Recorded traces"];
-  if (tested === "SDK test") return ["SDK test"];
-  return [];
+/** One test badge, e.g. "Recorded traces · Python". The docs page has the detail. */
+function testLabel(test: { kind: "recorded" | "sdk"; lang: string | null }): string {
+  const kind = test.kind === "recorded" ? "Recorded traces" : "SDK test";
+  return test.lang ? `${kind} · ${test.lang}` : kind;
 }
 ---
 
@@ -54,8 +50,8 @@ function testBadges(tested: string): string[] {
               <div class="badges">
                 {item.python && <span class="badge">Python</span>}
                 {item.typescript && <span class="badge">TypeScript</span>}
-                {testBadges(item.tested).map((label) => (
-                  <span class="badge">{label}</span>
+                {item.tests.map((test) => (
+                  <span class="badge">{testLabel(test)}</span>
                 ))}
               </div>
             </Card>
