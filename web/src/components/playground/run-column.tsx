@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { ArrowDownToLine, ArrowUpFromLine, Coins, Flag, Timer, Trash2, Zap } from "lucide-react";
+import { memo } from "react";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
 import { useProject } from "@/components/shell/project-context";
@@ -65,16 +66,33 @@ type RunColumnProps = {
   /** Why Run is disabled, if it is. */
   runReason: string | undefined;
   canRemove: boolean;
-  onChange: (patch: Partial<Column>) => void;
-  onRun: () => void;
-  onStop: () => void;
-  onRemove: () => void;
+  /** The callbacks take the column's id, so the parent can pass the same functions to every column. */
+  onChange: (id: string, patch: Partial<Column>) => void;
+  onRun: (id: string) => void;
+  onStop: (id: string) => void;
+  onRemove: (id: string) => void;
   /** Appends the run's answer to the draft's messages. */
   onAddAnswer: (message: Message) => void;
 };
 
+/** The line that says how a run ended, or `""` while it runs or before it starts. */
+function endText(run: RunState): string {
+  switch (run.status) {
+    case "done":
+      return "Run finished";
+    case "stopped":
+      return "Stopped";
+    case "incomplete":
+      return "The stream ended early.";
+    case "failed":
+      return run.problem ?? run.error?.message ?? "The run failed.";
+    default:
+      return "";
+  }
+}
+
 /** One model column: its connection, model and parameters, Run or Stop, and the streamed answer. */
-export function RunColumn({
+export const RunColumn = memo(function RunColumn({
   number,
   column,
   run,
@@ -92,6 +110,7 @@ export function RunColumn({
   const running = run.status === "running";
   const connection = connections.find((item) => item.id === column.connectionId);
   const output = run.done?.output;
+  const id = column.id;
   return (
     <section
       aria-label={`Model ${number}`}
@@ -102,7 +121,7 @@ export function RunColumn({
           value={column.connectionId ?? ""}
           disabled={connections.length === 0}
           onValueChange={(connectionId) => {
-            onChange({ connectionId });
+            onChange(id, { connectionId });
           }}
         >
           <SelectTrigger aria-label="Connection" className="min-w-0 flex-1">
@@ -122,7 +141,9 @@ export function RunColumn({
             variant="ghost"
             size="icon"
             aria-label={`Remove model ${number}`}
-            onClick={onRemove}
+            onClick={() => {
+              onRemove(id);
+            }}
           >
             <Trash2 aria-hidden="true" />
           </Button>
@@ -148,7 +169,7 @@ export function RunColumn({
           placeholder={connection?.default_model ?? ""}
           value={column.model}
           onChange={(event) => {
-            onChange({ model: event.target.value });
+            onChange(id, { model: event.target.value });
           }}
         />
         <Input
@@ -158,7 +179,7 @@ export function RunColumn({
           placeholder="Default"
           value={column.temperature}
           onChange={(event) => {
-            onChange({ temperature: event.target.value });
+            onChange(id, { temperature: event.target.value });
           }}
         />
         <Input
@@ -168,18 +189,32 @@ export function RunColumn({
           placeholder="Default"
           value={column.maxTokens}
           onChange={(event) => {
-            onChange({ maxTokens: event.target.value });
+            onChange(id, { maxTokens: event.target.value });
           }}
         />
       </div>
       <div className="flex items-center gap-2">
         <DisabledReason reason={running ? undefined : runReason}>
           {running ? (
-            <Button type="button" variant="outline" size="sm" onClick={onStop}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                onStop(id);
+              }}
+            >
               Stop
             </Button>
           ) : (
-            <Button type="button" size="sm" disabled={runReason !== undefined} onClick={onRun}>
+            <Button
+              type="button"
+              size="sm"
+              disabled={runReason !== undefined}
+              onClick={() => {
+                onRun(id);
+              }}
+            >
               Run
             </Button>
           )}
@@ -190,19 +225,19 @@ export function RunColumn({
           {message}
         </p>
       ))}
-      {run.problem ? <p className="text-body text-destructive">{run.problem}</p> : null}
-      {run.error ? (
-        <div className="flex items-center gap-2">
-          <Badge variant="outline">{run.error.class}</Badge>
-          <p className="text-body text-destructive">{run.error.message}</p>
-        </div>
-      ) : null}
-      {run.status === "stopped" ? (
-        <p className="text-caption text-muted-foreground">Stopped</p>
-      ) : null}
-      {run.status === "incomplete" ? (
-        <p className="text-caption text-muted-foreground">The stream ended early.</p>
-      ) : null}
+      <div className="flex items-center gap-2">
+        {run.error ? <Badge variant="outline">{run.error.class}</Badge> : null}
+        <p
+          role="status"
+          className={
+            run.status === "failed"
+              ? "text-body text-destructive"
+              : "text-caption text-muted-foreground"
+          }
+        >
+          {endText(run)}
+        </p>
+      </div>
       {run.traceId ? (
         <Link
           to="/$org/$project/traces/$traceId"
@@ -212,9 +247,7 @@ export function RunColumn({
           Open trace
         </Link>
       ) : null}
-      <pre aria-live="polite" className="font-mono text-body break-words whitespace-pre-wrap">
-        {run.text}
-      </pre>
+      <pre className="font-mono text-body break-words whitespace-pre-wrap">{run.text}</pre>
       {run.toolCalls.map((call, index) => (
         <div
           // biome-ignore lint/suspicious/noArrayIndexKey: the calls are append-only and a provider may repeat an id
@@ -267,4 +300,4 @@ export function RunColumn({
       ) : null}
     </section>
   );
-}
+});

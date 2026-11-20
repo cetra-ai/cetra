@@ -52,6 +52,7 @@ const LABEL_RULE_TEXT =
   'Use 1 to 64 lowercase letters, digits, _, . or -. "latest" and numbers alone are not labels.';
 const TEXT_PROMPT_TEXT = "Text prompts take one text; save as a new prompt instead.";
 const CONFIG_BLOCKED_TEXT = "Fix the settings of the first model to save.";
+const TEMPLATE_FIELD = /^template(\W|$)/;
 /** The fields a save can name: the commit message, the name and the labels. */
 const SAVE_FIELD = /^(commit_message|name|labels)(\W|$)/;
 /** The select's value for no prompt chosen (an empty string is not a select value). */
@@ -171,6 +172,8 @@ function SaveForm({
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [error, setError] = useState<string | undefined>();
   const [saved, setSaved] = useState<SavedVersion | undefined>();
+  // The form's state at the last successful save: the button stays off until the form changes.
+  const [savedKey, setSavedKey] = useState<string | undefined>();
 
   const promptRows = prompts.data?.data ?? [];
   const prompt = promptRows.find((item) => item.name === promptName);
@@ -184,11 +187,24 @@ function SaveForm({
       : undefined;
   const pending = createVersion.isPending || createPrompt.isPending;
 
-  // A failed save: the fields it names go under their controls, a protected label or any other
-  // problem in the form's error line.
+  // The form's state as one key: a save is the same save until one of these changes.
+  const formKey = JSON.stringify([
+    mode,
+    promptName,
+    newName,
+    message,
+    checked,
+    production,
+    newLabel,
+  ]);
+  const unchanged = savedKey !== undefined && savedKey === formKey;
+
+  // A failed save: the fields it names go under their controls, a template refusal, a protected
+  // label or any other problem in the form's error line.
   function failed(caught: unknown, touchesProtected: boolean) {
+    const fields = fieldErrors(caught);
     const next: Record<string, string> = {};
-    for (const [field, text] of Object.entries(fieldErrors(caught))) {
+    for (const [field, text] of Object.entries(fields)) {
       if (SAVE_FIELD.test(field)) {
         next[field] = text;
       }
@@ -197,9 +213,12 @@ function SaveForm({
     if (problem?.status === 409 && problem.detail === NAME_TAKEN_DETAIL) {
       next.name = NAME_TAKEN_TEXT;
     }
+    const templateField = Object.keys(fields).find((field) => TEMPLATE_FIELD.test(field));
     setErrors(next);
     if (problem?.status === 403 && touchesProtected) {
       setError(LABEL_FORBIDDEN_TEXT);
+    } else if (templateField !== undefined) {
+      setError(`The prompt's template was refused: ${fields[templateField] ?? ""}`);
     } else if (Object.keys(next).length === 0) {
       setError(problemMessage(caught, FALLBACK));
     }
@@ -210,6 +229,7 @@ function SaveForm({
     setError(undefined);
     setErrors({});
     setSaved(undefined);
+    setSavedKey(undefined);
     const nextErrors: Record<string, string> = {};
     const trimmedName = newName.trim();
     if (mode === "existing") {
@@ -249,6 +269,7 @@ function SaveForm({
           onSuccess: (version) => {
             invalidatePrompt(queryClient, org, project, version.name);
             setSaved(version);
+            setSavedKey(formKey);
           },
           onError: (caught) => {
             failed(caught, touchesProtected);
@@ -281,6 +302,7 @@ function SaveForm({
         onSuccess: (version) => {
           invalidatePrompt(queryClient, org, project, version.name);
           setSaved(version);
+          setSavedKey(formKey);
         },
         onError: (caught) => {
           failed(caught, touchesProtected);
@@ -449,7 +471,7 @@ function SaveForm({
       ) : null}
       <DialogFooter>
         <DisabledReason reason={reason}>
-          <SubmitButton pending={pending} disabled={reason !== undefined}>
+          <SubmitButton pending={pending} disabled={reason !== undefined || unchanged}>
             Save version
           </SubmitButton>
         </DisabledReason>

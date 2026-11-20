@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUp, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { memo, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,12 +13,14 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField, prettyJson } from "@/lib/datasets";
 import type { Entry, Message, Part, Role } from "@/lib/playground";
+import { uuidv7 } from "@/lib/uuid";
 
 const ROLES: readonly Role[] = ["system", "user", "assistant", "tool"];
 
 type MessageEditorProps = {
   entries: Entry[];
-  onChange: (entries: Entry[]) => void;
+  /** The new entries. `rename` is given when a placeholder's name changed, so its text moves too. */
+  onChange: (entries: Entry[], rename?: { from: string; to: string }) => void;
   /** Problems by entry position (0-based): the refused parts, or a server field error. */
   errors: Record<number, string>;
 };
@@ -105,19 +107,43 @@ function PartsEditor({
 }
 
 /** The ordered messages and placeholders of a draft. Message numbers count every entry. */
-export function MessageEditor({ entries, onChange, errors }: MessageEditorProps) {
-  function replaceAt(index: number, entry: Entry) {
-    onChange(entries.map((item, position) => (position === index ? entry : item)));
+export const MessageEditor = memo(function MessageEditor({
+  entries,
+  onChange,
+  errors,
+}: MessageEditorProps) {
+  // React-only row ids, one per entry. A row keeps its id while its neighbours move or go, so
+  // its local state (a parts editor's text) stays with its own entry.
+  const rowIds = useRef<string[]>([]);
+  while (rowIds.current.length < entries.length) {
+    rowIds.current.push(uuidv7());
+  }
+  rowIds.current.length = entries.length;
+
+  function replaceAt(index: number, entry: Entry, rename?: { from: string; to: string }) {
+    onChange(
+      entries.map((item, position) => (position === index ? entry : item)),
+      rename,
+    );
   }
 
   function move(index: number, to: number) {
     const next = [...entries];
+    const ids = [...rowIds.current];
     const [entry] = next.splice(index, 1);
-    if (entry === undefined) {
+    const [id] = ids.splice(index, 1);
+    if (entry === undefined || id === undefined) {
       return;
     }
     next.splice(to, 0, entry);
+    ids.splice(to, 0, id);
+    rowIds.current = ids;
     onChange(next);
+  }
+
+  function remove(index: number) {
+    rowIds.current = rowIds.current.filter((_, position) => position !== index);
+    onChange(entries.filter((_, position) => position !== index));
   }
 
   return (
@@ -129,11 +155,7 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
           const noun = isPlaceholder(entry) ? "placeholder" : "message";
           const error = errors[index];
           return (
-            <li
-              // biome-ignore lint/suspicious/noArrayIndexKey: the rows are edited in place and have no id
-              key={index}
-              className="flex flex-col gap-1.5 rounded-md border p-3"
-            >
+            <li key={rowIds.current[index]} className="flex flex-col gap-1.5 rounded-md border p-3">
               <div className="flex items-center gap-2">
                 {isPlaceholder(entry) ? (
                   <>
@@ -143,7 +165,12 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
                       className="h-7 w-48 text-body"
                       value={entry.name}
                       onChange={(event) => {
-                        replaceAt(index, { type: "placeholder", name: event.target.value });
+                        const name = event.target.value;
+                        replaceAt(
+                          index,
+                          { type: "placeholder", name },
+                          { from: entry.name, to: name },
+                        );
                       }}
                     />
                   </>
@@ -205,7 +232,7 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
                     size="icon"
                     aria-label={`Remove ${noun} ${number}`}
                     onClick={() => {
-                      onChange(entries.filter((_, position) => position !== index));
+                      remove(index);
                     }}
                   >
                     <Trash2 aria-hidden="true" />
@@ -247,6 +274,7 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
           variant="outline"
           size="sm"
           onClick={() => {
+            rowIds.current = [...rowIds.current, uuidv7()];
             onChange([...entries, { role: "user", parts: [{ type: "text", content: "" }] }]);
           }}
         >
@@ -257,6 +285,7 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
           variant="outline"
           size="sm"
           onClick={() => {
+            rowIds.current = [...rowIds.current, uuidv7()];
             onChange([...entries, { type: "placeholder", name: "history" }]);
           }}
         >
@@ -265,4 +294,4 @@ export function MessageEditor({ entries, onChange, errors }: MessageEditorProps)
       </div>
     </div>
   );
-}
+});

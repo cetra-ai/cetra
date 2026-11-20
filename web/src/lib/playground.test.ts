@@ -16,6 +16,7 @@ import {
   type RunEvent,
   type RunRequest,
   readSse,
+  renamePlaceholder,
   runPlayground,
   saveDraft,
   toChatTemplate,
@@ -433,10 +434,9 @@ it("names the messages the server refuses", () => {
 });
 
 it("reads a prompt version as a draft", () => {
-  const draft = draftFromPromptVersion(
-    versionTwo as unknown as Schema<"PromptVersion">,
+  const draft = draftFromPromptVersion(versionTwo as unknown as Schema<"PromptVersion">, [
     "01900000-0000-7000-8000-000000000099",
-  );
+  ]);
   expect(draft.entries).toEqual([
     {
       role: "system",
@@ -463,6 +463,56 @@ it("reads a prompt version as a draft", () => {
   expect(draft.source).toEqual({ prompt: { name: "support-reply", version: 2 } });
   expect(draft.renderVariables).toBe(true);
   expect(draft.tools).toBe("");
+});
+
+it("a prompt version's connection that the org lacks falls back to the first connection", () => {
+  const version = {
+    ...(versionTwo as unknown as Schema<"PromptVersion">),
+    config: { model: "gpt-4o", connection_id: "01900000-0000-7000-8000-00000000dead" },
+  };
+  const first = "01900000-0000-7000-8000-000000000011";
+  const second = "01900000-0000-7000-8000-000000000012";
+  expect(draftFromPromptVersion(version, [first, second]).columns[0]?.connectionId).toBe(first);
+  const owned = { ...version, config: { ...version.config, connection_id: second } };
+  expect(draftFromPromptVersion(owned, [first, second]).columns[0]?.connectionId).toBe(second);
+  expect(draftFromPromptVersion(version, []).columns[0]?.connectionId).toBeUndefined();
+});
+
+it("a placeholder named like an object property is not a crash", () => {
+  const draft = draftWith([{ type: "placeholder", name: "toString" }]);
+  expect(requestOf(draft).placeholders).toEqual({ toString: [] });
+  const variables = draftWith([
+    { role: "user", parts: [{ type: "text", content: "Hi {{ constructor }}" }] },
+  ]);
+  expect(requestOf(variables).variables).toEqual({ constructor: "" });
+});
+
+it("refuses a placeholder name that is empty or not an identifier", () => {
+  expect(
+    errorsOf(draftWith([{ type: "placeholder", name: "chat history" }]))[
+      "placeholders.chat history"
+    ],
+  ).toBe("Use letters, digits and _");
+  expect(errorsOf(draftWith([{ type: "placeholder", name: "" }]))["placeholders."]).toBe(
+    "Use letters, digits and _",
+  );
+});
+
+it("renaming a placeholder carries its text to the new name", () => {
+  const placeholders = { history: "[]", other: "[1]" };
+  const renamed = renamePlaceholder(placeholders, "history", "chat", [
+    { type: "placeholder", name: "chat" },
+  ]);
+  expect(renamed).toEqual({ chat: "[]", other: "[1]" });
+  // The old name keeps its text while another placeholder entry still uses it.
+  const shared = renamePlaceholder({ history: "[]" }, "history", "chat", [
+    { type: "placeholder", name: "chat" },
+    { type: "placeholder", name: "history" },
+  ]);
+  expect(shared).toEqual({ history: "[]", chat: "[]" });
+  expect(renamePlaceholder({ history: "[]" }, "history", "history", [])).toEqual({
+    history: "[]",
+  });
 });
 
 it("reads a span as a draft, converting its tool definitions", () => {

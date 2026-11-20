@@ -1,6 +1,6 @@
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
@@ -10,7 +10,7 @@ import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
-import { MessageEditor } from "@/components/playground/message-editor";
+import { isPlaceholder, MessageEditor } from "@/components/playground/message-editor";
 import { RecentRuns, RUNS_PATH } from "@/components/playground/recent-runs";
 import {
   applyRunEvent,
@@ -34,6 +34,7 @@ import {
   emptyDraft,
   loadDraft,
   type Message,
+  renamePlaceholder,
   runPlayground,
   saveDraft,
   toRunRequest,
@@ -56,6 +57,11 @@ type PlaygroundSearch = {
 
 const COLUMN_LIMIT = 4;
 const SAVE_DELAY_MS = 500;
+/** The frame of the streamed text when the browser has no `requestAnimationFrame`. */
+const FRAME_FALLBACK_MS = 50;
+const START_FAILED = "Could not start the run.";
+const CONNECTION_LOST = "The connection was lost.";
+const NO_ERRORS: Record<string, string> = {};
 const SEARCH_TEXT_MAX = 200;
 const VIEWER_REASON = "Only members can run the playground";
 const NO_CONNECTION_REASON =
@@ -116,6 +122,44 @@ function PlaygroundPage() {
       canRun={canRunPlayground(data.role)}
       connections={connections.data?.data ?? []}
     />
+  );
+}
+
+/** Runs the callback at the next frame; returns the function that cancels it. */
+function scheduleFrame(callback: () => void): () => void {
+  if (typeof window.requestAnimationFrame === "function") {
+    const id = window.requestAnimationFrame(callback);
+    return () => {
+      window.cancelAnimationFrame(id);
+    };
+  }
+  const timer = window.setTimeout(callback, FRAME_FALLBACK_MS);
+  return () => {
+    window.clearTimeout(timer);
+  };
+}
+
+/** The value from the last render whose JSON was the same, so memoized children skip a render. */
+function useStable<T>(value: T): T {
+  const key = JSON.stringify(value);
+  const kept = useRef({ key, value });
+  if (kept.current.key !== key) {
+    kept.current = { key, value };
+  }
+  return kept.current.value;
+}
+
+/** The runs with their field errors cleared: the errors were about the draft as it was. */
+function withoutFieldErrors(runs: Record<string, RunState>): Record<string, RunState> {
+  const hasErrors = Object.values(runs).some((run) => Object.keys(run.errors).length > 0);
+  if (!hasErrors) {
+    return runs;
+  }
+  return Object.fromEntries(
+    Object.entries(runs).map(([id, run]) => [
+      id,
+      Object.keys(run.errors).length > 0 ? { ...run, errors: {} } : run,
+    ]),
   );
 }
 
@@ -230,12 +274,13 @@ async function loadPrompt(
   project: string,
   name: string,
   version: number | undefined,
-  fallbackConnectionId: string | undefined,
+  connections: readonly Connection[],
 ): Promise<Loaded> {
+  const connectionIds = connections.map((item) => item.id);
   if (version !== undefined) {
     try {
       const found = await queryClient.fetchQuery(promptVersionQuery(org, project, name, version));
-      return { draft: draftFromPromptVersion(found, fallbackConnectionId), cut: false };
+      return { draft: draftFromPromptVersion(found, connectionIds), cut: false };
     } catch (error) {
       if (problemOf(error)?.status !== 404) {
         throw error;
@@ -246,7 +291,7 @@ async function loadPrompt(
   const latest = await queryClient.fetchQuery(
     promptVersionQuery(org, project, name, prompt.latest_version),
   );
-  return { draft: draftFromPromptVersion(latest, fallbackConnectionId), cut: false };
+  return { draft: draftFromPromptVersion(latest, connectionIds), cut: false };
 }
 
 /** A LLM span as a draft, with the first org connection (D-V-28). */
@@ -349,6 +394,11 @@ function PlaygroundWorkspace({
   const [replacing, setReplacing] = useState<Loaded | undefined>();
   // Whether the draft's span was cut at ingest (the banner).
   const [cut, setCut] = useState(false);
+  // Streamed text waits here until the next frame writes it into its run (see queueText).
+  const pendingText = useRef(new Map<string, string>());
+  const frame = useRef<(() => void) | undefined>(undefined);
+  // Counts the loads that replace the draft: the editor starts over with the loaded entries.
+  const [loadKey, setLoadKey] = useState(0);
   const loadedRun = useRef<string | undefined>(undefined);
   const loadedSource = useRef<string | undefined>(undefined);
   const draftRef = useRef(draft);
@@ -373,9 +423,11 @@ function PlaygroundWorkspace({
       controller.abort();
     }
     controllers.current.clear();
+    pendingText.current.clear();
     setRuns({});
     setCut(loaded.cut);
     setDraft(loaded.draft);
+    setLoadKey((key) => key + 1);
   }, []);
 
   // A loaded source replaces an empty draft at once, and a draft with content after the user's yes.
@@ -431,15 +483,14 @@ function PlaygroundWorkspace({
     if (loadedSource.current === sourceKey) {
       return;
     }
-    const fallbackId = connections[0]?.id;
     let load: Promise<Loaded>;
     let status: string;
     if (promptName !== undefined) {
       status = "Opening the prompt…";
-      load = loadPrompt(queryClient, org, project, promptName, promptVersion, fallbackId);
+      load = loadPrompt(queryClient, org, project, promptName, promptVersion, connections);
     } else if (traceId !== undefined && spanId !== undefined) {
       status = "Opening the span…";
-      load = loadSpan(queryClient, org, project, traceId, spanId, fallbackId);
+      load = loadSpan(queryClient, org, project, traceId, spanId, connections[0]?.id);
     } else {
       return;
     }
@@ -511,138 +562,255 @@ function PlaygroundWorkspace({
       for (const controller of active.values()) {
         controller.abort();
       }
+      frame.current?.();
     };
   }, []);
 
-  const blocked = blockedMessages(draft);
-  const checks = draft.columns.map((column) => toRunRequest(draft, column, connections));
+  // The draft's checks are recomputed only when the draft or the connections change, not on every
+  // streamed chunk.
+  const blocked = useMemo(() => blockedMessages(draft), [draft]);
+  const checks = useMemo(
+    () => draft.columns.map((column) => toRunRequest(draft, column, connections)),
+    [draft, connections],
+  );
   const running = Object.values(runs).some((run) => run.status === "running");
   const runReason = runBlockReason(canRun, blocked, connections.length);
 
+  // The server indexes messages after its placeholders are expanded, so `messages[n]` is entry n
+  // only when no placeholder comes at or before it. Other message errors go to the form.
+  const placeholderAt = draft.entries.findIndex(isPlaceholder);
+  const locatesMessage = (index: number) => placeholderAt === -1 || placeholderAt > index;
+  const isUnlocated = (field: string) => {
+    const index = messageIndexOf(field);
+    return index !== undefined && !locatesMessage(index);
+  };
+
   // Problems: the refused parts and server errors under their messages; the settings' under them;
   // the whole request above the columns; the rest under each column.
-  const editorErrors: Record<number, string> = {};
+  const runErrorList = Object.values(runs).map((run) => run.errors);
+  const editorProblems: Record<number, string> = {};
   for (const item of blocked) {
-    editorErrors[item.index - 1] = blockedText(item);
+    editorProblems[item.index - 1] = blockedText(item);
   }
-  for (const run of Object.values(runs)) {
-    for (const [field, message] of Object.entries(run.errors)) {
+  for (const errors of runErrorList) {
+    for (const [field, message] of Object.entries(errors)) {
       const index = messageIndexOf(field);
-      if (index !== undefined && editorErrors[index] === undefined) {
-        editorErrors[index] = message;
+      if (index !== undefined && locatesMessage(index) && editorProblems[index] === undefined) {
+        editorProblems[index] = message;
       }
     }
   }
-  const checkErrors = checks.map((check) => (check.ok ? {} : check.errors));
-  const runErrors = Object.values(runs).map((run) => run.errors);
-  const settingsErrors = mergeFirst([...checkErrors, ...runErrors], (field) =>
-    SETTINGS_FIELD.test(field),
+  const checkErrors = checks.map((check) => (check.ok ? NO_ERRORS : check.errors));
+  const editorErrors = useStable(editorProblems);
+  const settingsErrors = useStable(
+    mergeFirst([...checkErrors, ...runErrorList], (field) => SETTINGS_FIELD.test(field)),
   );
-  const formErrors = mergeFirst(runErrors, (field) => FORM_FIELDS.has(field));
-  const formError = formErrors.messages ?? formErrors.request;
+  const formError = Object.values(
+    mergeFirst(runErrorList, (field) => FORM_FIELDS.has(field) || isUnlocated(field)),
+  )[0];
+  const columnErrors = useStable(
+    Object.fromEntries(
+      draft.columns.map((column, index) => [
+        column.id,
+        mergeFirst(
+          [checkErrors[index] ?? NO_ERRORS, runs[column.id]?.errors ?? NO_ERRORS],
+          (field) =>
+            !SETTINGS_FIELD.test(field) &&
+            !FORM_FIELDS.has(field) &&
+            messageIndexOf(field) === undefined,
+        ),
+      ]),
+    ),
+  );
 
-  function updateDraft(patch: Partial<Draft>) {
-    setDraft((previous) => ({ ...previous, ...patch }));
-  }
+  // Edits change the draft, so the field errors of the last runs (about the old draft) go.
+  const editDraft = useCallback((change: (previous: Draft) => Draft) => {
+    setDraft(change);
+    setRuns(withoutFieldErrors);
+  }, []);
 
-  function updateColumn(id: string, patch: Partial<Column>) {
-    setDraft((previous) => ({
-      ...previous,
-      columns: previous.columns.map((column) =>
-        column.id === id ? { ...column, ...patch } : column,
-      ),
-    }));
-  }
+  const updateDraft = useCallback(
+    (patch: Partial<Draft>) => {
+      editDraft((previous) => ({ ...previous, ...patch }));
+    },
+    [editDraft],
+  );
 
-  function addAnswer(message: Message) {
-    setDraft((previous) => ({ ...previous, entries: [...previous.entries, message] }));
-  }
+  const setEntries = useCallback(
+    (entries: Entry[], rename?: { from: string; to: string }) => {
+      editDraft((previous) => ({
+        ...previous,
+        entries,
+        placeholders:
+          rename === undefined
+            ? previous.placeholders
+            : renamePlaceholder(previous.placeholders, rename.from, rename.to, entries),
+      }));
+    },
+    [editDraft],
+  );
+
+  const updateColumn = useCallback(
+    (id: string, patch: Partial<Column>) => {
+      editDraft((previous) => ({
+        ...previous,
+        columns: previous.columns.map((column) =>
+          column.id === id ? { ...column, ...patch } : column,
+        ),
+      }));
+    },
+    [editDraft],
+  );
+
+  const addAnswer = useCallback(
+    (message: Message) => {
+      editDraft((previous) => ({ ...previous, entries: [...previous.entries, message] }));
+    },
+    [editDraft],
+  );
 
   function addColumn() {
-    const column: Column = {
-      id: uuidv7(),
-      connectionId: draft.columns[draft.columns.length - 1]?.connectionId ?? connections[0]?.id,
-      model: "",
-      temperature: "",
-      maxTokens: "",
-    };
-    setDraft((previous) =>
-      previous.columns.length >= COLUMN_LIMIT
-        ? previous
-        : { ...previous, columns: [...previous.columns, column] },
-    );
+    editDraft((previous) => {
+      if (previous.columns.length >= COLUMN_LIMIT) {
+        return previous;
+      }
+      const column: Column = {
+        id: uuidv7(),
+        connectionId:
+          previous.columns[previous.columns.length - 1]?.connectionId ?? connections[0]?.id,
+        model: "",
+        temperature: "",
+        maxTokens: "",
+      };
+      return { ...previous, columns: [...previous.columns, column] };
+    });
   }
 
-  function removeColumn(id: string) {
+  const removeColumn = useCallback(
+    (id: string) => {
+      controllers.current.get(id)?.abort();
+      controllers.current.delete(id);
+      pendingText.current.delete(id);
+      editDraft((previous) => ({
+        ...previous,
+        columns: previous.columns.filter((column) => column.id !== id),
+      }));
+      setRuns((previous) =>
+        Object.fromEntries(Object.entries(previous).filter(([key]) => key !== id)),
+      );
+    },
+    [editDraft],
+  );
+
+  const stopColumn = useCallback((id: string) => {
     controllers.current.get(id)?.abort();
-    controllers.current.delete(id);
-    setDraft((previous) => ({
-      ...previous,
-      columns: previous.columns.filter((column) => column.id !== id),
-    }));
-    setRuns((previous) =>
-      Object.fromEntries(Object.entries(previous).filter(([key]) => key !== id)),
-    );
-  }
+  }, []);
 
-  function setRun(id: string, update: (run: RunState) => RunState) {
+  const setRun = useCallback((id: string, update: (run: RunState) => RunState) => {
     setRuns((previous) => ({ ...previous, [id]: update(previous[id] ?? IDLE_RUN) }));
-  }
+  }, []);
 
-  function startRun(column: Column) {
-    const checked = toRunRequest(draft, column, connections);
-    if (!checked.ok) {
-      // The problems are already shown under the controls.
-      return;
-    }
-    controllers.current.get(column.id)?.abort();
-    const controller = new AbortController();
-    controllers.current.set(column.id, controller);
-    const isCurrent = () => controllers.current.get(column.id) === controller;
-    setRun(column.id, () => ({ ...IDLE_RUN, status: "running" }));
-    runPlayground(projectKey, checked.request, {
-      signal: controller.signal,
-      onEvent: (event) => {
-        if (isCurrent()) {
-          setRun(column.id, (run) => applyRunEvent(run, event));
-        }
-        // A finished run is a trace now: the recent runs list is stale.
-        if (event.event === "done" || event.event === "error") {
-          void queryClient.invalidateQueries({
-            predicate: (query) => query.queryKey[1] === RUNS_PATH,
-          });
-        }
-      },
-    }).then(
-      () => {
-        if (!isCurrent()) {
-          return;
-        }
-        controllers.current.delete(column.id);
-        setRun(column.id, (run) =>
-          run.status !== "running"
-            ? run
-            : { ...run, status: controller.signal.aborted ? "stopped" : "incomplete" },
-        );
-      },
-      (error: unknown) => {
-        if (!isCurrent()) {
-          return;
-        }
-        controllers.current.delete(column.id);
-        setRun(column.id, (run) => ({
-          ...run,
-          status: "failed",
-          problem: problemMessage(error, "Could not start the run."),
-          errors: fieldErrors(error),
-        }));
-      },
-    );
-  }
+  // Writes one column's queued text into its run.
+  const flushText = useCallback(
+    (id: string) => {
+      const delta = pendingText.current.get(id);
+      if (delta === undefined) {
+        return;
+      }
+      pendingText.current.delete(id);
+      setRun(id, (run) => ({ ...run, text: run.text + delta }));
+    },
+    [setRun],
+  );
+
+  // Text deltas arrive many times a frame: they are queued and written once per frame.
+  const queueText = useCallback(
+    (id: string, delta: string) => {
+      pendingText.current.set(id, (pendingText.current.get(id) ?? "") + delta);
+      if (frame.current === undefined) {
+        frame.current = scheduleFrame(() => {
+          frame.current = undefined;
+          for (const key of [...pendingText.current.keys()]) {
+            flushText(key);
+          }
+        });
+      }
+    },
+    [flushText],
+  );
+
+  const startRun = useCallback(
+    (columnId: string) => {
+      const current = draftRef.current;
+      const column = current.columns.find((item) => item.id === columnId);
+      const checked = column === undefined ? undefined : toRunRequest(current, column, connections);
+      if (checked === undefined || !checked.ok) {
+        // The problems are already shown under the controls.
+        return;
+      }
+      controllers.current.get(columnId)?.abort();
+      const controller = new AbortController();
+      controllers.current.set(columnId, controller);
+      const isCurrent = () => controllers.current.get(columnId) === controller;
+      // Text queued by an earlier run of this column must not reach this one.
+      pendingText.current.delete(columnId);
+      let started = false;
+      setRun(columnId, () => ({ ...IDLE_RUN, status: "running" }));
+      runPlayground(projectKey, checked.request, {
+        signal: controller.signal,
+        onEvent: (event) => {
+          if (isCurrent()) {
+            if (event.event === "text") {
+              queueText(columnId, event.data.delta);
+            } else {
+              flushText(columnId);
+              if (event.event === "start") {
+                started = true;
+              }
+              setRun(columnId, (run) => applyRunEvent(run, event));
+            }
+          }
+          // A finished run is a trace now: the recent runs list is stale.
+          if (event.event === "done" || event.event === "error") {
+            void queryClient.invalidateQueries({
+              predicate: (query) => query.queryKey[1] === RUNS_PATH,
+            });
+          }
+        },
+      }).then(
+        () => {
+          if (!isCurrent()) {
+            return;
+          }
+          controllers.current.delete(columnId);
+          flushText(columnId);
+          setRun(columnId, (run) =>
+            run.status !== "running"
+              ? run
+              : { ...run, status: controller.signal.aborted ? "stopped" : "incomplete" },
+          );
+        },
+        (error: unknown) => {
+          if (!isCurrent()) {
+            return;
+          }
+          controllers.current.delete(columnId);
+          flushText(columnId);
+          setRun(columnId, (run) => ({
+            ...run,
+            status: "failed",
+            problem: started ? CONNECTION_LOST : problemMessage(error, START_FAILED),
+            errors: fieldErrors(error),
+          }));
+        },
+      );
+    },
+    [connections, projectKey, queryClient, setRun, queueText, flushText],
+  );
 
   function runAll() {
     for (const column of draft.columns) {
-      startRun(column);
+      startRun(column.id);
     }
   }
 
@@ -722,11 +890,10 @@ function PlaygroundWorkspace({
         <ResizablePanel id="playground-editor" defaultSize="40%" minSize="25%" className="min-h-0">
           <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-3">
             <MessageEditor
+              key={loadKey}
               entries={draft.entries}
               errors={editorErrors}
-              onChange={(entries: Entry[]) => {
-                updateDraft({ entries });
-              }}
+              onChange={setEntries}
             />
             <SettingsPanel draft={draft} errors={settingsErrors} onChange={updateDraft} />
           </div>
@@ -741,27 +908,13 @@ function PlaygroundWorkspace({
                 column={column}
                 run={runs[column.id] ?? IDLE_RUN}
                 connections={connections}
-                errors={mergeFirst(
-                  [checkErrors[index] ?? {}, runs[column.id]?.errors ?? {}],
-                  (field) =>
-                    !SETTINGS_FIELD.test(field) &&
-                    !FORM_FIELDS.has(field) &&
-                    messageIndexOf(field) === undefined,
-                )}
+                errors={columnErrors[column.id] ?? NO_ERRORS}
                 runReason={runReason}
                 canRemove={draft.columns.length > 1}
-                onChange={(patch) => {
-                  updateColumn(column.id, patch);
-                }}
-                onRun={() => {
-                  startRun(column);
-                }}
-                onStop={() => {
-                  controllers.current.get(column.id)?.abort();
-                }}
-                onRemove={() => {
-                  removeColumn(column.id);
-                }}
+                onChange={updateColumn}
+                onRun={startRun}
+                onStop={stopColumn}
+                onRemove={removeColumn}
                 onAddAnswer={addAnswer}
               />
             ))}

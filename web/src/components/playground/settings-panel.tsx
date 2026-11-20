@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { placeholderNamesOf } from "@/components/playground/message-editor";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,7 +12,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { parseJsonField } from "@/lib/datasets";
-import { type Draft, draftVariables } from "@/lib/playground";
+import { type Draft, draftVariables, storedText } from "@/lib/playground";
 
 /** The choices of `tool_choice` besides a tool name. */
 const TOOL_CHOICES = ["auto", "none", "required"] as const;
@@ -43,7 +44,11 @@ function toolNamesOf(text: string): string[] {
 }
 
 /** The variables, placeholders, tools and response format of a draft. */
-export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
+export const SettingsPanel = memo(function SettingsPanel({
+  draft,
+  onChange,
+  errors,
+}: SettingsPanelProps) {
   const variables = draftVariables(draft);
   const placeholders = placeholderNamesOf(draft.entries);
   const toolNames = toolNamesOf(draft.tools).filter(
@@ -72,7 +77,7 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
             <Input
               aria-label={name}
               className="h-7 text-body"
-              value={draft.variables[name] ?? ""}
+              value={storedText(draft.variables, name)}
               aria-invalid={errors[`variables.${name}`] ? true : undefined}
               onChange={(event) => {
                 onChange({ variables: { ...draft.variables, [name]: event.target.value } });
@@ -99,7 +104,7 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
               spellCheck={false}
               rows={3}
               placeholder="A JSON list of messages"
-              value={draft.placeholders[name] ?? ""}
+              value={storedText(draft.placeholders, name)}
               aria-invalid={errors[`placeholders.${name}`] ? true : undefined}
               onChange={(event) => {
                 onChange({ placeholders: { ...draft.placeholders, [name]: event.target.value } });
@@ -177,4 +182,4 @@ export function SettingsPanel({ draft, onChange, errors }: SettingsPanelProps) {
       </div>
     </div>
   );
-}
+});

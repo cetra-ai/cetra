@@ -1,7 +1,7 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import type { UserEvent } from "@testing-library/user-event";
 import { HttpResponse, http } from "msw";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { emptyDraft, saveDraft } from "@/lib/playground";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
@@ -37,6 +37,7 @@ type RunBody = {
   messages: unknown[];
   variables: Record<string, string>;
   connection_id: string;
+  render_variables: boolean;
 };
 
 /** A complete answer: each event is `[name, data]`, and the stream ends. */
@@ -302,4 +303,158 @@ it("reopens a past run from its LLM span", async () => {
     expect(screen.getByRole("textbox", { name: "Text of message 2" })).toHaveValue(SPAN_QUESTION),
   );
   expect(screen.getByRole("textbox", { name: "Text of message 1" })).toHaveValue(SPAN_SYSTEM);
+});
+
+it("removing a message keeps each parts editor with its own message", async () => {
+  const draft = emptyDraft(CONNECTION_ID);
+  draft.entries = [
+    { role: "tool", parts: [{ type: "tool_call_response", id: "call-1", response: "first" }] },
+    { role: "tool", parts: [{ type: "tool_call_response", id: "call-2", response: "second" }] },
+  ];
+  saveDraft(PROJECT_KEY, draft);
+  const { user } = await renderApp(PAGE);
+  await user.click(await screen.findByRole("button", { name: "Remove message 1" }));
+
+  const parts = (await screen.findByRole("textbox", {
+    name: "Parts of message 1",
+  })) as HTMLTextAreaElement;
+  expect(parts.value).toContain("call-2");
+  expect(parts.value).not.toContain("call-1");
+});
+
+it("a placeholder named like an object property shows an empty text", async () => {
+  const draft = emptyDraft(CONNECTION_ID);
+  draft.entries = [{ type: "placeholder", name: "toString" }];
+  saveDraft(PROJECT_KEY, draft);
+  await renderApp(PAGE);
+
+  expect(await screen.findByRole("textbox", { name: "Placeholder toString" })).toHaveValue("");
+});
+
+it("renaming a placeholder carries its text to the new name", async () => {
+  const text = '[{"role":"user","parts":[{"type":"text","content":"earlier"}]}]';
+  const draft = emptyDraft(CONNECTION_ID);
+  draft.entries = [
+    { role: "user", parts: [{ type: "text", content: "Hi" }] },
+    { type: "placeholder", name: "history" },
+  ];
+  draft.placeholders = { history: text };
+  saveDraft(PROJECT_KEY, draft);
+  await renderApp(PAGE);
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Name of placeholder 2" }), {
+    target: { value: "chat" },
+  });
+  expect(await screen.findByRole("textbox", { name: "Placeholder chat" })).toHaveValue(text);
+  expect(screen.queryByRole("textbox", { name: "Placeholder history" })).not.toBeInTheDocument();
+});
+
+it("a prompt asks before it replaces a draft with content, and cancel keeps the draft", async () => {
+  server.use(http.get(VERSION, () => HttpResponse.json(versionTwoFixture)));
+  const draft = emptyDraft(CONNECTION_ID);
+  draft.entries[1] = { role: "user", parts: [{ type: "text", content: "Keep me" }] };
+  saveDraft(PROJECT_KEY, draft);
+  const { user } = await renderApp(`${PAGE}?prompt=support-reply&version=2`);
+
+  expect(await screen.findByText("Replace the current draft?")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+  await waitFor(() =>
+    expect(screen.queryByText("Replace the current draft?")).not.toBeInTheDocument(),
+  );
+  expect(screen.getByRole("textbox", { name: "Text of message 2" })).toHaveValue("Keep me");
+  expect(screen.queryByText("From prompt support-reply v2")).not.toBeInTheDocument();
+});
+
+it("the variables switch sets render_variables in the run body", async () => {
+  const bodies: RunBody[] = [];
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      bodies.push((await request.json()) as RunBody);
+      return answer(["done", DONE]);
+    }),
+  );
+  const { user } = await renderApp(PAGE);
+  const text = await screen.findByRole("textbox", { name: "Text of message 2" });
+  text.focus();
+  await user.paste("Make {{product}} great");
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  expect(await screen.findByText("Run finished")).toBeInTheDocument();
+  expect(bodies[0]?.render_variables).toBe(true);
+
+  fireEvent.click(screen.getByRole("switch", { name: "Treat {{ }} as variables" }));
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  await waitFor(() => expect(bodies).toHaveLength(2));
+  expect(bodies[1]?.render_variables).toBe(false);
+});
+
+it("unmounting the page aborts a run that is still streaming", async () => {
+  let signal: AbortSignal | undefined;
+  server.use(
+    http.post(RUNS, ({ request }) => {
+      signal = request.signal;
+      return openStream();
+    }),
+  );
+  const { user, unmount } = await renderApp(PAGE);
+  await user.click(await screen.findByRole("button", { name: "Run" }));
+  await waitFor(() => expect(signal).toBeDefined());
+  unmount();
+
+  expect(signal?.aborted).toBe(true);
+});
+
+it("a run started after a stop leaves the earlier request aborted", async () => {
+  const signals: AbortSignal[] = [];
+  server.use(
+    http.post(RUNS, ({ request }) => {
+      signals.push(request.signal);
+      return openStream();
+    }),
+  );
+  const { user } = await renderApp(PAGE);
+  await user.click(await screen.findByRole("button", { name: "Run" }));
+  await waitFor(() => expect(signals).toHaveLength(1));
+  await user.click(screen.getByRole("button", { name: "Stop" }));
+  await screen.findByText("Stopped");
+  await user.click(screen.getByRole("button", { name: "Run" }));
+
+  await waitFor(() => expect(signals).toHaveLength(2));
+  expect(signals[0]?.aborted).toBe(true);
+  expect(signals[1]?.aborted).toBe(false);
+});
+
+it("a stream that breaks after start says the connection was lost", async () => {
+  // The mock server answers whole responses, so this test hands the page a response whose stream
+  // breaks after its start event.
+  const original = window.fetch;
+  const spy = vi.spyOn(window, "fetch").mockImplementation((input, init) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (!url.includes("/playground/runs")) {
+      return original(input, init);
+    }
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`event: start\ndata: ${JSON.stringify({ trace_id: TRACE_ID })}\n\n`),
+        );
+      },
+      pull(controller) {
+        controller.error(new Error("socket closed"));
+      },
+    });
+    return Promise.resolve(
+      new Response(stream, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+    );
+  });
+  try {
+    const { user } = await renderApp(PAGE);
+    await user.click(await screen.findByRole("button", { name: "Run" }));
+
+    expect(await screen.findByText("The connection was lost.")).toBeInTheDocument();
+    expect(screen.queryByText("Could not start the run.")).not.toBeInTheDocument();
+  } finally {
+    spy.mockRestore();
+  }
 });

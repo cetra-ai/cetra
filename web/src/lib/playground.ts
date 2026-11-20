@@ -327,6 +327,34 @@ export function draftVariables(draft: Draft): string[] {
 }
 
 /**
+ * A stored text by name. A name the record does not own (`toString`, say) is `""`, never a
+ * property inherited from the object.
+ */
+export function storedText(record: Record<string, string>, name: string): string {
+  return Object.hasOwn(record, name) ? (record[name] ?? "") : "";
+}
+
+/**
+ * The placeholder texts after a placeholder is renamed: its text moves to the new name. The old
+ * name's text goes too, unless another placeholder entry still uses that name.
+ */
+export function renamePlaceholder(
+  placeholders: Record<string, string>,
+  from: string,
+  to: string,
+  entries: readonly Entry[],
+): Record<string, string> {
+  if (from === to) {
+    return placeholders;
+  }
+  const next: Record<string, string> = { ...placeholders, [to]: storedText(placeholders, from) };
+  if (!entries.some((entry) => isPlaceholder(entry) && entry.name === from)) {
+    delete next[from];
+  }
+  return next;
+}
+
+/**
  * Messages (1-based numbers, counting every entry) holding parts the server refuses: media and
  * unknown parts, text in a `tool` message, a tool call outside an `assistant` message, a tool
  * response outside a `tool` message, and a tool part without an id. `kinds` names the part types.
@@ -425,7 +453,11 @@ function requestPlaceholders(
 ): Record<string, Message[]> {
   const result: Record<string, Message[]> = {};
   for (const name of placeholderNames(draft.entries)) {
-    const text = draft.placeholders[name] ?? "";
+    if (!VARIABLE_NAME.test(name)) {
+      errors[`placeholders.${name}`] = "Use letters, digits and _";
+      continue;
+    }
+    const text = storedText(draft.placeholders, name);
     if (text.trim() === "") {
       result[name] = [];
       continue;
@@ -496,7 +528,7 @@ export function toRunRequest(
 
   const variables: Record<string, string> = {};
   for (const name of draftVariables(draft)) {
-    variables[name] = draft.variables[name] ?? "";
+    variables[name] = storedText(draft.variables, name);
   }
   const params: NonNullable<RunRequest["params"]> = {
     ...(temperature === undefined ? {} : { temperature }),
@@ -621,10 +653,13 @@ export function droppedToolDefinitions(span: Schema<"SpanDetail">): number {
   return toolDefinitionsOf(span.tool_definitions).dropped;
 }
 
-/** A prompt version as a draft (D-V-28). */
+/**
+ * A prompt version as a draft (D-V-28). The column takes the version's connection when it is one
+ * of `connectionIds`, else the first of them.
+ */
 export function draftFromPromptVersion(
   version: Schema<"PromptVersion">,
-  fallbackConnectionId: string | undefined,
+  connectionIds: readonly string[],
 ): Draft {
   const config = version.config;
   const params: Record<string, unknown> = isRecord(config.params) ? config.params : {};
@@ -641,7 +676,9 @@ export function draftFromPromptVersion(
   for (const name of placeholderNames(entries)) {
     placeholders[name] = "";
   }
-  const connectionId = typeof config.connection_id === "string" ? config.connection_id : undefined;
+  const configured = typeof config.connection_id === "string" ? config.connection_id : undefined;
+  const connectionId =
+    configured !== undefined && connectionIds.includes(configured) ? configured : connectionIds[0];
   return {
     entries,
     variables: {},
@@ -651,7 +688,7 @@ export function draftFromPromptVersion(
     responseFormat: prettyOrBlank(config.response_format),
     columns: [
       newColumn(
-        connectionId ?? fallbackConnectionId,
+        connectionId,
         typeof config.model === "string" ? config.model : "",
         numberText(params.temperature),
         numberText(params.max_tokens),
