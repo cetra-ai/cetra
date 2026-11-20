@@ -108,7 +108,7 @@ fn provider_token(value: Option<&str>) -> Option<String> {
     }
 }
 
-fn is_token(value: &str) -> bool {
+pub(super) fn is_token(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-'))

@@ -31,7 +31,10 @@ mod text;
 mod trace;
 mod webhook;
 
-pub use chat::TokenUsage;
+pub use chat::{
+    CHAT_IDLE_TIMEOUT, CHAT_MAX_TOKENS_DEFAULT, CHAT_MAX_TOKENS_MAX, CHAT_TIMEOUT_MAX, ChatParams,
+    ChatRequest, FinishReason, ResponseFormat, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+};
 pub use config::{
     Check, ContainsMode, Evaluator, EvaluatorConfig, JudgeConfig, JudgeOutput, OutputScore,
     WebhookConfig,

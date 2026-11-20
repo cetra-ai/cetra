@@ -351,6 +351,14 @@ pub enum ChatError {
     /// The request breaks a bound, or its body could not be encoded.
     #[error("invalid request")]
     InvalidRequest,
+    /// A message cannot be sent (D-V-25, D-V-31). `index` is its position in the request.
+    #[error("message {index}: {reason}")]
+    UnsupportedMessage {
+        /// Zero-based index into the request's messages.
+        index: usize,
+        /// Fixed reason, such as `media part`.
+        reason: &'static str,
+    },
     /// The provider returned a non-success status, or an error event in a stream.
     #[error("provider status {status}")]
     Provider {
@@ -400,6 +408,11 @@ impl fmt::Debug for ChatError {
             Self::InvalidModel => formatter.write_str("InvalidModel"),
             Self::InvalidHeader => formatter.write_str("InvalidHeader"),
             Self::InvalidRequest => formatter.write_str("InvalidRequest"),
+            Self::UnsupportedMessage { index, reason } => formatter
+                .debug_struct("UnsupportedMessage")
+                .field("index", index)
+                .field("reason", reason)
+                .finish(),
         }
     }
 }
@@ -414,9 +427,10 @@ impl ChatError {
         match self {
             Self::Provider { class, .. } => *class,
             Self::Transport(error) => error.class(),
-            Self::InvalidModel | Self::InvalidHeader | Self::InvalidRequest => {
-                ErrorClass::Permanent
-            }
+            Self::InvalidModel
+            | Self::InvalidHeader
+            | Self::InvalidRequest
+            | Self::UnsupportedMessage { .. } => ErrorClass::Permanent,
         }
     }
 }
@@ -426,7 +440,9 @@ impl From<ChatError> for JudgeError {
         match error {
             ChatError::InvalidModel => Self::InvalidModel,
             ChatError::InvalidHeader => Self::InvalidHeader,
-            ChatError::InvalidRequest => Self::InvalidRequest,
+            ChatError::InvalidRequest | ChatError::UnsupportedMessage { .. } => {
+                Self::InvalidRequest
+            }
             ChatError::Provider {
                 status,
                 class,

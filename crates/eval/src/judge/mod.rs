@@ -5,7 +5,6 @@
 mod answer;
 mod anthropic;
 mod gemini;
-mod openai;
 
 use std::time::Duration;
 
@@ -15,7 +14,13 @@ pub(crate) use answer::{RawAnswer, parse_answer};
 pub(crate) use answer::{cut_chars, normalize_label};
 use reqwest::Url;
 
-use crate::chat::TokenUsage;
+use cetra_core::message::{Message, Part, Role};
+use serde_json::Map;
+
+use crate::chat::{
+    CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, PROMPT_INSTRUCTION,
+    ResponseFormat, TokenUsage,
+};
 use crate::config::JudgeOutput;
 use crate::egress::EgressClient;
 use crate::error::JudgeError;
@@ -83,10 +88,6 @@ pub(crate) const JUDGEMENT_TOOL: &str = "submit_judgement";
 
 /// Description sent with [`JUDGEMENT_TOOL`].
 pub(crate) const JUDGEMENT_DESCRIPTION: &str = "Submit your judgement.";
-
-/// Instruction appended in [`StructuredOutput::Prompt`], before the schema.
-pub(crate) const PROMPT_INSTRUCTION: &str =
-    "Reply with one JSON object and nothing else. It must match this JSON Schema:";
 
 impl StructuredOutput {
     /// The stored connection value.
@@ -230,6 +231,76 @@ pub(crate) struct JudgeReply {
     pub(crate) response_model: Option<String>,
 }
 
+/// The chat request of one judge call: the prompt as one user message, the answer
+/// schema as the response format (`judge_answer`, strict), and [`JUDGEMENT_TOOL`] as the
+/// forced tool in tool mode.
+fn chat_request(call: &JudgeCall<'_>) -> ChatRequest {
+    ChatRequest {
+        model: call.model.to_owned(),
+        messages: vec![Message {
+            role: Role::User,
+            name: None,
+            parts: vec![Part::Text {
+                content: call.prompt.to_owned(),
+                extra: Map::new(),
+            }],
+            finish_reason: None,
+            extra: Map::new(),
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        response_format: Some(ResponseFormat {
+            name: "judge_answer".to_owned(),
+            schema: answer::answer_schema(call.output, call.include_reason),
+            strict: true,
+            tool_name: JUDGEMENT_TOOL.to_owned(),
+            tool_description: JUDGEMENT_DESCRIPTION.to_owned(),
+        }),
+        params: ChatParams {
+            temperature: call.temperature,
+            ..ChatParams::default()
+        },
+        max_tokens: call.max_output_tokens,
+        timeout: call.timeout,
+        idle_timeout: CHAT_IDLE_TIMEOUT,
+    }
+}
+
+/// The judge's reading of a reply. Refusal, truncation, and filtering fail first, then a
+/// missing answer, then the first tool call (its arguments must be a JSON object), then the text.
+pub(crate) fn judge_reply(reply: ChatReply) -> Result<JudgeReply, JudgeError> {
+    match reply.finish_reason {
+        Some(FinishReason::Refusal) => return Err(JudgeError::Refused),
+        Some(FinishReason::Length) => return Err(JudgeError::Truncated),
+        Some(FinishReason::ContentFilter) => return Err(JudgeError::ContentFiltered),
+        _ => {}
+    }
+    let content = reply.content.ok_or(JudgeError::EmptyAnswer)?;
+    let usage = reply.usage.unwrap_or_default();
+    if let Some(call) = content.tool_calls.first() {
+        let object = call
+            .arguments
+            .as_object()
+            .cloned()
+            .ok_or(JudgeError::NotJson)?;
+        let output_text =
+            serde_json::to_string(&call.arguments).map_err(|_| JudgeError::NotJson)?;
+        return Ok(JudgeReply {
+            answer: RawAnswer::Object(object),
+            output_text,
+            usage,
+            response_model: reply.response_model,
+        });
+    }
+    let text = content.text.ok_or(JudgeError::EmptyAnswer)?;
+    Ok(JudgeReply {
+        answer: RawAnswer::Text(text.clone()),
+        output_text: text,
+        usage,
+        response_model: reply.response_model,
+    })
+}
+
 /// Sends one judge call and returns the model's answer without parsing it.
 ///
 /// # Errors
@@ -245,7 +316,9 @@ pub(crate) async fn call(
     call: &JudgeCall<'_>,
 ) -> Result<JudgeReply, JudgeError> {
     match conn.adapter {
-        Adapter::OpenAi => openai::complete(client, conn, call).await,
+        Adapter::OpenAi => {
+            judge_reply(crate::chat::openai::complete(client, conn, &chat_request(call)).await?)
+        }
         Adapter::Anthropic => anthropic::complete(client, conn, call).await,
         Adapter::Gemini => gemini::complete(client, conn, call).await,
     }
@@ -343,5 +416,76 @@ mod tests {
             super::user_message(StructuredOutput::Tool, &call).expect("tool"),
             "Grade."
         );
+    }
+
+    #[test]
+    fn judge_reply_keeps_the_old_priority() {
+        use super::{RawAnswer, judge_reply};
+        use crate::chat::{ChatReply, FinishReason, ReplyContent, TokenUsage, ToolCall};
+        use crate::error::JudgeError;
+        use serde_json::{Value, json};
+
+        let text = |text: &str| ReplyContent {
+            text: Some(text.to_owned()),
+            tool_calls: Vec::new(),
+        };
+        let tool = |arguments: Value| ReplyContent {
+            text: Some("{}".to_owned()),
+            tool_calls: vec![ToolCall {
+                id: "call_0".to_owned(),
+                name: "submit_judgement".to_owned(),
+                arguments,
+            }],
+        };
+        let reply =
+            |finish_reason: Option<FinishReason>, content: Option<ReplyContent>| ChatReply {
+                finish_reason,
+                content,
+                usage: None,
+                response_model: None,
+            };
+
+        assert_eq!(
+            judge_reply(reply(Some(FinishReason::Refusal), Some(text("x")))),
+            Err(JudgeError::Refused)
+        );
+        assert_eq!(
+            judge_reply(reply(Some(FinishReason::Length), None)),
+            Err(JudgeError::Truncated)
+        );
+        assert_eq!(
+            judge_reply(reply(Some(FinishReason::ContentFilter), Some(text("x")))),
+            Err(JudgeError::ContentFiltered)
+        );
+        assert_eq!(
+            judge_reply(reply(Some(FinishReason::Stop), None)),
+            Err(JudgeError::EmptyAnswer)
+        );
+        assert_eq!(
+            judge_reply(reply(None, Some(tool(json!([1]))))),
+            Err(JudgeError::NotJson)
+        );
+
+        let object =
+            judge_reply(reply(None, Some(tool(json!({"value": true}))))).expect("object answer");
+        assert_eq!(
+            object.answer,
+            RawAnswer::Object(json!({"value": true}).as_object().cloned().expect("object"))
+        );
+        assert_eq!(object.output_text, "{\"value\":true}");
+        assert_eq!(object.usage, TokenUsage::default());
+        assert_eq!(object.response_model, None);
+
+        let empty = ReplyContent {
+            text: None,
+            tool_calls: Vec::new(),
+        };
+        assert_eq!(
+            judge_reply(reply(None, Some(empty))),
+            Err(JudgeError::EmptyAnswer)
+        );
+        let answer = judge_reply(reply(None, Some(text("x")))).expect("text answer");
+        assert_eq!(answer.answer, RawAnswer::Text("x".to_owned()));
+        assert_eq!(answer.output_text, "x");
     }
 }
