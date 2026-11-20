@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use super::issue_links::Digest;
 use super::{MetaError, unique_or};
 use crate::alerts::evaluate::Step;
 use crate::api::alerts::{
@@ -1029,7 +1030,8 @@ pub(crate) struct DueDelivery {
     pub(crate) channel_id: Uuid,
     pub(crate) channel_kind: ChannelKind,
     pub(crate) config_enc: Vec<u8>,
-    pub(crate) event: EventRow,
+    /// What is delivered: a rule event or an issue notification.
+    pub(crate) body: DueBody,
     pub(crate) project_id: ProjectId,
     pub(crate) project_name: String,
     pub(crate) project_slug: String,
@@ -1037,7 +1039,26 @@ pub(crate) struct DueDelivery {
     pub(crate) org_slug: String,
 }
 
-/// Prints the ids, attempts and kind only: the event holds the rule name and filter.
+/// What a due delivery sends.
+#[derive(Clone, PartialEq)]
+pub(crate) enum DueBody {
+    Rule(EventRow),
+    Issues(DueIssues),
+}
+
+/// An issue notification, with the source name its message shows (D-IC-21).
+#[derive(Clone, PartialEq)]
+pub(crate) struct DueIssues {
+    pub(crate) notification_id: Uuid,
+    pub(crate) source_id: Uuid,
+    pub(crate) source_name: String,
+    pub(crate) digest: Digest,
+    /// When the notification was recorded.
+    pub(crate) created_at: i64,
+}
+
+/// Prints the ids, attempts and kind only: the event holds the rule name and filter, and the
+/// digest holds issue titles.
 impl fmt::Debug for DueDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1054,6 +1075,7 @@ impl fmt::Debug for DueDelivery {
 struct DueRecord {
     id: String,
     attempts: i64,
+    next_attempt_at: Option<i64>,
     channel_id: String,
     channel_kind: String,
     config_enc: Vec<u8>,
@@ -1074,19 +1096,44 @@ struct DueRecord {
     org_slug: String,
 }
 
+#[derive(sqlx::FromRow)]
+struct DueIssueRecord {
+    id: String,
+    attempts: i64,
+    next_attempt_at: Option<i64>,
+    channel_id: String,
+    channel_kind: String,
+    config_enc: Vec<u8>,
+    notification_id: String,
+    source_id: String,
+    source_name: String,
+    digest: String,
+    notification_created_at: i64,
+    project_id: String,
+    project_name: String,
+    project_slug: String,
+    org_id: String,
+    org_slug: String,
+}
+
 /// `pending` deliveries with `next_attempt_at <= now`, oldest `next_attempt_at` first, then `id`,
-/// at most `limit`. Only deliveries of active projects in active orgs.
+/// at most `limit`, of rule events and of issue notifications. Only deliveries of active projects
+/// in active orgs.
+///
+/// Each query takes its own `limit` oldest rows. The oldest `limit` of their union lie among
+/// those rows, so sorting the union and keeping `limit` gives the same rows as one query would.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
 pub(crate) async fn due_deliveries(
     pool: &SqlitePool,
     now: i64,
     limit: i64,
 ) -> Result<Vec<DueDelivery>, MetaError> {
-    let records: Vec<DueRecord> = sqlx::query_as(
-        "SELECT d.id, d.attempts, d.channel_id, c.kind AS channel_kind, c.config_enc, \
+    let rules: Vec<DueRecord> = sqlx::query_as(
+        "SELECT d.id, d.attempts, d.next_attempt_at, d.channel_id, c.kind AS channel_kind, \
+         c.config_enc, \
          e.id AS event_id, e.rule_id, e.kind AS event_kind, e.value, e.count, e.threshold, \
          e.window_from, e.window_to, e.details, e.created_at AS event_created_at, \
          p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.id AS org_id, \
@@ -1106,7 +1153,48 @@ pub(crate) async fn due_deliveries(
     .bind(limit)
     .fetch_all(pool)
     .await?;
-    records.into_iter().map(due_from).collect()
+    let issues: Vec<DueIssueRecord> = sqlx::query_as(
+        "SELECT d.id, d.attempts, d.next_attempt_at, d.channel_id, c.kind AS channel_kind, \
+         c.config_enc, \
+         n.id AS notification_id, n.source_id, s.name AS source_name, n.digest, \
+         n.created_at AS notification_created_at, \
+         p.id AS project_id, p.name AS project_name, p.slug AS project_slug, o.id AS org_id, \
+         o.slug AS org_slug \
+         FROM notification_deliveries d \
+         JOIN notification_channels c ON c.id = d.channel_id \
+         JOIN issue_notifications n ON n.id = d.issue_notification_id \
+         JOIN issue_sources s ON s.id = n.source_id \
+         JOIN projects p ON p.id = s.project_id \
+         JOIN orgs o ON o.id = p.org_id \
+         WHERE d.status = 'pending' AND d.next_attempt_at <= ? AND p.state = 'active' \
+           AND o.state = 'active' \
+         ORDER BY d.next_attempt_at, d.id \
+         LIMIT ?",
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    // A pending row always has `next_attempt_at` (the queries filter on it), so the fallback
+    // never applies.
+    let mut due = Vec::with_capacity(rules.len() + issues.len());
+    for record in rules {
+        let key = (
+            record.next_attempt_at.unwrap_or(i64::MAX),
+            record.id.clone(),
+        );
+        due.push((key, due_from(record)?));
+    }
+    for record in issues {
+        let key = (
+            record.next_attempt_at.unwrap_or(i64::MAX),
+            record.id.clone(),
+        );
+        due.push((key, due_issue_from(record)?));
+    }
+    due.sort_by(|a, b| a.0.cmp(&b.0));
+    due.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    Ok(due.into_iter().map(|(_, delivery)| delivery).collect())
 }
 
 /// The result of one attempt.
@@ -1158,8 +1246,9 @@ pub(crate) async fn finish_delivery(
     Ok(result.rows_affected() > 0)
 }
 
-/// Deletes events created before `events_before` (their deliveries cascade) and `sent`/`failed`
-/// deliveries updated before `deliveries_before`. Returns `(events, deliveries)` deleted.
+/// Deletes events and issue notifications created before `events_before` (their deliveries
+/// cascade), and `sent`/`failed` deliveries updated before `deliveries_before`. Returns
+/// `(events, notifications, deliveries)` deleted.
 ///
 /// # Errors
 ///
@@ -1168,8 +1257,13 @@ pub(crate) async fn prune(
     conn: &mut SqliteConnection,
     events_before: i64,
     deliveries_before: i64,
-) -> Result<(u64, u64), MetaError> {
+) -> Result<(u64, u64, u64), MetaError> {
     let events = sqlx::query("DELETE FROM alert_events WHERE created_at < ?")
+        .bind(events_before)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    let notifications = sqlx::query("DELETE FROM issue_notifications WHERE created_at < ?")
         .bind(events_before)
         .execute(&mut *conn)
         .await?
@@ -1181,7 +1275,7 @@ pub(crate) async fn prune(
     .execute(&mut *conn)
     .await?
     .rows_affected();
-    Ok((events, deliveries))
+    Ok((events, notifications, deliveries))
 }
 
 fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
@@ -1197,7 +1291,7 @@ fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
         channel_id: parse_uuid(&record.channel_id, DELIVERIES, "id")?,
         channel_kind,
         config_enc: record.config_enc,
-        event: EventRow {
+        body: DueBody::Rule(EventRow {
             id: parse_uuid(&record.event_id, DELIVERIES, "id")?,
             rule_id: parse_uuid(&record.rule_id, DELIVERIES, "id")?,
             kind,
@@ -1208,7 +1302,39 @@ fn due_from(record: DueRecord) -> Result<DueDelivery, MetaError> {
             window_to: record.window_to,
             details,
             created_at: record.event_created_at,
-        },
+        }),
+        project_id: record
+            .project_id
+            .parse()
+            .map_err(|_| corrupt(DELIVERIES, "id"))?,
+        project_name: record.project_name,
+        project_slug: record.project_slug,
+        org_id: record
+            .org_id
+            .parse()
+            .map_err(|_| corrupt(DELIVERIES, "org_id"))?,
+        org_slug: record.org_slug,
+    })
+}
+
+fn due_issue_from(record: DueIssueRecord) -> Result<DueDelivery, MetaError> {
+    let channel_kind =
+        ChannelKind::parse(&record.channel_kind).ok_or_else(|| corrupt(DELIVERIES, "kind"))?;
+    let digest: Digest =
+        serde_json::from_str(&record.digest).map_err(|_| corrupt(DELIVERIES, "digest"))?;
+    Ok(DueDelivery {
+        id: parse_uuid(&record.id, DELIVERIES, "id")?,
+        attempts: record.attempts,
+        channel_id: parse_uuid(&record.channel_id, DELIVERIES, "id")?,
+        channel_kind,
+        config_enc: record.config_enc,
+        body: DueBody::Issues(DueIssues {
+            notification_id: parse_uuid(&record.notification_id, DELIVERIES, "id")?,
+            source_id: parse_uuid(&record.source_id, DELIVERIES, "id")?,
+            source_name: record.source_name,
+            digest,
+            created_at: record.notification_created_at,
+        }),
         project_id: record
             .project_id
             .parse()
