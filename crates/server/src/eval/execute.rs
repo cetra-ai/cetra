@@ -1370,7 +1370,7 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
 }
 
 /// True when the connection row still has the `updated_at` the job was claimed with.
-async fn connection_unchanged(
+pub(crate) async fn connection_unchanged(
     conn: &mut SqliteConnection,
     org: OrgId,
     connection_id: Uuid,
@@ -1419,7 +1419,7 @@ fn retryable(
 
 /// Check B (D-M-6): commits the judge trace unless the deletion guard blocks its target now.
 /// `Ok(false)` when it blocks: nothing is committed.
-async fn commit_unless_deleted(
+pub(crate) async fn commit_unless_deleted(
     state: &AppState,
     project: &ProjectRow,
     now: i64,
@@ -1482,7 +1482,7 @@ fn deleted(usage: JobUsage, actual: f64) -> Ended {
 
 /// Runs `write` up to `tries` times, `delay` apart, while `retry_on` says the error is worth another
 /// try (D-I-13).
-async fn retry_write<T, E, F, Fut>(
+pub(crate) async fn retry_write<T, E, F, Fut>(
     tries: u32,
     delay: Duration,
     retry_on: impl Fn(&E) -> bool,
@@ -1507,7 +1507,7 @@ where
 
 /// The budget's cost of one run (D-I-15): the call's cost, else the estimate when the call used
 /// tokens, else 0.
-fn spent(usage: Option<JudgeUsage>, estimate: Option<f64>) -> f64 {
+pub(crate) fn spent(usage: Option<JudgeUsage>, estimate: Option<f64>) -> f64 {
     let Some(usage) = usage else {
         return 0.0;
     };

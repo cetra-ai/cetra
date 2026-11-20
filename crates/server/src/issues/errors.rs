@@ -15,6 +15,7 @@ use cetra_core::score::{ScoreTarget, ScoreValue};
 use cetra_eval::issue::fingerprint::{ErrorFields, fingerprint_hex, normalize_message};
 use cetra_storage::{ErrorSpansRequest, QueryContext, RunError, error_spans};
 use serde_json::Value;
+use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::convert::ConvertError;
@@ -148,7 +149,7 @@ pub(crate) async fn sweep_batch(
                     );
                 })?;
         created += issues_created;
-        let outcome = write_occurrences(ctx, &project, source.id, found).await?;
+        let outcome = write_occurrences(ctx.state, &project, source.id, found).await?;
         total.add(&outcome);
     }
     tracing::debug!(
@@ -168,7 +169,7 @@ pub(crate) async fn sweep_batch(
 
 /// What became of the occurrences of a batch, for the debug log.
 #[derive(Default)]
-struct Outcome {
+pub(crate) struct Outcome {
     /// Written as occurrence scores.
     written: usize,
     /// Dropped before the write: a deletion blocks their trace or user (D-M-6).
@@ -236,8 +237,8 @@ fn keep_hits(
 ///
 /// `Err(())` when a write fails. The occurrence ids are stable, so a later rewrite of the same
 /// trace replaces the same rows.
-async fn write_occurrences(
-    ctx: &SweepCtx<'_>,
+pub(crate) async fn write_occurrences(
+    state: &AppState,
     project: &ProjectRow,
     source: Uuid,
     occurrences: Vec<Occurrence>,
@@ -248,16 +249,11 @@ async fn write_occurrences(
             .iter()
             .map(|occurrence| occurrence_score(project.id, occurrence))
             .collect();
-        if let Err(error) = scores::write(
-            ctx.state,
-            project,
-            Writer::Issue { source_id: source },
-            items,
-        )
-        .await
+        if let Err(error) =
+            scores::write(state, project, Writer::Issue { source_id: source }, items).await
         {
             tracing::warn!(
-                project_id = %ctx.project,
+                project_id = %project.id,
                 source_id = %source,
                 count = chunk.len(),
                 error = %error,
@@ -269,8 +265,8 @@ async fn write_occurrences(
         for occurrence in chunk {
             let users = user_times(occurrence.user_id.as_deref(), occurrence.at);
             if after_commit(
-                ctx.state,
-                ctx.project,
+                state,
+                project.id,
                 occurrence.trace_id,
                 &borrowed_users(&users),
                 occurrence.trace_id,
@@ -300,8 +296,9 @@ fn user_times(user_id: Option<&str>, at: i64) -> Vec<(String, i64)> {
 }
 
 /// The score of an occurrence (D-IC-18): named for its issue, stamped with its time through the
-/// id, on its trace, with the trace's user and session and the span it came from.
-fn occurrence_score(project: ProjectId, occurrence: &Occurrence) -> ScoreCreate {
+/// id, on its trace, with the trace's user and session and, when it has one, the span it came from
+/// (A3).
+pub(crate) fn occurrence_score(project: ProjectId, occurrence: &Occurrence) -> ScoreCreate {
     ScoreCreate {
         score_id: Some(occurrence_id(
             project,
@@ -318,16 +315,16 @@ fn occurrence_score(project: ProjectId, occurrence: &Occurrence) -> ScoreCreate 
         value: ScoreValue::Boolean(true),
         reason: occurrence.reason.clone(),
         source: None,
-        metadata: BTreeMap::from([
-            (
+        metadata: {
+            let mut metadata = BTreeMap::from([(
                 "cetra.issue.source_id".to_owned(),
                 occurrence.source_id.to_string(),
-            ),
-            (
-                "cetra.issue.span_id".to_owned(),
-                occurrence.span_id.to_string(),
-            ),
-        ]),
+            )]);
+            if let Some(span_id) = occurrence.span_id {
+                metadata.insert("cetra.issue.span_id".to_owned(), span_id.to_string());
+            }
+            metadata
+        },
         experiment_id: None,
         dataset_item_id: None,
     }
@@ -569,16 +566,18 @@ struct Hit {
 }
 
 /// One occurrence of an issue in a trace, written as an occurrence score by [`write_occurrences`].
-struct Occurrence {
-    source_id: Uuid,
-    issue_id: Uuid,
-    trace_id: TraceId,
-    span_id: SpanId,
+pub(crate) struct Occurrence {
+    pub(crate) source_id: Uuid,
+    pub(crate) issue_id: Uuid,
+    pub(crate) trace_id: TraceId,
+    /// The span the occurrence came from. `None` for a candidate's occurrence on a session or
+    /// trace target (A3); its metadata then has no `cetra.issue.span_id`.
+    pub(crate) span_id: Option<SpanId>,
     /// Trace start, clamped to the sweep's clock.
-    at: i64,
-    user_id: Option<String>,
-    session_id: Option<String>,
-    reason: Option<String>,
+    pub(crate) at: i64,
+    pub(crate) user_id: Option<String>,
+    pub(crate) session_id: Option<String>,
+    pub(crate) reason: Option<String>,
 }
 
 /// Groups the spans by fingerprint (D-IC-2, D-IC-17). Spans are visited in `(start_time,
@@ -643,6 +642,54 @@ fn event(issue: Uuid, kind: EventKind, from: Option<&str>, to: Option<&str>, at:
         to_value: to.map(str::to_owned),
         at,
     }
+}
+
+/// Applies the occurrence times of a group to its issue, in the caller's transaction: a resolved
+/// issue whose group started after its resolution regresses (D-IC-10), and `first_seen` and
+/// `last_seen` widen to the times. `occurrence_times` is the group's `(first, last)` trace start.
+/// The issue is written when something changed. Returns whether it changed.
+pub(crate) async fn join_issue(
+    conn: &mut SqliteConnection,
+    issue: &mut IssueRow,
+    occurrence_times: (i64, i64),
+    now: i64,
+) -> Result<bool, MetaError> {
+    let (first, last) = occurrence_times;
+    let mut changed = false;
+    // A resolved issue recurs when a trace of the group started after it was resolved (D-IC-10).
+    // Trace times decide, not completion times.
+    if issue.state == IssueState::Resolved
+        && issue.resolved_at.is_none_or(|resolved| last > resolved)
+    {
+        issue.state = IssueState::Open;
+        issue.regressed = true;
+        issue.resolved_at = None;
+        issue.resolved_by = None;
+        issues::insert_event(
+            conn,
+            &event(
+                issue.id,
+                EventKind::Regressed,
+                Some(IssueState::Resolved.as_str()),
+                Some(IssueState::Open.as_str()),
+                now,
+            ),
+        )
+        .await?;
+        changed = true;
+    }
+    let first_seen = issue.first_seen.min(first);
+    let last_seen = issue.last_seen.max(last);
+    if first_seen != issue.first_seen || last_seen != issue.last_seen {
+        issue.first_seen = first_seen;
+        issue.last_seen = last_seen;
+        changed = true;
+    }
+    if changed {
+        issue.updated_at = now;
+        issues::update_issue(conn, issue).await?;
+    }
+    Ok(changed)
 }
 
 /// Creates, routes and regresses the issues of one source's groups in one transaction (D-IC-2,
@@ -721,46 +768,13 @@ async fn write_groups(
                             ),
                         }
                     }
-                    let mut changed = false;
-                    // A resolved issue recurs when a trace of the group started after it was
-                    // resolved (D-IC-10). Trace times decide, not completion times.
-                    if issue.state == IssueState::Resolved
-                        && issue.resolved_at.is_none_or(|resolved| last > resolved)
-                    {
-                        issue.state = IssueState::Open;
-                        issue.regressed = true;
-                        issue.resolved_at = None;
-                        issue.resolved_by = None;
-                        issues::insert_event(
-                            conn,
-                            &event(
-                                issue.id,
-                                EventKind::Regressed,
-                                Some(IssueState::Resolved.as_str()),
-                                Some(IssueState::Open.as_str()),
-                                now,
-                            ),
-                        )
-                        .await?;
-                        changed = true;
-                    }
-                    let first_seen = issue.first_seen.min(first);
-                    let last_seen = issue.last_seen.max(last);
-                    if first_seen != issue.first_seen || last_seen != issue.last_seen {
-                        issue.first_seen = first_seen;
-                        issue.last_seen = last_seen;
-                        changed = true;
-                    }
-                    if changed {
-                        issue.updated_at = now;
-                        issues::update_issue(conn, &issue).await?;
-                    }
+                    join_issue(conn, &mut issue, (first, last), now).await?;
                     for (trace_id, hit) in traces {
                         occurrences.push(Occurrence {
                             source_id: source,
                             issue_id: issue.id,
                             trace_id,
-                            span_id: hit.span_id,
+                            span_id: Some(hit.span_id),
                             at: hit.at,
                             user_id: hit.user_id,
                             session_id: hit.session_id,
