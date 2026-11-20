@@ -8,6 +8,7 @@ export function traceListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"TraceSort">;
     order?: Schema<"SortOrder">;
     search?: string;
@@ -18,7 +19,7 @@ export function traceListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
