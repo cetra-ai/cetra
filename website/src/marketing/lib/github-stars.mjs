@@ -8,8 +8,11 @@
  */
 export async function fetchStars(repo, { fetchImpl = fetch, timeoutMs = 3000 } = {}) {
   try {
+    /** @type {Record<string, string>} */
+    const headers = { accept: "application/vnd.github+json", "user-agent": "cetra-website-build" };
+    if (process.env.GITHUB_TOKEN) headers.authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
     const res = await fetchImpl(`https://api.github.com/repos/${repo}`, {
-      headers: { accept: "application/vnd.github+json", "user-agent": "cetra-website-build" },
+      headers,
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) return null;

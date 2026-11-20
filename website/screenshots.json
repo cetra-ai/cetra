@@ -42,5 +42,47 @@
     "path": "/acme/support-bot/alerts",
     "waitFor": "High error rate",
     "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "marketing-trace-view",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "waitAfter": "Input / Output"
+  },
+  {
+    "name": "marketing-trace-list",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-sql-console",
+    "path": "/acme/support-bot/sql",
+    "waitFor": "Run",
+    "theme": "dark",
+    "actions": [
+      {
+        "click": ".cm-content",
+        "type": "SELECT span_kind, count(*) AS spans, min(start_time) AS first_start\nFROM spans\nGROUP BY span_kind\nORDER BY span_kind"
+      },
+      { "click": "button:has-text('Run')" }
+    ],
+    "waitAfter": " rows · "
+  },
+  {
+    "name": "marketing-evaluators",
+    "path": "/acme/support-bot/evaluators",
+    "waitFor": "Answer is JSON",
+    "now": "2026-01-01T11:00:00Z",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-alerts",
+    "path": "/acme/support-bot/alerts",
+    "waitFor": "High error rate",
+    "now": "2026-01-01T11:00:00Z",
+    "theme": "dark"
   }
 ]

@@ -10,7 +10,7 @@ const { commands, note, noteHref, id } = Astro.props;
 ---
 <div class="copy" data-copy>
   {commands.length > 1 && (
-    <div class="tabs" role="tablist">
+    <div class="tablist" role="tablist">
       {commands.map((c, i) => (
         <button
           type="button"
@@ -37,33 +37,27 @@ const { commands, note, noteHref, id } = Astro.props;
       <button type="button" class="copy-btn" aria-label="Copy command" data-copy-target={`${id}-panel-${i}`}>Copy</button>
     </div>
   ))}
+  <span class="visually-hidden" role="status" aria-live="polite"></span>
   {note && <p class="note">{noteHref ? <a href={noteHref}>{note}</a> : note}</p>}
 </div>
 <style>
+  /* The box is always dark, whatever band it sits in. */
   .copy {
-    border: 1px solid var(--line);
+    --fg: var(--c-paper);
+    --fg-muted: var(--c-stone-400);
+    --line: var(--c-line);
+    --line-strong: var(--c-line-strong);
+    --surface-2: var(--c-ink-3);
+    --accent: var(--c-teal-light);
+    background: var(--c-ink-0);
+    border: 1px solid;
+    border-color: var(--c-line-strong);
     border-radius: var(--radius);
-    background: var(--c-ink-2);
-  }
-  .tabs {
-    display: flex;
-    gap: var(--space-1);
-    padding: var(--space-2);
-    border-bottom: 1px solid var(--line);
-  }
-  .tabs button {
-    font: inherit;
-    font-size: var(--text-xs);
-    background: none;
-    border: 0;
-    color: var(--fg-muted);
-    padding: var(--space-1) var(--space-3);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-  }
-  .tabs button[aria-selected="true"] {
-    background: var(--surface-2);
     color: var(--fg);
+    color-scheme: dark;
+  }
+  .tablist [role="tab"] {
+    font-size: var(--text-xs);
   }
   .panel {
     display: flex;
@@ -108,58 +102,52 @@ const { commands, note, noteHref, id } = Astro.props;
   }
 </style>
 <script>
-  function selectTab(tabs: HTMLButtonElement[], panels: HTMLElement[], index: number) {
-    tabs.forEach((tab, i) => {
-      tab.setAttribute("aria-selected", String(i === index));
-      tab.tabIndex = i === index ? 0 : -1;
-    });
-    panels.forEach((panel, i) => {
-      panel.hidden = i !== index;
-    });
-  }
+  import { wireTabs } from "../lib/tabs";
 
-  function wireTabs(root: HTMLElement) {
-    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
-    const panels = Array.from(root.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
-    if (tabs.length === 0) return;
-    tabs.forEach((tab, i) => {
-      tab.addEventListener("click", () => selectTab(tabs, panels, i));
-      tab.addEventListener("keydown", (event) => {
-        let next: number | null = null;
-        if (event.key === "ArrowRight") next = (i + 1) % tabs.length;
-        else if (event.key === "ArrowLeft") next = (i - 1 + tabs.length) % tabs.length;
-        else if (event.key === "Home") next = 0;
-        else if (event.key === "End") next = tabs.length - 1;
-        if (next === null) return;
-        event.preventDefault();
-        selectTab(tabs, panels, next);
-        tabs[next].focus();
-      });
-    });
-  }
+  // One pending label reset per button: a new attempt replaces the old timer.
+  const resetTimers = new WeakMap<HTMLButtonElement, number>();
 
   async function copyCommand(button: HTMLButtonElement) {
+    const root = button.closest<HTMLElement>("[data-copy]");
+    const status = root?.querySelector<HTMLElement>('[role="status"]');
     const target = document.getElementById(button.dataset.copyTarget ?? "");
     const cmd = target?.querySelector<HTMLElement>(".cmd");
     const text = cmd?.textContent ?? "";
     try {
       if (!navigator.clipboard) throw new Error("no clipboard");
       await navigator.clipboard.writeText(text);
-      setLabel(button, "Copied");
-      window.setTimeout(() => setLabel(button, "Copy"), 1500);
+      showFeedback(button, status, "Copied", "Copied", 1500);
     } catch {
-      setLabel(button, "Press Ctrl+C");
+      showFeedback(button, status, "Select and copy", "Select the command and copy it", 3000);
       if (cmd) window.getSelection()?.selectAllChildren(cmd);
     }
   }
 
-  // The label is both the text and the accessible name, so a screen reader hears the new state.
-  function setLabel(button: HTMLButtonElement, label: string) {
+  // The visible label shows the result for a moment, then "Copy" again. The live region announces
+  // the result, because the button's accessible name stays "Copy command".
+  function showFeedback(
+    button: HTMLButtonElement,
+    status: HTMLElement | null | undefined,
+    label: string,
+    announcement: string,
+    ms: number,
+  ) {
     button.textContent = label;
-    button.setAttribute("aria-label", label === "Copy" ? "Copy command" : label);
+    if (status) status.textContent = announcement;
+    window.clearTimeout(resetTimers.get(button));
+    resetTimers.set(
+      button,
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, ms),
+    );
   }
 
-  document.querySelectorAll<HTMLElement>("[data-copy]").forEach(wireTabs);
+  document.querySelectorAll<HTMLElement>("[data-copy]").forEach((root) => {
+    const tabs = Array.from(root.querySelectorAll<HTMLElement>(":scope > .tablist > [role=tab]"));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>(":scope > .panel"));
+    wireTabs(tabs, panels);
+  });
   document.querySelectorAll<HTMLButtonElement>(".copy-btn").forEach((button) => {
     button.addEventListener("click", () => copyCommand(button));
   });

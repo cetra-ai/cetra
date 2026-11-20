@@ -53,7 +53,28 @@ pre {
 :focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 3px;
-  border-radius: 4px;
+}
+/* Tab lists of the Tabs and CopyCommand components (lib/tabs.ts wires them). */
+.tablist {
+  display: flex;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+.tablist [role="tab"] {
+  font: inherit;
+  font-size: var(--text-sm);
+  background: none;
+  border: 0;
+  color: var(--fg-muted);
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tablist [role="tab"][aria-selected="true"] {
+  background: var(--surface-2);
+  color: var(--fg);
 }
 .container {
   width: 100%;

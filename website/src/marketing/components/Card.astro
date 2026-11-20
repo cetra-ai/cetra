@@ -40,6 +40,13 @@ const { title, href, tone = "surface" } = Astro.props;
     position: absolute;
     inset: 0;
   }
+  .card:has(a):focus-within {
+    outline: 2px solid var(--focus);
+    outline-offset: 3px;
+  }
+  .card h3 a:focus-visible {
+    outline: none;
+  }
   .body {
     color: var(--fg-muted);
     margin-top: var(--space-2);
