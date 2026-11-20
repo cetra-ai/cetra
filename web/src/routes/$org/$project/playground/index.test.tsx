@@ -458,3 +458,59 @@ it("a stream that breaks after start says the connection was lost", async () => 
     spy.mockRestore();
   }
 });
+
+it("Ctrl+Enter in a message runs every model", async () => {
+  const models: string[] = [];
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      models.push(((await request.json()) as RunBody).model);
+      return answer(["done", DONE]);
+    }),
+  );
+  const { user } = await renderApp(PAGE);
+  await user.click(await screen.findByRole("button", { name: "Add model" }));
+  await typeIn(user, screen.getByRole("textbox", { name: "Text of message 2" }), "Hello");
+  await user.keyboard("{Control>}{Enter}{/Control}");
+
+  await waitFor(() => expect(models).toHaveLength(2));
+});
+
+it("an unrun column says how to run it", async () => {
+  await renderApp(PAGE);
+  const column = within(await screen.findByRole("region", { name: "Model 1" }));
+  expect(column.getByText("Run to see the answer")).toBeInTheDocument();
+});
+
+it("the parameters popover sets the temperature and max tokens", async () => {
+  let body: (RunBody & { params?: { temperature?: number; max_tokens?: number } }) | undefined;
+  server.use(
+    http.post(RUNS, async ({ request }) => {
+      body = (await request.json()) as typeof body;
+      return answer(["done", DONE]);
+    }),
+  );
+  const { user } = await renderApp(PAGE);
+  await user.click(await screen.findByRole("button", { name: "Parameters of model 1" }));
+  await typeIn(user, await screen.findByRole("textbox", { name: "Temperature" }), "0.5");
+  await typeIn(user, screen.getByRole("textbox", { name: "Max tokens" }), "200");
+  await user.keyboard("{Escape}");
+  expect(screen.getByRole("button", { name: "Parameters of model 1" })).toHaveTextContent(
+    "temp 0.5 · max 200",
+  );
+  await user.click(screen.getByRole("button", { name: "Run" }));
+
+  await waitFor(() => expect(body).toBeDefined());
+  expect(body?.params).toEqual({ temperature: 0.5, max_tokens: 200 });
+});
+
+it("empty settings sections start folded and open on click", async () => {
+  const { user } = await renderApp(PAGE);
+  const tools = await screen.findByRole("button", { name: "Tools" });
+  expect(tools).toHaveAttribute("aria-expanded", "false");
+  expect(screen.queryByRole("textbox", { name: "Tools" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "Placeholders" })).not.toBeInTheDocument();
+
+  await user.click(tools);
+  expect(screen.getByRole("textbox", { name: "Tools" })).toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "Tool choice" })).toBeInTheDocument();
+});
