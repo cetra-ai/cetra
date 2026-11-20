@@ -41,6 +41,15 @@ export function NextItem({ queueId, after }: { queueId: string; after: string | 
     { kind: "claiming" } | { kind: "empty" } | { kind: "error"; message: string }
   >({ kind: "claiming" });
   const claimedFor = useRef<{ after: string | undefined } | undefined>(undefined);
+  // A claim can answer after the page is gone (a StrictMode remount sets this back to true at once).
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   const claim = useCallback(
     async (afterId: string | undefined) => {
@@ -52,6 +61,9 @@ export function NextItem({ queueId, after }: { queueId: string; after: string | 
         params: { path: { project: ref, id: queueId } },
         body: afterId === undefined ? {} : { after: afterId },
       });
+      if (!mounted.current) {
+        return;
+      }
       if (response.status === 204) {
         setOutcome({ kind: "empty" });
         return;
@@ -104,8 +116,28 @@ export function NextItem({ queueId, after }: { queueId: string; after: string | 
       </div>
     );
   }
+  const checkAgain = (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={() => {
+        setOutcome({ kind: "claiming" });
+        void claim(undefined);
+      }}
+    >
+      Check again
+    </Button>
+  );
   if (outcome.kind === "error") {
-    return <FormError message={outcome.message} />;
+    return (
+      <div className="flex flex-col items-center">
+        <FormError message={outcome.message} />
+        <div className="flex gap-2">
+          {backLink}
+          {checkAgain}
+        </div>
+      </div>
+    );
   }
   return (
     <div className="flex flex-col items-center">
@@ -116,16 +148,7 @@ export function NextItem({ queueId, after }: { queueId: string; after: string | 
       />
       <div className="flex gap-2">
         {backLink}
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => {
-            setOutcome({ kind: "claiming" });
-            void claim(undefined);
-          }}
-        >
-          Check again
-        </Button>
+        {checkAgain}
       </div>
     </div>
   );

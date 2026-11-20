@@ -6,7 +6,6 @@ type Item = Schema<"AnnotationQueueItem">;
 
 const ME = "01900000-0000-7000-8000-000000000100";
 const BOB = "01900000-0000-7000-8000-000000000101";
-const NOW = Date.parse("2026-01-01T10:00:00.000000000Z");
 
 const base: Item = {
   id: "01900000-0000-7000-8000-000000000a11",
@@ -21,26 +20,21 @@ const base: Item = {
 
 describe("canLease", () => {
   it("takes a free pending item", () => {
-    expect(canLease(base, ME, NOW)).toBe(true);
+    expect(canLease(base, ME)).toBe(true);
   });
 
   it("renews the caller's own lease", () => {
     const item = { ...base, leased_by_user_id: ME, lease_expires_at: "2026-01-01T10:03:00Z" };
-    expect(canLease(item, ME, NOW)).toBe(true);
+    expect(canLease(item, ME)).toBe(true);
   });
 
-  it("takes an item whose lease has expired", () => {
+  it("refuses a lease held by another reviewer, whatever the client clock says", () => {
     const item = { ...base, leased_by_user_id: BOB, lease_expires_at: "2026-01-01T09:59:00Z" };
-    expect(canLease(item, ME, NOW)).toBe(true);
-  });
-
-  it("refuses a live lease held by another reviewer", () => {
-    const item = { ...base, leased_by_user_id: BOB, lease_expires_at: "2026-01-01T10:03:00Z" };
-    expect(canLease(item, ME, NOW)).toBe(false);
+    expect(canLease(item, ME)).toBe(false);
   });
 
   it("refuses an item that is not pending", () => {
-    expect(canLease({ ...base, status: "completed" }, ME, NOW)).toBe(false);
-    expect(canLease({ ...base, status: "skipped" }, ME, NOW)).toBe(false);
+    expect(canLease({ ...base, status: "completed" }, ME)).toBe(false);
+    expect(canLease({ ...base, status: "skipped" }, ME)).toBe(false);
   });
 });

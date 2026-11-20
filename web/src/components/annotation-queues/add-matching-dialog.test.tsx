@@ -145,4 +145,18 @@ describe("add matching to queue", () => {
       await within(dialog).findByText("The filter is not valid. Fix it on the list first."),
     ).toBeInTheDocument();
   });
+
+  it("says the queue is full when the add answers too_many_items", async () => {
+    serve([QUEUE]);
+    server.use(http.post(ADD, () => problemResponse(422, "too_many_items")));
+    const { user } = renderDialog();
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+    await user.click(await screen.findByRole("option", { name: "Relevance review" }));
+    await user.click(await within(dialog).findByRole("button", { name: "Add 42 to queue" }));
+
+    expect(
+      await within(dialog).findByText("The queue is full (100 000 items)."),
+    ).toBeInTheDocument();
+  });
 });

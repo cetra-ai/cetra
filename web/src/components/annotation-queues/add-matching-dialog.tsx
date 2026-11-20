@@ -6,6 +6,7 @@ import { annotationQueueWriteKeys } from "@/api/queries-annotation-queues";
 import type { Schema } from "@/api/types";
 import {
   type QueueKind,
+  queueFullMessage,
   useProjectQueues,
 } from "@/components/annotation-queues/add-to-queue-dialog";
 import { FormError } from "@/components/form/form-error";
@@ -253,5 +254,5 @@ function messageOf(caught: unknown, fallback: string): string {
   if (problemOf(caught)?.code === "invalid_filter") {
     return "The filter is not valid. Fix it on the list first.";
   }
-  return problemMessage(caught, fallback);
+  return queueFullMessage(caught) ?? problemMessage(caught, fallback);
 }

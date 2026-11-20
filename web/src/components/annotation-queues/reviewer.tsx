@@ -114,6 +114,8 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
   const [actionError, setActionError] = useState<string | undefined>();
   const [skipOpen, setSkipOpen] = useState(false);
   const [discardOpen, setDiscardOpen] = useState(false);
+  // Set at once by each action, so a second click or shortcut before the re-render does nothing.
+  const inFlight = useRef(false);
   const onFormReady = useCallback(() => {
     setFormReady(true);
   }, []);
@@ -126,11 +128,31 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
     );
   }
 
-  // Saves the changed rows first, then completes the item (D-AQ-5). A failed save completes nothing.
-  async function completeAndNext() {
-    if (busy || blocked || !formReady) {
+  // Saves the changed rows of a completed or skipped item, which stays as it is (D-AQ-5).
+  // A failed save shows the form's own error.
+  async function saveEdits() {
+    if (inFlight.current || busy || !formReady) {
       return;
     }
+    inFlight.current = true;
+    setBusy(true);
+    setActionError(undefined);
+    try {
+      if (saveRef.current) {
+        await saveRef.current.save();
+      }
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  // Saves the changed rows first, then completes the item (D-AQ-5). A failed save completes nothing.
+  async function completeAndNext() {
+    if (inFlight.current || busy || blocked || !formReady) {
+      return;
+    }
+    inFlight.current = true;
     setBusy(true);
     setActionError(undefined);
     try {
@@ -146,23 +168,31 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
     } catch (caught) {
       setActionError(problemMessage(caught, "Could not complete this item."));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
 
   // Moves on without saving or changing the item. Unsaved edits ask first.
   function next() {
-    if (busy) {
+    if (inFlight.current || busy) {
       return;
     }
     if (saveRef.current?.isDirty()) {
       setDiscardOpen(true);
       return;
     }
-    void goToNext(itemId);
+    inFlight.current = true;
+    void goToNext(itemId).finally(() => {
+      inFlight.current = false;
+    });
   }
 
   async function reopenItem() {
+    if (inFlight.current) {
+      return;
+    }
+    inFlight.current = true;
     setBusy(true);
     setActionError(undefined);
     try {
@@ -173,6 +203,7 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
     } catch (caught) {
       setActionError(problemMessage(caught, "Could not reopen this item."));
     } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   }
@@ -351,6 +382,17 @@ export function Reviewer({ queueId, itemId }: { queueId: string; itemId: string 
         >
           Previous
         </Button>
+        {member && !pending ? (
+          <Button
+            variant="outline"
+            disabled={busy || !formReady}
+            onClick={() => {
+              void saveEdits();
+            }}
+          >
+            Save
+          </Button>
+        ) : null}
         {member && !pending ? (
           <Button
             variant="outline"

@@ -14,22 +14,15 @@ export type LeaseState = {
 };
 
 /**
- * Whether `userId` may take or renew the item's lease: the item is pending, and its lease is free,
- * expired or already theirs (D-AQ-4). The server sets `leased_by_user_id` and `lease_expires_at`
- * only while a lease is live.
+ * Whether `userId` may take or renew the item's lease: the item is pending, and it has no live
+ * lease or the caller holds it (D-AQ-4). The server omits `leased_by_user_id` and
+ * `lease_expires_at` once a lease has expired, so the client does not compare clocks.
  */
-export function canLease(
-  item: Schema<"AnnotationQueueItem">,
-  userId: string,
-  now: number = Date.now(),
-): boolean {
+export function canLease(item: Schema<"AnnotationQueueItem">, userId: string): boolean {
   if (item.status !== "pending") {
     return false;
   }
-  if (item.leased_by_user_id === undefined || item.leased_by_user_id === userId) {
-    return true;
-  }
-  return item.lease_expires_at !== undefined && Date.parse(item.lease_expires_at) <= now;
+  return item.leased_by_user_id === undefined || item.leased_by_user_id === userId;
 }
 
 /**
@@ -66,20 +59,26 @@ export function useLease(
         setLease({ state: "lost", holder: problemOf(error)?.errors?.[0]?.message });
       }
     };
-    void claim();
-    const timer = window.setInterval(() => {
-      void claim();
-    }, LEASE_RENEW_MS);
-    return () => {
-      active = false;
-      window.clearInterval(timer);
-      // Best effort: the lease also ends by itself after five minutes.
+    // Best effort: the lease also ends by itself after five minutes. Keepalive lets the request
+    // outlive the page, so `pagehide` (tab closed or navigated away) sends it too.
+    const release = () => {
       void api
         .DELETE("/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease", {
           ...path,
           keepalive: true,
         })
         .catch(() => undefined);
+    };
+    void claim();
+    const timer = window.setInterval(() => {
+      void claim();
+    }, LEASE_RENEW_MS);
+    window.addEventListener("pagehide", release);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+      window.removeEventListener("pagehide", release);
+      release();
     };
   }, [enabled, org, project, queueId, itemId]);
 

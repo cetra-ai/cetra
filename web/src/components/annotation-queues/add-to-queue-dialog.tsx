@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { type FormEvent, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
 import { problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
@@ -56,8 +56,20 @@ export function addToQueueReason(role: OrgRole | undefined, count: number): stri
 }
 
 /**
+ * The message for a 422 `too_many_items` (a full queue), or undefined for any other error. The
+ * add dialogs show it in place of the problem's own text.
+ */
+export function queueFullMessage(caught: unknown): string | undefined {
+  if (problemOf(caught)?.code === "too_many_items") {
+    return "The queue is full (100 000 items).";
+  }
+  return undefined;
+}
+
+/**
  * Every queue of the project, all pages, through the list's own infinite init. The list page
- * reads the same key, so a plain query here would read its cache in the wrong shape.
+ * reads the same key, so a plain query here would read its cache in the wrong shape. Pages are
+ * fetched one after another until the last, so queues past the first page are listed too.
  */
 export function useProjectQueues() {
   const { org, project } = useProject();
@@ -66,6 +78,12 @@ export function useProjectQueues() {
     initialPageParam: null,
     getNextPageParam: (page) => page.next_cursor ?? undefined,
   });
+  const { hasNextPage, isFetchingNextPage, fetchNextPage } = query;
+  useEffect(() => {
+    if (hasNextPage && !isFetchingNextPage) {
+      void fetchNextPage();
+    }
+  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
   const queues = (query.data?.pages ?? []).flatMap((page) => page.data);
   return { queues, query };
 }
@@ -232,7 +250,9 @@ function AddToQueueForm({
       onAdded?.();
       setResult({ queue: picked, answer });
     } catch (caught) {
-      setFormError(addMessage(caught));
+      setFormError(
+        queueFullMessage(caught) ?? problemMessage(caught, "The items could not be added."),
+      );
     }
   }
 
@@ -309,14 +329,6 @@ function AddToQueueForm({
       />
     </>
   );
-}
-
-/** A 422 for a full queue has its own message. Anything else keeps the problem's text. */
-function addMessage(caught: unknown): string {
-  if (problemOf(caught)?.code === "too_many_items") {
-    return "The queue is full (100 000 items).";
-  }
-  return problemMessage(caught, "The items could not be added.");
 }
 
 /** The short id of the item a skipped row names. */

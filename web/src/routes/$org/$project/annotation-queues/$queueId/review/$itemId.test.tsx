@@ -376,3 +376,36 @@ it("a completed item shows who completed it, the form, and Reopen", async () => 
   expect(requests.calls.some((call) => call.path.endsWith("/lease"))).toBe(false);
   requests.stop();
 });
+
+it("saving a completed item sends its scores and does not complete it", async () => {
+  serveReview({
+    item: {
+      ...pendingItem,
+      status: "completed",
+      done_by_user_id: ADA_ID,
+      done_at: "2026-01-01T10:00:00.000000000Z",
+      leased_by_user_id: undefined,
+      lease_expires_at: undefined,
+    },
+  });
+  serveWrites();
+  serveAnnotationDefinitions(ANNOTATION_DEFINITIONS);
+  serveScores([]);
+  const requests = recordRequests();
+  const { user } = await renderApp(ITEM_URL);
+  fireEvent.change(await screen.findByRole("spinbutton", { name: "helpfulness" }), {
+    target: { value: "0.5" },
+  });
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: "Save" })).toBeEnabled();
+  });
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => {
+    const save = requests.calls.find(
+      (call) => call.method === "POST" && call.path.endsWith("/scores"),
+    );
+    expect(save?.body).toMatchObject({ scores: [{ queue_id: QUEUE }] });
+  });
+  expect(requests.calls.some((call) => call.path.endsWith("/complete"))).toBe(false);
+  requests.stop();
+});
