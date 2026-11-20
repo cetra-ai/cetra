@@ -2,7 +2,7 @@
 import { CHART_HEIGHT, chartAt, ERROR, HALF, LLM, LLM_TTFT, numberAt, query } from "./preset";
 import type { Definition } from "./types";
 
-export type TemplateId = "cost" | "latency" | "quality";
+export type TemplateId = "cost" | "latency" | "quality" | "coding_agents";
 
 export type DashboardTemplate = {
   id: TemplateId;
@@ -14,6 +14,9 @@ export type DashboardTemplate = {
 
 const QUARTER = 15; // four tiles in the first row
 const THIRD = 20; // three tiles in the first row
+const FIFTH = 12; // five tiles in the first row
+/** Spans and traces of coding agents (D-CA-4). */
+const AGENT = "metadata['coding_agent'] IS NOT NULL";
 
 export const TEMPLATES: readonly DashboardTemplate[] = [
   {
@@ -263,6 +266,154 @@ export const TEMPLATES: readonly DashboardTemplate[] = [
             filter: "value_num IS NOT NULL",
             breakdown: { field: "name", limit: 6, other: false },
           }),
+        ),
+      ],
+    },
+  },
+  {
+    id: "coding_agents",
+    name: "Coding agents",
+    description:
+      "Cost, sessions and tool use of coding agents (Claude Code, Codex, Gemini CLI, Copilot) by person, repository and branch. For subscription plans the cost is what the tokens would cost at API prices.",
+    definition: {
+      widgets: [
+        numberAt(
+          "agents-1",
+          "Cost",
+          0,
+          FIFTH,
+          query("traces", [{ agg: "sum", field: "cost_total" }], { filter: AGENT }),
+        ),
+        numberAt(
+          "agents-2",
+          "Sessions",
+          FIFTH,
+          FIFTH,
+          query("traces", [{ agg: "count_distinct", field: "session_id" }], { filter: AGENT }),
+        ),
+        numberAt(
+          "agents-3",
+          "People",
+          2 * FIFTH,
+          FIFTH,
+          query("traces", [{ agg: "count_distinct", field: "user_id" }], { filter: AGENT }),
+        ),
+        numberAt(
+          "agents-4",
+          "Turns",
+          3 * FIFTH,
+          FIFTH,
+          query("traces", [{ agg: "count" }], { filter: AGENT }),
+        ),
+        numberAt(
+          "agents-5",
+          "Tokens",
+          4 * FIFTH,
+          FIFTH,
+          query("traces", [{ agg: "sum", field: "total_tokens" }], { filter: AGENT }),
+        ),
+        chartAt(
+          "agents-6",
+          "Cost over time by agent",
+          0,
+          4,
+          { type: "area", stacked: true },
+          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: AGENT,
+            breakdown: { field: "metadata['coding_agent']", limit: 5, other: true },
+          }),
+        ),
+        chartAt(
+          "agents-7",
+          "Cost over time by model",
+          HALF,
+          4,
+          { type: "area", stacked: true },
+          query("spans", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: `${LLM} AND ${AGENT}`,
+            breakdown: { field: "model", limit: 5, other: true },
+          }),
+        ),
+        chartAt(
+          "agents-8",
+          "Top people by cost",
+          0,
+          4 + CHART_HEIGHT,
+          { type: "bar_h" },
+          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: `${AGENT} AND user_id IS NOT NULL`,
+            breakdown: { field: "user_id", limit: 10, other: false },
+          }),
+        ),
+        chartAt(
+          "agents-9",
+          "Top repositories by cost",
+          HALF,
+          4 + CHART_HEIGHT,
+          { type: "bar_h" },
+          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: `${AGENT} AND metadata['repository'] IS NOT NULL`,
+            breakdown: { field: "metadata['repository']", limit: 10, other: false },
+          }),
+        ),
+        chartAt(
+          "agents-10",
+          "Top branches by cost",
+          0,
+          4 + 2 * CHART_HEIGHT,
+          { type: "bar_h" },
+          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: `${AGENT} AND metadata['branch'] IS NOT NULL`,
+            breakdown: { field: "metadata['branch']", limit: 10, other: false },
+          }),
+        ),
+        chartAt(
+          "agents-11",
+          "Top sessions by cost",
+          HALF,
+          4 + 2 * CHART_HEIGHT,
+          { type: "bar_h" },
+          query("traces", [{ agg: "sum", field: "cost_total", label: "Cost" }], {
+            filter: `${AGENT} AND session_id IS NOT NULL`,
+            breakdown: { field: "session_id", limit: 10, other: false },
+          }),
+        ),
+        chartAt(
+          "agents-12",
+          "Tool calls by tool",
+          0,
+          4 + 3 * CHART_HEIGHT,
+          { type: "table" },
+          query(
+            "spans",
+            [
+              { agg: "count", label: "Calls" },
+              { agg: "rate", where: "status = 'error'", label: "Error rate" },
+              { agg: "p95", field: "duration_ns", label: "p95 duration" },
+            ],
+            {
+              filter: `span_kind = 'tool' AND ${AGENT}`,
+              breakdown: { field: "name", limit: 20, other: true },
+            },
+          ),
+        ),
+        chartAt(
+          "agents-13",
+          "Cost per turn by agent",
+          HALF,
+          4 + 3 * CHART_HEIGHT,
+          { type: "table" },
+          query(
+            "traces",
+            [
+              { agg: "p50", field: "cost_total", label: "p50 cost" },
+              { agg: "p95", field: "cost_total", label: "p95 cost" },
+            ],
+            {
+              filter: AGENT,
+              breakdown: { field: "metadata['coding_agent']", limit: 5, other: false },
+            },
+          ),
         ),
       ],
     },
