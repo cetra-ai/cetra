@@ -5,8 +5,10 @@ interface Props {
   lede: string;
   features?: string[];
   id?: string;
+  /** The slot holds its own frame (a Frame): drop the visual's border, background and fade. */
+  bare?: boolean;
 }
-const { eyebrow, title, lede, features, id } = Astro.props;
+const { eyebrow, title, lede, features, id, bare = false } = Astro.props;
 ---
 <div class="chapter">
   <div class="text">
@@ -25,7 +27,7 @@ const { eyebrow, title, lede, features, id } = Astro.props;
       )}
     </div>
   </div>
-  <div class="visual">
+  <div class:list={["visual", bare && "visual--bare"]}>
     <slot />
   </div>
 </div>
@@ -102,5 +104,17 @@ const { eyebrow, title, lede, features, id } = Astro.props;
     height: 30%;
     background: linear-gradient(to bottom, transparent, var(--band-bg));
     pointer-events: none;
+  }
+  /* Placed last so it overrides the .visual rules above, including the phone media query. */
+  .visual--bare {
+    margin-top: var(--space-7);
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    overflow: visible;
+  }
+  .visual--bare::after {
+    content: none;
   }
 </style>
