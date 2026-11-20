@@ -117,6 +117,9 @@ pub(crate) enum ProjectPerm {
     /// Prompts: create, version, label (unprotected; D-V-10 for protected ones), edit, delete
     /// (D-V-13). Member and above; a `write` API key; a read-write personal access token.
     ManagePrompts,
+    /// Run the playground (D-V-26): member and above, a session or a read-write personal access
+    /// token; never an API key.
+    RunPlayground,
     /// Create, edit and delete dashboards (D-C-16). Member and above; no API key; a read-only
     /// personal access token cannot write (the access layer).
     ManageDashboards,
@@ -231,6 +234,7 @@ impl ProjectPerm {
             | Self::ManageAlerts
             | Self::ManageDatasets
             | Self::ManagePrompts
+            | Self::RunPlayground
             | Self::ManageDashboards => Role::Member,
             Self::ManageSettings | Self::ManageMembers | Self::Delete | Self::Drop => Role::Admin,
         }
@@ -248,6 +252,7 @@ impl ProjectPerm {
             | Self::ManageMembers
             | Self::ManageAlerts
             | Self::ManageDashboards
+            | Self::RunPlayground
             | Self::ViewMembers
             | Self::Drop => None,
         }
@@ -342,6 +347,9 @@ mod tests {
             ProjectPerm::ManagePrompts.key_scope(),
             Some(KeyScope::Write)
         );
+        // Playground: member and above; an API key cannot run it (D-V-26).
+        assert_eq!(ProjectPerm::RunPlayground.min_role(), Role::Member);
+        assert!(ProjectPerm::RunPlayground.key_scope().is_none());
         // Dashboards: member and above; an API key cannot manage them (D-C-16).
         assert_eq!(ProjectPerm::ManageDashboards.min_role(), Role::Member);
         assert!(ProjectPerm::ManageDashboards.key_scope().is_none());
