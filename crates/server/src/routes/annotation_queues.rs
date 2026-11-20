@@ -4,7 +4,7 @@
 //! member and above through a session, a read-write personal access token or a `write` API key.
 //! A read-only personal access token cannot write (the access layer answers 403).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use axum::extract::{DefaultBodyLimit, Extension, State};
@@ -16,11 +16,13 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use cetra_core::ids::TraceId;
+use cetra_core::ids::{ProjectId, SpanId, TraceId};
 
 use crate::api::annotation_queues::{
-    AnnotationQueue, AnnotationQueueListParams, CreateAnnotationQueue, QueueCounts, QueueTarget,
-    UpdateAnnotationQueue,
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
+    AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue,
+    QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueTarget,
+    SkippedQueueItem, UpdateAnnotationQueue,
 };
 use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
@@ -33,10 +35,12 @@ use crate::meta::annotation_queues::{
     self as store, Counts, MAX_DEFINITIONS, NewQueue, QueueChanges, QueueCreate, QueueRow,
     QueueUpdate, Target,
 };
-use crate::routes::read::page_limit;
+use crate::routes::read::{Deadline, open_query, page_limit};
 
 /// A queue body is a name, two texts and up to 50 ids (D-AQ-7).
 const QUEUE_BODY_LIMIT: usize = 64 * 1024;
+/// An add body is up to 1 000 targets of a few hundred bytes each (D-AQ-8).
+const ITEMS_BODY_LIMIT: usize = 1024 * 1024;
 /// Longest queue name, in characters after trimming.
 const MAX_NAME_CHARS: usize = 100;
 /// Longest queue description, in characters after trimming.
@@ -46,7 +50,7 @@ const MAX_INSTRUCTIONS_CHARS: usize = 10_000;
 /// Longest session id, in bytes.
 const MAX_SESSION_ID_BYTES: usize = 255;
 
-/// Annotation queue routes (spec 09). The item routes are added in their own phase.
+/// Annotation queue routes (spec 09): the queues and their items.
 pub(crate) fn routes() -> Vec<RouteDef> {
     vec![
         RouteDef {
@@ -99,11 +103,64 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: delete(delete_queue),
         },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(list_items),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items",
+            access: Access::Project {
+                perm: ProjectPerm::ManageQueues,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(add_items).layer(DefaultBodyLimit::max(ITEMS_BODY_LIMIT)),
+        },
+        RouteDef {
+            method: Method::GET,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+            access: Access::Project {
+                perm: ProjectPerm::View,
+                session_only: false,
+            },
+            documented: true,
+            handler: get(get_item),
+        },
+        RouteDef {
+            method: Method::DELETE,
+            path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+            access: Access::Project {
+                perm: ProjectPerm::ManageQueues,
+                session_only: false,
+            },
+            documented: true,
+            handler: delete(remove_item),
+        },
     ]
 }
 
 #[derive(Debug, Deserialize)]
 struct QueuePath {
+    id: Uuid,
+}
+
+#[derive(Debug, Deserialize)]
+struct ItemPath {
+    id: Uuid,
+    item_id: Uuid,
+}
+
+/// The position an item list cursor names: the id of the previous page's last item.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ItemCursor {
     id: Uuid,
 }
 
@@ -336,6 +393,496 @@ async fn delete_queue(
     }
 }
 
+/// `GET /annotation-queues/{id}/items`: the queue's visible items by id, optionally of one
+/// status. An absent queue, or one of another project, is 404.
+async fn list_items(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<QueuePath>,
+    error::Query(params): error::Query<AnnotationQueueItemListParams>,
+) -> Result<error::Json<Page<AnnotationQueueItem>>, ApiError> {
+    ensure_queue(&state, access.project.id, path.id).await?;
+    let after = params.cursor.as_deref().map(decode_item_cursor).transpose()?;
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
+    let (rows, next) = store::list_items(
+        state.meta.reader(),
+        path.id,
+        params.status.map(store_status),
+        after,
+        page_limit(params.limit),
+        visible_from,
+    )
+    .await?;
+    let now = state.clock.now_ns();
+    let next_cursor = next.map(encode_item_cursor).transpose()?;
+    Ok(error::Json(Page {
+        data: rows.iter().map(|row| item_json(row, now)).collect(),
+        next_cursor,
+    }))
+}
+
+/// `GET /annotation-queues/{id}/items/{item_id}`: one item of the queue. An absent item, an item
+/// of another queue and an item the data window hides are all 404.
+async fn get_item(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
+    ensure_queue(&state, access.project.id, path.id).await?;
+    let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
+    let row = store::get_item(state.meta.reader(), path.id, path.item_id, visible_from)
+        .await?
+        .ok_or(ApiError::NotFound)?;
+    Ok(error::Json(item_json(&row, state.clock.now_ns())))
+}
+
+/// `POST /annotation-queues/{id}/items`: adds 1 to 1 000 targets by id and answers 201. A target
+/// that is unknown, hidden, an evaluation trace, of the wrong kind for the queue, or blocked by a
+/// deletion is listed in `skipped` and not added. Adding a target twice is `existing`, not an
+/// error. Past 100 000 items the queue refuses with 422 and adds nothing (D-AQ-8).
+async fn add_items(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<QueuePath>,
+    error::Json(body): error::Json<AddQueueItems>,
+) -> Result<(StatusCode, error::Json<AddedQueueItems>), ApiError> {
+    let project = access.project.id;
+    let org = access.project.org_id;
+    let queue_id = path.id;
+    let target = store::get(state.meta.reader(), project, queue_id)
+        .await?
+        .ok_or(ApiError::NotFound)?
+        .target;
+    let added_by = added_by_of(&principal)?;
+    if !(1..=cetra_storage::MAX_TARGET_IDS).contains(&body.items.len()) {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors: vec![field(
+                "items",
+                format!("must hold 1 to {} items", cetra_storage::MAX_TARGET_IDS),
+            )],
+        });
+    }
+
+    // Format first: a malformed id is a 400 whatever the queue's kind.
+    let mut errors = Vec::new();
+    let parsed: Vec<Option<Parsed>> = body
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| parse_target(index, item, &mut errors))
+        .collect();
+    refuse_if_any(errors)?;
+    let parsed: Vec<Parsed> = parsed.into_iter().flatten().collect();
+
+    let mut skipped = Vec::new();
+    let mut fitting = Vec::new();
+    for item in parsed {
+        match shape_error(target, &item) {
+            Some(message) => skipped.push(skip(item.index, &message)),
+            None => fitting.push(item),
+        }
+    }
+
+    let ctx = open_query(&state, org, project, None).await?;
+    let deadline = Deadline::start();
+    let mut candidates = Vec::new();
+    match target {
+        Target::Trace => {
+            let ids: Vec<TraceId> = fitting
+                .iter()
+                .filter_map(|item| item.trace)
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let found: HashMap<TraceId, i64> =
+                cetra_storage::trace_targets(&ctx, &ids, deadline.remaining()?)
+                    .await?
+                    .into_iter()
+                    .map(|found| (found.trace_id, found.start_time))
+                    .collect();
+            for item in &fitting {
+                // The shape check gave every trace item a trace id.
+                let Some(trace) = item.trace else { continue };
+                match found.get(&trace) {
+                    Some(start) => candidates.push(Candidate {
+                        index: item.index,
+                        item: store::NewItem {
+                            trace_id: Some(trace.to_hex()),
+                            span_id: None,
+                            session_id: None,
+                            target_time: *start,
+                        },
+                        guard: vec![trace],
+                    }),
+                    None => skipped.push(skip(item.index, "the trace was not found")),
+                }
+            }
+        }
+        Target::Span => {
+            let pairs: Vec<(TraceId, SpanId)> = fitting
+                .iter()
+                .filter_map(|item| Some((item.trace?, item.span?)))
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let found: HashMap<(TraceId, SpanId), i64> =
+                cetra_storage::span_targets(&ctx, &pairs, deadline.remaining()?)
+                    .await?
+                    .into_iter()
+                    .map(|found| ((found.trace_id, found.span_id), found.trace_start))
+                    .collect();
+            for item in &fitting {
+                let (Some(trace), Some(span)) = (item.trace, item.span) else {
+                    continue;
+                };
+                match found.get(&(trace, span)) {
+                    Some(start) => candidates.push(Candidate {
+                        index: item.index,
+                        item: store::NewItem {
+                            trace_id: Some(trace.to_hex()),
+                            span_id: Some(span.to_hex()),
+                            session_id: None,
+                            target_time: *start,
+                        },
+                        guard: vec![trace],
+                    }),
+                    None => skipped.push(skip(item.index, "the span was not found")),
+                }
+            }
+        }
+        Target::Session => {
+            let ids: Vec<String> = fitting
+                .iter()
+                .filter_map(|item| item.session.clone())
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect();
+            let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+            let found: HashMap<String, cetra_storage::SessionTarget> =
+                cetra_storage::session_targets(&ctx, &refs, deadline.remaining()?)
+                    .await?
+                    .into_iter()
+                    .map(|found| (found.session_id.clone(), found))
+                    .collect();
+            for item in &fitting {
+                let Some(session) = &item.session else {
+                    continue;
+                };
+                match found.get(session) {
+                    Some(found) => candidates.push(Candidate {
+                        index: item.index,
+                        item: store::NewItem {
+                            trace_id: None,
+                            span_id: None,
+                            session_id: Some(session.clone()),
+                            target_time: found.start_time,
+                        },
+                        guard: found.trace_ids.clone(),
+                    }),
+                    None => skipped.push(skip(item.index, "the session was not found")),
+                }
+            }
+        }
+    }
+
+    // The queue is checked again, and the deletion guard asked for each target, in the writer's
+    // transaction (D-M-6), so a deletion that lands meanwhile still blocks the add.
+    let now = state.clock.now_ns();
+    let deletions = state.clone();
+    let outcome = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if store::get_on(conn, project, queue_id).await?.is_none() {
+                    return Ok(AddWrite::Gone);
+                }
+                let mut blocked = Vec::new();
+                let mut items = Vec::new();
+                for candidate in candidates {
+                    let guarded = candidate.guard.iter().any(|trace| {
+                        deletions
+                            .deletions
+                            .guard
+                            .blocking(project, *trace, &[], now)
+                            .is_some()
+                    });
+                    if guarded {
+                        blocked.push(candidate.index);
+                    } else {
+                        items.push(candidate.item);
+                    }
+                }
+                let inserted =
+                    store::insert_items_tx(conn, queue_id, project, &items, added_by, now).await?;
+                Ok(AddWrite::Written { inserted, blocked })
+            })
+        })
+        .await?;
+    let (inserted, blocked) = match outcome {
+        AddWrite::Gone => return Err(ApiError::NotFound),
+        AddWrite::Written { inserted, blocked } => (inserted, blocked),
+    };
+    let (added, existing) = items_answer(inserted)?;
+    skipped.extend(
+        blocked
+            .into_iter()
+            .map(|index| skip(index, "a deletion blocks this target")),
+    );
+    skipped.sort_by_key(|item| item.index);
+    tracing::info!(
+        project_id = %project,
+        queue_id = %queue_id,
+        added,
+        existing,
+        skipped = skipped.len(),
+        "annotation queue items added"
+    );
+    Ok((
+        StatusCode::CREATED,
+        error::Json(AddedQueueItems {
+            added,
+            existing,
+            skipped,
+        }),
+    ))
+}
+
+/// `DELETE /annotation-queues/{id}/items/{item_id}`: removes one item. Answers 204, or 404.
+async fn remove_item(
+    State(state): State<AppState>,
+    Extension(access): Extension<ProjectAccess>,
+    error::Path(path): error::Path<ItemPath>,
+) -> Result<StatusCode, ApiError> {
+    let project = access.project.id;
+    let queue_id = path.id;
+    let item_id = path.item_id;
+    let deleted = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if store::get_on(conn, project, queue_id).await?.is_none() {
+                    return Ok(false);
+                }
+                store::delete_item(conn, queue_id, item_id).await
+            })
+        })
+        .await?;
+    if deleted {
+        tracing::info!(
+            project_id = %project,
+            queue_id = %queue_id,
+            item_id = %item_id,
+            "annotation queue item removed"
+        );
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+/// Fails with 404 unless `id` is a queue of the project.
+async fn ensure_queue(state: &AppState, project: ProjectId, id: Uuid) -> Result<(), ApiError> {
+    let found = store::existing_ids(state.meta.reader(), project, &[id]).await?;
+    if found.contains(&id) {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound)
+    }
+}
+
+/// Who adds an item (D-AQ-11): the session user, the personal token or the API key. The
+/// control plane never reaches a project route.
+fn added_by_of(principal: &Principal) -> Result<(store::AddedByKind, Uuid), ApiError> {
+    match principal {
+        Principal::Session { user, .. } => Ok((store::AddedByKind::User, user.id)),
+        Principal::Pat { token_id, .. } => Ok((store::AddedByKind::Pat, *token_id)),
+        Principal::ApiKey { key_id, .. } => Ok((store::AddedByKind::Key, *key_id)),
+        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+    }
+}
+
+/// One target of an add after the format checks. `index` is its position in the request.
+struct Parsed {
+    index: usize,
+    trace: Option<TraceId>,
+    span: Option<SpanId>,
+    session: Option<String>,
+}
+
+/// A target that may be added: its row, and the traces the deletion guard asks about.
+struct Candidate {
+    index: usize,
+    item: store::NewItem,
+    guard: Vec<TraceId>,
+}
+
+/// What the writer's transaction of an add did.
+enum AddWrite {
+    /// The queue is gone.
+    Gone,
+    /// The queue's rows, and the request positions the deletion guard blocked.
+    Written {
+        inserted: store::ItemsInsert,
+        blocked: Vec<usize>,
+    },
+}
+
+/// Checks one target's ids. A malformed id is recorded in `errors` and gives `None`.
+fn parse_target(
+    index: usize,
+    item: &QueueItemTarget,
+    errors: &mut Vec<FieldError>,
+) -> Option<Parsed> {
+    let trace = hex_field::<TraceId>(
+        item.trace_id.as_deref(),
+        &format!("items[{index}].trace_id"),
+        "invalid trace id",
+        errors,
+    );
+    let span = hex_field::<SpanId>(
+        item.span_id.as_deref(),
+        &format!("items[{index}].span_id"),
+        "invalid span id",
+        errors,
+    );
+    let session = match item.session_id.as_deref() {
+        None => Some(None),
+        Some(text) if text.is_empty() || text.len() > MAX_SESSION_ID_BYTES => {
+            errors.push(field(
+                format!("items[{index}].session_id"),
+                "must be 1 to 255 bytes",
+            ));
+            None
+        }
+        Some(text) => Some(Some(text.to_owned())),
+    };
+    Some(Parsed {
+        index,
+        trace: trace?,
+        span: span?,
+        session: session?,
+    })
+}
+
+/// An optional id: `Some(None)` when absent, `Some(Some(id))` when it parses, and `None` with
+/// an error at `path` when it does not.
+fn hex_field<T: FromStr>(
+    text: Option<&str>,
+    path: &str,
+    message: &str,
+    errors: &mut Vec<FieldError>,
+) -> Option<Option<T>> {
+    match text {
+        None => Some(None),
+        Some(text) => match text.parse::<T>() {
+            Ok(id) => Some(Some(id)),
+            Err(_) => {
+                errors.push(field(path, message));
+                None
+            }
+        },
+    }
+}
+
+/// The reason a target does not fit the queue's kind, as the skip message names it: `None` when
+/// it fits. A trace queue takes a trace id; a span queue a trace and a span id; a session queue
+/// a session id. Nothing else.
+fn shape_error(target: Target, item: &Parsed) -> Option<String> {
+    let (takes, fits) = match target {
+        Target::Trace => (
+            "trace_id",
+            item.trace.is_some() && item.span.is_none() && item.session.is_none(),
+        ),
+        Target::Span => (
+            "trace_id and span_id",
+            item.trace.is_some() && item.span.is_some() && item.session.is_none(),
+        ),
+        Target::Session => (
+            "session_id",
+            item.session.is_some() && item.trace.is_none() && item.span.is_none(),
+        ),
+    };
+    (!fits).then(|| format!("a {} queue takes {takes}", target.as_str()))
+}
+
+/// The answer of an add's insert: `(added, existing)`. A queue past the item cap is 422 and
+/// nothing was added (D-AQ-8).
+fn items_answer(inserted: store::ItemsInsert) -> Result<(u64, u64), ApiError> {
+    match inserted {
+        store::ItemsInsert::Done { added, existing } => Ok((added, existing)),
+        store::ItemsInsert::TooMany => Err(ApiError::TooManyItems),
+    }
+}
+
+fn skip(index: usize, message: &str) -> SkippedQueueItem {
+    SkippedQueueItem {
+        index: u64::try_from(index).unwrap_or(u64::MAX),
+        message: message.to_owned(),
+    }
+}
+
+fn store_status(status: QueueItemStatus) -> store::Status {
+    match status {
+        QueueItemStatus::Pending => store::Status::Pending,
+        QueueItemStatus::Completed => store::Status::Completed,
+        QueueItemStatus::Skipped => store::Status::Skipped,
+    }
+}
+
+fn api_status(status: store::Status) -> QueueItemStatus {
+    match status {
+        store::Status::Pending => QueueItemStatus::Pending,
+        store::Status::Completed => QueueItemStatus::Completed,
+        store::Status::Skipped => QueueItemStatus::Skipped,
+    }
+}
+
+fn api_added_by(kind: store::AddedByKind) -> QueueItemAddedBy {
+    match kind {
+        store::AddedByKind::User => QueueItemAddedBy::User,
+        store::AddedByKind::Pat => QueueItemAddedBy::Pat,
+        store::AddedByKind::Key => QueueItemAddedBy::Key,
+    }
+}
+
+/// The API form of a stored item. The lease fields show only while the lease is live (D-AQ-4).
+fn item_json(row: &store::ItemRow, now: i64) -> AnnotationQueueItem {
+    let live = row.lease_expires_at.filter(|expires| *expires > now);
+    AnnotationQueueItem {
+        id: row.id,
+        queue_id: row.queue_id,
+        trace_id: row.trace_id.clone(),
+        span_id: row.span_id.clone(),
+        session_id: row.session_id.clone(),
+        target_time: row.target_time,
+        status: api_status(row.status),
+        skip_reason: row.skip_reason.clone(),
+        leased_by_user_id: row.leased_by_user_id.filter(|_| live.is_some()),
+        lease_expires_at: live,
+        done_by_user_id: row.done_by_user_id,
+        done_at: row.done_at,
+        added_by: api_added_by(row.added_by_kind),
+        added_by_id: row.added_by_id,
+        created_at: row.created_at,
+    }
+}
+
+/// The position an item cursor names. Text that does not decode is `400` on `cursor`.
+fn encode_item_cursor(id: Uuid) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(&ItemCursor { id })
+        .map_err(|error| ApiError::Internal(Box::new(error)))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_item_cursor(text: &str) -> Result<Uuid, ApiError> {
+    let invalid = || field_error("cursor", "invalid cursor");
+    let bytes = URL_SAFE_NO_PAD.decode(text).map_err(|_| invalid())?;
+    let cursor: ItemCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    Ok(cursor.id)
+}
+
 /// The API form of a stored queue. A missing count is zero.
 fn queue_json(row: &QueueRow, counts: Option<&Counts>) -> AnnotationQueue {
     let counts = counts.cloned().unwrap_or_default();
@@ -481,7 +1028,7 @@ mod tests {
     use crate::api::score_definitions::ScoreDirection;
     use crate::auth::roles::OrgRole;
     use crate::meta::score_definitions::{DefinitionFields, insert_definition};
-    use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
+    use crate::test_support::{Seeded, TestApp, TestResponse, dataset_span, set_limits};
     use cetra_core::enums::ScoreDataType;
     use cetra_core::ids::ProjectId;
 
@@ -868,5 +1415,612 @@ mod tests {
         )
         .await;
         assert_eq!(member_write.status, StatusCode::CREATED);
+    }
+
+    /// A trace id with `n` in its low digits.
+    fn trace_id(n: u128) -> TraceId {
+        format!("{:032x}", n + 0x1000)
+            .parse::<TraceId>()
+            .expect("trace id hex")
+    }
+
+    /// Creates a queue of `target` (`trace`, `span` or `session`) with `definition`.
+    async fn create_of(
+        app: &TestApp,
+        seeded: &Seeded,
+        name: &str,
+        target: &str,
+        definition: Uuid,
+    ) -> AnnotationQueue {
+        let response = send(
+            app,
+            Method::POST,
+            &base(seeded),
+            &seeded.cookie,
+            Some(json!({"name": name, "target": target, "definition_ids": [definition]})),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CREATED);
+        response.json()
+    }
+
+    /// Commits one span `n` of `trace`, starting at `start`, in `session` and in the
+    /// evaluation environment when `eval`.
+    async fn commit_span(
+        app: &TestApp,
+        seeded: &Seeded,
+        trace: TraceId,
+        n: u64,
+        start: i64,
+        session: Option<&str>,
+        eval: bool,
+    ) {
+        let mut span = dataset_span(0);
+        span.trace_id = trace;
+        span.span_id = format!("d4{n:014x}")
+            .parse::<SpanId>()
+            .expect("span id hex");
+        span.parent_span_id = None;
+        span.start_time = start;
+        span.end_time = start + 1_000_000_000;
+        span.ingest_time = app.state.clock.now_ns();
+        span.session_id = session.map(str::to_owned);
+        if eval {
+            span.environment = Some("cetra-eval".to_owned());
+        }
+        app.commit_spans(&seeded.project, vec![span]).await;
+    }
+
+    /// Adds `body` to the queue `queue` as the owner.
+    async fn add(
+        app: &TestApp,
+        seeded: &Seeded,
+        queue: Uuid,
+        body: Value,
+    ) -> TestResponse {
+        let path = format!("{}/{queue}/items", base(seeded));
+        send(app, Method::POST, &path, &seeded.cookie, Some(body)).await
+    }
+
+    /// The items of the queue `queue`, as the owner lists them.
+    async fn items_of(app: &TestApp, seeded: &Seeded, queue: Uuid) -> Vec<AnnotationQueueItem> {
+        let path = format!("{}/{queue}/items", base(seeded));
+        let response = send(app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(response.status, StatusCode::OK);
+        let page: Page<AnnotationQueueItem> = response.json();
+        page.data
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_items_by_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        let body = json!({"items": [
+            {"trace_id": trace_id(1).to_hex()},
+            {"trace_id": trace_id(2).to_hex()},
+            {"trace_id": trace_id(9).to_hex()},
+        ]});
+
+        let first = add(&app, &seeded, queue.id, body.clone()).await;
+        assert_eq!(first.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = first.json();
+        assert_eq!(answer.added, 2);
+        assert_eq!(answer.existing, 0);
+        assert_eq!(
+            answer.skipped,
+            vec![SkippedQueueItem {
+                index: 2,
+                message: "the trace was not found".to_owned(),
+            }]
+        );
+
+        let second = add(&app, &seeded, queue.id, body).await;
+        assert_eq!(second.status, StatusCode::CREATED);
+        let again: AddedQueueItems = second.json();
+        assert_eq!(again.added, 0);
+        assert_eq!(again.existing, 2);
+        assert_eq!(again.skipped.len(), 1);
+
+        let items = items_of(&app, &seeded, queue.id).await;
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| item.status == QueueItemStatus::Pending));
+        assert!(items.iter().all(|item| item.target_time == now));
+        assert!(items.iter().all(|item| item.span_id.is_none()));
+        assert!(items.iter().all(|item| item.added_by == QueueItemAddedBy::User));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_items_checks_the_shape() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+
+        let wrong = add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [
+                {"trace_id": trace_id(1).to_hex(), "span_id": "0000000000000007"},
+                {"session_id": "s1"},
+            ]}),
+        )
+        .await;
+        assert_eq!(wrong.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = wrong.json();
+        assert_eq!(answer.added, 0);
+        assert_eq!(
+            answer.skipped,
+            vec![
+                SkippedQueueItem {
+                    index: 0,
+                    message: "a trace queue takes trace_id".to_owned(),
+                },
+                SkippedQueueItem {
+                    index: 1,
+                    message: "a trace queue takes trace_id".to_owned(),
+                },
+            ]
+        );
+
+        let bad = add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [{"trace_id": "xyz"}]}),
+        )
+        .await;
+        assert_refused_at(&bad, "items[0].trace_id");
+
+        let empty = add(&app, &seeded, queue.id, json!({"items": []})).await;
+        assert_refused_at(&empty, "items");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_span_and_session_items() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let now = app.state.clock.now_ns();
+        let spans = create_of(&app, &seeded, "Spans", "span", definition).await;
+        let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
+        commit_span(&app, &seeded, trace_id(1), 1, now, Some("s-1"), false).await;
+        commit_span(&app, &seeded, trace_id(2), 2, now + 5_000_000_000, Some("s-1"), false).await;
+        commit_span(&app, &seeded, trace_id(3), 3, now + 1_000_000_000, Some("s-1"), false).await;
+
+        let span_added = add(
+            &app,
+            &seeded,
+            spans.id,
+            json!({"items": [
+                {"trace_id": trace_id(1).to_hex(), "span_id": "d400000000000001"},
+                {"trace_id": trace_id(1).to_hex(), "span_id": "d400000000000002"},
+            ]}),
+        )
+        .await;
+        assert_eq!(span_added.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = span_added.json();
+        assert_eq!(answer.added, 1);
+        assert_eq!(
+            answer.skipped,
+            vec![SkippedQueueItem {
+                index: 1,
+                message: "the span was not found".to_owned(),
+            }]
+        );
+        let span_items = items_of(&app, &seeded, spans.id).await;
+        assert_eq!(span_items.len(), 1);
+        assert_eq!(span_items[0].span_id.as_deref(), Some("d400000000000001"));
+        assert_eq!(span_items[0].target_time, now);
+
+        let session_added = add(
+            &app,
+            &seeded,
+            sessions.id,
+            json!({"items": [{"session_id": "s-1"}, {"session_id": "missing"}]}),
+        )
+        .await;
+        assert_eq!(session_added.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = session_added.json();
+        assert_eq!(answer.added, 1);
+        assert_eq!(answer.skipped.len(), 1);
+        assert_eq!(answer.skipped[0].index, 1);
+        assert_eq!(answer.skipped[0].message, "the session was not found");
+        let session_items = items_of(&app, &seeded, sessions.id).await;
+        assert_eq!(session_items.len(), 1);
+        // The session's earliest visible trace starts first.
+        assert_eq!(session_items[0].target_time, now);
+        assert_eq!(session_items[0].session_id.as_deref(), Some("s-1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_items_skips_evaluation_traces() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        commit_span(&app, &seeded, trace_id(5), 5, now, None, true).await;
+
+        let response = add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [{"trace_id": trace_id(5).to_hex()}]}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = response.json();
+        assert_eq!(answer.added, 0);
+        assert_eq!(
+            answer.skipped,
+            vec![SkippedQueueItem {
+                index: 0,
+                message: "the trace was not found".to_owned(),
+            }]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_items_respects_the_guard() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let traces = create(&app, &seeded, "Traces", definition).await;
+        let sessions = create_of(&app, &seeded, "Sessions", "session", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        commit_span(&app, &seeded, trace_id(1), 1, now, Some("s-guard"), false).await;
+        app.state.deletions.guard.add_traces(
+            seeded.project.id,
+            &[trace_id(1)],
+            Uuid::now_v7(),
+            app.state.clock.now_ns(),
+        );
+
+        let response = add(
+            &app,
+            &seeded,
+            traces.id,
+            json!({"items": [
+                {"trace_id": trace_id(1).to_hex()},
+                {"trace_id": trace_id(2).to_hex()},
+            ]}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::CREATED);
+        let answer: AddedQueueItems = response.json();
+        assert_eq!(answer.added, 1);
+        assert_eq!(
+            answer.skipped,
+            vec![SkippedQueueItem {
+                index: 0,
+                message: "a deletion blocks this target".to_owned(),
+            }]
+        );
+
+        // A session that holds the deleted trace is blocked too.
+        let session = add(
+            &app,
+            &seeded,
+            sessions.id,
+            json!({"items": [{"session_id": "s-guard"}]}),
+        )
+        .await;
+        let answer: AddedQueueItems = session.json();
+        assert_eq!(answer.added, 0);
+        assert_eq!(answer.skipped[0].message, "a deletion blocks this target");
+    }
+
+    #[test]
+    fn a_full_queue_is_422() {
+        assert!(matches!(
+            items_answer(store::ItemsInsert::TooMany),
+            Err(ApiError::TooManyItems)
+        ));
+        match items_answer(store::ItemsInsert::Done {
+            added: 2,
+            existing: 1,
+        }) {
+            Ok(counts) => assert_eq!(counts, (2, 1)),
+            Err(_) => panic!("a fitting add is not an error"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn items_list_pages_and_filters_by_status() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        for n in 1..=3 {
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+        }
+        let added = add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [
+                {"trace_id": trace_id(1).to_hex()},
+                {"trace_id": trace_id(2).to_hex()},
+                {"trace_id": trace_id(3).to_hex()},
+            ]}),
+        )
+        .await;
+        let answer: AddedQueueItems = added.json();
+        assert_eq!(answer.added, 3);
+
+        let path = format!("{}/{}/items", base(&seeded), queue.id);
+        let first = send(
+            &app,
+            Method::GET,
+            &format!("{path}?limit=2"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(first.status, StatusCode::OK);
+        let page: Page<AnnotationQueueItem> = first.json();
+        assert_eq!(page.data.len(), 2);
+        let cursor = page.next_cursor.expect("a second page");
+        let second = send(
+            &app,
+            Method::GET,
+            &format!("{path}?limit=2&cursor={cursor}"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        let page: Page<AnnotationQueueItem> = second.json();
+        assert_eq!(page.data.len(), 1);
+        assert!(page.next_cursor.is_none());
+
+        // Complete the first item through the store (the reviewer routes come in Q5).
+        let done = page_first_id(&app, &seeded, queue.id).await;
+        let finish_now = app.state.clock.now_ns();
+        let user = seeded.user_id;
+        let queue_id = queue.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    store::finish_tx(
+                        conn,
+                        queue_id,
+                        done,
+                        user,
+                        store::Finish::Complete,
+                        None,
+                        finish_now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let completed = send(
+            &app,
+            Method::GET,
+            &format!("{path}?status=completed"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        let page: Page<AnnotationQueueItem> = completed.json();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id, done);
+        assert_eq!(page.data[0].status, QueueItemStatus::Completed);
+        assert_eq!(page.data[0].done_by_user_id, Some(seeded.user_id));
+
+        let pending = send(
+            &app,
+            Method::GET,
+            &format!("{path}?status=pending"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        let page: Page<AnnotationQueueItem> = pending.json();
+        assert_eq!(page.data.len(), 2);
+    }
+
+    /// The id of the first item of `queue` by id.
+    async fn page_first_id(app: &TestApp, seeded: &Seeded, queue: Uuid) -> Uuid {
+        items_of(app, seeded, queue).await[0].id
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_item_by_id() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let other = create(&app, &seeded, "Other", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [{"trace_id": trace_id(1).to_hex()}]}),
+        )
+        .await;
+        let item = items_of(&app, &seeded, queue.id).await.remove(0);
+
+        let path = format!("{}/{}/items/{}", base(&seeded), queue.id, item.id);
+        let found = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(found.status, StatusCode::OK);
+        let found: AnnotationQueueItem = found.json();
+        assert_eq!(found, item);
+        assert_eq!(found.trace_id, Some(trace_id(1).to_hex()));
+        assert_eq!(found.added_by_id, seeded.user_id);
+
+        let unknown = format!("{}/{}/items/{}", base(&seeded), queue.id, Uuid::now_v7());
+        let response = send(&app, Method::GET, &unknown, &seeded.cookie, None).await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+
+        let wrong_queue = format!("{}/{}/items/{}", base(&seeded), other.id, item.id);
+        let response = send(&app, Method::GET, &wrong_queue, &seeded.cookie, None).await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_by_target_trace() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let first = create(&app, &seeded, "First", definition).await;
+        let second = create(&app, &seeded, "Second", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now).await;
+        app.commit_trace_at(&seeded.project, trace_id(2), 0, now).await;
+        add(
+            &app,
+            &seeded,
+            first.id,
+            json!({"items": [{"trace_id": trace_id(1).to_hex()}]}),
+        )
+        .await;
+        add(
+            &app,
+            &seeded,
+            second.id,
+            json!({"items": [{"trace_id": trace_id(2).to_hex()}]}),
+        )
+        .await;
+
+        let path = format!(
+            "{}?target_trace_id={}",
+            base(&seeded),
+            trace_id(1).to_hex()
+        );
+        let response = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(response.status, StatusCode::OK);
+        let page: Page<AnnotationQueue> = response.json();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].id, first.id);
+        assert_eq!(page.data[0].counts.pending, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn item_permissions() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        for n in 1..=4 {
+            app.commit_trace_at(&seeded.project, trace_id(n), 0, now).await;
+        }
+        let viewer = app
+            .add_member(&seeded, "viewer@example.com", OrgRole::Viewer)
+            .await;
+        let member = app
+            .add_member(&seeded, "member@example.com", OrgRole::Member)
+            .await;
+        let items_path = format!("{}/{}/items", base(&seeded), queue.id);
+        let body = |trace: u128| json!({"items": [{"trace_id": trace_id(trace).to_hex()}]});
+
+        let listed = send(&app, Method::GET, &items_path, &viewer.cookie, None).await;
+        assert_eq!(listed.status, StatusCode::OK);
+        let denied = send(
+            &app,
+            Method::POST,
+            &items_path,
+            &viewer.cookie,
+            Some(body(1)),
+        )
+        .await;
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+        let write_key = app.write_key(&seeded).await;
+        let by_key = app
+            .request(Method::POST, &items_path)
+            .header("authorization", &format!("Bearer {write_key}"))
+            .json(&body(2))
+            .send()
+            .await;
+        assert_eq!(by_key.status, StatusCode::CREATED);
+
+        let write_pat = app.personal_token(member.id, true).await;
+        let by_pat = app
+            .request(Method::POST, &items_path)
+            .header("authorization", &format!("Bearer {write_pat}"))
+            .json(&body(3))
+            .send()
+            .await;
+        assert_eq!(by_pat.status, StatusCode::CREATED);
+
+        let by_user = add(&app, &seeded, queue.id, body(4)).await;
+        assert_eq!(by_user.status, StatusCode::CREATED);
+
+        let items = items_of(&app, &seeded, queue.id).await;
+        let added_by = |trace: u128| {
+            items
+                .iter()
+                .find(|item| item.trace_id == Some(trace_id(trace).to_hex()))
+                .map(|item| item.added_by)
+        };
+        assert_eq!(added_by(2), Some(QueueItemAddedBy::Key));
+        assert_eq!(added_by(3), Some(QueueItemAddedBy::Pat));
+        assert_eq!(added_by(4), Some(QueueItemAddedBy::User));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn items_hidden_by_the_window() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"data_access_days": 30}),
+        );
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        let day = 86_400_000_000_000_i64;
+        let old = store::NewItem {
+            trace_id: Some(trace_id(7).to_hex()),
+            span_id: None,
+            session_id: None,
+            target_time: now - 60 * day,
+        };
+        let queue_id = queue.id;
+        let project = seeded.project.id;
+        let user = seeded.user_id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    store::insert_items_tx(
+                        conn,
+                        queue_id,
+                        project,
+                        &[old],
+                        (store::AddedByKind::User, user),
+                        now,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+
+        assert!(items_of(&app, &seeded, queue.id).await.is_empty());
+        let path = format!("{}/{}", base(&seeded), queue.id);
+        let response = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        let fetched: AnnotationQueue = response.json();
+        assert_eq!(fetched.counts.pending, 0);
     }
 }

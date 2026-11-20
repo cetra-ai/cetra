@@ -3950,6 +3950,81 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 429],
     ))
     .build();
+    let list_items = operation(
+        "list_annotation_queue_items",
+        "annotation_queues",
+        "List annotation queue items",
+    )
+    .description(Some(
+        "Items of the queue by id, optionally of one status, over the data window. An absent queue is 404. Readable with a read key and a read-only token.",
+    ))
+    .parameters(Some(with_query::<AnnotationQueueItemListParams>(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ])))
+    .responses(responses(
+        "200",
+        json_named("AnnotationQueueItemPage", "One page of queue items."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let get_item = operation(
+        "get_annotation_queue_item",
+        "annotation_queues",
+        "Get an annotation queue item",
+    )
+    .description(Some(
+        "One item of the queue. An unknown id, an item of another queue and an item the data window hides are all 404. Readable with a read key and a read-only token.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "200",
+        json_of::<AnnotationQueueItem>("The item."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let add_items = operation(
+        "add_annotation_queue_items",
+        "annotation_queues",
+        "Add items to an annotation queue",
+    )
+    .description(Some(
+        "Adds 1 to 1 000 targets by id. A trace queue takes a `trace_id`, a span queue a `trace_id` and a `span_id`, a session queue a `session_id`. A target that is unknown, hidden by the data window, an evaluation trace, of the wrong kind for the queue, or blocked by a deletion is listed in `skipped` and not added. A target already in the queue counts as `existing`. The answer is 201 whatever the counts. A queue that would pass 100 000 items is 422 and nothing is added. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+    ]))
+    .request_body(Some(json_body("AddQueueItems")))
+    .responses(responses(
+        "201",
+        json_of::<AddedQueueItems>("The counts and the skipped targets."),
+        &[400, 401, 403, 404, 413, 415, 422, 429, 503],
+    ))
+    .build();
+    let remove_item = operation(
+        "remove_annotation_queue_item",
+        "annotation_queues",
+        "Remove an annotation queue item",
+    )
+    .description(Some(
+        "Removes one item from the queue. The score definitions and the scores stay. Same roles as create.",
+    ))
+    .parameters(Some(vec![
+        project_param(),
+        path_uuid("id", "Annotation queue id."),
+        path_uuid("item_id", "Annotation queue item id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new().description("Removed.").build(),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     paths
         .path(
             format!("{PROJECT}/annotation-queues"),
@@ -3970,6 +4045,22 @@ fn annotation_queue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/annotation-queues/{{id}}"),
             PathItem::new(HttpMethod::Delete, delete),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items"),
+            PathItem::new(HttpMethod::Get, list_items),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items"),
+            PathItem::new(HttpMethod::Post, add_items),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Get, get_item),
+        )
+        .path(
+            format!("{PROJECT}/annotation-queues/{{id}}/items/{{item_id}}"),
+            PathItem::new(HttpMethod::Delete, remove_item),
         )
 }
 

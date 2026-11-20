@@ -336,6 +336,26 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "list_annotation_queue_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "add_annotation_queue_items",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "get_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "remove_annotation_queue_item",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/dashboards",
         "list_dashboards",
     ),
@@ -1187,8 +1207,13 @@ fn document_lint() {
         } else if *id == "list_annotation_queues"
             || *id == "get_annotation_queue"
             || *id == "delete_annotation_queue"
+            || *id == "list_annotation_queue_items"
+            || *id == "get_annotation_queue_item"
+            || *id == "remove_annotation_queue_item"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "add_annotation_queue_items" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429", "503"]);
         } else if *id == "create_annotation_queue" || *id == "update_annotation_queue" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_experiment_finish" {

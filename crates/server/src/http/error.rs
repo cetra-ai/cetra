@@ -95,6 +95,9 @@ pub(crate) enum ApiError {
     /// A filter deletion would cover more than 100,000 traces (D-M-5).
     #[error("too many traces")]
     TooManyTraces,
+    /// An add would take an annotation queue past 100,000 items (D-AQ-8). Nothing was added.
+    #[error("too many items")]
+    TooManyItems,
     /// The request conflicts with the current state.
     #[error("conflict")]
     Conflict {
@@ -225,6 +228,10 @@ impl ApiError {
                     "the filter matches more than 100,000 traces; narrow it or the time range"
                         .to_owned(),
                 ),
+            ),
+            Self::TooManyItems => Problem::new(
+                ProblemCode::TooManyItems,
+                Some("the queue would hold more than 100000 items".to_owned()),
             ),
             Self::QuotaExceeded { detail, .. } => {
                 Problem::new(ProblemCode::QuotaExceeded, Some(detail.clone()))

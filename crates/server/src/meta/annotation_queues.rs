@@ -995,6 +995,21 @@ pub(crate) async fn get_item_on(
     record.map(item_from).transpose()
 }
 
+/// [`get_item_on`] on a reader. The caller checks that `queue` is in the project.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn get_item(
+    pool: &SqlitePool,
+    queue: Uuid,
+    item: Uuid,
+    visible_from: Option<i64>,
+) -> Result<Option<ItemRow>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    get_item_on(&mut conn, queue, item, visible_from).await
+}
+
 /// Deletes the item `item` of `queue`. Returns whether a row was deleted.
 ///
 /// # Errors

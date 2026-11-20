@@ -1,0 +1,10 @@
+{
+  "added": 2,
+  "existing": 0,
+  "skipped": [
+    {
+      "index": 2,
+      "message": "the trace was not found"
+    }
+  ]
+}

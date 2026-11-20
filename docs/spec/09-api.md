@@ -113,6 +113,10 @@ Spec 04 § Annotation queues, D-AQ-2–D-AQ-11. Reads are `View`; queue writes a
 | `GET /annotation-queues?limit=&cursor=&target_trace_id=&target_session_id=` | by name then id, with `counts` `{pending, completed, skipped}` over the data window; `target_trace_id` keeps the queues that hold a visible trace or span item of that trace, `target_session_id` those that hold a visible item of that session; both at once is `400` on `target_session_id` |
 | `POST /annotation-queues` | `201`; `name` 1–100 characters, unique in the project (`409`); `target` `trace`\|`span`\|`session`, fixed; `definition_ids` 1–50 distinct live score definitions in review order (`400`, on the field, for unknown or archived ones); at most 100 queues per project (`409`); the org's `max_annotation_queues` (`403 plan_limit`) |
 | `GET/PATCH/DELETE /annotation-queues/{id}` | `PATCH` takes `version` (the stored one, else `409` with it), and changes the fields given; `""` clears `description` or `instructions`; `definition_ids` replaces the list; `DELETE` is `204` and deletes the queue's items, never the score definitions or scores; any other id is `404` |
+| `GET /annotation-queues/{id}/items?limit=&cursor=&status=` | by id, over the data window; `status` is `pending`, `completed` or `skipped`; `leased_by_user_id` and `lease_expires_at` only while the lease is live; an absent queue is `404` |
+| `POST /annotation-queues/{id}/items` | `{items}` of 1–1 000 targets; `201` with `added`, `existing` and `skipped` (by request index, with a message) whatever the counts; a target that is unknown, hidden, an evaluation trace, of the wrong kind for the queue (a trace queue takes `trace_id`, a span queue `trace_id` and `span_id`, a session queue `session_id`) or blocked by a deletion is skipped; past 100 000 items `422` `too_many_items` and nothing is added |
+| `GET /annotation-queues/{id}/items/{item_id}` | one item; an unknown id, an item of another queue and an item the data window hides are `404` |
+| `DELETE /annotation-queues/{id}/items/{item_id}` | `204`; `404` when the item is absent |
 
 ### Datasets & experiments
 
