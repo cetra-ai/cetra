@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Users } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +15,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { countLabel, NewRowsPill, useNewRows } from "@/components/data-table/new-rows";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
 import {
@@ -40,6 +41,7 @@ import { UsersSummary, usersKpiQuery, usersKpis } from "@/components/user/users-
 import { orderedUserColumns, userColumnSpecs, userScoreNames } from "@/components/user-columns";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatCost } from "@/lib/format";
+import { anchorKey, LIST_CACHE, NEW_ROWS_LIMIT, useListAnchor } from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseUsersSearch, type UsersSearch } from "@/lib/search/users";
@@ -119,15 +121,19 @@ function UsersPage() {
   const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
-  const [anchor, setAnchor] = useState(() => Date.now());
-  const seenRange = useRef(rangeKey);
-  useEffect(() => {
-    if (seenRange.current === rangeKey) {
-      return;
-    }
-    seenRange.current = rangeKey;
-    setAnchor(Date.now());
-  }, [rangeKey]);
+  const windowKey = anchorKey(org, project, "users", {
+    rangeKey,
+    filter: search.filter,
+    search: undefined,
+    sort: search.sort ?? "last_seen",
+    order: search.order ?? "desc",
+    eval: search.eval === 1,
+    exp: search.exp === 1,
+  });
+  const listAnchor = useListAnchor(windowKey, false);
+  const anchor = listAnchor.anchor;
+  const windowId = `${windowKey}\n${anchor}`;
+  const [restoreAtMount] = useState(() => (listAnchor.reused ? listAnchor.scroll : undefined));
   const resolved = resolveRange(range, anchor);
   /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
   const facetScope: FacetScope = {
@@ -146,8 +152,26 @@ function UsersPage() {
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
     }),
+    ...LIST_CACHE,
+    placeholderData: keepPreviousData,
     enabled: !hold,
   });
+  // Users with activity since the anchor: asked once after a return to a remembered window.
+  const newRows = useNewRows(
+    userListOptions(org, project, {
+      from: new Date(anchor).toISOString(),
+      to: new Date(listAnchor.lookedUpAt).toISOString(),
+      filter: search.filter,
+      includeEval: search.eval === 1,
+      includeExperiments: search.exp === 1,
+      limit: NEW_ROWS_LIMIT,
+    }),
+    listAnchor.reused &&
+      range.kind === "preset" &&
+      !hold &&
+      list.isSuccess &&
+      !list.isPlaceholderData,
+  );
   const problem = list.isError ? problemOf(list.error) : undefined;
   const filterError = problem?.code === "invalid_filter" ? problem : undefined;
   const headline = useQuery({
@@ -158,6 +182,8 @@ function UsersPage() {
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
     }),
+    ...LIST_CACHE,
+    placeholderData: keepPreviousData,
     enabled: !hold && !filterError,
   });
   const top = useQuery({
@@ -169,6 +195,8 @@ function UsersPage() {
       includeExperiments: search.exp === 1,
       limit: 5,
     }),
+    ...LIST_CACHE,
+    placeholderData: keepPreviousData,
     enabled: !hold && !filterError,
   });
   const fetchNextPage = useCallback(() => {
@@ -247,6 +275,22 @@ function UsersPage() {
     throw list.error;
   }
 
+  // A new window (a filter change, refresh or the pill) starts at the top, where its rows show.
+  const seenWindow = useRef(windowId);
+  useLayoutEffect(() => {
+    if (seenWindow.current === windowId) {
+      return;
+    }
+    seenWindow.current = windowId;
+    const node = document.querySelector<HTMLElement>(
+      '[aria-label="Users"] [data-scroll-container]',
+    );
+    if (node && node.scrollTop !== 0) {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    }
+  }, [windowId]);
+
   return (
     <div className="relative h-full min-h-0 flex-1">
       <div className="absolute inset-0">
@@ -286,16 +330,19 @@ function UsersPage() {
                   idPrefix="users"
                   range={range}
                   onRange={(next) => {
-                    seenRange.current =
+                    const nextKey =
                       next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-                    setAnchor(Date.now());
+                    if (nextKey === rangeKey) {
+                      listAnchor.renew();
+                    }
                     void navigate({
                       to: "/$org/$project/users",
                       params: { org, project },
                       search: (prev) => withRange(prev, next),
                     });
                   }}
-                  onRefresh={() => setAnchor(Date.now())}
+                  onRefresh={listAnchor.renew}
+                  updatedAt={anchor}
                   evalOn={search.eval === 1}
                   onEval={(on) => {
                     void navigate({
@@ -428,7 +475,7 @@ function UsersPage() {
                               replace: true,
                             });
                           }}
-                          hasNextPage={list.hasNextPage}
+                          hasNextPage={list.hasNextPage && !list.isPlaceholderData}
                           isFetchingNextPage={list.isFetchingNextPage}
                           fetchNextPage={fetchNextPage}
                           sorting={{
@@ -443,6 +490,24 @@ function UsersPage() {
                             });
                           }}
                           emptyState={<EmptyState icon={Users} title="No users" />}
+                          onScrollAnchor={
+                            list.isPlaceholderData ? undefined : listAnchor.rememberScroll
+                          }
+                          restoreAnchor={restoreAtMount}
+                          stale={list.isPlaceholderData}
+                          notice={
+                            newRows && newRows.count > 0 ? (
+                              <NewRowsPill
+                                label={countLabel(
+                                  newRows.count,
+                                  newRows.more,
+                                  "user with new activity",
+                                  "users with new activity",
+                                )}
+                                onClick={listAnchor.renew}
+                              />
+                            ) : null
+                          }
                         />
                       </>
                     ) : null}

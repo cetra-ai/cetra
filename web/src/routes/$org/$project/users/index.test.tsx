@@ -5,6 +5,32 @@ import type { Schema } from "@/api/types";
 import { formatCost } from "@/lib/format";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import { recordUrls } from "@/test/requests";
+import usersFixture from "../../../../../../fixtures/api/responses/users.json";
+
+const USERS_ENDPOINT = "*/api/v1/projects/:project/users";
+const USERS_PATH = { org: "acme", project: "support-bot" } as const;
+
+type Router = Awaited<ReturnType<typeof renderApp>>["router"];
+
+/** A list request: the first page of the window (limit 100). */
+function isListRequest(url: URL): boolean {
+  return url.pathname.endsWith("/users") && url.searchParams.get("limit") === "100";
+}
+
+/** A new-rows check request (limit 50). */
+function isCheckRequest(url: URL): boolean {
+  return url.pathname.endsWith("/users") && url.searchParams.get("limit") === "50";
+}
+
+async function leaveUsers(router: Router) {
+  await router.navigate({ to: "/$org/$project/sessions", params: USERS_PATH });
+}
+
+async function returnToUsers(router: Router) {
+  await router.navigate({ to: "/$org/$project/users", params: USERS_PATH });
+  await screen.findByRole("grid", { name: "Users" });
+}
 
 function topUser(
   userId: string,
@@ -265,4 +291,94 @@ it("sends the top-users request with the list's range, filter and flags", async 
   } finally {
     server.events.removeListener("request:start", onStart);
   }
+});
+
+it("a return within 15 minutes sends no list request", async () => {
+  const { router } = await renderApp("/acme/support-bot/users");
+  await screen.findByRole("grid", { name: "Users" });
+  await leaveUsers(router);
+  const recording = recordUrls();
+  try {
+    await returnToUsers(router);
+    expect(screen.getByRole("grid", { name: "Users" })).toHaveTextContent("user-42");
+    expect(recording.urls.some(isListRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("the pill shows the new users and loads them", async () => {
+  server.use(
+    http.get(USERS_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({
+          ...usersFixture,
+          data: usersFixture.data.slice(0, 2),
+          next_cursor: null,
+        });
+      }
+      return undefined;
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/users");
+  await screen.findByRole("grid", { name: "Users" });
+  await leaveUsers(router);
+  await returnToUsers(router);
+  const pill = await screen.findByRole("button", { name: "2 users with new activity ↑" });
+
+  const recording = recordUrls();
+  try {
+    await user.click(pill);
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+    expect(screen.queryByRole("button", { name: /with new activity/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("an expired anchor refetches", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+  try {
+    const { router } = await renderApp("/acme/support-bot/users");
+    await screen.findByRole("grid", { name: "Users" });
+    await leaveUsers(router);
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    const recording = recordUrls();
+    try {
+      await returnToUsers(router);
+      await waitFor(() => {
+        expect(recording.urls.some(isListRequest)).toBe(true);
+      });
+      expect(recording.urls.some(isCheckRequest)).toBe(false);
+    } finally {
+      recording.stop();
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a new window keeps the old rows dimmed", async () => {
+  server.use(
+    http.get(USERS_ENDPOINT, async ({ request }) => {
+      if (new URL(request.url).searchParams.has("filter")) {
+        await new Promise(() => {});
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/users");
+  await screen.findByRole("grid", { name: "Users" });
+  await router.navigate({
+    to: "/$org/$project/users",
+    params: USERS_PATH,
+    search: { filter: "environment = 'production'" },
+  });
+  const grid = screen.getByRole("grid", { name: "Users" });
+  await waitFor(() => {
+    expect(grid).toHaveAttribute("aria-busy", "true");
+  });
+  expect(grid).toHaveTextContent("user-42");
 });

@@ -4,7 +4,33 @@ import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { renderApp } from "@/test/render";
+import { recordUrls } from "@/test/requests";
+import sessionsFixture from "../../../../../../fixtures/api/responses/sessions.json";
 import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
+
+const SESSIONS_ENDPOINT = "*/api/v1/projects/:project/sessions";
+const SESSIONS_PATH = { org: "acme", project: "support-bot" } as const;
+
+type Router = Awaited<ReturnType<typeof renderApp>>["router"];
+
+/** A list request: the first page of the window (limit 100). */
+function isListRequest(url: URL): boolean {
+  return url.pathname.endsWith("/sessions") && url.searchParams.get("limit") === "100";
+}
+
+/** A new-rows check request (limit 50). */
+function isCheckRequest(url: URL): boolean {
+  return url.pathname.endsWith("/sessions") && url.searchParams.get("limit") === "50";
+}
+
+async function leaveSessions(router: Router) {
+  await router.navigate({ to: "/$org/$project/users", params: SESSIONS_PATH });
+}
+
+async function returnToSessions(router: Router) {
+  await router.navigate({ to: "/$org/$project/sessions", params: SESSIONS_PATH });
+  await screen.findByRole("grid", { name: "Sessions" });
+}
 
 function slotRect(left: number, width: number): DOMRect {
   return {
@@ -232,4 +258,94 @@ it("checks session rows without opening them and adds them to a session queue", 
     expect(item.session_id).toMatch(/^sess-/);
   }
   expect(router.state.location.pathname).toBe("/acme/support-bot/sessions");
+});
+
+it("a return within 15 minutes sends no list request", async () => {
+  const { router } = await renderApp("/acme/support-bot/sessions");
+  await screen.findByRole("grid", { name: "Sessions" });
+  await leaveSessions(router);
+  const recording = recordUrls();
+  try {
+    await returnToSessions(router);
+    expect(screen.getByRole("grid", { name: "Sessions" })).toHaveTextContent("sess-001");
+    expect(recording.urls.some(isListRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("the pill shows the new sessions and loads them", async () => {
+  server.use(
+    http.get(SESSIONS_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({
+          ...sessionsFixture,
+          data: sessionsFixture.data.slice(0, 2),
+          next_cursor: null,
+        });
+      }
+      return undefined;
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/sessions");
+  await screen.findByRole("grid", { name: "Sessions" });
+  await leaveSessions(router);
+  await returnToSessions(router);
+  const pill = await screen.findByRole("button", { name: "2 sessions with new activity ↑" });
+
+  const recording = recordUrls();
+  try {
+    await user.click(pill);
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+    expect(screen.queryByRole("button", { name: /with new activity/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("an expired anchor refetches", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+  try {
+    const { router } = await renderApp("/acme/support-bot/sessions");
+    await screen.findByRole("grid", { name: "Sessions" });
+    await leaveSessions(router);
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    const recording = recordUrls();
+    try {
+      await returnToSessions(router);
+      await waitFor(() => {
+        expect(recording.urls.some(isListRequest)).toBe(true);
+      });
+      expect(recording.urls.some(isCheckRequest)).toBe(false);
+    } finally {
+      recording.stop();
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a new window keeps the old rows dimmed", async () => {
+  server.use(
+    http.get(SESSIONS_ENDPOINT, async ({ request }) => {
+      if (new URL(request.url).searchParams.has("filter")) {
+        await new Promise(() => {});
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/sessions");
+  await screen.findByRole("grid", { name: "Sessions" });
+  await router.navigate({
+    to: "/$org/$project/sessions",
+    params: SESSIONS_PATH,
+    search: { filter: "status = 'error'" },
+  });
+  const grid = screen.getByRole("grid", { name: "Sessions" });
+  await waitFor(() => {
+    expect(grid).toHaveAttribute("aria-busy", "true");
+  });
+  expect(grid).toHaveTextContent("sess-001");
 });
