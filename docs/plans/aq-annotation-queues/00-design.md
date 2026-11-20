@@ -114,6 +114,7 @@ Queues and items live in `meta.db`: they are few, mutable and need atomic claims
 | `GET /annotation-queues/{id}/items?status=&cursor=` | items by id: target, state, `leased_by_user_id` while the lease is live, `done_by_user_id`, `done_at`, `skip_reason`. User ids only, never names (D-P-67); the web resolves names through the members list |
 | `POST /annotation-queues/{id}/items` | `{items: [{trace_id} \| {trace_id, span_id} \| {session_id}]}`, 1–1 000, the queue's kind only; `201 {added, existing, skipped: [{index, message}]}`; existing items keep their state |
 | `POST /annotation-queues/{id}/items/matching/preview` · `POST …/items/matching` | the queue kind's list filter body (filter DSL, `search`, `[from, to)`, `include_experiments`); preview `{matched, capped}`; add `{added, existing, capped}`; at most 10 000 targets per call |
+| `GET /annotation-queues/{id}/items/{item}` | one item (the reviewer page loads it by id) |
 | `DELETE /annotation-queues/{id}/items/{item}` | remove one item |
 | `POST /annotation-queues/{id}/next` | `{after?: item_id}` → the leased item, or `204` when no pending item is free |
 | `POST …/items/{item}/lease` · `DELETE …/items/{item}/lease` | acquire or renew: succeeds when the item is pending and free, expired or the caller's; `409 conflict` with the holder's user id otherwise · release (`204`, also when not held) |
