@@ -269,6 +269,7 @@ pub(super) async fn observe_scores(
                 source: None,
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: None,
                 limit,
                 cursor: cursor.as_deref(),

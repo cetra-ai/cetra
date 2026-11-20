@@ -6922,6 +6922,11 @@ export interface components {
             name: string;
             /** @description Partition key. Spec 01 `project_id`. */
             project_id: components["schemas"]["ProjectId"];
+            /**
+             * Format: uuid
+             * @description Annotation queue the score was written from (D-AQ-6). Spec 01 `queue_id`.
+             */
+            queue_id?: string;
             /** @description Explanation. Spec 01 `reason`. */
             reason?: string;
             /**
@@ -6997,6 +7002,11 @@ export interface components {
             };
             /** @description Score name. */
             name: string;
+            /**
+             * Format: uuid
+             * @description Annotation queue the score is written from (D-AQ-6). Not part of the derived id.
+             */
+            queue_id?: string;
             /** @description Free-text reason for the value. */
             reason?: string;
             /**
@@ -21532,6 +21542,8 @@ export interface operations {
                 evaluator_id?: string;
                 /** @description Scores written by this online rule. */
                 rule_id?: string;
+                /** @description Only scores written from this annotation queue (D-AQ-6). */
+                queue_id?: string;
                 /** @description Inclusive `created_at` start. RFC 3339 or epoch milliseconds. */
                 from?: components["schemas"]["TimeParam"];
                 /** @description Exclusive `created_at` end. RFC 3339 or epoch milliseconds. */

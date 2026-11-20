@@ -143,6 +143,7 @@ One row per live score.
 | `rule_id` | `string` | yes | Online rule that produced the score. |
 | `experiment_id` | `string` | yes | Experiment the score belongs to. |
 | `dataset_item_id` | `string` | yes | Dataset item the score belongs to. |
+| `queue_id` | `string` | yes | Annotation queue the score was written from. |
 | `author_user_id` | `string` | yes | Person who annotated, for human scores. |
 | `metadata` | `string_map` | no | Evaluator metadata. Values are strings. |
 | `created_at` | `timestamp` | no | Creation time. |

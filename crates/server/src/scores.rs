@@ -273,6 +273,7 @@ pub(crate) async fn write(
                 metadata,
                 experiment_id,
                 dataset_item_id,
+                queue_id,
                 ..
             } = item;
             // An experiment score is at least as old as its experiment (D-J-13): a client's
@@ -298,6 +299,7 @@ pub(crate) async fn write(
                 rule_id,
                 experiment_id,
                 dataset_item_id,
+                queue_id,
                 author_user_id: author_user,
                 metadata,
                 created_at,
@@ -669,6 +671,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         }
     }
 
@@ -696,6 +699,7 @@ mod tests {
                 source: None,
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 window: None,
                 limit: 100,
                 cursor: None,
@@ -2095,6 +2099,7 @@ mod tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         let id = "01900000-0000-7000-8000-000000000402";
         let before_cap = app

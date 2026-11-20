@@ -945,6 +945,7 @@ async fn call_evaluator(state: &AppState, job: &ClaimedJob, call: Call) -> Ended
                 metadata: score_metadata(metadata, row.id, evaluator_version, truncated),
                 experiment_id: None,
                 dataset_item_id: None,
+                queue_id: None,
             };
             let writer = Writer::Evaluator {
                 kind,
@@ -4155,6 +4156,7 @@ mod job_tests {
             metadata: BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         let writer = Writer::Evaluator {
             kind: EvaluatorKind::LlmJudge,

@@ -17141,6 +17141,16 @@
             }
           },
           {
+            "name": "queue_id",
+            "in": "query",
+            "description": "Only scores written from this annotation queue (D-AQ-6).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "description": "Inclusive `created_at` start. RFC 3339 or epoch milliseconds.",
@@ -26992,6 +27002,11 @@
             "$ref": "#/components/schemas/ProjectId",
             "description": "Partition key. Spec 01 `project_id`."
           },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Annotation queue the score was written from (D-AQ-6). Spec 01 `queue_id`."
+          },
           "reason": {
             "type": "string",
             "description": "Explanation. Spec 01 `reason`."
@@ -27119,6 +27134,11 @@
           "name": {
             "type": "string",
             "description": "Score name."
+          },
+          "queue_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Annotation queue the score is written from (D-AQ-6). Not part of the derived id."
           },
           "reason": {
             "type": "string",

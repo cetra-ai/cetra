@@ -490,6 +490,7 @@ pub fn parquet_file(data: &[u8]) {
             ScoreListRequest {
                 evaluator_id: None,
                 rule_id: None,
+                queue_id: None,
                 target: None,
                 trace_id: None,
                 span_id: None,

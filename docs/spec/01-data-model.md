@@ -201,6 +201,7 @@ Scores are high-volume (online judges can score every trace) and must be joinabl
 | `rule_id` | Utf8, nullable | online rule that produced it |
 | `experiment_id` | Utf8, nullable | |
 | `dataset_item_id` | Utf8, nullable | |
+| `queue_id` | Utf8, nullable | annotation queue the score was written from (D-AQ-6); not part of the derived id |
 | `author_user_id` | Utf8, nullable | for `human` |
 | `metadata` | Map(Utf8, Utf8) | |
 | `created_at` | Timestamp | partition day |

@@ -695,6 +695,7 @@ mod tests {
             rule_id: Some(Uuid::from_u128(3)),
             experiment_id: Some(Uuid::from_u128(4)),
             dataset_item_id: Some(Uuid::from_u128(5)),
+            queue_id: Some(Uuid::from_u128(7)),
             author_user_id: Some(Uuid::from_u128(6)),
             metadata,
             created_at,
