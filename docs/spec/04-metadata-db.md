@@ -533,6 +533,8 @@ The LLM kinds carry a chat connection and model (candidate summaries, naming), a
 
 `issue_refits` is the history of a source's refits (D-IC-8, D-IC-12): `trigger` is `schedule` or `manual`; the counts are the pending candidates read, the clusters found, the issues created, the candidates joined and the outliers; `error_class` is set when the refit stopped early. The last 50 refits of a source are kept.
 
+`issue_sources.last_notified_at` is the cut-off of the source's notifications, in nanoseconds: enabling a source, or giving it its first channel, sets it to now, so no backlog is sent (D-IC-21). `issue_source_channels` holds the source's notification channels, for new and regressed issues: at most 10 per source, both foreign keys cascade. `issue_notifications` holds one digest per message: `digest` is the JSON `{"items":[{"issue_id","kind":"created"|"regressed","title"}],"more":n}`, at most 20 items, newest first, `more` the count of the rest. A source sends at most one digest per 10 minutes, to each of its channels, through the delivery loop of § Alerts. Digests are pruned like alert events, after 90 days, with their deliveries (D-IC-21).
+
 ```sql
 CREATE TABLE issue_sources (
   id TEXT PRIMARY KEY,
@@ -560,6 +562,7 @@ CREATE TABLE issue_sources (
   budget_period TEXT,                 -- 'day' or 'month'
   paused_detail TEXT,                 -- the provider's error text for a connection pause
   next_refit_at INTEGER,              -- ns
+  last_notified_at INTEGER,           -- ns; the last issue notification cut-off (D-IC-21)
   UNIQUE (project_id, name)
 );
 
@@ -585,6 +588,7 @@ CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
     WHERE fingerprint IS NOT NULL;
 CREATE INDEX issues_project_last_seen ON issues (project_id, last_seen DESC, id);
 CREATE INDEX issues_merged_into ON issues (merged_into) WHERE merged_into IS NOT NULL;
+CREATE INDEX issues_source ON issues (source_id);
 
 CREATE TABLE issue_events (
   id TEXT PRIMARY KEY,
@@ -653,11 +657,26 @@ CREATE TABLE issue_refits (
   error_class TEXT
 );
 CREATE INDEX issue_refits_source ON issue_refits (source_id, started_at DESC);
+
+CREATE TABLE issue_source_channels (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, channel_id)
+);
+CREATE INDEX issue_source_channels_channel ON issue_source_channels (channel_id);
+
+CREATE TABLE issue_notifications (
+    id         TEXT PRIMARY KEY,
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    digest     TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX issue_notifications_created ON issue_notifications (created_at);
 ```
 
 ## Alerts
 
-Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10).
+Track K (07, D-K-1–D-K-16). `config_enc` is sealed JSON (§ Encryption of secrets) and is listed in `crypto::ENCRYPTED_COLUMNS`. `alert_rules.config` is the normalized condition JSON (07); `state` is `ok`, `firing` or `no_data`; `clear_streak` counts clear or insufficient evaluations while firing. `alert_events.kind` is `fired`, `resolved` or `reminder`, and `details` snapshots the rule's name, metric, comparator, window and filter. `notification_deliveries.status` is `pending`, `sent` or `failed`; `next_attempt_at` is set while pending. Events are kept 90 days, finished deliveries 30 days (D-K-10). A delivery belongs to an alert event or to an issue notification, never both (D-IC-21).
 
 ```sql
 CREATE TABLE notification_channels (
@@ -719,19 +738,22 @@ CREATE INDEX alert_events_rule ON alert_events(rule_id, created_at);
 CREATE INDEX alert_events_created ON alert_events(created_at);
 
 CREATE TABLE notification_deliveries (
-  id TEXT PRIMARY KEY,
-  event_id TEXT NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
-  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
-  status TEXT NOT NULL,
-  attempts INTEGER NOT NULL DEFAULT 0,
-  next_attempt_at INTEGER,
-  last_error TEXT,
-  created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
+    issue_notification_id TEXT REFERENCES issue_notifications(id) ON DELETE CASCADE,
+    channel_id            TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    status                TEXT NOT NULL,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       INTEGER,
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))
 );
 CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next_attempt_at);
 CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id);
 CREATE INDEX notification_deliveries_channel ON notification_deliveries(channel_id, updated_at);
+CREATE INDEX notification_deliveries_issue ON notification_deliveries(issue_notification_id);
 ```
 
 ## Entitlements (track P)

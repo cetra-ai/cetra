@@ -243,17 +243,12 @@ This gives, with no new storage:
 ### D-IC-14 Links
 
 - **Alerts** (track K):
-  - **Condition.** A new condition `issue_occurrences` measures the number of occurrence scores whose `created_at` falls in the window. Its scope is one issue (`issue_id`, with its merged set) or one source (`source_id`: every issue of the source that is not ignored or merged, read from `meta.db` at each evaluation, at most 1 000 names).
-    - The comparators and the state model are K's (D-K-4). Like `cost`, it has no `min_count`: zero occurrences is a value, not "no data".
-    - A new storage read, `alert_count_scores(project, names, window)`, counts the live scores of a name list; it ships in M4.
-    - Since `created_at` is the trace's start (D-IC-11), joins made late by a refit can fall before the window and are not counted. Users who need them pick a window longer than the refit period.
-  - **Notifications.** Each source has an optional list of channels for **new issue** and **regressed issue** notifications. These are deliveries through K's channels, delivery loop and retries (D-K-7), not rule events.
-    - `notification_deliveries` gets a nullable `issue_event_id` (FK to `issue_events`, `ON DELETE CASCADE`), its `event_id` becomes nullable, and a CHECK makes exactly one of the two set.
-    - `issue_sources.last_notified_at` limits a source to one message per 10 minutes: the alert tick collects the source's `created` and `regressed` events since then, at most 20 named and a count of the rest, into one message per channel, tied to the newest event.
-- **Datasets** (track J): "Add examples to dataset" on an issue adds up to 100 of its most recent occurrence traces through J's add-from-trace path, with `metadata.issue_id`.
+  - **Condition.** See D-IC-20.
+  - **Notifications.** See D-IC-21.
+- **Datasets** (track J): "Add examples to dataset" on an issue adds up to 100 of its most recent occurrence traces through J's bulk-add code, with metadata `cetra.issue_id` (D-IC-22).
 - **Annotation queues** (track AQ): "Send to queue" on an issue, through AQ's add-items API, in the milestone after AQ's API lands. IC does not design queues.
 - **Trace view**: an Issues chip row on a trace or session links to each issue, and the trace list gets an "Issue" facet.
-- **MCP**: a read-only `list_issues` tool (open issues of a project with counts) joins H's tools.
+- **MCP** (D-IC-24): a read-only `list_issues` tool (open issues of a project with counts) joins H's tools.
 
 ### D-IC-15 Crate boundaries
 
@@ -263,7 +258,7 @@ This gives, with no new storage:
   - a generic structured completion that takes any JSON schema, so the judge path and the summary and naming calls share one adapter path; the judge keeps its `submit_judgement` tool name;
   - the error-message normalization and the fingerprint, as pure functions;
   - the cosine, running-mean and average-linkage clustering, as pure functions. They are kept here so the server crate holds no numeric code, and they are tested with property tests.
-- **`cetra-storage`.** `error_spans` (M1, D-IC-2), and a name-list form of the score reads for the issue counts (M1) and `alert_count_scores` (M4, D-IC-14).
+- **`cetra-storage`.** `error_spans` (M1, D-IC-2), and a name-list form of the score reads for the issue counts (M1) and `AlertMeasure::ScoreCount` (M4, D-IC-20).
 - **`cetra-server`.**
   - an `issues/` module with the tables, sources, sweeper hooks, worker job kinds, the refit loop, the routes, and the deletion and pruning hooks;
   - the K condition and notifications, in `alerts/`.
@@ -309,6 +304,45 @@ These are fixed here so the plans copy them, not choose them.
 - **Naming waits for a slot.** A refit takes a chat-connection slot for each naming call, retrying every second for up to 2 minutes. If none comes, the refit stops with error class `busy`, and the issues it already created stay.
 - **Embedding connection test.** `POST …/llm-connections/{id}/test` takes an optional `embedding_model`. When it is set, the test embeds `"ping"` instead of asking for a judgement. A success resumes the sources paused for that connection.
 
+### D-IC-20 The issue_occurrences condition
+- K gets a fifth metric `issue_occurrences` (amends D-K-2 "four conditions" and spec 07). `AlertCondition` gains two optional fields `issue_id` and `source_id` (UUID strings). Exactly one of them is set for `issue_occurrences`; both must be absent for the other metrics (D-K-2's "fields that do not apply must be absent").
+- For `issue_occurrences`: `filter`, `min_count`, `target`, `score_name`, `aggregation` are refused ("does not apply"). `threshold` is finite and >= 0. The value is the count; zero is a value (like `cost`), never "no data".
+- The window of an `issue_occurrences` rule is `15m` or more: `1m` and `5m` are refused (400 `condition.window`: "issue occurrences need a window of 15m or more"). An occurrence is written after its trace completes (a rooted trace idle 5 s, else the 60 s timeout, then the sweep), later than its `created_at` (the trace's start), so a window of a few minutes would miss occurrences written after the window moved on. Docs advise `1h` or more for LLM issues (refit lag).
+- `checked_condition` checks the issue or source exists in the rule's project (400 `condition.issue_id` / `condition.source_id`: "no such issue in this project" / "no such issue source in this project").
+- Storage: no new function; the existing `alert_value` gets a new measure. `cetra_storage::AlertMeasure` gets a variant `ScoreCount { names: Vec<String> }`: the number of live scores whose name is in `names` and whose `created_at` is in the window. No trace filter, no default exclusions, any target. At most `MAX_COUNT_NAMES` (1 000) names, else `InvalidRequest`. `AlertValue { count: n, value: Some(n as f64) }`.
+- Names at each evaluation (server, `alerts/evaluate.rs` before building the request):
+  - issue scope: resolve the issue; if it is merged, use its `merged_into` target (merges are retargeted, so one hop). Names = the target and every issue merged into it (`issue:<id>` each).
+  - source scope: every issue of the source whose state is not `ignored` or `merged`, plus the issues merged into each.
+  - The names are split into chunks of `MAX_COUNT_NAMES`, one `alert_value` each, counts summed (no cap on names).
+- If the issue or the source no longer exists (source deleted), the evaluation fails with the fixed reason `issue not found` / `issue source not found`, handled like any failed measure read (K's existing path). Deleting a source does not touch alert rules.
+- A rule on `issue_occurrences` counts toward D-K-14's rule limit like any rule.
+
+### D-IC-21 Issue notifications
+- Each issue source has one optional list of notification channels (K's project channels), used for both **new** and **regressed** issues: table `issue_source_channels(source_id, channel_id)`, both FKs `ON DELETE CASCADE`, primary key on the pair, index on `channel_id`. At most 10 channels per source, validated like `checked_channels` (owned by the project, no duplicates). Source create/update requests and responses get `channel_ids`. Permission: the source routes' (`ManageEvaluation`).
+- `issue_sources.last_notified_at INTEGER` (nullable). Enabling a source (create enabled, or disabled → enabled) sets it to now, so a backlog is never sent. The same when a source's channel list goes from empty to non-empty (a create with channels counts only if the source is enabled; an update): `last_notified_at` is set to now. Changing a non-empty list to another non-empty list, or to empty, does not touch it.
+- Replaces D-IC-14's `issue_event_id` column: a new table `issue_notifications(id TEXT PK, source_id TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE, digest TEXT NOT NULL, created_at INTEGER NOT NULL)`. `digest` is JSON: `{"items":[{"issue_id","kind":"created"|"regressed","title"}], "more": n}` (at most 20 items, newest first). `notification_deliveries` is rebuilt (SQLite cannot drop NOT NULL): `event_id` nullable, new nullable `issue_notification_id REFERENCES issue_notifications(id) ON DELETE CASCADE`, `CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))`, the three existing indexes kept plus one on `issue_notification_id`.
+- The tick: the alert evaluation loop (each tick) runs `notify_issues(state, now)`. For each enabled source of an active project in an active org with at least one channel and `last_notified_at <= now - 10 min`: collect `issue_events` of its issues with kind `created` or `regressed` and `last_notified_at < at <= now - ISSUE_NOTIFY_SETTLE_NS` (a 60 s settle margin, so an event whose transaction committed a little after its `at` is not lost; `issue_events.at` is the write-time `now`). None → nothing. Else, in one transaction: insert one `issue_notifications` row (digest of up to 20, newest first, `more` = the rest), one pending delivery per channel, and set `last_notified_at` = the newest event's `at`. Events at or before `last_notified_at` are never sent. The cut-off is the newest collected event's `at`, which is up to the settle margin (60 s) older than the moment of the send, so two digests of one source are at least about 9 to 10 minutes apart (10 minutes from the first cut-off, not from the first send). Events of an issue that is ignored or merged by the time of the tick are still sent (accepted). A paused source still notifies; a disabled source does not.
+- Delivery: `due_deliveries` returns both kinds (rule deliveries as today; issue deliveries joined through `issue_notifications` → `issue_sources` → projects → orgs). Retries, backoff, `MAX_ATTEMPTS`, the delivery header and pruning are K's. `issue_notifications` are pruned like `alert_events` (90 days, cascading their deliveries).
+- Messages: webhook kind `issues.detected` with `{source_id, source_name, project, items, more, issues_url}`; Slack: a header "N new or regressed issues in <source>" ("1 new or regressed issue in <source>" for one), up to 20 lines (kind word + title linked to the issue page), "and N more", a button "View issues" → `/<org>/<project>/issues?source=<id>`; email: a new `Email::Issues` variant and `issue_notification.{html,txt}` templates, subject `"[<PRODUCT>] <N> new or regressed issues: <source name>"` (`issue` for N = 1, in the subject and the body). Email quota (D-K-19) applies as for alerts. The channel test-send is unchanged (alert sample).
+- Titles go to the user's own channels (as rule names do); logs carry ids and counts only.
+
+### D-IC-22 Add examples to a dataset
+- Route `POST /api/v1/projects/{project}/issues/{issue}/dataset-items`, body `{"dataset": "<id or name>", "limit": 1..=100 (default 100)}`, permission `ManageDatasets`. Answer: J's `FromTracesResult` (201).
+- The server picks the most recent occurrences by `created_at` of the issue and up to 7 merged issues (the 8 names the occurrences examples use: the merged issues with the most occurrences over the default occurrences window, the last 14 days ending now), one per trace (distinct traces), up to `limit`, any issue state. Each item uses the occurrence's span (`cetra.issue.span_id` in the score metadata) when present, else the trace root.
+- It reuses J's bulk-add code: the core of `add_from_traces` is extracted into a `pub(crate)` function taking the trace refs and a metadata map; the public J route passes an empty map, so J's API and D-J-25 are unchanged. Items get metadata `{"cetra.issue_id": "<issue id>"}` (namespaced like other `cetra.*` keys; amends D-IC-14's `metadata.issue_id`).
+- Web: "Add examples to dataset" on the issue page (members with `canManageDatasets`), a dialog with J's dataset picker (search + new dataset) and the result view with skipped traces, as `add-traces-to-dataset-dialog.tsx` does.
+
+### D-IC-23 Create alert from an issue
+- The issue page gets "Create alert": it opens `alerts/new` with search params `metric=issue_occurrences&issue_id=<id>`, and `RuleForm` takes initial values (prefill only; the user saves). Defaults: window 1h, comparator gt, threshold 0.
+- The rule form's metric picker gets "Issue occurrences" with an issue-or-source scope picker.
+
+### D-IC-24 MCP list_issues
+- An eighth read-only tool `list_issues` (amends D-H-11 "seven"). Arguments: `project` (required), `state` (`open` default, `resolved`, `ignored`, `all`), `source` (id, optional), `limit` (1–100, default 20), `max_chars`. Output `{issues: [{id, title, kind, state, regressed, source_id, first_seen, last_seen, count_7d, users_7d, url}], truncated, notes}`, sorted by last_seen desc. Counts over the last 7 days through the same tally helper as `GET /issues` (moved from `routes/issues.rs` to `issues/` as `pub(crate)`). `ProjectPerm::View`.
+
+### D-IC-25 End-to-end coverage
+- The CLI e2e (`crates/cli/tests/e2e.rs`) covers error issues with the real binary: an error trace creates an open issue with the trace as an example, resolve, a second trace regresses it, then "add examples to dataset" copies it. It does not wait for alerts (60 s tick).
+- Alerts on `issue_occurrences` and issue notifications are covered in-process with `AlertTiming::TEST`, a `HookReceiver` and the manual clock (the 10-minute throttle).
+
 ## Architecture
 
 ```
@@ -326,8 +360,10 @@ issue events (created, regressed) ─► K channels       occurrence scores ─�
 
 | Table | Holds |
 |---|---|
-| `issue_sources` | id, project, name, kind, filter, sample_rate, daily_cap, score_names, feedback_sources, chat connection and model, embedding connection, model and dimension, floor, min_issue_size, budget, enabled, paused and reason, notification channel ids, last_notified_at, created_by, timestamps |
+| `issue_sources` | id, project, name, kind, filter, sample_rate, daily_cap, score_names, feedback_sources, chat connection and model, embedding connection, model and dimension, floor, min_issue_size, budget, enabled, paused and reason, last_notified_at, created_by, timestamps |
 | `issues` | id (UUIDv7), project, source, fingerprint (error kind, unique per source), title, description, state, regressed, merged_into, centroid BLOB, member_count, first_seen, last_seen, occurrence_count, resolved_at and by, timestamps |
+| `issue_source_channels` | source, channel (the source's notification channels, D-IC-21) |
+| `issue_notifications` | id, source, digest (JSON: up to 20 items, newest first, and `more`), created_at |
 | `issue_source_days` | source, UTC day, candidates accepted, USD spent (the daily cap and the budget, as `rule_spend`) |
 | `issue_candidates` | id, project, source, trace_id, span_id, session_id, user_id, trace_start, score_id, status (`queued`, `running`, `pending`, `assigned`, `outlier`, `dropped`, `failed`, `skipped`), the queue columns of D-IC-12, issue, summary, summary_prompt_version, vector BLOB, model, dimension, call trace id, cost, error class, timestamps; unique on `dedup_key` (`<source>:<trace>`, `:<span>` or `:session:<id>`) |
 | `issue_events` | id, issue, kind (`created`, `state_changed`, `renamed`, `merged`, `regressed`), actor, from and to, at |
@@ -350,7 +386,7 @@ Deletion (track M):
 | `POST …/issues/{id}/merge` | `{into}` |
 | `GET …/issues/{id}/occurrences` | daily counts and the newest examples |
 | `GET …/issues/{id}/events` | history |
-| `POST …/issues/{id}/dataset-items` | `{dataset_id, limit ≤ 100}` |
+| `POST …/issues/{id}/dataset-items` | `{dataset, limit ≤ 100}` |
 
 Permissions follow online rules (D-I-24): members manage sources, viewers read issues, and members change states.
 
@@ -368,7 +404,7 @@ Each milestone ends in working, tested behaviour, with its spec sections, `CHANG
 | **M1** Error issues | The `error_spans` storage read, sources (kind `error` only), the `issues` and `issue_events` tables, fingerprinting on completed traces through I's sweeper, occurrence scores (`ScoreSource::Issue`), the lifecycle (resolve, ignore, reopen, regression) and merge, the issues and sources API, the Issues list and page, the source editor for errors, the trace chips, the facet and filter, the `max_active_issue_sources` limit | I, K, P, M (all done); the coordinator's `ScoreSource::Issue` | Every LLM kind, refit, embeddings, alerts |
 | **M2** Provider calls | `cetra-eval`: the embedding call (OpenAI-compatible, Gemini) with its traced span and price, the generic structured completion, the clustering math with property tests; an embedding model test on the connection test route | E, I (done) | Server use of them |
 | **M3** LLM sources | Kinds `score`, `feedback`, `topic`: the score-write and completion triggers, candidates, summarize and embed jobs on I's dispatcher, the budget and pauses, assignment, the refit with naming, the refit history and "Refit now", candidate pruning, the deletion cascade for candidates, the editor for LLM kinds | M1, M2 | Alerts, datasets |
-| **M4** Links | `alert_count_scores` in storage, K's `issue_occurrences` condition, the `notification_deliveries` change and the new or regressed notifications, "Add examples to dataset", MCP `list_issues`, the end-to-end test | M3; K, J, H (done) | Annotation queues |
+| **M4** Links | `AlertMeasure::ScoreCount` in storage, K's `issue_occurrences` condition, the `notification_deliveries` change and the new or regressed notifications, "Add examples to dataset", MCP `list_issues`, the end-to-end test | M3; K, J, H (done) | Annotation queues |
 | **M5** Queues | "Send to queue" from an issue | M4 and AQ's API | — |
 
 M1 and M2 can run in parallel: M1 touches `cetra-core`, `cetra-storage`, `cetra-server` and `web/`, and M2 only `cetra-eval`; they share `CHANGELOG.md` and the decision log, merged by hand. There is no backfill: a source sees traces and scores from its creation on (a non-goal of the MVP; I's backfill is the model if users ask). M5 is a small plan written when AQ has landed.
