@@ -205,7 +205,18 @@ describe("checkPage", () => {
 
   it("holding page links skipped before launch", () => {
     const body = '<h1>A</h1><a href="/">Home</a><a href="/#product">Product</a>';
-    assert.deepEqual(checkPage("/x/", page({ body }), noindex), []);
+    assert.deepEqual(checkPage("/x/", page({ body }), { ...noindex, launched: false }), []);
+  });
+
+  it("home links are checked after launch", () => {
+    const body = '<h1>A</h1><a href="/">Home</a><a href="/#product">Product</a>';
+    const options = { noindex: true, launched: true };
+    assert.deepEqual(checkPage("/x/", page({ body }), { ...options, distFiles: new Set() }), [
+      "broken internal link: /",
+      "broken internal link: /#product",
+    ]);
+    const distFiles = new Set(["/index.html"]);
+    assert.deepEqual(checkPage("/x/", page({ body }), { ...options, distFiles }), []);
   });
 
   it("external, mailto and in-page links not checked", () => {
@@ -299,7 +310,7 @@ describe("listedRoutes", () => {
     "/404.html",
   ]);
 
-  it("lists the built non-docs pages, without the holding page before launch", () => {
+  it("lists the built non-docs pages, and / only after launch", () => {
     assert.deepEqual(listedRoutes(distFiles, false), ["/styleguide/"]);
   });
 
