@@ -695,6 +695,12 @@
           "description": "Dataset item the score belongs to."
         },
         {
+          "name": "queue_id",
+          "column_type": "string",
+          "nullable": true,
+          "description": "Annotation queue the score was written from."
+        },
+        {
           "name": "author_user_id",
           "column_type": "string",
           "nullable": true,

@@ -1,0 +1,111 @@
+---
+title: GitHub Copilot
+description: "Send GitHub Copilot CLI and VS Code Copilot Chat traces to cetra with the environment variables and VS Code settings that setup prints."
+---
+
+import Backing from "../../../../components/Backing.astro";
+
+This page shows how to send GitHub Copilot's traces to cetra. Copilot has no settings file that setup can edit, so `cetra agents setup copilot` prints the settings for you to add yourself.
+
+<Backing fixtures={["genai/copilot-cli-tool"]} />
+
+This integration is documented, not captured: the repository holds no recorded run of Copilot. Its fixture is written by hand from GitHub's attribute reference.
+
+## Connect Copilot
+
+1. Create a project key with the `ingest` scope in the project's [API keys](/docs/platform/api-keys/) page. Copy the `sk-cetra-…` value.
+2. Run this in a terminal, with `<SK_CETRA_KEY>` set to your key and `<CETRA_URL>` set to your server:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup copilot --url <CETRA_URL>
+```
+
+Setup writes no files. It prints three things:
+
+- For Copilot CLI, `export` lines to add to your shell profile: `COPILOT_OTEL_ENABLED`, `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` and `OTEL_EXPORTER_OTLP_HEADERS`, which holds your key.
+- For VS Code Copilot Chat, a block of settings to add to your VS Code `settings.json`: the OTLP endpoint and the exporter type. VS Code reads the key from the `OTEL_EXPORTER_OTLP_HEADERS` variable in its own environment.
+- A note, when the URL starts with `http://`, that Copilot CLI does not export to it.
+
+Setup prints the same output with or without `--print`. It does not create the `agents.toml` file for Copilot, and no hooks run.
+
+To remove the settings, delete the lines you added to your shell profile and to VS Code's settings. Setup has nothing to remove.
+
+## What you get
+
+Copilot's spans follow the GenAI conventions, and cetra maps them directly:
+
+- `invoke_agent` is an `agent` span, the root of the turn. Its token totals are not counted, so the tokens come from the model calls;
+- `chat` is an `llm` span, with the model and its token counts;
+- `execute_tool` is a `tool` span named after the tool.
+
+Each trace has these fields:
+
+- the session, from the session id the agent sends;
+- the person, from `enduser.pseudo.id`, which Copilot sends on its spans;
+- `metadata.coding_agent` set to `copilot`;
+- `metadata.repository` and `metadata.branch` from VS Code's `github.copilot.git.repository` and `github.copilot.git.branch` attributes. Copilot CLI sends neither.
+
+Use the [Coding agents dashboard template](/docs/tracing/custom-dashboards/) to see API-equivalent cost per person, repository, branch and session, and tool usage.
+
+## Content
+
+Content is on by default:
+
+- Copilot CLI: setup prints `OTEL_INSTRUMENTATION_GENAI_CAPTURE_CONTENT=SPAN_ONLY`, which puts the messages and the tool arguments and results on the spans.
+- VS Code Copilot Chat: setup prints `captureContent: true`.
+
+With `--no-content`, setup leaves both off, and the spans carry no content.
+
+## API-equivalent cost
+
+cetra prices each model call from its token counts, using its price table. It does not read Copilot's `github.copilot.cost` attribute, because that value is a billing multiplier, not dollars.
+
+API-equivalent cost is what the same tokens would cost at API prices. If you use a Copilot plan, it is not what you pay.
+
+## Self-hosted cetra
+
+Copilot CLI exports only to `https://` endpoints, and `cetra serve` does not serve TLS. On a self-hosted instance, put a reverse proxy with TLS in front of cetra's OTLP port, 4318, and give Copilot CLI the proxy's address.
+
+With Caddy, the proxy gets a certificate for the name you give it:
+
+```caddy
+otel.example.com {
+	reverse_proxy 127.0.0.1:4318
+}
+```
+
+With nginx, use a certificate that you provide:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name otel.example.com;
+    ssl_certificate     /etc/nginx/certs/otel.example.com.crt;
+    ssl_certificate_key /etc/nginx/certs/otel.example.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:4318;
+    }
+}
+```
+
+Then run setup with the proxy's `https://` address:
+
+```bash
+export CETRA_INGEST_KEY=<SK_CETRA_KEY>
+cetra agents setup copilot --url https://otel.example.com
+```
+
+## Limits
+
+- Copilot was not captured. The shapes come from GitHub's attribute reference, and they have not been checked against a real run of Copilot.
+- Copilot CLI exports only to `https://` endpoints. A self-hosted cetra on `http://` cannot receive Copilot CLI's traces, so put a reverse proxy with TLS in front of it (see Self-hosted cetra above). cetra does not serve TLS itself.
+- Copilot CLI has no hook in this integration, so its traces have no repository or branch.
+- `cetra agents setup` does not run on Windows.
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Sessions](/docs/tracing/sessions/): the turns of one Copilot session.
+- [Custom dashboards](/docs/tracing/custom-dashboards/): build your own cost views, or start from the Coding agents template.

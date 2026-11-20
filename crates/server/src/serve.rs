@@ -511,6 +511,13 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     if let Err(error) = crate::eval::trigger::load(&state).await {
         tracing::warn!(error = %error, "pending traces could not be loaded; tracking starts empty");
     }
+    // Losing the load only loses the contexts already posted; hooks post again at the next prompt.
+    match crate::meta::agent_contexts::load_contexts(state.meta.reader()).await {
+        Ok(rows) => state.ingest.contexts().load(rows),
+        Err(error) => {
+            tracing::warn!(error = %error, "agent contexts could not be loaded; starting empty");
+        }
+    }
     // The guard is a safety net for judge runs; the server starts without it.
     if let Err(error) = state
         .deletions
@@ -572,6 +579,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let eval_tasks = crate::eval::spawn(&state, crate::eval::EvalTiming::DEFAULT);
     tasks.push(spawn_deletions(state.clone()));
     tasks.push(spawn_retention(state.clone()));
+    tasks.push(crate::agent_context::spawn_agent_context_sweep(
+        state.clone(),
+    ));
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
@@ -1564,6 +1574,53 @@ mod tests {
                 .unwrap();
         assert_eq!(rows, 1);
         meta.close().await;
+    }
+
+    #[tokio::test]
+    async fn contexts_survive_a_restart() {
+        use crate::meta::agent_contexts::{AgentContextRow, upsert_context};
+        use cetra_core::ids::ProjectId;
+
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(with_init(config(dir.path())), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let project_text: String = sqlx::query_scalar("SELECT id FROM projects")
+            .fetch_one(state.meta.reader())
+            .await
+            .unwrap();
+        let project = ProjectId::from_uuid(uuid::Uuid::parse_str(&project_text).unwrap());
+        let row = AgentContextRow {
+            project_id: project,
+            agent: "codex".to_owned(),
+            session_id: "s1".to_owned(),
+            repository: Some("github.com/acme/app".to_owned()),
+            branch: Some("main".to_owned()),
+            user_id: None,
+            updated_at: state.clock.now_ns(),
+        };
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { upsert_context(conn, &row).await.map(|_| ()) })
+            })
+            .await
+            .unwrap();
+        running.shutdown().await.unwrap();
+
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let contexts = state
+            .ingest
+            .contexts()
+            .project(project)
+            .expect("the project's contexts are loaded before the listeners open");
+        let branch = contexts
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get("codex", "s1")
+            .map(|context| context.branch.clone());
+        assert_eq!(branch, Some(Some("main".to_owned())));
+        running.shutdown().await.unwrap();
     }
 
     #[tokio::test]

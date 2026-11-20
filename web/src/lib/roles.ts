@@ -79,6 +79,16 @@ export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::ManageQueues`: project members and above create, edit and fill queues (D-AQ-11). */
+export function canManageQueues(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::Review`: project members and above review queue items (D-AQ-11). The web session user is never an API key. */
+export function canReview(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Members and above create, edit and delete custom dashboards (spec 09 § Dashboards). */
 export function canManageDashboards(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");

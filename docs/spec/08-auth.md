@@ -105,6 +105,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | Run the playground: model runs through an LLM connection (D-V-26) | | ✓ | ✓ | ✓ |
 | Create prompt versions, move unprotected prompt labels (D-V-13) | | ✓ | ✓ | ✓ |
 | Move protected prompt labels, edit the protected list (D-V-10) | | | ✓ | ✓ |
+| Create and edit annotation queues, add and remove items (D-AQ-11) | | ✓ | ✓ | ✓ |
 | Use the in-app assistant: chat and manage one's own conversations, with a session only (D-AS-4) | | ✓ | ✓ | ✓ |
 | Manage API keys, LLM connections, the assistant setting (D-AS-3), project settings (retention), GDPR deletions | | | ✓ | ✓ |
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
@@ -119,6 +120,8 @@ Playground runs: `ProjectPerm::RunPlayground`. Members and above run through a s
 
 Annotations: a member changes or deletes only their own `human` scores; a project admin may change or delete anyone's (D-I-26, D-I-36). API keys keep their scope rules.
 
+Annotation queues: `ManageQueues` (member, a `write` key, a read-write PAT) for queues and items; `Review` (member, sessions and read-write PATs only) for next, lease, complete, skip and reopen (D-AQ-11).
+
 LLM connections belong to the org. Org admins and owners manage and test them, and every org member can list them without their keys (D-I-4, D-I-24).
 
 Model prices: project admins manage a project's prices (`ProjectPerm::ManageSettings`; API keys cannot); org admins and owners manage the org's prices (`OrgPerm::ManagePrices`); every member can read both, and a `read` key can read a project's (D-T-6).
@@ -129,7 +132,7 @@ Enforced in one place: every route is declared with its access (public, any sign
 
 **Session-only** (a session cookie; a PAT or an API key is refused): creating, listing or revoking API keys and personal access tokens, changing members, roles, overrides or invites, the password and the account name, and dropping a project or an org (D-P-70). Exception: a PAT may revoke itself with `DELETE /api/v1/me/tokens/current` (D140). A PAT with scope `read` may call safe methods (GET, HEAD) only, plus the two reads that use POST: `POST /api/v1/projects/{project}/sql` and `POST /mcp` (D-H-4); `read, write` may call everything except those session-only routes.
 
-API keys are project-bound and their scopes map onto permissions: `ingest` (OTLP + scores write), `read` (safe methods of project-scoped routes, and `POST …/sql`, D-H-4), `write` (datasets, experiments, scores, deletions by trace), `feedback` (public feedback only). Track D enforces `read`; later tracks map `ingest`, `write` and `feedback` (D140). Deletion by user or by filter requires project `admin` with a session or a `read, write` PAT, never an API key; deleting a project requires the **org** role `admin` or `owner` (a project-admin override is not enough), and deleting an org requires `owner`; both need a session, so a stolen PAT cannot drop them (D-M-4, D-P-70). No API key reads the project member list (D-P-67). An `sk` key needs `write`, not `read`, even for `GET …/deletions`: the history names the people whose data was erased.
+API keys are project-bound and their scopes map onto permissions: `ingest` (OTLP, scores write and the coding-agent context), `read` (safe methods of project-scoped routes, and `POST …/sql`, D-H-4), `write` (datasets, experiments, scores, deletions by trace), `feedback` (public feedback only). Track D enforces `read`; later tracks map `ingest`, `write` and `feedback` (D140). Deletion by user or by filter requires project `admin` with a session or a `read, write` PAT, never an API key; deleting a project requires the **org** role `admin` or `owner` (a project-admin override is not enough), and deleting an org requires `owner`; both need a session, so a stolen PAT cannot drop them (D-M-4, D-P-70). No API key reads the project member list (D-P-67). An `sk` key needs `write`, not `read`, even for `GET …/deletions`: the history names the people whose data was erased.
 
 ### Demo org (D187)
 

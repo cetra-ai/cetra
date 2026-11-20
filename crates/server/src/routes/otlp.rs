@@ -1,14 +1,16 @@
 //! `POST /v1/traces`: OTLP/HTTP trace export (spec 02 § Endpoints, D-G-2 to D-G-9), and the
 //! `POST /v1/logs` and `POST /v1/metrics` routes that acknowledge and drop their data
-//! (D-G-40).
+//! (D-G-40), and the `POST /v1/agent-context` route that stores a coding agent's session context
+//! (D-CA-9).
 //!
-//! The routes are key-only (D-G-15) and undocumented (D-G-6). Their bodies are read under their
-//! own cap, so the router's JSON limit does not apply.
+//! The routes are key-only (D-G-15). The three OTLP routes are undocumented (D-G-6), and their
+//! bodies are read under their own cap, so the router's JSON limit does not apply.
+//! `/v1/agent-context` is documented and has its own body limit.
 
 use std::time::Instant;
 
 use axum::body::Body;
-use axum::extract::{Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
@@ -24,9 +26,11 @@ use crate::ingest::body::{BodyFormat, body_encoding, body_format, read_capped};
 use crate::ingest::otlp::export_response;
 use crate::ingest::{Accepted, CommitTarget, IngestError, check_rate, commit_in_task};
 use crate::meta::projects::ProjectRow;
+use crate::routes::agent_context::post_agent_context;
 use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
-/// The OTLP/HTTP route. Undocumented, so it stays out of `openapi.json` (D-G-6).
+/// The OTLP/HTTP routes and `POST /v1/agent-context`. The three OTLP routes are undocumented, so
+/// they stay out of `openapi.json` (D-G-6). `/v1/agent-context` is documented (D-CA-9).
 pub(crate) fn routes() -> Vec<RouteDef> {
     let route = |path, handler| RouteDef {
         method: Method::POST,
@@ -41,6 +45,15 @@ pub(crate) fn routes() -> Vec<RouteDef> {
         route("/v1/traces", post(export)),
         route("/v1/logs", post(export_logs)),
         route("/v1/metrics", post(export_metrics)),
+        RouteDef {
+            method: Method::POST,
+            path: "/v1/agent-context",
+            access: Access::Key {
+                scope: KeyScope::Ingest,
+            },
+            documented: true,
+            handler: post(post_agent_context).layer(DefaultBodyLimit::max(4096)),
+        },
     ]
 }
 
@@ -128,7 +141,10 @@ async fn export_metrics(
 }
 
 /// The org's units cap applies to every OTLP route, so a capped org is refused alike.
-async fn refuse_over_cap(state: &AppState, access: &ProjectAccess) -> Result<(), ApiError> {
+pub(crate) async fn refuse_over_cap(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<(), ApiError> {
     check_cap(state, access.project.org_id)
         .await
         .map_err(|cap| {
@@ -542,7 +558,14 @@ mod tests {
         };
         let prices = PriceTable::new(builtin_price_rows()).expect("built-in prices");
         let request = decode_json(&body).expect("fixture decodes");
-        let expected = normalize(&request, &ctx, &prices).rejections.message();
+        let expected = normalize(
+            &request,
+            &ctx,
+            &prices,
+            &cetra_otel::AgentContexts::default(),
+        )
+        .rejections
+        .message();
         assert_eq!(partial["errorMessage"].as_str(), expected.as_deref());
         assert_eq!(stored_spans(&app, seeded.project.id).await, 1);
     }
@@ -1327,6 +1350,146 @@ mod tests {
             .send()
             .await;
         assert_eq!(no_key.status, StatusCode::UNAUTHORIZED);
+    }
+
+    /// The M1 Claude Code export, with its placeholder session id replaced by `session`.
+    fn claude_export(session: &str) -> Vec<u8> {
+        let text = String::from_utf8(fixture_bytes("claude_code/bash-tool/input.json"))
+            .expect("the fixture is UTF-8");
+        text.replace("capture-volatile-2", session).into_bytes()
+    }
+
+    /// The claude-code context of session `s1`, as `cetra agents hook` posts it.
+    fn s1_context() -> Value {
+        serde_json::json!({
+            "agent": "claude-code",
+            "session_id": "s1",
+            "repository": "https://github.com/Acme/Widgets.git",
+            "branch": "feature/x",
+            "user": "Dev@Example.com",
+        })
+    }
+
+    /// Spans of the project whose stored row matches the SQL `predicate` on `raw_spans`.
+    async fn spans_where(app: &TestApp, project: ProjectId, predicate: &str) -> usize {
+        let query = raw_query(&app.state.storage, project).await;
+        let ctx = SessionContext::new();
+        ctx.register_table("raw_spans", query.spans)
+            .expect("spans register");
+        ctx.sql(&format!("SELECT * FROM raw_spans WHERE {predicate}"))
+            .await
+            .expect("sql")
+            .count()
+            .await
+            .expect("count")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn stamped_after_a_context() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let posted = post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        assert_eq!(posted.status, StatusCode::NO_CONTENT);
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s1"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let total = stored_spans(&app, project).await;
+        assert!(total > 0);
+        assert_eq!(
+            spans_where(
+                &app,
+                project,
+                "metadata['repository'] = 'github.com/acme/widgets' \
+                 AND metadata['branch'] = 'feature/x' AND user_id = 'dev@example.com'"
+            )
+            .await,
+            total
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_stamped_for_another_session() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s2"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        assert!(stored_spans(&app, project).await > 0);
+        assert_eq!(
+            spans_where(&app, project, "metadata['branch'] IS NOT NULL").await,
+            0
+        );
+        assert!(
+            spans_where(
+                &app,
+                project,
+                "metadata['repository'] = 'github.com/acme/widgets'"
+            )
+            .await
+                > 0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn not_stamped_before_the_context() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let response = post_traces(
+            &app,
+            &seeded.ingest_key,
+            "application/json",
+            claude_export("s1"),
+        )
+        .send()
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+        let posted = post_to(
+            &app,
+            "/v1/agent-context",
+            &seeded.ingest_key,
+            "application/json",
+            s1_context().to_string(),
+        )
+        .send()
+        .await;
+        assert_eq!(posted.status, StatusCode::NO_CONTENT);
+        assert!(stored_spans(&app, project).await > 0);
+        assert_eq!(
+            spans_where(&app, project, "metadata['branch'] IS NOT NULL").await,
+            0
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

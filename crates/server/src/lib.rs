@@ -8,6 +8,7 @@
 
 pub mod admin;
 pub mod admin_socket;
+pub(crate) mod agent_context;
 pub(crate) mod alerts;
 pub mod api;
 pub(crate) mod assistant;

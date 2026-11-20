@@ -90,6 +90,7 @@ export default defineConfig({
                     { label: "Overview", link: "/docs/evaluation/" },
                     { label: "Scores", link: "/docs/evaluation/scores/" },
                     { label: "Human annotation", link: "/docs/evaluation/annotation/" },
+                    { label: "Annotation queues", link: "/docs/evaluation/annotation-queues/" },
                     { label: "Evaluators and LLM judges", link: "/docs/evaluation/evaluators/" },
                     { label: "LLM connections", link: "/docs/evaluation/llm-connections/" },
                     { label: "Online rules", link: "/docs/evaluation/online-rules/" },
@@ -189,6 +190,15 @@ export default defineConfig({
                     { label: "CrewAI", link: "/docs/integrations/crewai/" },
                     { label: "DSPy", link: "/docs/integrations/dspy/" },
                     { label: "Google ADK", link: "/docs/integrations/google-adk/" },
+                  ],
+                },
+                {
+                  label: "Coding agents",
+                  items: [
+                    { label: "Claude Code", link: "/docs/integrations/claude-code/" },
+                    { label: "Codex CLI", link: "/docs/integrations/codex/" },
+                    { label: "Gemini CLI", link: "/docs/integrations/gemini-cli/" },
+                    { label: "GitHub Copilot", link: "/docs/integrations/copilot/" },
                   ],
                 },
                 {

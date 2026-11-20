@@ -457,7 +457,7 @@ async fn matching(
         },
     )
     .await?;
-    Ok(ids)
+    Ok(ids.into_iter().map(|target| target.trace_id).collect())
 }
 
 /// Blank filter or search text means "no filter". The stored text is not trimmed.

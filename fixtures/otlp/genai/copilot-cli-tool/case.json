@@ -1,0 +1,8 @@
+{
+  "description": "GitHub Copilot CLI turn as documented by GitHub (spans invoke_agent, chat, execute_tool; GenAI semconv with content capture SPAN_ONLY).",
+  "origin": "hand_written",
+  "spec_refs": [
+    "02 § Convention detection"
+  ],
+  "notes": "Copilot has no base-URL override, so it cannot be captured (D-CA-12). Attributes from docs.github.com/en/copilot/reference/enterprise-administrators/opentelemetry-reference, 2026-11-20."
+}

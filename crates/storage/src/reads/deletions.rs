@@ -3,7 +3,7 @@
 //! The server resolves a request to trace ids (and session ids for a user) before it
 //! registers it with [`crate::Storage::register_deletion`].
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -20,6 +20,7 @@ use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{col, lit};
 use futures::StreamExt;
 
+use super::targets::{TraceTarget, start_column};
 use super::{ListScope, present, scoped_traces};
 use crate::filter::{Filter, FilterView, search};
 use crate::query_error::{RunError, classify};
@@ -57,11 +58,11 @@ pub struct UserDeletionScope {
     pub session_ids: Vec<String>,
 }
 
-/// Trace ids of the traces-view rows that pass the window, the default exclusions, the
-/// search and the filter, exactly as the trace list selects them. At most `limit`, sorted
-/// by bytes, no duplicates. No order is applied before the limit: when more than `limit`
-/// traces match, which ones come back is unspecified. The server only uses the result as
-/// a set, or checks its length against the cap.
+/// The traces of the traces-view rows that pass the window, the default exclusions, the
+/// search and the filter, exactly as the trace list selects them, each with its `start_time`.
+/// At most `limit`, sorted by trace id, no duplicates. No order is applied before the limit:
+/// when more than `limit` traces match, which ones come back is unspecified. The server only
+/// uses the result as a set, or checks its length against the cap.
 ///
 /// # Errors
 ///
@@ -70,7 +71,7 @@ pub struct UserDeletionScope {
 pub async fn filter_trace_ids(
     ctx: &QueryContext,
     request: FilterDeletionRequest<'_>,
-) -> Result<Vec<TraceId>, RunError> {
+) -> Result<Vec<TraceTarget>, RunError> {
     let filter = match present(request.filter) {
         Some(text) => Some(ctx.parse_filter(FilterView::Traces, text)?),
         None => None,
@@ -85,7 +86,7 @@ async fn matching(
     ctx: &QueryContext,
     request: &FilterDeletionRequest<'_>,
     filter: Option<Filter>,
-) -> Result<Vec<TraceId>, RunError> {
+) -> Result<Vec<TraceTarget>, RunError> {
     let references_environment = filter
         .as_ref()
         .is_some_and(|filter| filter.references_environment);
@@ -104,16 +105,38 @@ async fn matching(
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
     let frame = frame
-        .select(vec![col(traces::TRACE_ID)])
+        .select(vec![col(traces::TRACE_ID), col(traces::START_TIME)])
         .map_err(classify)?
         .limit(0, Some(request.limit))
         .map_err(classify)?;
     let batches = frame.collect().await.map_err(|error| ctx.fail(error))?;
-    let mut ids = BTreeSet::new();
-    for batch in &batches {
-        collect_ids(batch, 0, &mut ids)?;
+    let targets = collect_targets(&batches)?;
+    Ok(targets
+        .into_iter()
+        .map(|(trace_id, start_time)| TraceTarget {
+            trace_id,
+            start_time,
+        })
+        .collect())
+}
+
+/// Trace ids (column 0) and start times (column 1) of `batches`. A trace that appears twice
+/// keeps its smallest start.
+fn collect_targets(batches: &[RecordBatch]) -> Result<BTreeMap<TraceId, i64>, RunError> {
+    let mut found: BTreeMap<TraceId, i64> = BTreeMap::new();
+    for batch in batches {
+        let ids = utf8(batch.column(0))?;
+        let ids = ids.as_string::<i32>();
+        let starts = start_column(batch.column(1))?;
+        for row in 0..batch.num_rows() {
+            let id = TraceId::from_str(ids.value(row)).map_err(|_| bad_id())?;
+            found
+                .entry(id)
+                .and_modify(|start| *start = (*start).min(starts.value(row)))
+                .or_insert_with(|| starts.value(row));
+        }
     }
-    Ok(ids.into_iter().collect())
+    Ok(found)
 }
 
 /// Trace ids and session ids of the `spans` rows with `user_id = user_id` and
@@ -259,12 +282,71 @@ async fn eval_scan(
     Ok(found.into_iter().collect())
 }
 
-fn arrow_failure(error: ArrowError) -> RunError {
+/// The distinct non-null `session_id`s of the spans of `traces` (D-AQ-9: annotation-queue
+/// session items follow the deletion of any of their traces). Sorted, no duplicates. One scan
+/// of the project's spans; the match against `traces` is done in memory, batch by batch. An
+/// empty `traces` returns at once without a query.
+///
+/// # Errors
+///
+/// [`RunError::Timeout`]; the query's other errors as `ctx.fail` classifies them.
+pub async fn session_ids_of_traces(
+    ctx: &QueryContext,
+    traces: &HashSet<TraceId>,
+    timeout: Duration,
+) -> Result<Vec<String>, RunError> {
+    if traces.is_empty() {
+        return Ok(Vec::new());
+    }
+    match tokio::time::timeout(timeout, session_scan(ctx, traces)).await {
+        Err(_) => Err(RunError::Timeout),
+        Ok(result) => result,
+    }
+}
+
+async fn session_scan(
+    ctx: &QueryContext,
+    traces: &HashSet<TraceId>,
+) -> Result<Vec<String>, RunError> {
+    let frame = ctx
+        .session()
+        .table("spans")
+        .await
+        .map_err(classify)?
+        .filter(col(spans::SESSION_ID).is_not_null())
+        .map_err(classify)?
+        .select(vec![col(spans::TRACE_ID), col(spans::SESSION_ID)])
+        .map_err(classify)?;
+    let mut stream = frame
+        .execute_stream()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let mut found = BTreeSet::new();
+    while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| ctx.fail(error))?;
+        let ids = utf8(batch.column(0))?;
+        let ids = ids.as_string::<i32>();
+        let sessions = utf8(batch.column(1))?;
+        let sessions = sessions.as_string::<i32>();
+        for row in 0..batch.num_rows() {
+            if sessions.is_null(row) {
+                continue;
+            }
+            let trace = TraceId::from_str(ids.value(row)).map_err(|_| bad_id())?;
+            if traces.contains(&trace) {
+                found.insert(sessions.value(row).to_owned());
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
+}
+
+pub(super) fn arrow_failure(error: ArrowError) -> RunError {
     RunError::Internal(DataFusionError::ArrowError(Box::new(error), None))
 }
 
 /// The column as `Utf8`, whether the view yields `Utf8` or `Utf8View`.
-fn utf8(column: &ArrayRef) -> Result<ArrayRef, RunError> {
+pub(super) fn utf8(column: &ArrayRef) -> Result<ArrayRef, RunError> {
     cast(column, &DataType::Utf8).map_err(arrow_failure)
 }
 
@@ -286,7 +368,7 @@ fn collect_ids(
     Ok(())
 }
 
-fn bad_id() -> RunError {
+pub(super) fn bad_id() -> RunError {
     RunError::Internal(DataFusionError::Internal(
         "a view returned an invalid trace id".to_owned(),
     ))
@@ -302,8 +384,9 @@ mod tests {
 
     use super::{
         FilterDeletionRequest, RunError, UserDeletionScope, eval_trace_ids, filter_trace_ids,
-        user_deletion_scope,
+        session_ids_of_traces, user_deletion_scope,
     };
+    use crate::reads::TraceTarget;
     use crate::test_support::{example_query, span_row, spans_table, traces_table};
     use crate::views::{QueryContext, TimeWindow};
 
@@ -318,6 +401,15 @@ mod tests {
 
     fn window() -> TimeWindow {
         TimeWindow::new(0, 10_000).expect("window")
+    }
+
+    /// The trace ids of [`filter_trace_ids`].
+    async fn filter_ids(
+        ctx: &QueryContext,
+        request: FilterDeletionRequest<'_>,
+    ) -> Result<Vec<TraceId>, RunError> {
+        let targets = filter_trace_ids(ctx, request).await?;
+        Ok(targets.into_iter().map(|target| target.trace_id).collect())
     }
 
     fn id(trace: u16) -> TraceId {
@@ -362,16 +454,14 @@ mod tests {
         let ctx = context_of(&four_traces());
         let mut req = request(Some("name = 'chat'"), None);
         req.window = TimeWindow::new(1_500, 4_500).expect("window");
-        let ids = filter_trace_ids(&ctx, req).await.expect("filter");
+        let ids = filter_ids(&ctx, req).await.expect("filter");
         assert_eq!(ids, [id(2), id(4)]);
     }
 
     #[tokio::test]
     async fn no_filter_and_no_search_take_the_whole_window() {
         let ctx = context_of(&four_traces());
-        let ids = filter_trace_ids(&ctx, request(None, None))
-            .await
-            .expect("window");
+        let ids = filter_ids(&ctx, request(None, None)).await.expect("window");
         assert_eq!(ids, [id(1), id(2), id(3), id(4)]);
     }
 
@@ -385,25 +475,46 @@ mod tests {
             .insert("cetra.experiment_id".to_owned(), "e1".to_owned());
         let ctx = context_of(&[eval, experiment]);
 
-        let ids = filter_trace_ids(&ctx, request(None, None))
+        let ids = filter_ids(&ctx, request(None, None))
             .await
             .expect("default");
         assert_eq!(ids, []);
 
         let mut req = request(None, None);
         req.include_eval = true;
-        let ids = filter_trace_ids(&ctx, req).await.expect("eval");
+        let ids = filter_ids(&ctx, req).await.expect("eval");
         assert_eq!(ids, [id(5)]);
 
         let mut req = request(None, None);
         req.include_experiments = true;
-        let ids = filter_trace_ids(&ctx, req).await.expect("experiments");
+        let ids = filter_ids(&ctx, req).await.expect("experiments");
         assert_eq!(ids, [id(6)]);
 
-        let ids = filter_trace_ids(&ctx, request(Some("environment = 'cetra-eval'"), None))
+        let ids = filter_ids(&ctx, request(Some("environment = 'cetra-eval'"), None))
             .await
             .expect("environment filter");
         assert_eq!(ids, [id(5)]);
+    }
+
+    #[tokio::test]
+    async fn filter_trace_ids_returns_start_times() {
+        let ctx = context_of(&four_traces());
+        let mut req = request(Some("name = 'chat'"), None);
+        req.window = TimeWindow::new(1_500, 4_500).expect("window");
+        let targets = filter_trace_ids(&ctx, req).await.expect("targets");
+        assert_eq!(
+            targets,
+            [
+                TraceTarget {
+                    trace_id: id(2),
+                    start_time: 2_000,
+                },
+                TraceTarget {
+                    trace_id: id(4),
+                    start_time: 4_000,
+                },
+            ]
+        );
     }
 
     #[tokio::test]
@@ -411,7 +522,7 @@ mod tests {
         let mut spans = four_traces();
         spans[2].input = Some("refund please".to_owned());
         let ctx = context_of(&spans);
-        let ids = filter_trace_ids(&ctx, request(None, Some("refund")))
+        let ids = filter_ids(&ctx, request(None, Some("refund")))
             .await
             .expect("search");
         assert_eq!(ids, [id(3)]);
@@ -423,7 +534,7 @@ mod tests {
         let ctx = context_of(&spans);
         let mut req = request(None, None);
         req.limit = 3;
-        let ids = filter_trace_ids(&ctx, req).await.expect("limit");
+        let ids = filter_ids(&ctx, req).await.expect("limit");
         assert_eq!(ids.len(), 3);
         let all: Vec<TraceId> = (1..=5).map(id).collect();
         assert!(ids.iter().all(|id| all.contains(id)));
@@ -432,14 +543,14 @@ mod tests {
     #[tokio::test]
     async fn invalid_filter_is_invalid() {
         let ctx = context_of(&four_traces());
-        let result = filter_trace_ids(&ctx, request(Some("name = "), None)).await;
+        let result = filter_ids(&ctx, request(Some("name = "), None)).await;
         assert!(matches!(result, Err(RunError::Invalid(_))), "{result:?}");
     }
 
     #[tokio::test]
     async fn blank_filter_and_search_are_ignored() {
         let ctx = context_of(&four_traces());
-        let ids = filter_trace_ids(&ctx, request(Some("  "), Some(" ")))
+        let ids = filter_ids(&ctx, request(Some("  "), Some(" ")))
             .await
             .expect("blank");
         assert_eq!(ids, [id(1), id(2), id(3), id(4)]);
@@ -450,11 +561,11 @@ mod tests {
         let mut spans = four_traces();
         spans[2].input = Some("refund please".to_owned());
         let ctx = context_of(&spans);
-        let ids = filter_trace_ids(&ctx, request(Some("name = 'tool'"), Some("refund")))
+        let ids = filter_ids(&ctx, request(Some("name = 'tool'"), Some("refund")))
             .await
             .expect("tool");
         assert_eq!(ids, [id(3)]);
-        let ids = filter_trace_ids(&ctx, request(Some("name = 'chat'"), Some("refund")))
+        let ids = filter_ids(&ctx, request(Some("name = 'chat'"), Some("refund")))
             .await
             .expect("chat");
         assert_eq!(ids, []);
@@ -470,7 +581,7 @@ mod tests {
         spans.push(late);
         spans.push(inside);
         let ctx = context_of(&spans);
-        let ids = filter_trace_ids(&ctx, request(None, Some("refund")))
+        let ids = filter_ids(&ctx, request(None, Some("refund")))
             .await
             .expect("window search");
         assert_eq!(ids, [id(4)]);
@@ -588,5 +699,28 @@ mod tests {
             .await
             .expect("empty");
         assert_eq!(found, []);
+    }
+
+    #[tokio::test]
+    async fn session_ids_of_traces_collects_sessions() {
+        let mut t1 = span_row(1, 0, 1_000, 0);
+        t1.session_id = Some("s2".to_owned());
+        let mut t2 = span_row(2, 0, 2_000, 0);
+        t2.session_id = Some("s1".to_owned());
+        let t3 = span_row(3, 0, 3_000, 0);
+        let mut t4 = span_row(4, 0, 4_000, 0);
+        t4.session_id = Some("s3".to_owned());
+        let ctx = context_of(&[t1, t2, t3, t4]);
+
+        let traces: HashSet<TraceId> = [id(1), id(2), id(3)].into_iter().collect();
+        let sessions = session_ids_of_traces(&ctx, &traces, TIMEOUT)
+            .await
+            .expect("sessions");
+        assert_eq!(sessions, ["s1", "s2"]);
+
+        let found = session_ids_of_traces(&ctx, &HashSet::new(), TIMEOUT)
+            .await
+            .expect("empty");
+        assert_eq!(found, Vec::<String>::new());
     }
 }

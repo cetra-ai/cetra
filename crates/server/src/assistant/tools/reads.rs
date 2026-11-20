@@ -254,6 +254,7 @@ pub(super) async fn list_scores(
         source: args.source,
         evaluator_id: args.evaluator_id,
         rule_id: args.rule_id,
+        queue_id: None,
         from: args.from,
         to: args.to,
         limit: list_limit(args.limit)?,

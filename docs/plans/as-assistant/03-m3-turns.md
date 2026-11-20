@@ -12,7 +12,7 @@ Track AS milestone M3 (design: [`00-design.md`](00-design.md), D-AS-2, D-AS-3, D
 
 **Checks (the user's rule, 2026-11-20):** no phase compiles, tests or builds anything (only `cargo fmt` is allowed). Each phase writes its code and tests carefully and commits. When AS3.7 is committed, the milestone runs `just check` once and fixes what fails.
 
-**Cleared to start (2026-11-20).** Track V's M5 and M6 are on `main` (PR #181), merged into this branch. Every interface in § Assumed V interfaces was checked against the merged code and matches, names included. The assistant's migrations are `0024_assistant.sql` (M1, renumbered after V's `0023_prompts.sql`) and `0025_assistant_settings.sql` (AS3.3). Phases AS3.2 and AS3.3 may run in parallel; the others run in order.
+**Cleared to start (2026-11-20).** Track V's M5 and M6 are on `main` (PR #181), merged into this branch. Every interface in § Assumed V interfaces was checked against the merged code and matches, names included. The assistant's migrations are `0026_assistant.sql` (M1, renumbered after V's `0023_prompts.sql`) and `0027_assistant_settings.sql` (AS3.3). Phases AS3.2 and AS3.3 may run in parallel; the others run in order.
 
 ## Prerequisites
 
@@ -116,7 +116,7 @@ No new dependency.
 |---|---|---|
 | AS3.1 Reserved environment | `crates/core/src/names.rs`, `crates/core/tests/snapshots/names.snap` (at the milestone check), `website/src/content/docs/docs/reference/attributes.md`, `sdks/python/src/cetra/_config.py`, `sdks/python/tests/test_config.py`, `sdks/typescript/src/config.ts`, `sdks/typescript/src/config.test.ts`, `crates/storage/src/filter/scope.rs` (test only), `crates/storage/src/views/catalog.rs`, `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/src/mcp/tools.rs`, `crates/server/src/api/evaluators.rs`, `docs/spec/01-data-model.md`, `docs/spec/02-ingestion.md`, `docs/spec/05-query.md`, `docs/spec/10-sdk.md` | — |
 | AS3.2 Turn trace builder | `crates/eval/src/assistant_trace.rs` (new), `crates/eval/src/lib.rs` | AS3.1 |
-| AS3.3 Org setting and status | `crates/server/migrations/meta/0025_assistant_settings.sql` (new), `crates/server/src/meta/assistant.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `crates/server/src/api/assistant.rs`, `crates/server/src/routes/assistant.rs`, `crates/server/src/assistant/mod.rs`, `crates/server/src/assistant/settings.rs` (new), `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/test_support/mod.rs`, `fixtures/api/**`, `docs/spec/04-metadata-db.md`, `docs/spec/08-auth.md`, `docs/spec/09-api.md` | — |
+| AS3.3 Org setting and status | `crates/server/migrations/meta/0027_assistant_settings.sql` (new), `crates/server/src/meta/assistant.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `crates/server/src/api/assistant.rs`, `crates/server/src/routes/assistant.rs`, `crates/server/src/assistant/mod.rs`, `crates/server/src/assistant/settings.rs` (new), `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/test_support/mod.rs`, `fixtures/api/**`, `docs/spec/04-metadata-db.md`, `docs/spec/08-auth.md`, `docs/spec/09-api.md` | — |
 | AS3.4 Writers, feedback, limits, history | `crates/server/src/meta/assistant.rs`, `crates/server/src/assistant/mod.rs`, `crates/server/src/assistant/history.rs` (new), `crates/server/src/auth/limits.rs`, `crates/server/src/routes/assistant.rs`, `crates/server/src/api/assistant.rs`, `crates/server/src/http/access_suite.rs`, `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `fixtures/api/requests/assistant-feedback.json` (new), `crates/server/tests/api_examples.rs` | AS3.3 |
 | AS3.5 Turn engine | `crates/server/src/assistant/turn.rs` (new), `crates/server/src/assistant/prompt.md` (new), `crates/server/src/assistant/mod.rs`, `crates/server/src/assistant/tools/mod.rs` (remove the `dead_code` allow), `crates/server/Cargo.toml` (only if `cetra-capture` is not yet a dev-dependency) | AS3.1–AS3.4 |
 | AS3.6 Turn route | `crates/server/src/routes/assistant.rs`, `crates/server/src/api/assistant.rs`, `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `fixtures/api/requests/assistant-turn.json` (new), `crates/server/tests/api_examples.rs` | AS3.5 |
@@ -298,7 +298,7 @@ pub fn build_assistant_trace(input: &AssistantTurnTrace<'_>, ingest: &IngestCont
 
 **Steps:**
 
-1. Migration `crates/server/migrations/meta/0025_assistant_settings.sql` (if `0025` is taken after the rebase, use the next free number and say so):
+1. Migration `crates/server/migrations/meta/0027_assistant_settings.sql` (if `0025` is taken after the rebase, use the next free number and say so):
    ```sql
    -- The org's in-app assistant setting (track AS, D-AS-3).
    CREATE TABLE org_assistant_settings (
@@ -805,7 +805,7 @@ Then the milestone check: `just check` once (with the nvm `PATH` export), `just 
 - **AS3.4 (writers, feedback, limits, history).** `a_busy_refusal_spends_no_rate_token` checks 19 further admits, since the held turn spent one of the 20 tokens.
 - **AS3.5 (turn engine).** The turn trace is committed through the existing `eval::execute::commit_judge_trace` (it reserves 0 and commits in a task), not a new commit path. The prompt's filter DSL paragraph follows spec 05; the plan's `~` and `2s` forms are not in the DSL. The 32-tool-call limit text is "I stopped here: this turn reached its limit of 32 tool calls. Ask me to continue."
 - **AS3.6 (turn route).** `TURN_MESSAGES_MAX` was added to `turn.rs` by AS3.6, since AS3.5 had not written it. `new_trace_id` is a copy of the playground's private helper.
-- **Migrations.** M1's is `0024_assistant.sql`; AS3.3's is `0025_assistant_settings.sql` (V's `0023_prompts.sql` came first).
+- **Migrations.** M1's is `0026_assistant.sql`; AS3.3's is `0027_assistant_settings.sql` (main's `0023_prompts.sql`, `0024_agent_contexts.sql` and `0025_annotation_queues.sql` came first).
 - **Assumed V interfaces.** Every name matched the merged code; the table is unchanged.
 - **AS3.7 (closeout), found while checking the docs against the code.**
   - Design D-AS-9 does not contain the phrase "a draft part of the assistant message"; only D-AS-6 was changed.

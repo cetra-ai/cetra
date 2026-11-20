@@ -194,6 +194,8 @@ mod tests {
             env: BTreeMap::new(),
             timestamp_attributes: Vec::new(),
             timing_attributes: Vec::new(),
+            span_names: Vec::new(),
+            volatile_attributes: Vec::new(),
             turns: vec![Turn {
                 api: Api::OpenaiChat,
                 model: "gpt-test".to_owned(),

@@ -96,7 +96,12 @@ pub fn build_assistant_trace(
     prices: &PriceTable,
 ) -> Normalized {
     let request = export_request(input);
-    let normalized = normalize(&request, ingest, prices);
+    let normalized = normalize(
+        &request,
+        ingest,
+        prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     if normalized.rejections.total() > 0 {
         tracing::warn!(
             trace_id = %input.trace_id.to_hex(),

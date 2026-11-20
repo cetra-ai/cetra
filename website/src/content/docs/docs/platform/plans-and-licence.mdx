@@ -33,7 +33,7 @@ A key is active before its expiry date, then in a grace period where features ke
 
 A self-hosted instance without a key has every core feature and no limits. To limit what orgs get, set `entitlements.defaults.*` in the configuration, for example `max_projects`, `max_seats`, `max_alert_rules` or `data_access_days`. The [configuration reference](/docs/self-hosting/configuration-reference/) lists them. A limit that is not set means unlimited.
 
-When an org reaches a count limit, such as seats or alert rules, the request fails with `403 plan_limit`.
+When an org reaches a count limit, such as seats or alert rules, the request fails with `403 plan_limit`. The limit `max_annotation_queues` caps the [annotation queues](/docs/evaluation/annotation-queues/) of an org. The Free plan allows one.
 
 ## Usage
 

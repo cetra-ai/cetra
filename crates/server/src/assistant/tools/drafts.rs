@@ -366,6 +366,7 @@ pub(super) async fn draft_dashboard(
         let stored = dashboard_detail(state, &access, id).await?;
         if stored.version != version {
             return Err(ApiError::StaleVersion {
+                what: "dashboard",
                 current: stored.version,
             }
             .into());

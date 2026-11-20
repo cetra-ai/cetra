@@ -1,0 +1,122 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "fa64fb35579841d823191655671c939b",
+      "span_id": "a7584d0ffcd3d9dd",
+      "name": "session_task.turn",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.008000000Z",
+      "end_time": "2025-12-31T23:59:50.319000000Z",
+      "status": "unset",
+      "service_name": "codex_exec",
+      "session_id": "capture-volatile-2",
+      "release": "0.167.2",
+      "metadata": {
+        "coding_agent": "codex"
+      },
+      "request_model": "gpt-5.3-codex",
+      "input_tokens": 820,
+      "output_tokens": 55,
+      "cache_read_tokens": 600,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 15,
+      "total_tokens": 875,
+      "cost_source": "none",
+      "attributes": {
+        "busy_ns": "16420225",
+        "cetra.normalize_warning": "[\"duplicate_key\"]",
+        "code.file.path": "core/src/tasks/mod.rs",
+        "code.line.number": "369",
+        "code.module.name": "codex_core::tasks",
+        "codex.turn.reasoning_effort": "default",
+        "codex.turn.token_usage.cache_write_input_tokens": "0",
+        "codex.turn.token_usage.cached_input_tokens": "600",
+        "codex.turn.token_usage.input_tokens": "820",
+        "codex.turn.token_usage.non_cached_input_tokens": "220",
+        "codex.turn.token_usage.output_tokens": "55",
+        "codex.turn.token_usage.reasoning_output_tokens": "15",
+        "codex.turn.token_usage.total_tokens": "875",
+        "idle_ns": "294852555",
+        "model": "gpt-5.3-codex",
+        "target": "codex_core::tasks",
+        "thread.id": "capture-volatile-2",
+        "thread.name": "tokio-rt-worker",
+        "turn.id": "capture-volatile-1"
+      },
+      "resource_attributes": {
+        "env": "capture",
+        "service.version": "0.167.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.31.0"
+      },
+      "scope_name": "codex_exec",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.316000000Z",
+          "name": "codex.turn_profile",
+          "attributes": "{\"level\":\"INFO\",\"target\":\"codex_otel.trace_safe\",\"event.name\":\"codex.turn_profile\",\"conversation.id\":\"capture-volatile-2\",\"turn_id\":\"capture-volatile-1\",\"sampling_request_count\":\"2\",\"sampling_retry_count\":\"0\",\"code.file.path\":\"core/src/turn_timing.rs\",\"code.module.name\":\"codex_core::turn_timing\",\"code.line.number\":28}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "fa64fb35579841d823191655671c939b",
+      "span_id": "8dce2156e56863a0",
+      "parent_span_id": "a7584d0ffcd3d9dd",
+      "name": "exec_command",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.156000000Z",
+      "end_time": "2025-12-31T23:59:50.208000000Z",
+      "status": "unset",
+      "service_name": "codex_exec",
+      "session_id": "capture-volatile-2",
+      "release": "0.167.2",
+      "metadata": {
+        "coding_agent": "codex"
+      },
+      "attributes": {
+        "aborted": "false",
+        "busy_ns": "16337251",
+        "call_id": "call_capture_1",
+        "cetra.normalize_warning": "[\"duplicate_key\"]",
+        "code.file.path": "core/src/tools/parallel.rs",
+        "code.line.number": "257",
+        "code.module.name": "codex_core::tools::parallel",
+        "codex.tool.phase": "dispatch",
+        "conversation.id": "capture-volatile-2",
+        "idle_ns": "35467789",
+        "target": "codex_core::tools::parallel",
+        "thread.id": "capture-volatile-2",
+        "thread.name": "tokio-rt-worker",
+        "tool_name": "exec_command",
+        "tool_source": "direct",
+        "turn.id": "capture-volatile-1",
+        "turn_id": "capture-volatile-1"
+      },
+      "resource_attributes": {
+        "env": "capture",
+        "service.version": "0.167.2",
+        "telemetry.sdk.language": "rust",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "0.31.0"
+      },
+      "scope_name": "codex_exec",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.208000000Z",
+          "name": "codex.tool_result_ready",
+          "attributes": "{\"level\":\"INFO\",\"target\":\"codex_otel.trace_safe\",\"event.name\":\"codex.tool_result_ready\",\"dispatch_to_result_ready_ms\":51.77789,\"conversation.id\":\"capture-volatile-2\",\"turn_id\":\"capture-volatile-1\",\"call_id\":\"call_capture_1\",\"tool_name\":\"exec_command\",\"tool_namespace\":\"functions\",\"tool_source\":\"direct\",\"code.file.path\":\"core/src/tools/call_trace.rs\",\"code.module.name\":\"codex_core::tools::call_trace\",\"code.line.number\":75}"
+        }
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0,
+  "discarded": 17
+}

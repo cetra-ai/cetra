@@ -479,7 +479,10 @@ async fn update_dashboard(
             tracing::info!(project_id = %project, dashboard_id = %id, "dashboard updated");
             Ok(error::Json(Dashboard::from(row)))
         }
-        UpdateOutcome::Stale(current) => Err(ApiError::StaleVersion { current }),
+        UpdateOutcome::Stale(current) => Err(ApiError::StaleVersion {
+            what: "dashboard",
+            current,
+        }),
         UpdateOutcome::Missing => Err(ApiError::NotFound),
     }
 }
@@ -552,7 +555,10 @@ async fn save_overview(
             };
             Ok((status, error::Json(Dashboard::from(row))).into_response())
         }
-        OverviewSave::Stale(current) => Err(ApiError::StaleVersion { current }),
+        OverviewSave::Stale(current) => Err(ApiError::StaleVersion {
+            what: "dashboard",
+            current,
+        }),
     }
 }
 

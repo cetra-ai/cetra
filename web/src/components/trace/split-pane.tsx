@@ -21,7 +21,8 @@ type SplitName =
   | "experiments"
   | "datasets"
   | "dataset-items"
-  | "settings";
+  | "settings"
+  | "annotation-review";
 
 /** The accessible name of the detail side: every list opens a trace-like detail, settings open a row panel. */
 function paneLabel(name: SplitName): string {
@@ -42,6 +43,11 @@ const PANES = {
   datasets: { start: "datasets-list", end: "datasets-detail", startSize: 40 },
   "dataset-items": { start: "dataset-items-list", end: "dataset-items-detail", startSize: 50 },
   settings: { start: "settings-list", end: "settings-detail", startSize: 40 },
+  "annotation-review": {
+    start: "annotation-review-target",
+    end: "annotation-review-form",
+    startSize: 40,
+  },
 } as const;
 
 type SplitPaneProps = {

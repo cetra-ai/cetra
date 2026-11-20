@@ -19,7 +19,7 @@ Track AS milestone M1 (design: [`00-design.md`](00-design.md), D-AS-1, D-AS-4, D
 ## What it is, and what it is not
 
 When M1 is done:
-- `meta.db` has `assistant_conversations` and `assistant_messages` (migration `0024_assistant.sql`).
+- `meta.db` has `assistant_conversations` and `assistant_messages` (migration `0026_assistant.sql`).
 - A project member or above, signed in with a session, can create, list, read, rename and delete their own conversations under `/api/v1/projects/{project}/assistant/conversations`. Nobody else (other members, admins, owners, instance admins) can see them: another user's conversation id is a `404`. PATs and API keys get `403`.
 - A conversation is deleted with its project, its org or its author (foreign keys), 30 days after its last activity, or by its author. At most 100 per user per project: creating the 101st deletes the least recently active one.
 - Tool results in stored messages are replaced by a stub 24 hours after they were stored.
@@ -54,7 +54,7 @@ No new dependency.
 
 | Phase | Edit | Depends on |
 |---|---|---|
-| AS1.1 Store | `crates/server/migrations/meta/0024_assistant.sql` (new), `crates/server/src/meta/assistant.rs` (new), `crates/server/src/meta/mod.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `docs/spec/04-metadata-db.md` | — |
+| AS1.1 Store | `crates/server/migrations/meta/0026_assistant.sql` (new), `crates/server/src/meta/assistant.rs` (new), `crates/server/src/meta/mod.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `docs/spec/04-metadata-db.md` | — |
 | AS1.2 Expiry job | `crates/server/src/assistant/mod.rs` (new), `crates/server/src/lib.rs`, `crates/server/src/serve.rs`, `crates/server/src/meta/assistant.rs` (only to move the test helper, step 0) | AS1.1 |
 | AS1.3 Routes | `crates/server/src/auth/roles.rs`, `crates/server/src/meta/assistant.rs`, `crates/server/src/http/access_suite.rs`, `docs/spec/08-auth.md`, `crates/server/src/api/assistant.rs` (new), `crates/server/src/api/mod.rs`, `crates/server/src/routes/assistant.rs` (new), `crates/server/src/routes/mod.rs`, `crates/server/src/http/access.rs`, `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/openapi.json`, `web/src/api/schema.gen.ts`, `crates/server/src/api_examples.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/test_support/mod.rs`, `fixtures/api/**`, `fixtures/api/README.md`, `docs/spec/09-api.md`, `docs/roadmap.md` | AS1.2 |
 
@@ -75,11 +75,11 @@ just check-rust
 
 **Goal:** the two tables and their store functions, with caps, expiry and stubbing, tested.
 
-**Edit:** `crates/server/migrations/meta/0024_assistant.sql` (new), `crates/server/src/meta/assistant.rs` (new), `crates/server/src/meta/mod.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `docs/spec/04-metadata-db.md`.
+**Edit:** `crates/server/migrations/meta/0026_assistant.sql` (new), `crates/server/src/meta/assistant.rs` (new), `crates/server/src/meta/mod.rs`, `crates/server/tests/snapshots/meta_schema.snap`, `docs/spec/04-metadata-db.md`.
 
 **Steps:**
 
-1. Create `crates/server/migrations/meta/0024_assistant.sql` with exactly:
+1. Create `crates/server/migrations/meta/0026_assistant.sql` with exactly:
 
    ```sql
    -- In-app assistant conversations (track AS, D-AS-10).

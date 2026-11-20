@@ -5,6 +5,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { problemOf } from "@/api/problem";
 import { spanListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
@@ -15,6 +21,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
 import {
@@ -35,6 +42,7 @@ import { orderedSpanColumns, spanColumnSpecs, spanRowTone } from "@/components/s
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
@@ -59,13 +67,23 @@ const COLUMN_SORT: Record<string, Schema<"SpanSort">> = {
   tokens: "total_tokens",
 };
 
+const NO_SPANS: ReadonlySet<string> = new Set();
+
+/** The checked rows (`trace_id:span_id`) as queue items. */
+function spanItems(ids: ReadonlySet<string>): QueueItemTarget[] {
+  return [...ids].map((id) => {
+    const [traceId, spanId] = id.split(":");
+    return { trace_id: traceId, span_id: spanId };
+  });
+}
+
 export const Route = createFileRoute("/$org/$project/spans/")({
   validateSearch: (search) => parseSpansSearch(search),
   component: SpansPage,
 });
 
 function SpansPage() {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const applyView = useCallback(
@@ -123,6 +141,25 @@ function SpansPage() {
     includeExperiments: search.exp === 1,
     search: search.search,
   };
+  // Checked spans belong to the list they were checked in: a new filter, search, range or
+  // eval/experiment flag clears them.
+  const selectionKey = JSON.stringify([
+    search.filter,
+    search.search,
+    rangeKey,
+    search.eval,
+    search.exp,
+  ]);
+  const [selection, setSelection] = useState<{ key: string; ids: ReadonlySet<string> }>({
+    key: selectionKey,
+    ids: NO_SPANS,
+  });
+  const checkedIds = selection.key === selectionKey ? selection.ids : NO_SPANS;
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
   const list = useInfiniteQuery({
     ...spanListOptions(org, project, {
       from: resolved.from,
@@ -339,7 +376,61 @@ function SpansPage() {
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
                   views={<SavedViewsMenu kind="spans" search={search} onApply={applyView} />}
+                  actions={
+                    <>
+                      {checkedIds.size > 0 ? (
+                        <DisabledReason reason={queueReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={queueReason !== undefined}
+                            onClick={() => {
+                              setQueueItems(spanItems(checkedIds));
+                              setQueueOpen(true);
+                            }}
+                          >
+                            {`Add ${checkedIds.size} to queue`}
+                          </Button>
+                        </DisabledReason>
+                      ) : null}
+                      <DisabledReason reason={matchingQueueReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={matchingQueueReason !== undefined}
+                          onClick={() => {
+                            setMatchOpen(true);
+                          }}
+                        >
+                          Add matching to queue…
+                        </Button>
+                      </DisabledReason>
+                    </>
+                  }
                   loaded={list.data ? rows.length : undefined}
+                />
+                <AddToQueueDialog
+                  open={queueOpen}
+                  onOpenChange={setQueueOpen}
+                  target="span"
+                  items={queueItems}
+                  onAdded={() => {
+                    setSelection({ key: selectionKey, ids: NO_SPANS });
+                  }}
+                />
+                <AddMatchingDialog
+                  open={matchOpen}
+                  onOpenChange={setMatchOpen}
+                  target="span"
+                  selection={{
+                    filter: search.filter,
+                    search: search.search,
+                    from: resolved.from,
+                    to: resolved.to,
+                    includeExperiments: search.exp === 1,
+                  }}
                 />
                 <div className="flex min-h-0 flex-1">
                   {facetsOpen && !hold ? (
@@ -370,6 +461,10 @@ function SpansPage() {
                         rows={rows}
                         getRowId={(row) => `${row.trace_id}:${row.span_id}`}
                         selectedRowId={selectedRowId}
+                        checkedIds={checkedIds}
+                        onCheckedChange={(ids) => {
+                          setSelection({ key: selectionKey, ids });
+                        }}
                         rowTone={spanRowTone}
                         onReorder={onColumns}
                         lockedColumnIds={lockedIds}

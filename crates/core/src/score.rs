@@ -218,6 +218,9 @@ pub struct Score {
     /// Dataset item the score belongs to. Spec 01 `dataset_item_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dataset_item_id: Option<Uuid>,
+    /// Annotation queue the score was written from (D-AQ-6). Spec 01 `queue_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub queue_id: Option<Uuid>,
     /// Person who annotated, for `human` scores. Spec 01 `author_user_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author_user_id: Option<Uuid>,
@@ -302,6 +305,7 @@ mod tests {
             rule_id: Some("018f6b4e-7c1a-7c1a-8c1a-000000000004".parse().unwrap()),
             experiment_id: Some("018f6b4e-7c1a-7c1a-8c1a-000000000005".parse().unwrap()),
             dataset_item_id: Some("018f6b4e-7c1a-7c1a-8c1a-000000000006".parse().unwrap()),
+            queue_id: Some("018f6b4e-7c1a-7c1a-8c1a-000000000007".parse().unwrap()),
             author_user_id: Some("018f6b4e-7c1a-7c1a-8c1a-000000000007".parse().unwrap()),
             metadata,
             created_at: crate::time_serde::parse_rfc3339("2026-11-09T10:12:03.123456789Z").unwrap(),
