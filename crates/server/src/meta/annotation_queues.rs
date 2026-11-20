@@ -229,6 +229,27 @@ pub(crate) enum ItemsInsert {
     TooMany,
 }
 
+/// How a review ends an item: completed, or skipped with an optional reason (D-AQ-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Finish {
+    Complete,
+    Skip(Option<String>),
+}
+
+/// What a reviewer action did to one item (D-AQ-4, D-AQ-5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewOutcome {
+    Done(Box<ItemRow>),
+    /// No such item in the queue, or the data window hides it.
+    Missing,
+    /// The item is completed or skipped.
+    NotPending,
+    /// The item is already pending.
+    Pending,
+    /// Another user holds a live lease on the item. Carries that user.
+    HeldBy(Uuid),
+}
+
 /// Which queues [`list`] keeps: those holding a visible item with this trace id (trace and span
 /// items) or this session id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -992,6 +1013,349 @@ pub(crate) async fn delete_item(
     Ok(result.rows_affected() > 0)
 }
 
+/// The lease check of a claim, a lease or a finish: the item is free, its lease has run out,
+/// or the user holds it. Binds `now`, then the user's id text.
+const CLAIMABLE: &str =
+    "(leased_by_user_id IS NULL OR lease_expires_at <= ? OR leased_by_user_id = ?)";
+/// The data window of a review: binds `visible_from` twice.
+const VISIBLE: &str = "(? IS NULL OR target_time >= ?)";
+/// How many session ids one `DELETE` binds.
+const SESSION_CHUNK: usize = 500;
+
+/// Claims the first free pending item of `queue` after `after` (by id), wrapping to the first
+/// one when none follows, and gives the user a lease of [`LEASE_NS`]. The user's other leases
+/// in the queue are released. Returns `None` when nothing is free; the user's lease then stays.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn claim_next_tx(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    user: Uuid,
+    after: Option<Uuid>,
+    visible_from: Option<i64>,
+    now: i64,
+) -> Result<Option<ItemRow>, MetaError> {
+    let mut claimed = claim_one(
+        &mut *conn,
+        queue,
+        user,
+        after.map(|id| id.to_string()).unwrap_or_default(),
+        visible_from,
+        now,
+    )
+    .await?;
+    if claimed.is_none() && after.is_some() {
+        claimed = claim_one(&mut *conn, queue, user, String::new(), visible_from, now).await?;
+    }
+    if let Some(row) = &claimed {
+        release_other_leases(&mut *conn, queue, user, row.id).await?;
+    }
+    Ok(claimed)
+}
+
+/// One `UPDATE` of [`claim_next_tx`]: the first free pending item with an id above `after`.
+async fn claim_one(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    user: Uuid,
+    after: String,
+    visible_from: Option<i64>,
+    now: i64,
+) -> Result<Option<ItemRow>, MetaError> {
+    let sql = format!(
+        "UPDATE annotation_queue_items SET leased_by_user_id = ?, lease_expires_at = ?, \
+         updated_at = ? \
+         WHERE id = (SELECT id FROM annotation_queue_items WHERE queue_id = ? \
+           AND status = 'pending' AND {CLAIMABLE} AND {VISIBLE} AND id > ? \
+           ORDER BY id LIMIT 1) \
+         RETURNING {ITEM_COLUMNS}"
+    );
+    let record: Option<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(user.to_string())
+        .bind(now.saturating_add(LEASE_NS))
+        .bind(now)
+        .bind(queue.to_string())
+        .bind(now)
+        .bind(user.to_string())
+        .bind(visible_from)
+        .bind(visible_from)
+        .bind(after)
+        .fetch_optional(&mut *conn)
+        .await?;
+    record.map(item_from).transpose()
+}
+
+/// Clears the lease `user` holds on the items of `queue` other than `keep`.
+async fn release_other_leases(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    user: Uuid,
+    keep: Uuid,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE annotation_queue_items SET leased_by_user_id = NULL, lease_expires_at = NULL \
+         WHERE queue_id = ? AND leased_by_user_id = ? AND id <> ?",
+    )
+    .bind(queue.to_string())
+    .bind(user.to_string())
+    .bind(keep.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Explains why a review `UPDATE` on `item` changed no row: the item is hidden or absent,
+/// completed or skipped, or leased by another user while the lease is live.
+async fn refusal_on(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    item: Uuid,
+    visible_from: Option<i64>,
+) -> Result<ReviewOutcome, MetaError> {
+    match get_item_on(&mut *conn, queue, item, visible_from).await? {
+        None => Ok(ReviewOutcome::Missing),
+        Some(row) if row.status != Status::Pending => Ok(ReviewOutcome::NotPending),
+        Some(row) => match row.leased_by_user_id {
+            Some(holder) => Ok(ReviewOutcome::HeldBy(holder)),
+            // A pending item without a lease is claimable, so the UPDATE above changed it.
+            // Both run in one writer transaction, so this cannot happen.
+            None => Err(MetaError::Conflict(
+                "annotation queue item cannot be reviewed",
+            )),
+        },
+    }
+}
+
+/// Takes or renews the lease of `item` for `user` for [`LEASE_NS`], when it is free, expired or
+/// already the user's. On success the user's other leases in `queue` are released. A refused
+/// lease changes nothing, so the user keeps the lease they hold.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn lease_tx(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    item: Uuid,
+    user: Uuid,
+    visible_from: Option<i64>,
+    now: i64,
+) -> Result<ReviewOutcome, MetaError> {
+    let sql = format!(
+        "UPDATE annotation_queue_items SET leased_by_user_id = ?, lease_expires_at = ?, \
+         updated_at = ? \
+         WHERE queue_id = ? AND id = ? AND status = 'pending' AND {CLAIMABLE} AND {VISIBLE} \
+         RETURNING {ITEM_COLUMNS}"
+    );
+    let record: Option<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(user.to_string())
+        .bind(now.saturating_add(LEASE_NS))
+        .bind(now)
+        .bind(queue.to_string())
+        .bind(item.to_string())
+        .bind(now)
+        .bind(user.to_string())
+        .bind(visible_from)
+        .bind(visible_from)
+        .fetch_optional(&mut *conn)
+        .await?;
+    match record {
+        Some(record) => {
+            release_other_leases(&mut *conn, queue, user, item).await?;
+            Ok(ReviewOutcome::Done(Box::new(item_from(record)?)))
+        }
+        None => refusal_on(conn, queue, item, visible_from).await,
+    }
+}
+
+/// Clears the lease on `item` when `user` holds it. Otherwise changes nothing.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the update fails.
+pub(crate) async fn release_tx(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    item: Uuid,
+    user: Uuid,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE annotation_queue_items SET leased_by_user_id = NULL, lease_expires_at = NULL \
+         WHERE queue_id = ? AND id = ? AND leased_by_user_id = ?",
+    )
+    .bind(queue.to_string())
+    .bind(item.to_string())
+    .bind(user.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Completes or skips a pending `item` as `user`. A pending item that another user holds under a
+/// live lease is refused with [`ReviewOutcome::HeldBy`]. The lease is cleared.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn finish_tx(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    item: Uuid,
+    user: Uuid,
+    finish: Finish,
+    visible_from: Option<i64>,
+    now: i64,
+) -> Result<ReviewOutcome, MetaError> {
+    let (status, reason) = match finish {
+        Finish::Complete => (Status::Completed, None),
+        Finish::Skip(reason) => (Status::Skipped, reason),
+    };
+    let sql = format!(
+        "UPDATE annotation_queue_items SET status = ?, skip_reason = ?, done_by_user_id = ?, \
+         done_at = ?, leased_by_user_id = NULL, lease_expires_at = NULL, updated_at = ? \
+         WHERE queue_id = ? AND id = ? AND status = 'pending' AND {CLAIMABLE} AND {VISIBLE} \
+         RETURNING {ITEM_COLUMNS}"
+    );
+    let record: Option<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(status.as_str())
+        .bind(reason)
+        .bind(user.to_string())
+        .bind(now)
+        .bind(now)
+        .bind(queue.to_string())
+        .bind(item.to_string())
+        .bind(now)
+        .bind(user.to_string())
+        .bind(visible_from)
+        .bind(visible_from)
+        .fetch_optional(&mut *conn)
+        .await?;
+    match record {
+        Some(record) => Ok(ReviewOutcome::Done(Box::new(item_from(record)?))),
+        None => refusal_on(conn, queue, item, visible_from).await,
+    }
+}
+
+/// Sets a completed or skipped `item` back to pending, clearing its reason, done fields and
+/// lease. A pending item answers [`ReviewOutcome::Pending`].
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn reopen_tx(
+    conn: &mut SqliteConnection,
+    queue: Uuid,
+    item: Uuid,
+    visible_from: Option<i64>,
+    now: i64,
+) -> Result<ReviewOutcome, MetaError> {
+    let sql = format!(
+        "UPDATE annotation_queue_items SET status = 'pending', skip_reason = NULL, \
+         done_by_user_id = NULL, done_at = NULL, leased_by_user_id = NULL, \
+         lease_expires_at = NULL, updated_at = ? \
+         WHERE queue_id = ? AND id = ? AND status IN ('completed', 'skipped') AND {VISIBLE} \
+         RETURNING {ITEM_COLUMNS}"
+    );
+    let record: Option<ItemRecord> = sqlx::query_as(AssertSqlSafe(sql))
+        .bind(now)
+        .bind(queue.to_string())
+        .bind(item.to_string())
+        .bind(visible_from)
+        .bind(visible_from)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some(record) = record {
+        return Ok(ReviewOutcome::Done(Box::new(item_from(record)?)));
+    }
+    match get_item_on(&mut *conn, queue, item, visible_from).await? {
+        Some(row) if row.status == Status::Pending => Ok(ReviewOutcome::Pending),
+        // A completed or skipped item in the window was updated above.
+        _ => Ok(ReviewOutcome::Missing),
+    }
+}
+
+/// Whether any item of `project` is a session item. The deletion cascade skips its session scan
+/// when none is.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn has_session_items(
+    pool: &SqlitePool,
+    project: ProjectId,
+) -> Result<bool, MetaError> {
+    let found: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM annotation_queue_items \
+         WHERE project_id = ? AND session_id IS NOT NULL)",
+    )
+    .bind(project.to_string())
+    .fetch_one(pool)
+    .await?;
+    Ok(found)
+}
+
+/// Deletes the items of `project` that a deletion covers: trace and span items whose trace is
+/// in the deletion's `deletion_traces`, and session items whose session is in `sessions`.
+/// Returns the number of items deleted.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when a delete fails.
+pub(crate) async fn delete_items_of_deletion_tx(
+    conn: &mut SqliteConnection,
+    deletion: Uuid,
+    project: ProjectId,
+    sessions: &[String],
+) -> Result<u64, MetaError> {
+    let by_trace = sqlx::query(
+        "DELETE FROM annotation_queue_items WHERE project_id = ? AND trace_id IN \
+         (SELECT lower(hex(trace_id)) FROM deletion_traces WHERE deletion_id = ?)",
+    )
+    .bind(project.to_string())
+    .bind(deletion.to_string())
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+
+    let mut by_session = 0;
+    for chunk in sessions.chunks(SESSION_CHUNK) {
+        let mut builder =
+            QueryBuilder::<Sqlite>::new("DELETE FROM annotation_queue_items WHERE project_id = ");
+        builder
+            .push_bind(project.to_string())
+            .push(" AND session_id IN (");
+        let mut list = builder.separated(", ");
+        for session in chunk {
+            list.push_bind(session.as_str());
+        }
+        list.push_unseparated(")");
+        by_session += builder.build().execute(&mut *conn).await?.rows_affected();
+    }
+    Ok(by_trace + by_session)
+}
+
+/// Deletes the items of `project` whose `target_time` is before `cutoff` (retention, D-AQ-9).
+/// Returns the number of items deleted.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the delete fails.
+pub(crate) async fn delete_items_before(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    cutoff: i64,
+) -> Result<u64, MetaError> {
+    let result =
+        sqlx::query("DELETE FROM annotation_queue_items WHERE project_id = ? AND target_time < ?")
+            .bind(project.to_string())
+            .bind(cutoff)
+            .execute(&mut *conn)
+            .await?;
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1001,6 +1365,15 @@ mod tests {
     use crate::meta::projects::insert_project;
     use crate::meta::score_definitions::{DefinitionFields, insert_definition};
     use cetra_core::enums::ScoreDataType;
+    use cetra_core::ids::TraceId;
+
+    use crate::meta::deletions::{
+        ActorKind, DeletionKind, DeletionState, NewDeletion, RequestDetails, insert_deletion,
+        insert_traces,
+    };
+    use crate::meta::users::{NewUser, insert_user};
+
+    const MINUTE: i64 = 60_000_000_000;
 
     const NOW: i64 = 1_000;
     const TRACE: &str = "0af7651916cd43dd8448eb211c80319c";
@@ -1745,5 +2118,509 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The 32-digit lowercase hex trace id of `n`.
+    fn hex_trace(n: u128) -> String {
+        format!("{n:032x}")
+    }
+
+    fn session_item(session: &str) -> NewItem {
+        NewItem {
+            trace_id: None,
+            span_id: None,
+            session_id: Some(session.to_owned()),
+            target_time: NOW,
+        }
+    }
+
+    async fn user(db: &MetaDb, email: &str) -> Uuid {
+        let email = email.to_owned();
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_user(
+                    conn,
+                    NewUser {
+                        email,
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: None,
+                        email_verified_via: None,
+                        is_instance_admin: false,
+                    },
+                    NOW,
+                )
+                .await
+                .map(|row| row.id)
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Every item of `queue`, in id order, with no data window.
+    async fn items(db: &MetaDb, queue: Uuid) -> Vec<ItemRow> {
+        list_items(db.reader(), queue, None, None, 100, None)
+            .await
+            .unwrap()
+            .0
+    }
+
+    /// The item of `queue` whose trace id is `trace` (a trace item).
+    async fn item_of(db: &MetaDb, queue: Uuid, trace: u128) -> ItemRow {
+        let want = hex_trace(trace);
+        items(db, queue)
+            .await
+            .into_iter()
+            .find(|row| row.trace_id.as_deref() == Some(want.as_str()))
+            .unwrap()
+    }
+
+    async fn leased_by(db: &MetaDb, queue: Uuid, item: Uuid) -> Option<Uuid> {
+        items(db, queue)
+            .await
+            .into_iter()
+            .find(|row| row.id == item)
+            .unwrap()
+            .leased_by_user_id
+    }
+
+    async fn claim(
+        db: &MetaDb,
+        queue: Uuid,
+        user: Uuid,
+        after: Option<Uuid>,
+        visible_from: Option<i64>,
+        now: i64,
+    ) -> Option<ItemRow> {
+        db.write(move |conn| {
+            Box::pin(
+                async move { claim_next_tx(conn, queue, user, after, visible_from, now).await },
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn lease(db: &MetaDb, queue: Uuid, item: Uuid, user: Uuid, now: i64) -> ReviewOutcome {
+        db.write(move |conn| {
+            Box::pin(async move { lease_tx(conn, queue, item, user, None, now).await })
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn release(db: &MetaDb, queue: Uuid, item: Uuid, user: Uuid) {
+        db.write(move |conn| Box::pin(async move { release_tx(conn, queue, item, user).await }))
+            .await
+            .unwrap();
+    }
+
+    async fn finish(
+        db: &MetaDb,
+        queue: Uuid,
+        item: Uuid,
+        user: Uuid,
+        status: Status,
+        reason: Option<&str>,
+        now: i64,
+    ) -> ReviewOutcome {
+        let finish = match status {
+            Status::Skipped => Finish::Skip(reason.map(str::to_owned)),
+            _ => Finish::Complete,
+        };
+        db.write(move |conn| {
+            Box::pin(async move { finish_tx(conn, queue, item, user, finish, None, now).await })
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn reopen(db: &MetaDb, queue: Uuid, item: Uuid, now: i64) -> ReviewOutcome {
+        db.write(move |conn| Box::pin(async move { reopen_tx(conn, queue, item, None, now).await }))
+            .await
+            .unwrap()
+    }
+
+    fn done(outcome: ReviewOutcome) -> ItemRow {
+        match outcome {
+            ReviewOutcome::Done(row) => *row,
+            other => panic!("expected a done item, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_takes_the_first_free_item_and_wraps() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(
+            &db,
+            queue.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW),
+                trace_item(&hex_trace(2), NOW),
+                trace_item(&hex_trace(3), NOW),
+            ],
+        )
+        .await;
+        let ids: Vec<Uuid> = items(&db, queue.id)
+            .await
+            .iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+        let a = user(&db, "a@example.com").await;
+        let b = user(&db, "b@example.com").await;
+
+        let got = claim(&db, queue.id, a, None, None, NOW).await.unwrap();
+        assert_eq!(got.id, ids[0]);
+        assert_eq!(got.leased_by_user_id, Some(a));
+        assert_eq!(got.lease_expires_at, Some(NOW + LEASE_NS));
+
+        // B skips the item A holds under a live lease.
+        let got = claim(&db, queue.id, b, None, None, NOW).await.unwrap();
+        assert_eq!(got.id, ids[1]);
+
+        // A, after item 2, takes item 3 and releases its lease on item 1.
+        let got = claim(&db, queue.id, a, Some(ids[1]), None, NOW)
+            .await
+            .unwrap();
+        assert_eq!(got.id, ids[2]);
+        assert_eq!(leased_by(&db, queue.id, ids[0]).await, None);
+
+        // B, after item 3, finds nothing and wraps to the freed item 1.
+        let got = claim(&db, queue.id, b, Some(ids[2]), None, NOW)
+            .await
+            .unwrap();
+        assert_eq!(got.id, ids[0]);
+
+        // An expired lease is claimable: B's lease on item 1 ran out.
+        let c = user(&db, "c@example.com").await;
+        let got = claim(&db, queue.id, c, None, None, NOW + LEASE_NS + 1)
+            .await
+            .unwrap();
+        assert_eq!(got.id, ids[0]);
+        assert_eq!(got.leased_by_user_id, Some(c));
+    }
+
+    #[tokio::test]
+    async fn claim_respects_the_window() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(
+            &db,
+            queue.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW - 100),
+                trace_item(&hex_trace(2), NOW),
+            ],
+        )
+        .await;
+        let a = user(&db, "a@example.com").await;
+        let b = user(&db, "b@example.com").await;
+        let visible = Some(NOW);
+        let inside = item_of(&db, queue.id, 2).await;
+        let hidden = item_of(&db, queue.id, 1).await;
+
+        let got = claim(&db, queue.id, a, None, visible, NOW).await.unwrap();
+        assert_eq!(got.id, inside.id);
+        // The hidden item is never claimed; the visible one is held by A.
+        assert!(claim(&db, queue.id, b, None, visible, NOW).await.is_none());
+        let outcome = db
+            .write(move |conn| {
+                Box::pin(async move { lease_tx(conn, queue.id, hidden.id, b, visible, NOW).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(outcome, ReviewOutcome::Missing);
+
+        let (listed, _) = list_items(db.reader(), queue.id, None, None, 10, visible)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let counted = counts(db.reader(), project, &[queue.id], visible)
+            .await
+            .unwrap();
+        assert_eq!(counted[&queue.id].pending, 1);
+        let counted = counts(db.reader(), project, &[queue.id], None)
+            .await
+            .unwrap();
+        assert_eq!(counted[&queue.id].pending, 2);
+    }
+
+    #[tokio::test]
+    async fn finish_and_reopen() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(
+            &db,
+            queue.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW),
+                trace_item(&hex_trace(2), NOW),
+                trace_item(&hex_trace(3), NOW),
+            ],
+        )
+        .await;
+        let x = item_of(&db, queue.id, 1).await.id;
+        let y = item_of(&db, queue.id, 2).await.id;
+        let z = item_of(&db, queue.id, 3).await.id;
+        let a = user(&db, "a@example.com").await;
+        let b = user(&db, "b@example.com").await;
+
+        // A completes an unleased item.
+        let row = done(finish(&db, queue.id, x, a, Status::Completed, None, NOW + 1).await);
+        assert_eq!(row.status, Status::Completed);
+        assert_eq!(row.done_by_user_id, Some(a));
+        assert_eq!(row.done_at, Some(NOW + 1));
+
+        // B cannot finish an item A holds; A can.
+        done(lease(&db, queue.id, y, a, NOW).await);
+        assert_eq!(
+            finish(&db, queue.id, y, b, Status::Completed, None, NOW + 2).await,
+            ReviewOutcome::HeldBy(a)
+        );
+        let row = done(finish(&db, queue.id, y, a, Status::Completed, None, NOW + 2).await);
+        assert_eq!(row.leased_by_user_id, None);
+
+        // A finished item cannot be finished again.
+        assert_eq!(
+            finish(&db, queue.id, x, b, Status::Completed, None, NOW + 3).await,
+            ReviewOutcome::NotPending
+        );
+
+        // A skip keeps its reason; a reopen clears the reason and the done fields.
+        let row = done(
+            finish(
+                &db,
+                queue.id,
+                z,
+                a,
+                Status::Skipped,
+                Some("duplicate"),
+                NOW + 3,
+            )
+            .await,
+        );
+        assert_eq!(row.status, Status::Skipped);
+        assert_eq!(row.skip_reason.as_deref(), Some("duplicate"));
+        let row = done(reopen(&db, queue.id, z, NOW + 4).await);
+        assert_eq!(row.status, Status::Pending);
+        assert_eq!(row.skip_reason, None);
+        assert_eq!(row.done_by_user_id, None);
+        assert_eq!(row.done_at, None);
+        assert_eq!(
+            reopen(&db, queue.id, z, NOW + 5).await,
+            ReviewOutcome::Pending
+        );
+        assert_eq!(
+            reopen(&db, queue.id, Uuid::now_v7(), NOW + 5).await,
+            ReviewOutcome::Missing
+        );
+        assert_eq!(
+            finish(
+                &db,
+                queue.id,
+                Uuid::now_v7(),
+                a,
+                Status::Completed,
+                None,
+                NOW + 5
+            )
+            .await,
+            ReviewOutcome::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_renews_and_releases() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(&db, queue.id, project, vec![trace_item(&hex_trace(1), NOW)]).await;
+        let x = item_of(&db, queue.id, 1).await.id;
+        let a = user(&db, "a@example.com").await;
+        let b = user(&db, "b@example.com").await;
+
+        let first = done(lease(&db, queue.id, x, a, NOW).await);
+        assert_eq!(first.lease_expires_at, Some(NOW + LEASE_NS));
+        // The holder renews: the lease runs from the renewal time.
+        let renewed = done(lease(&db, queue.id, x, a, NOW + MINUTE).await);
+        let expires = NOW + MINUTE + LEASE_NS;
+        assert_eq!(renewed.lease_expires_at, Some(expires));
+        assert_eq!(renewed.leased_by_user_id, Some(a));
+        // Another user is refused while the lease is live.
+        assert_eq!(
+            lease(&db, queue.id, x, b, NOW + MINUTE).await,
+            ReviewOutcome::HeldBy(a)
+        );
+        // After expiry the other user takes it.
+        let taken = done(lease(&db, queue.id, x, b, expires + 1).await);
+        assert_eq!(taken.leased_by_user_id, Some(b));
+
+        // A release by a non-holder changes nothing; by the holder it clears the lease.
+        release(&db, queue.id, x, a).await;
+        assert_eq!(leased_by(&db, queue.id, x).await, Some(b));
+        release(&db, queue.id, x, b).await;
+        assert_eq!(leased_by(&db, queue.id, x).await, None);
+    }
+
+    #[tokio::test]
+    async fn failed_lease_keeps_the_current_lease() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(
+            &db,
+            queue.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW),
+                trace_item(&hex_trace(2), NOW),
+            ],
+        )
+        .await;
+        let x = item_of(&db, queue.id, 1).await.id;
+        let y = item_of(&db, queue.id, 2).await.id;
+        let a = user(&db, "a@example.com").await;
+        let b = user(&db, "b@example.com").await;
+        let c = user(&db, "c@example.com").await;
+
+        done(lease(&db, queue.id, x, a, NOW).await);
+        done(lease(&db, queue.id, y, b, NOW).await);
+        // A's refused lease on Y leaves A's lease on X in place.
+        assert_eq!(
+            lease(&db, queue.id, y, a, NOW).await,
+            ReviewOutcome::HeldBy(b)
+        );
+        assert_eq!(leased_by(&db, queue.id, x).await, Some(a));
+        // A claim that finds nothing free keeps A's lease too.
+        assert!(claim(&db, queue.id, c, None, None, NOW).await.is_none());
+        assert_eq!(leased_by(&db, queue.id, x).await, Some(a));
+    }
+
+    #[tokio::test]
+    async fn cascade_deletes_trace_span_and_session_items() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let traces = created(
+            &db,
+            org,
+            project,
+            new_queue("traces", Target::Trace, vec![]),
+        )
+        .await;
+        let sessions = created(
+            &db,
+            org,
+            project,
+            new_queue("sessions", Target::Session, vec![]),
+        )
+        .await;
+        add(
+            &db,
+            traces.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW),
+                span_item(&hex_trace(1), SPAN),
+                trace_item(&hex_trace(2), NOW),
+            ],
+        )
+        .await;
+        assert!(!has_session_items(db.reader(), project).await.unwrap());
+        add(
+            &db,
+            sessions.id,
+            project,
+            vec![session_item("s-1"), session_item("s-2")],
+        )
+        .await;
+        assert!(has_session_items(db.reader(), project).await.unwrap());
+
+        // A deletion of trace 1 and session s-1.
+        let deletion = Uuid::from_u128(7);
+        let removed = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_deletion(
+                        conn,
+                        &NewDeletion {
+                            id: deletion,
+                            org_id: org,
+                            project_id: Some(project),
+                            kind: DeletionKind::TraceIds,
+                            user_id: None,
+                            request: RequestDetails::default(),
+                            actor_kind: ActorKind::User,
+                            actor_id: Uuid::from_u128(9),
+                            state: DeletionState::Resolving,
+                            created_at: NOW,
+                        },
+                    )
+                    .await?;
+                    insert_traces(
+                        conn,
+                        deletion,
+                        &[TraceId::from_bytes(1u128.to_be_bytes()).unwrap()],
+                    )
+                    .await?;
+                    delete_items_of_deletion_tx(conn, deletion, project, &["s-1".to_owned()]).await
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed, 3);
+
+        let left: Vec<String> = items(&db, traces.id)
+            .await
+            .into_iter()
+            .filter_map(|row| row.trace_id)
+            .collect();
+        assert_eq!(left, vec![hex_trace(2)]);
+        let left: Vec<String> = items(&db, sessions.id)
+            .await
+            .into_iter()
+            .filter_map(|row| row.session_id)
+            .collect();
+        assert_eq!(left, vec!["s-2".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn delete_items_before_cutoff() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let (org, project) = seed(&db).await;
+        let queue = created(&db, org, project, new_queue("q", Target::Trace, vec![])).await;
+        add(
+            &db,
+            queue.id,
+            project,
+            vec![
+                trace_item(&hex_trace(1), NOW - 10),
+                trace_item(&hex_trace(2), NOW),
+                trace_item(&hex_trace(3), NOW + 10),
+            ],
+        )
+        .await;
+        let removed = db
+            .write(move |conn| {
+                Box::pin(async move { delete_items_before(conn, project, NOW).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        let mut left: Vec<i64> = items(&db, queue.id)
+            .await
+            .iter()
+            .map(|row| row.target_time)
+            .collect();
+        left.sort_unstable();
+        assert_eq!(left, vec![NOW, NOW + 10]);
     }
 }
