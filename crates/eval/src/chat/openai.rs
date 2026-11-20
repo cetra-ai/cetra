@@ -512,12 +512,14 @@ mod tests {
     use reqwest::Url;
     use serde_json::{Map, Value, json};
 
-    use super::{DEFAULT_BASE, decode_reply, request_body};
+    use super::{DEFAULT_BASE, StreamState, decode_reply, request_body};
+    use crate::chat::sse::SseEvent;
+    use crate::chat::stream::Sink;
     use crate::chat::{
         CHAT_IDLE_TIMEOUT, ChatParams, ChatReply, ChatRequest, FinishReason, PROMPT_INSTRUCTION,
         ResponseFormat, TokenUsage, ToolCall, ToolChoice, ToolDefinition, endpoint, validate_model,
     };
-    use crate::error::{ChatError, JudgeError};
+    use crate::error::{ChatError, EgressError, JudgeError};
     use crate::hostile_tests::{body, check_reply, config, openai_reply};
     use crate::judge::{StructuredOutput, judge_reply};
 
@@ -607,6 +609,38 @@ mod tests {
                 ) => {}
                 Err(other) => panic!("undocumented decode error {other:?}"),
             }
+        }
+    }
+
+    /// A stream event the layer refuses with a documented error: a malformed event, a provider
+    /// error event, or a cap.
+    fn documented_stream_error(outcome: Result<(), ChatError>) {
+        match outcome {
+            Ok(()) => {}
+            Err(
+                ChatError::BadStream
+                | ChatError::Provider { .. }
+                | ChatError::Transport(EgressError::TooLarge { .. }),
+            ) => {}
+            Err(other) => panic!("undocumented stream error {other:?}"),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        #[test]
+        fn a_hostile_stream_event_decodes_or_fails_cleanly(bytes in body(openai_reply())) {
+            let event = SseEvent {
+                event: None,
+                data: String::from_utf8_lossy(&bytes).into_owned(),
+            };
+            let mut state = StreamState::default();
+            let mut sink = Sink::default();
+            documented_stream_error(match state.on_event(&event, &mut sink) {
+                Ok(_) => state.finish(&mut sink),
+                Err(error) => Err(error),
+            });
         }
     }
 

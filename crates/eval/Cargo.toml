@@ -42,6 +42,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+# The chat layer's streams are tested against the capture mock provider (D-I-43).
+cetra-capture.workspace = true
 insta.workspace = true
 proptest = { workspace = true, default-features = false, features = ["std"] }
 # Integration tests name `Url` and JSON values directly.

@@ -578,12 +578,14 @@ mod tests {
     use reqwest::Url;
     use serde_json::{Map, Value, json};
 
-    use super::{DEFAULT_BASE, decode_reply, request_body};
+    use super::{DEFAULT_BASE, StreamState, decode_reply, request_body};
+    use crate::chat::sse::SseEvent;
+    use crate::chat::stream::Sink;
     use crate::chat::{
         CHAT_IDLE_TIMEOUT, ChatParams, ChatRequest, FinishReason, PROMPT_INSTRUCTION,
         ResponseFormat, ToolChoice, ToolDefinition, endpoint, validate_model,
     };
-    use crate::error::{ChatError, JudgeError};
+    use crate::error::{ChatError, EgressError, JudgeError};
     use crate::hostile_tests::{anthropic_reply, body, check_reply, config};
     use crate::judge::{StructuredOutput, judge_reply};
 
@@ -668,6 +670,47 @@ mod tests {
             strict: true,
             tool_name: "submit_judgement".to_owned(),
             tool_description: "Submit your judgement.".to_owned(),
+        }
+    }
+
+    /// A stream event the layer refuses with a documented error: a malformed event, a provider
+    /// error event, or a cap.
+    fn documented_stream_error(outcome: Result<(), ChatError>) {
+        match outcome {
+            Ok(()) => {}
+            Err(
+                ChatError::BadStream
+                | ChatError::Provider { .. }
+                | ChatError::Transport(EgressError::TooLarge { .. }),
+            ) => {}
+            Err(other) => panic!("undocumented stream error {other:?}"),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        #[test]
+        fn a_hostile_stream_event_decodes_or_fails_cleanly(bytes in body(anthropic_reply())) {
+            let data = String::from_utf8_lossy(&bytes).into_owned();
+            // The type comes from the data; the event name is read only when the data has none.
+            for name in [
+                None,
+                Some("content_block_start"),
+                Some("content_block_delta"),
+                Some("message_delta"),
+            ] {
+                let event = SseEvent {
+                    event: name.map(str::to_owned),
+                    data: data.clone(),
+                };
+                let mut state = StreamState::default();
+                let mut sink = Sink::default();
+                documented_stream_error(match state.on_event(&event, &mut sink) {
+                    Ok(_) => state.finish(&mut sink),
+                    Err(error) => Err(error),
+                });
+            }
         }
     }
 

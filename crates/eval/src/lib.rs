@@ -62,6 +62,9 @@ pub use webhook::{SIGNATURE_HEADER, sign_payload};
 #[path = "../tests/anthropic.rs"]
 mod anthropic_tests;
 #[cfg(test)]
+#[path = "../tests/chat_capture.rs"]
+mod chat_capture_tests;
+#[cfg(test)]
 #[path = "../tests/chat_stream.rs"]
 mod chat_stream_tests;
 #[cfg(test)]

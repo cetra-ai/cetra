@@ -526,12 +526,14 @@ mod tests {
     use reqwest::Url;
     use serde_json::{Map, Value, json};
 
-    use super::{decode_reply, generate_content_url, request_body};
+    use super::{StreamState, decode_reply, generate_content_url, request_body};
+    use crate::chat::sse::SseEvent;
+    use crate::chat::stream::Sink;
     use crate::chat::{
         CHAT_IDLE_TIMEOUT, ChatParams, ChatRequest, FinishReason, ToolCall, ToolChoice,
         ToolDefinition,
     };
-    use crate::error::{ChatError, JudgeError};
+    use crate::error::{ChatError, EgressError, JudgeError};
     use crate::hostile_tests::{body, check_reply, config, gemini_reply};
     use crate::judge::{StructuredOutput, judge_reply};
 
@@ -590,6 +592,42 @@ mod tests {
 
     fn body_of(mode: StructuredOutput, request: &ChatRequest) -> Value {
         serde_json::from_slice(&request_body(mode, request).expect("body")).expect("json")
+    }
+
+    /// A stream event the layer refuses with a documented error: a malformed event, a provider
+    /// error event, or a cap.
+    fn documented_stream_error(outcome: Result<(), ChatError>) {
+        match outcome {
+            Ok(()) => {}
+            Err(
+                ChatError::BadStream
+                | ChatError::Provider { .. }
+                | ChatError::Transport(EgressError::TooLarge { .. }),
+            ) => {}
+            Err(other) => panic!("undocumented stream error {other:?}"),
+        }
+    }
+
+    proptest! {
+        #![proptest_config(config())]
+
+        #[test]
+        fn a_hostile_stream_event_decodes_or_fails_cleanly(bytes in body(gemini_reply())) {
+            let event = SseEvent {
+                event: None,
+                data: String::from_utf8_lossy(&bytes).into_owned(),
+            };
+            let mut state = StreamState::default();
+            let mut sink = Sink::default();
+            let outcome = match state.on_event(&event, &mut sink) {
+                Ok(_) => {
+                    state.finish(&mut sink);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            };
+            documented_stream_error(outcome);
+        }
     }
 
     #[test]

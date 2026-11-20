@@ -1,3 +1,5 @@
+Status: implemented (2026-11-20).
+
 # V · M5 — Streaming provider layer
 
 Implementation plan for milestone M5 of track V (`docs/plans/v-prompts/00-design.md` § Milestones, D-V-19). It has 7 sub-phases, **V5.1 to V5.7**, done in order by one agent per sub-phase in one worktree. **Haiku** implements each sub-phase in one go, with no context beyond this plan, the design doc and the files they name. Each sub-phase is one commit and ends with `just check-rust` green (`just check` for V5.7). Sonnet reviews after V5.5 and after V5.7.
