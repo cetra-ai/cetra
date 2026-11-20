@@ -3260,7 +3260,7 @@ export interface components {
             id: string;
             /**
              * Format: date-time
-             * @description Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             * @description Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it.
              */
             last_active_at: string;
             /**
@@ -3285,7 +3285,7 @@ export interface components {
             id: string;
             /**
              * Format: date-time
-             * @description Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+             * @description Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it.
              */
             last_active_at: string;
             /**

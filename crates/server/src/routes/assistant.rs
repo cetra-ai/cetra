@@ -86,14 +86,17 @@ fn parse_id(text: &str) -> Result<Uuid, ApiError> {
     text.parse().map_err(|_| ApiError::NotFound)
 }
 
-/// Trimmed, 1 to 80 characters. Returns the trimmed title when it is valid.
+/// Trimmed, 1 to 80 characters, no control characters. Returns the trimmed title when it is valid.
 fn checked_title(text: &str) -> Result<String, ApiError> {
     let title = text.trim();
     let length = title.chars().count();
-    if (1..=MAX_TITLE_CHARS).contains(&length) {
+    if (1..=MAX_TITLE_CHARS).contains(&length) && !title.chars().any(char::is_control) {
         Ok(title.to_owned())
     } else {
-        Err(field_error("title", "must be 1 to 80 characters"))
+        Err(field_error(
+            "title",
+            "must be 1 to 80 characters without control characters",
+        ))
     }
 }
 
@@ -679,6 +682,22 @@ mod tests {
         assert_eq!(padded.status, StatusCode::OK);
         let renamed: AssistantConversation = padded.json();
         assert_eq!(renamed.title, "Checkout errors");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rename_refuses_control_characters() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let project = seeded.project.id;
+        let conversation = create_as(&app, project, &seeded.cookie).await;
+
+        for title in ["a\nb", "a\u{7}b"] {
+            let response = rename_as(&app, project, conversation.id, &seeded.cookie, title).await;
+            assert_eq!(response.status, StatusCode::BAD_REQUEST, "{title:?}");
+            let problem = response.problem();
+            assert_eq!(problem.errors.len(), 1);
+            assert_eq!(problem.errors[0].field, "title");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

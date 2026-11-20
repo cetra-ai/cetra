@@ -18,7 +18,7 @@ pub struct AssistantConversation {
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
-    /// Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+    /// Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it.
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub last_active_at: i64,
@@ -37,7 +37,7 @@ pub struct AssistantConversationDetail {
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub created_at: i64,
-    /// Last message or change, nanoseconds since the Unix epoch. JSON is RFC 3339.
+    /// Last message, nanoseconds since the Unix epoch. JSON is RFC 3339. A rename does not change it.
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub last_active_at: i64,

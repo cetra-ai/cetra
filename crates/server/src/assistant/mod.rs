@@ -43,12 +43,11 @@ pub(crate) async fn expire_once(state: &AppState) -> Result<ExpiryOutcome, MetaE
     Ok(ExpiryOutcome { expired, stubbed })
 }
 
-/// Runs [`expire_once`] every hour; the first run is one interval after start.
+/// Runs [`expire_once`] at start, then every hour.
 pub(crate) fn spawn_expiry(state: AppState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(EXPIRY_EVERY);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
         loop {
             interval.tick().await;
             match expire_once(&state).await {
