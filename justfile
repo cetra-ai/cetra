@@ -243,10 +243,15 @@ nightly-issue:
 eval-live:
     cargo test -p cetra-eval --test live -- --ignored --test-threads 1
 
-# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). Run by hand until the first release (D188)
+# Supply-chain checks: advisories, bans, licences, sources (D-P-3), for the root graph and the fuzz graph (track R M3). The release workflow runs it before publishing (D196)
 deny: fuzz-lock
     cargo deny check advisories bans licenses sources
     cargo deny --manifest-path fuzz/Cargo.toml check advisories bans licenses sources
+
+# The checks that only change when the dependencies do: bans, licences, sources (D196). In `check-rust`; advisories run nightly
+deny-policy: fuzz-lock
+    cargo deny check bans licenses sources
+    cargo deny --manifest-path fuzz/Cargo.toml check bans licenses sources
 
 # Debug build
 build:
@@ -278,8 +283,8 @@ demo-image tag="cetra-demo:dev":
     cp -r fixtures/otlp target/demo-image/fixtures/otlp
     docker build -f tools/demo/Dockerfile -t {{tag}} target/demo-image
 
-# Rust checks: format, lint, tests, licence headers, golden directories. `just deny` is off until the first release (D188)
-check-rust: fmt-check lint test check-ee check-golden
+# Rust checks: format, lint, tests, licence headers, golden directories, cargo deny's bans, licences and sources (D196)
+check-rust: fmt-check lint test check-ee check-golden deny-policy
 
 # Install JS dependencies from the lockfile
 js-install:

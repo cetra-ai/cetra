@@ -2,7 +2,7 @@ name: Nightly
 
 # Outside ci-ok (track R M3): the fuzz targets run for 10 minutes each. A failed run opens or
 # updates one issue labelled `nightly`. The `links` job checks the docs site's external links
-# (track W, D-W-13).
+# (track W, D-W-13), and the `advisories` job the RustSec advisories (D196).
 on:
   schedule:
     - cron: "23 2 * * *" # 02:23 UTC daily; off the hour to avoid the scheduler rush
@@ -76,8 +76,22 @@ jobs:
           tool: lychee@0.24.2
       - run: just docs-links
 
+  # RustSec advisories, for the root graph and the fuzz graph (D196). They change with the date,
+  # not the code, so they run here and in the release workflow rather than on pull requests.
+  advisories:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+        with:
+          cache: "false"
+      - run: just deny-advisories
+
   report:
-    needs: [fuzz, links]
+    needs: [fuzz, links, advisories]
     if: failure()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

@@ -157,7 +157,7 @@ Run everything through `just`:
 | Command | What it does |
 |---|---|
 | `just check` | Rust, web, Python SDK, TypeScript SDK and the docs site (D79); **must pass before every commit** |
-| `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories (cargo-deny is off until the first release, D188) |
+| `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories, cargo-deny's bans, licences and sources (D196) |
 | `just check-web` | web lint, types, tests, production build |
 | `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
@@ -174,9 +174,10 @@ Run everything through `just`:
 | `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
 | `just golden-dir <name>` | write a golden data directory from the current build into `fixtures/storage/golden/<name>` (track R M8, D-R-29) and a golden server backup into `fixtures/server/golden/<name>` (SF6, D-R-38); `scratch` for a look, a version at a release |
 | `just check-golden` | fail a branch that deletes a released golden directory or a `RELEASES` line, against `origin/main` (spec 03 § 12, D-R-30); skipped without `origin/main`; in `check-rust` |
-| `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3); not in `just check` or CI until the first release (D188) |
+| `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3); the release workflow runs it before publishing (D196) |
+| `just deny-policy` | cargo-deny's bans, licences and sources only; in `just check-rust` and CI (D196) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |
-| `just deny-advisories` | RustSec advisories only |
+| `just deny-advisories` | RustSec advisories only; CI's nightly `advisories` job (D196) |
 | `just assert-clean` | fail if the working tree changed; CI runs it after each job |
 | `just ts-smoke <tarball>` | load a packed TS SDK from ESM and CommonJS |
 | `just check-workflows` | lint and audit GitHub Actions workflows (actionlint, zizmor) |
@@ -226,7 +227,7 @@ Required tools:
 
 CI runs the `just` recipes from the table. A branch that passes `just check` locally and leaves a clean tree passes CI, except for the runtime matrix (Python 3.15, Node 22.12). The `packaging` job runs `just check-packaging-lint`; the full `just check-packaging` runs in `packaging.yml` on pushes to `main` and weekly, outside `ci-ok` (D-N-13).
 
-`.github/workflows/nightly.yml` runs nightly and on demand, outside `ci-ok`: each fuzz target for 10 minutes. A failed run opens or updates one issue labelled `nightly` (track R M3). The model, stress and LazyFS jobs join it when their recipes land.
+`.github/workflows/nightly.yml` runs nightly and on demand, outside `ci-ok`: each fuzz target for 10 minutes, the docs site's external links and the RustSec advisories (D196). A failed run opens or updates one issue labelled `nightly` (track R M3). The model, stress and LazyFS jobs join it when their recipes land.
 
 Actions are pinned by commit SHA with the tag in a comment; Dependabot updates them. Never use a tag or branch reference.
 

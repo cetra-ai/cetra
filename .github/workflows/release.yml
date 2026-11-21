@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.version.outputs.version }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -32,12 +32,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
-          tool: just@1.59.0
+          cache: "false"
       - name: Fetch main
         run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
       - run: just release-verify "$GITHUB_REF_NAME"
+      # Every cargo deny check, advisories included, before anything is published (D196).
+      - run: just deny
       - id: version
         name: Read the version
         run: |

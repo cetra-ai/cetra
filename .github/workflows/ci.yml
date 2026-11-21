@@ -86,8 +86,8 @@ jobs:
           cache: "false"
       # The checkout's ref is the PR merge commit: fetch main explicitly so origin/main exists.
       - run: just fetch-main
-      # cargo deny is off until the first release (D188).
-      - run: just check-ee check-golden
+      # cargo deny's bans, licences and sources; advisories run nightly (D196).
+      - run: just check-ee check-golden deny-policy
       - run: just assert-clean
 
   web:
