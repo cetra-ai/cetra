@@ -279,7 +279,7 @@ P1 → P2 in order (same files). P3 and P4 touch disjoint files and may run in p
 2. `routes/admin.rs`:
    - Imports: add `put` to the `axum::routing::{get, patch, post}` import; `InstallLicenseRequest` and `LicenseKeySource` from `crate::api::admin`; `InstanceLicense`, `LicenseSource` and `LICENSE_STORE_URL` next to `LicenseState` from `crate::ee::license`; `LICENSE_KEY` and `put_setting` from `crate::meta::instance_settings`; `FieldError` if not already imported.
    - Move `get_license`'s body into `fn admin_license(state: &AppState) -> AdminLicense`. It also sets `source` with an explicit `match license.source { LicenseSource::Config => Some(LicenseKeySource::Config), LicenseSource::Stored => Some(LicenseKeySource::Stored), LicenseSource::Missing => None }` and `renew_url` (`state.config.entitlements.upgrade_url.is_none().then(|| LICENSE_STORE_URL.to_owned())`) on every variant, `none` included. `get_license` returns `error::Json(admin_license(&state))`.
-   - Add a `RouteDef` after the GET one: `method: PUT`, `path: "/api/v1/admin/license"`, `access: Access::InstanceAdmin`, `documented: true`, `handler: put(put_license)` (import `axum::routing::put` next to `get`/`post`).
+   - Add a `RouteDef` after the GET one: `method: PUT`, `path: "/api/v1/admin/license"`, `access: Access::InstanceAdmin`, `documented: true`, `handler: put(put_license)`.
    - `async fn put_license(State(state), error::Json(body): error::Json<InstallLicenseRequest>) -> Result<error::Json<AdminLicense>, ApiError>`, in this order:
      1. `state.config.license_key.is_some()` → `Err(ApiError::Conflict { detail: "the licence key is set in the configuration" })`.
      2. `let key = body.key.trim();` empty → `ApiError::BadRequest { detail: Some("enter a licence key".to_owned()), errors: vec![FieldError { field: "key".to_owned(), message: "enter a licence key".to_owned(), position: None }] }`.
@@ -290,7 +290,7 @@ P1 → P2 in order (same files). P3 and P4 touch disjoint files and may run in p
      7. `tracing::info!(license_id = %license.id, kid = %license.kid, "licence key installed");`
      8. `state.entitlements.set_license(InstanceLicense { state: LicenseState::Valid(license), source: LicenseSource::Stored });`
      9. Drop the guard; return `error::Json(admin_license(&state))` (status 200).
-3. Remove the three `cfg_attr(…dead_code)` attributes and their comments from P1 (two in `entitlements/mod.rs`, one on `InstanceLicense::source` in `ee/license.rs`).
+3. Remove the three dead-code attributes and their `// Licence renewal: P2 uses it.` comments from P1: on `InstanceLicense::source` (`ee/license.rs`), and on `set_license`, `lock_license_writes` and the `license_writes` field (`entitlements/mod.rs`; P1 used a plain `#[allow(dead_code)]` on the last two because no test calls them).
 4. The eight steps of M3 § "Every new or changed API operation" for `put_admin_license`:
    - `openapi.rs`: `let install = operation("put_admin_license", "admin", "Install a licence key").securities(session.clone()).request_body(Some(json_body("InstallLicenseRequest"))).responses(responses("200", json_of::<AdminLicense>("The licence now in force. The key itself is never returned."), &[400, 401, 403, 409, 429])).build();` (before `test_email`, which takes `session` by value); the path item becomes `let mut license_item = PathItem::new(HttpMethod::Get, license); license_item.put = Some(install);`.
    - `collect_schemas`: `InstallLicenseRequest`, `LicenseKeySource`.
@@ -334,9 +334,11 @@ P1 → P2 in order (same files). P3 and P4 touch disjoint files and may run in p
 **Edit:**
 - `web/src/ee/license-card.tsx`
 - `web/src/routes/admin/settings.test.tsx`
+- `web/src/mocks/writes.ts`
 
 **Steps:**
 
+0. Imports in `license-card.tsx`: `useQueryClient` (with `useQuery`) from `@tanstack/react-query`; `useState` from `react`; `$api` from `@/api/client`; `problemMessage` from `@/api/problem`; `adminSettingsQuery` (with `adminLicenseQuery`) from `@/api/queries-admin`; `SettingsFormCard` (with `SettingsCard`) from `@/components/settings/settings-card`; `Label` from `@/components/ui/label`; `Textarea` from `@/components/ui/textarea`.
 1. In `LicenseCard`, inside the existing `SettingsCard`:
    - Replace the paragraph "Set the key with CETRA_LICENSE_KEY and restart the server." with the source line: `source === "config"` → "Set by CETRA_LICENSE_KEY or license_key in the configuration. Change it there and restart the server."; `source === "stored"` → "Installed from this page."; no `source` → nothing.
    - When `data.renew_url` is set, a paragraph after the `<dl>` with `<a href={data.renew_url} target="_blank" rel="noreferrer" className="underline">Buy or renew a licence</a>`. The URL is never written in `web/src`: it comes from the API.
@@ -345,6 +347,7 @@ P1 → P2 in order (same files). P3 and P4 touch disjoint files and may run in p
    - One field: `<Label htmlFor="license-key">Licence key</Label>` and `<Textarea id="license-key" value={key} onChange=… rows={4} className="font-mono" spellCheck={false} autoComplete="off" />` (`@/components/ui/textarea`, `@/components/ui/label`).
    - `const install = $api.useMutation("put", "/api/v1/admin/license");`. `onSubmit`: `setSaved(false)`, `install.reset()`, return when `key.trim() === ""`, then `install.mutate({ body: { key: key.trim() } }, { onSuccess })`.
    - `onSuccess(answer)`: `setKey("")`, `setSaved(true)`, `queryClient.setQueryData(adminLicenseQuery.queryKey, answer)`, `void queryClient.invalidateQueries({ queryKey: adminSettingsQuery.queryKey })` (`enforce_sso_applied` depends on the licence), and `void queryClient.invalidateQueries({ predicate: (query) => query.queryKey[1] === "/api/v1/orgs/{org}/entitlements" })` (every org's plan).
+2b. `web/src/mocks/writes.ts` (its test `writes.test.ts` requires every admin write of the contract): add `{ operationId: "put_admin_license", method: "put", path: "/api/v1/admin/license" }` to `WRITE_OPERATIONS` next to `post_admin_settings_test_email`, and the handler `put_admin_license: () => HttpResponse.json(adminLicenseDocument)` to `RESPONSES`, with `import adminLicenseDocument from "../../../fixtures/api/static/admin-license.json";` in the alphabetical import block (follow how the neighbouring static documents are imported).
 3. `statusLabel`'s `none` text becomes "No licence key. Enterprise features are locked." (unchanged) — keep the existing status strings exactly; the existing tests check them.
 
 **Tests** (`settings.test.tsx`; the default MSW mock is `fixtures/api/static/admin-license.json`, now with `source: "config"` and `renew_url`):
@@ -356,7 +359,7 @@ P1 → P2 in order (same files). P3 and P4 touch disjoint files and may run in p
 - `cannot install an empty key`: the Install button is disabled while the field is blank.
 - Every existing test in the file still passes.
 
-**Done when:** `cd web && pnpm vitest run src/routes/admin/settings.test.tsx --maxWorkers=8`, `cd web && pnpm typecheck`, and `cd web && pnpm exec biome check src/ee/license-card.tsx src/routes/admin/settings.test.tsx` pass. `grep -rn "app.cetra.sh" web/src` finds only the test file.
+**Done when:** `cd web && pnpm vitest run src/routes/admin/settings.test.tsx src/mocks/writes.test.ts --maxWorkers=8`, `cd web && pnpm typecheck`, and `cd web && pnpm exec biome check src/ee/license-card.tsx src/routes/admin/settings.test.tsx src/mocks/writes.ts` pass. `grep -rn "app.cetra.sh" web/src` finds only the test file.
 
 **Commit:** `Link to the licence store and install keys on the licence card`
 
