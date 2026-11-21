@@ -14,7 +14,7 @@ The Monitor, Evaluate and Explore pages grew apart: three page layouts, two tabl
 
 When this plan is done:
 - **One toolbar.** Alerts, Issues, Prompts, Playground, Evaluators, Online rules, Issue sources, Annotation queues, Datasets and Experiments share `PageToolbar`:
-  - `min-h-9 border-b px-3 py-1`. The root font is 13 px, so that is about 29 px high (the Traces toolbar's height) with about 10 px of side padding;
+  - `min-h-9 border-b px-3`. The root font is 13 px, so that is about 29 px high (the Traces toolbar's height) with about 10 px of side padding;
   - the search box first (`h-7 w-56`), then the filters and sort, then a muted summary;
   - the primary action on the right, as a small button with a `Plus` icon.
 - **One chip style.** The count chips of Alerts, Online rules, Experiments and Evaluators use `FilterChips`: select a chip to filter, select it again to clear. There is no "All" or "Total" chip.
@@ -94,7 +94,7 @@ export function PageToolbar({ children, actions }: { children?: ReactNode; actio
   return (
     <div
       data-slot="page-toolbar"
-      className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3 py-1"
+      className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3"
     >
       {children}
       {actions === undefined || actions === null ? null : (

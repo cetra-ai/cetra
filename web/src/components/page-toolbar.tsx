@@ -8,7 +8,7 @@ export function PageToolbar({ children, actions }: { children?: ReactNode; actio
   return (
     <div
       data-slot="page-toolbar"
-      className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3 py-1"
+      className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3"
     >
       {children}
       {actions === undefined || actions === null ? null : (
