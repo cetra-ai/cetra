@@ -743,7 +743,11 @@ The phases run in order: each uses the modules of the one before. Files per phas
 
 **Goal:** `cetra-cli init` as design § `init`, step by step.
 
-**Edit:** `node-cli/src/init.ts`, `init.test.ts` (new); `src/cli.ts`.
+**Edit:** `node-cli/src/init.ts`, `init.test.ts` (new); `src/cli.ts`; `node-cli/src/local.ts` and `local.test.ts` (two follow-ups from C5b, step 0).
+
+**Step 0 — two follow-ups in `local.ts`** (decided 2026-11-21 after C5b):
+- **Docker port mismatch.** When `docker port cetra-local 8080` gives a host port other than `--url`'s, throw `CliError("the cetra-local container listens on port <p>; run again with --url http://localhost:<p>", Exit.Usage)` before waiting. Do not change `server`: the container's `public_url` is fixed at creation. Add a test with an injected `execFile`.
+- **Timeout of a binary first start.** Before removing the data dir, kill the child: `process.kill(pid)` (ignore an error). Add an assertion to the existing timeout test that the injected child was killed.
 
 **Steps.**
 1. **`init.ts`:** `export async function init(args: string[], io: Io, deps: Deps = {}): Promise<ExitCode>`.
