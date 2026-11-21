@@ -303,7 +303,7 @@ async fn get_license(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> error::Json<AdminLicense> {
     let license = state.entitlements.license();
-    let status = match license.status(state.clock.now_ns()) {
+    let status = match license.state.status(state.clock.now_ns()) {
         crate::ee::license::LicenseStatus::Absent => LicenseStatus::None,
         crate::ee::license::LicenseStatus::Invalid => LicenseStatus::Invalid,
         crate::ee::license::LicenseStatus::Active => LicenseStatus::Active,
@@ -319,7 +319,7 @@ async fn get_license(
         expires_at: None,
         grace_ends_at: None,
     };
-    error::Json(match license {
+    error::Json(match &license.state {
         LicenseState::Absent => none,
         LicenseState::Invalid(reason) => AdminLicense {
             reason: Some(reason.to_string()),

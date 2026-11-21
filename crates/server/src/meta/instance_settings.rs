@@ -7,6 +7,9 @@ use super::MetaError;
 /// Key of the encryption check value (D-I-2).
 pub(crate) const ENCRYPTION_CHECK: &str = "encryption.check";
 
+/// Key of the licence key an instance admin installed (D-P-75). A signed token, stored in plain text.
+pub(crate) const LICENSE_KEY: &str = "license.key";
+
 /// The value of `key`, or `None`.
 ///
 /// # Errors

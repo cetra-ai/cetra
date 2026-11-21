@@ -23,7 +23,7 @@ use crate::auth::secret::constant_time_eq;
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::crypto::{self, Aad, KeySource, SecretBox};
-use crate::ee::license::LicenseState;
+use crate::ee::license::load_license;
 use crate::entitlements::{Defaults, EntitlementsState};
 use crate::meta::deletions::{
     DeletionState, all_deletions, insert_copy, scope_projects, scope_sessions, scope_traces,
@@ -295,8 +295,12 @@ async fn entitlements_in(
     }
     .map_err(map_meta)?
     .ok_or(AdminError::OrgNotFound)?;
-    let license =
-        LicenseState::from_key(config.license_key.as_ref().map(|key| key.expose().as_str()));
+    let license = load_license(
+        meta.reader(),
+        config.license_key.as_ref().map(|key| key.expose().as_str()),
+    )
+    .await
+    .map_err(map_meta)?;
     let defaults = Defaults::from_config(&config.entitlements.defaults);
     let state = EntitlementsState::load(
         meta,
@@ -1933,6 +1937,29 @@ mod tests {
 
         let missing = entitlements(&config, "missing").await.unwrap_err();
         assert_eq!(missing.to_string(), "no such org");
+    }
+
+    #[tokio::test]
+    async fn entitlements_show_reads_the_installed_licence() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+
+        let before = entitlements(&config, "acme").await.unwrap();
+        assert!(!before.features.contains(&Feature::ProjectRoles));
+
+        let key = crate::test_support::license_key(&["project_roles"]);
+        db.write(move |conn| {
+            Box::pin(async move {
+                instance_settings::put_setting(conn, instance_settings::LICENSE_KEY, &key).await
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        let report = entitlements(&config, "acme").await.unwrap();
+        assert!(report.features.contains(&Feature::ProjectRoles));
     }
 
     #[test]

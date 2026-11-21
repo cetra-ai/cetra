@@ -9,7 +9,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use cetra_core::ids::OrgId;
 
 use crate::config::EntitlementDefaults;
-use crate::ee::license::{LicenseState, LicenseStatus};
+use crate::ee::license::{InstanceLicense, LicenseState, LicenseStatus};
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::entitlements::window_ends_since;
@@ -200,7 +200,11 @@ pub(crate) struct PlanView {
 /// Entitlement sources held by the process (D-P-10, D-P-11).
 #[derive(Debug)]
 pub(crate) struct EntitlementsState {
-    license: LicenseState,
+    /// The instance licence; replaced when an admin installs a key (D-P-75).
+    license: RwLock<Arc<InstanceLicense>>,
+    /// Serializes licence installs: the stored key and the held licence change together.
+    #[allow(dead_code)] // Licence renewal: P2 uses it.
+    license_writes: tokio::sync::Mutex<()>,
     defaults: Defaults,
     /// The newest accepted token per org, valid or in grace at the time it was read.
     orgs: RwLock<HashMap<OrgId, Arc<OrgGrant>>>,
@@ -215,7 +219,7 @@ impl EntitlementsState {
     /// With `control_plane` off (D-P-50) no stored token is read: the org map stays empty.
     pub(crate) async fn load(
         meta: &MetaDb,
-        license: LicenseState,
+        license: InstanceLicense,
         defaults: Defaults,
         public_url: &str,
         control_plane: bool,
@@ -230,7 +234,8 @@ impl EntitlementsState {
                 );
             }
             return Ok(Self {
-                license,
+                license: RwLock::new(Arc::new(license)),
+                license_writes: tokio::sync::Mutex::new(()),
                 defaults,
                 orgs: RwLock::new(orgs),
             });
@@ -257,15 +262,31 @@ impl EntitlementsState {
             }
         }
         Ok(Self {
-            license,
+            license: RwLock::new(Arc::new(license)),
+            license_writes: tokio::sync::Mutex::new(()),
             defaults,
             orgs: RwLock::new(orgs),
         })
     }
 
-    /// The instance licence.
-    pub(crate) fn license(&self) -> &LicenseState {
-        &self.license
+    /// The instance licence now.
+    pub(crate) fn license(&self) -> Arc<InstanceLicense> {
+        self.license
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Replaces the instance licence. Every later check sees it (D-P-75).
+    #[cfg_attr(not(test), allow(dead_code))] // Licence renewal: P2 uses it.
+    pub(crate) fn set_license(&self, license: InstanceLicense) {
+        *self.license.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(license);
+    }
+
+    /// Held while a licence key is stored and set, so two installs cannot interleave.
+    #[allow(dead_code)] // Licence renewal: P2 uses it.
+    pub(crate) async fn lock_license_writes(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.license_writes.lock().await
     }
 
     /// The instance defaults.
@@ -297,7 +318,7 @@ impl EntitlementsState {
     /// What `org` may do at `now`: the org's token while it is in grace, else the defaults,
     /// plus the licence's features while it is active or in grace.
     pub(crate) fn resolve(&self, org: OrgId, now: i64) -> Entitlements {
-        let licensed = self.license.active_features(now);
+        let licensed = self.license().state.active_features(now);
         match self.grant(org) {
             Some(grant) if now < grant.grace_ends_at => {
                 Entitlements::new(grant.features.union(licensed), grant.limits)
@@ -461,7 +482,7 @@ mod tests {
         );
     }
     use crate::config::{EntitlementDefaults, PublicUrl, Secret};
-    use crate::ee::license::InvalidLicense;
+    use crate::ee::license::{InvalidLicense, LicenseSource};
     use crate::meta::entitlements::{StoredToken, put_token, record_window_end};
     use crate::meta::orgs::insert_org;
     use crate::test_support::{
@@ -518,6 +539,14 @@ mod tests {
         grant_from_token(&token, PublicUrl::default().origin(), &Limits::default())
             .unwrap()
             .1
+    }
+
+    /// No licence key.
+    fn absent_license() -> InstanceLicense {
+        InstanceLicense {
+            state: LicenseState::Absent,
+            source: LicenseSource::Missing,
+        }
     }
 
     /// Inserts an org in the meta database and returns its id.
@@ -632,6 +661,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn set_license_applies_at_once() {
+        let app = TestApp::new().await;
+        let org = OrgId::new_v7();
+        assert!(!of(&app.state, org).allows(Feature::ProjectRoles));
+
+        app.state.entitlements.set_license(InstanceLicense {
+            state: LicenseState::from_key(Some(&license_key(&["project_roles"]))),
+            source: LicenseSource::Stored,
+        });
+        assert!(of(&app.state, org).allows(Feature::ProjectRoles));
+        assert_eq!(
+            app.state.entitlements.license().source,
+            LicenseSource::Stored
+        );
+    }
+
+    #[tokio::test]
     async fn expired_license_allows_nothing() {
         let key = license_key_until(
             &["project_roles"],
@@ -648,6 +694,7 @@ mod tests {
             app.state
                 .entitlements
                 .license()
+                .state
                 .listed_features()
                 .contains(Feature::ProjectRoles)
         );
@@ -660,7 +707,7 @@ mod tests {
         })
         .await;
         assert!(matches!(
-            app.state.entitlements.license(),
+            app.state.entitlements.license().state,
             LicenseState::Invalid(InvalidLicense::Token(TokenError::Malformed))
         ));
         assert_eq!(
@@ -829,7 +876,7 @@ mod tests {
         let defaults = app.state.entitlements.defaults().clone();
         let (loaded, logs) = capture_logs(EntitlementsState::load(
             &app.state.meta,
-            LicenseState::Absent,
+            absent_license(),
             defaults,
             PublicUrl::default().origin(),
             true,
@@ -873,7 +920,7 @@ mod tests {
         let defaults = app.state.entitlements.defaults().clone();
         let (loaded, logs) = capture_logs(EntitlementsState::load(
             &app.state.meta,
-            LicenseState::Absent,
+            absent_license(),
             defaults,
             PublicUrl::default().origin(),
             false,

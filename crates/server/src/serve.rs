@@ -411,10 +411,20 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
             }));
         }
     };
-    let license = crate::ee::license::LicenseState::from_key(
+    let license = match crate::ee::license::load_license(
+        meta.reader(),
         config.license_key.as_ref().map(|key| key.expose().as_str()),
-    );
-    crate::entitlements::log_license(&license, Clock::System.now_ns());
+    )
+    .await
+    {
+        Ok(license) => license,
+        Err(error) => {
+            release_storage(storage).await;
+            meta.close().await;
+            return Err(ServeError::Meta(error));
+        }
+    };
+    crate::entitlements::log_license(&license.state, Clock::System.now_ns());
     let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
     let entitlements = match crate::entitlements::EntitlementsState::load(
         &meta,
