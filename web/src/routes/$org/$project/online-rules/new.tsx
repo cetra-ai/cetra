@@ -1,9 +1,13 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { cn } from "cn";
 import { ChevronLeft } from "lucide-react";
 import { useEffect, useState } from "react";
+
 import { projectRef } from "@/api/project-ref";
 import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { RuleForm } from "@/components/online-rules/rule-form";
+import { ITEM_TITLE_CLASS, PageToolbar, PageToolbarTitle } from "@/components/page-toolbar";
+
 import { useProject } from "@/components/shell/project-context";
 import { subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
 
@@ -30,28 +34,35 @@ function NewOnlineRulePage() {
     [ref],
   );
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex min-w-0 flex-wrap items-center gap-2">
-        <BackLink
-          fallback={
-            <Link
-              to="/$org/$project/online-rules"
-              params={{ org, project }}
-              search={{}}
-              aria-label="Back to online rules"
-              className={BACK_LINK_CLASS}
-            >
-              <ChevronLeft aria-hidden="true" className="size-3.5" />
-              Online rules
-            </Link>
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar>
+        <PageToolbarTitle
+          back={
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/online-rules"
+                  params={{ org, project }}
+                  search={{}}
+                  aria-label="Back to online rules"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Online rules
+                </Link>
+              }
+            />
           }
-        />
-        <span aria-hidden="true" className="text-muted-foreground/60">
-          /
-        </span>
-        <h2 className="text-title font-medium">New rule</h2>
+          label="Online rule"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>New rule</h2>
+        </PageToolbarTitle>
+      </PageToolbar>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className={cn("flex flex-col gap-6 px-3 py-3", "max-w-3xl")}>
+          <RuleForm key={formKey} org={org} project={project} initialDraft={draft} />
+        </div>
       </div>
-      <RuleForm key={formKey} org={org} project={project} initialDraft={draft} />
     </div>
   );
 }

@@ -13,6 +13,12 @@ import { EvaluatorForm } from "@/components/evaluators/evaluator-form";
 import { EvaluatorHistory } from "@/components/evaluators/evaluator-history";
 import { EvaluatorOverview } from "@/components/evaluators/evaluator-overview";
 import { RuleConflicts } from "@/components/online-rules/rule-conflicts";
+import {
+  ITEM_TITLE_CLASS,
+  PageToolbar,
+  PageToolbarSummary,
+  PageToolbarTitle,
+} from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { Button } from "@/components/ui/button";
@@ -110,10 +116,27 @@ function EvaluatorPage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex flex-col gap-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-2">
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar
+        actions={
+          <DisabledReason reason={canManage ? undefined : "Only members can edit evaluators"}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!canManage}
+              onClick={() => {
+                setDeleteFailure(undefined);
+                setConfirmOpen(true);
+              }}
+            >
+              Delete
+            </Button>
+          </DisabledReason>
+        }
+      >
+        <PageToolbarTitle
+          back={
             <BackLink
               fallback={
                 <Link
@@ -127,73 +150,63 @@ function EvaluatorPage() {
                 </Link>
               }
             />
-            <span aria-hidden="true" className="text-muted-foreground/60">
-              /
-            </span>
-            <h2 className="text-title font-medium">{evaluator.name}</h2>
-            <TopBarCrumb>
-              <span className="max-w-64 truncate text-body font-medium">{evaluator.name}</span>
-            </TopBarCrumb>
-          </div>
-          <p className="text-caption text-muted-foreground">
-            {KIND_LABELS[evaluator.kind]} · version {evaluator.version} · score{" "}
-            {evaluator.output_score.name} ({evaluator.output_score.data_type})
-          </p>
-        </div>
-        <DisabledReason reason={canManage ? undefined : "Only members can edit evaluators"}>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!canManage}
-            onClick={() => {
-              setDeleteFailure(undefined);
-              setConfirmOpen(true);
-            }}
-          >
-            Delete
-          </Button>
-        </DisabledReason>
-      </div>
-      <Tabs value={tab} onValueChange={chooseTab} className="flex flex-col gap-4">
-        <TabsList>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="config">Configuration</TabsTrigger>
-          <TabsTrigger value="history">History</TabsTrigger>
-        </TabsList>
-        <TabsContent value="overview">
-          <EvaluatorOverview org={org} project={project} evaluator={evaluator} />
-        </TabsContent>
-        {/* Kept mounted while hidden so unsaved edits survive a tab switch. */}
-        <TabsContent value="config" forceMount hidden={tab !== "config"}>
-          {/* Keyed by version: a saved change remounts the form, which clears any secret it still holds. */}
-          <EvaluatorForm
-            key={`${evaluator.id}-${evaluator.version}`}
-            org={org}
-            project={project}
-            evaluator={evaluator}
-            onSaved={() => {
-              void queryClient.invalidateQueries({
-                queryKey: ["get", "/api/v1/projects/{project}/evaluators/{id}/versions"],
-              });
-            }}
+          }
+          label="Evaluator"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>{evaluator.name}</h2>
+        </PageToolbarTitle>
+        <PageToolbarSummary>
+          {KIND_LABELS[evaluator.kind]} · version {evaluator.version} · score{" "}
+          {evaluator.output_score.name} ({evaluator.output_score.data_type})
+        </PageToolbarSummary>
+      </PageToolbar>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="flex flex-col gap-6 px-3 py-3">
+          <TopBarCrumb>
+            <span className="max-w-64 truncate text-body font-medium">{evaluator.name}</span>
+          </TopBarCrumb>
+          <Tabs value={tab} onValueChange={chooseTab} className="flex flex-col gap-4">
+            <TabsList>
+              <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="config">Configuration</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
+            </TabsList>
+            <TabsContent value="overview">
+              <EvaluatorOverview org={org} project={project} evaluator={evaluator} />
+            </TabsContent>
+            {/* Kept mounted while hidden so unsaved edits survive a tab switch. */}
+            <TabsContent value="config" forceMount hidden={tab !== "config"}>
+              {/* Keyed by version: a saved change remounts the form, which clears any secret it still holds. */}
+              <EvaluatorForm
+                key={`${evaluator.id}-${evaluator.version}`}
+                org={org}
+                project={project}
+                evaluator={evaluator}
+                onSaved={() => {
+                  void queryClient.invalidateQueries({
+                    queryKey: ["get", "/api/v1/projects/{project}/evaluators/{id}/versions"],
+                  });
+                }}
+              />
+            </TabsContent>
+            <TabsContent value="history">
+              <EvaluatorHistory org={org} project={project} evaluatorId={evaluator.id} />
+            </TabsContent>
+          </Tabs>
+          <ConfirmDialog
+            open={confirmOpen}
+            onOpenChange={setConfirmOpen}
+            title={`Delete ${evaluator.name}?`}
+            description="Its test history is kept as evaluation traces."
+            confirmLabel="Delete"
+            destructive
+            pending={remove.isPending}
+            error={deleteFailure?.message}
+            details={<RuleConflicts org={org} project={project} problem={deleteFailure?.problem} />}
+            onConfirm={onDelete}
           />
-        </TabsContent>
-        <TabsContent value="history">
-          <EvaluatorHistory org={org} project={project} evaluatorId={evaluator.id} />
-        </TabsContent>
-      </Tabs>
-      <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title={`Delete ${evaluator.name}?`}
-        description="Its test history is kept as evaluation traces."
-        confirmLabel="Delete"
-        destructive
-        pending={remove.isPending}
-        error={deleteFailure?.message}
-        details={<RuleConflicts org={org} project={project} problem={deleteFailure?.problem} />}
-        onConfirm={onDelete}
-      />
+        </div>
+      </div>
     </div>
   );
 }

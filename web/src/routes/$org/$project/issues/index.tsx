@@ -7,6 +7,7 @@ import type { Schema } from "@/api/types";
 import { EmptyState } from "@/components/empty-state";
 import { KIND_LABELS } from "@/components/issue-sources/source-list";
 import { IssueList } from "@/components/issues/issue-list";
+import { PageToolbar } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -112,7 +113,21 @@ function IssuesPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b px-3 py-2">
+      <PageToolbar>
+        <Input
+          aria-label="Search issues"
+          placeholder="Search issues"
+          value={text}
+          className="h-7 w-56 text-body"
+          onChange={(event) => {
+            const value = event.target.value;
+            setText(value);
+            clearTimeout(searchTimer.current);
+            searchTimer.current = setTimeout(() => {
+              setSearch((prev) => ({ ...prev, q: value.trim() || undefined }), true);
+            }, SEARCH_DEBOUNCE_MS);
+          }}
+        />
         <Tabs
           value={state}
           onValueChange={(value) => {
@@ -122,7 +137,7 @@ function IssuesPage() {
             }
           }}
         >
-          <TabsList>
+          <TabsList className="group-data-horizontal/tabs:h-8">
             {ISSUE_STATE_TABS.map((tab) => (
               <TabsTrigger key={tab} value={tab}>
                 {STATE_LABEL[tab]}
@@ -136,7 +151,7 @@ function IssuesPage() {
             setSearch((prev) => ({ ...prev, source: value === "all" ? undefined : value }));
           }}
         >
-          <SelectTrigger aria-label="Source" className="h-7 w-44 text-body">
+          <SelectTrigger aria-label="Source" size="sm" className="w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -157,7 +172,7 @@ function IssuesPage() {
             }
           }}
         >
-          <SelectTrigger aria-label="Kind" className="h-7 w-36 text-body">
+          <SelectTrigger aria-label="Kind" size="sm" className="w-36 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -168,43 +183,27 @@ function IssuesPage() {
             ))}
           </SelectContent>
         </Select>
-        <div className="ml-auto flex items-center gap-2">
-          <Select
-            value={sort}
-            onValueChange={(value) => {
-              const next = ISSUE_SORTS.find((option) => option === value);
-              if (next) {
-                setSearch((prev) => ({ ...prev, sort: next === "last_seen" ? undefined : next }));
-              }
-            }}
-          >
-            <SelectTrigger aria-label="Sort" className="h-7 w-36 text-body">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {ISSUE_SORTS.map((option) => (
-                <SelectItem key={option} value={option}>
-                  {SORT_LABEL[option]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            aria-label="Search issues"
-            placeholder="Search issues"
-            value={text}
-            className="h-7 w-56 text-body"
-            onChange={(event) => {
-              const value = event.target.value;
-              setText(value);
-              clearTimeout(searchTimer.current);
-              searchTimer.current = setTimeout(() => {
-                setSearch((prev) => ({ ...prev, q: value.trim() || undefined }), true);
-              }, SEARCH_DEBOUNCE_MS);
-            }}
-          />
-        </div>
-      </div>
+        <Select
+          value={sort}
+          onValueChange={(value) => {
+            const next = ISSUE_SORTS.find((option) => option === value);
+            if (next) {
+              setSearch((prev) => ({ ...prev, sort: next === "last_seen" ? undefined : next }));
+            }
+          }}
+        >
+          <SelectTrigger aria-label="Sort" size="sm" className="w-36 text-body">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {ISSUE_SORTS.map((option) => (
+              <SelectItem key={option} value={option}>
+                {SORT_LABEL[option]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </PageToolbar>
       <div className="flex min-h-0 flex-1 flex-col gap-3 px-3 py-3">
         {list.isPending ? (
           <>

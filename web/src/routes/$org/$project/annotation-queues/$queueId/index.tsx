@@ -8,6 +8,7 @@ import { QueueProgress } from "@/components/annotation-queues/queue-progress";
 import { QueueSettings } from "@/components/annotation-queues/queue-settings";
 import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { DisabledReason } from "@/components/disabled-reason";
+import { ITEM_TITLE_CLASS, PageToolbar, PageToolbarTitle } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { Button } from "@/components/ui/button";
@@ -74,50 +75,54 @@ function QueuePage() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
-      <header className="flex min-h-9 flex-wrap items-center gap-2 border-b px-3 py-1.5">
-        <nav aria-label="Annotation queue" className="flex min-w-0 items-center gap-1.5">
-          <BackLink
-            fallback={
-              <Link
-                to="/$org/$project/annotation-queues"
-                params={{ org, project }}
-                aria-label="Back to annotation queues"
-                className={BACK_LINK_CLASS}
-              >
-                <ChevronLeft aria-hidden="true" className="size-3.5" />
-                Annotation queues
-              </Link>
-            }
-          />
-          <span aria-hidden="true" className="text-muted-foreground/60">
-            /
-          </span>
-          <h2 className="truncate text-ui font-medium">{current.name}</h2>
+      <PageToolbar
+        actions={
+          <>
+            <QueueProgress counts={current.counts} />
+            <DisabledReason reason={startReason}>
+              {startable ? (
+                <Button asChild size="sm">
+                  <Link
+                    to="/$org/$project/annotation-queues/$queueId/review/$itemId"
+                    params={{ org, project, queueId, itemId: "next" }}
+                  >
+                    Start reviewing
+                  </Link>
+                </Button>
+              ) : (
+                <Button type="button" size="sm" disabled>
+                  Start reviewing
+                </Button>
+              )}
+            </DisabledReason>
+          </>
+        }
+      >
+        <PageToolbarTitle
+          back={
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/annotation-queues"
+                  params={{ org, project }}
+                  aria-label="Back to annotation queues"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Annotation queues
+                </Link>
+              }
+            />
+          }
+          label="Annotation queue"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>{current.name}</h2>
           <TopBarCrumb>
             <span className="max-w-64 truncate text-body font-medium">{current.name}</span>
           </TopBarCrumb>
-        </nav>
+        </PageToolbarTitle>
         <span className="text-body text-muted-foreground">{targetLabel(current.target)}</span>
-        <div className="ml-auto flex flex-wrap items-center gap-3">
-          <QueueProgress counts={current.counts} />
-          <DisabledReason reason={startReason}>
-            {startable ? (
-              <Button asChild size="sm">
-                <Link
-                  to="/$org/$project/annotation-queues/$queueId/review/$itemId"
-                  params={{ org, project, queueId, itemId: "next" }}
-                >
-                  Start reviewing
-                </Link>
-              </Button>
-            ) : (
-              <Button type="button" size="sm" disabled>
-                Start reviewing
-              </Button>
-            )}
-          </DisabledReason>
-        </div>
-      </header>
+      </PageToolbar>
 
       {current.description ? (
         <p className="px-3 pt-2 text-body text-muted-foreground">{current.description}</p>

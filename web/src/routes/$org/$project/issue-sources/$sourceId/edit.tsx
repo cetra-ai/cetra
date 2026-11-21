@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, notFound, useNavigate } from "@tanstack/react-router";
+import { cn } from "cn";
 import { ChevronLeft } from "lucide-react";
 import { useState } from "react";
 import { problemMessage, problemOf } from "@/api/problem";
@@ -10,6 +11,7 @@ import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { SourceForm } from "@/components/issue-sources/source-form";
 import { openIssuesText } from "@/components/issue-sources/source-list";
+import { ITEM_TITLE_CLASS, PageToolbar, PageToolbarTitle } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { canManageEvaluation } from "@/lib/roles";
@@ -66,53 +68,62 @@ function EditIssueSourcePage() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <BackLink
-            fallback={
-              <Link
-                to="/$org/$project/issue-sources"
-                params={{ org, project }}
-                aria-label="Back to issue sources"
-                className={BACK_LINK_CLASS}
-              >
-                <ChevronLeft aria-hidden="true" className="size-3.5" />
-                Issue sources
-              </Link>
-            }
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar
+        actions={
+          <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={!canManage}
+              onClick={() => {
+                setDeleteError(undefined);
+                setConfirmOpen(true);
+              }}
+            >
+              Delete
+            </Button>
+          </DisabledReason>
+        }
+      >
+        <PageToolbarTitle
+          back={
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/issue-sources"
+                  params={{ org, project }}
+                  aria-label="Back to issue sources"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Issue sources
+                </Link>
+              }
+            />
+          }
+          label="Issue source"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>{source.name}</h2>
+        </PageToolbarTitle>
+      </PageToolbar>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className={cn("flex flex-col gap-6 px-3 py-3", "max-w-3xl")}>
+          <SourceForm key={source.id} org={org} project={project} source={source} />
+          <ConfirmDialog
+            open={confirmOpen}
+            onOpenChange={setConfirmOpen}
+            title={`Delete ${source.name}?`}
+            description={`Delete this source and its ${openIssuesText(source.open_issues)}? Their occurrence scores stay on the traces.`}
+            confirmLabel="Delete"
+            destructive
+            pending={remove.isPending}
+            error={deleteError}
+            onConfirm={onDelete}
           />
-          <span aria-hidden="true" className="text-muted-foreground/60">
-            /
-          </span>
-          <h2 className="text-title font-medium">{source.name}</h2>
         </div>
-        <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={!canManage}
-            onClick={() => {
-              setDeleteError(undefined);
-              setConfirmOpen(true);
-            }}
-          >
-            Delete
-          </Button>
-        </DisabledReason>
       </div>
-      <SourceForm key={source.id} org={org} project={project} source={source} />
-      <ConfirmDialog
-        open={confirmOpen}
-        onOpenChange={setConfirmOpen}
-        title={`Delete ${source.name}?`}
-        description={`Delete this source and its ${openIssuesText(source.open_issues)}? Their occurrence scores stay on the traces.`}
-        confirmLabel="Delete"
-        destructive
-        pending={remove.isPending}
-        error={deleteError}
-        onConfirm={onDelete}
-      />
     </div>
   );
 }

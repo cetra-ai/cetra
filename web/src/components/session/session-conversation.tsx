@@ -186,7 +186,7 @@ function Turn({
     // biome-ignore lint/a11y/useKeyWithClickEvents: the meta-line button is the keyboard equivalent.
     <div
       className={cn(
-        "flex cursor-pointer flex-col gap-2 border-b px-3 py-2",
+        "flex cursor-pointer flex-col gap-3 border-b px-4 py-3",
         selected
           ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
           : cn("hover:bg-row-hover", failed && "shadow-[inset_2px_0_0_var(--status-error)]"),

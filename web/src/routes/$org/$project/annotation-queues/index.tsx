@@ -1,6 +1,6 @@
 import { keepPreviousData } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { ClipboardCheck } from "lucide-react";
+import { ClipboardCheck, Plus } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { $api } from "@/api/client";
 import { annotationQueuesInit } from "@/api/queries-annotation-queues";
@@ -10,6 +10,7 @@ import { QueueProgress } from "@/components/annotation-queues/queue-progress";
 import { DataTable, type DataTableColumn } from "@/components/data-table/data-table";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { PageToolbar } from "@/components/page-toolbar";
 import { RelativeTime } from "@/components/relative-time";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
@@ -134,17 +135,8 @@ function QueuesPage() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
-      <div className="flex min-h-9 shrink-0 items-center gap-3 border-b px-3">
-        <Input
-          aria-label="Search annotation queues"
-          placeholder="Search by name"
-          value={text}
-          onChange={(event) => {
-            setText(event.target.value);
-          }}
-          className="h-7 max-w-xs text-body"
-        />
-        <div className="ml-auto">
+      <PageToolbar
+        actions={
           <DisabledReason reason={canManage ? undefined : "Only members can create queues"}>
             <Button
               type="button"
@@ -154,11 +146,22 @@ function QueuesPage() {
                 setCreating(true);
               }}
             >
+              <Plus />
               New queue
             </Button>
           </DisabledReason>
-        </div>
-      </div>
+        }
+      >
+        <Input
+          aria-label="Search annotation queues"
+          placeholder="Search by name"
+          value={text}
+          onChange={(event) => {
+            setText(event.target.value);
+          }}
+          className="h-7 w-56 text-body"
+        />
+      </PageToolbar>
       {query.isPending ? (
         <div className="flex flex-col gap-2 p-3">
           <Skeleton className="h-7 w-full" />
@@ -176,7 +179,7 @@ function QueuesPage() {
           <EmptyState icon={ClipboardCheck} title="No queue matches" />
         )
       ) : (
-        <div className="min-h-0 flex-1">
+        <div className="flex min-h-0 flex-1 flex-col px-3 py-3">
           <DataTable
             tableId="annotation-queues"
             ariaLabel="Annotation queues"
