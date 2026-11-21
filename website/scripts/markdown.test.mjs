@@ -66,6 +66,35 @@ test("prepass turns a card grid into a Markdown list", () => {
   );
 });
 
+test("toMarkdown turns a LinkCard written over three lines into a bullet with its description", () => {
+  const out = toMarkdown(
+    [
+      "---",
+      "title: T",
+      "---",
+      "",
+      "<CardGrid>",
+      "<LinkCard",
+      '  title="Quick start"',
+      '  description="Run it."',
+      '  href="/docs/get-started/quickstart/"',
+      "/>",
+      "</CardGrid>",
+      "",
+    ].join("\n"),
+  );
+  assert.ok(out.includes(`- [Quick start](${SITE}/docs/get-started/quickstart/): Run it.`));
+  assert.doesNotMatch(out, /LinkCard/);
+});
+
+test("prepass throws on a LinkCard that is never closed", () => {
+  assert.throws(
+    () =>
+      prepass('<LinkCard\n  title="Quick start"\n  href="/docs/get-started/quickstart/"\nAfter.'),
+    /unclosed <LinkCard> at line 1/,
+  );
+});
+
 test("prepass throws on a tilde fence outside code", () => {
   assert.throws(() => prepass("Text.\n~~~bash\necho hi\n~~~"), /line 2: use backtick fences/);
 });

@@ -43,6 +43,19 @@ function fenceKinds(lines) {
 }
 
 /**
+ * The Markdown list item for a one-line `<LinkCard>` (title, href, and an optional description),
+ * or undefined when the text is not one.
+ * @param {string} text
+ * @returns {string | undefined}
+ */
+function linkCardBullet(text) {
+  const card = /^<LinkCard\b[^>]*\btitle="([^"]+)"[^>]*\bhref="([^"]+)"[^>]*\/>$/.exec(text);
+  if (!card) return undefined;
+  const description = /\bdescription="([^"]+)"/.exec(text);
+  return `- [${card[1]}](${card[2]})${description ? `: ${description[1]}` : ""}`;
+}
+
+/**
  * Our components and markers, removed or rewritten before tidymd runs.
  * Lines inside fenced code blocks are never touched.
  * @param {string} source the page's full text, front matter included
@@ -107,10 +120,23 @@ export function prepass(source) {
       i += 1;
       continue;
     }
-    const card = /^<LinkCard\b[^>]*\btitle="([^"]+)"[^>]*\bhref="([^"]+)"[^>]*\/>$/.exec(trimmed);
-    if (card) {
-      const description = /\bdescription="([^"]+)"/.exec(trimmed);
-      out.push(`- [${card[1]}](${card[2]})${description ? `: ${description[1]}` : ""}`);
+    if (trimmed.startsWith("<LinkCard") && !trimmed.endsWith("/>")) {
+      let end = i;
+      while (end < lines.length && !lines[end].trim().endsWith("/>")) end += 1;
+      if (end === lines.length) throw new Error(`unclosed <LinkCard> at line ${lineNo}`);
+      const joined = lines
+        .slice(i, end + 1)
+        .map((l) => l.trim())
+        .join(" ");
+      const bullet = linkCardBullet(joined);
+      if (bullet) out.push(bullet);
+      else out.push(...lines.slice(i, end + 1));
+      i = end + 1;
+      continue;
+    }
+    const bullet = linkCardBullet(trimmed);
+    if (bullet) {
+      out.push(bullet);
       i += 1;
       continue;
     }
