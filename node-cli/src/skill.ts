@@ -1,4 +1,5 @@
-import { cp, rm, stat, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { cp, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { gitTop } from "./link.js";
@@ -18,8 +19,10 @@ export function bundledSkill(): string {
 }
 
 /** Copies `source` into each target under `root` and writes the marker (the version and a
- *  newline). A target that exists without the marker is left alone. A target that fails is
- *  skipped with its error message; this function does not throw. */
+ *  newline). A target that exists without the marker is left alone. The copy is built in a
+ *  sibling `<target>.tmp-<random>` directory, marker included, and only then put in place, so a
+ *  failed or interrupted install keeps the earlier one (and a missing source touches nothing). A
+ *  target that fails is skipped with its error message; this function does not throw. */
 export async function installSkill(
   source: string,
   root: string,
@@ -34,12 +37,15 @@ export async function installSkill(
       skipped.push({ path, reason: "not installed by cetra-cli; left alone" });
       continue;
     }
+    const temporary = `${path}.tmp-${randomBytes(6).toString("hex")}`;
     try {
+      await cp(source, temporary, { recursive: true });
+      await writeFile(join(temporary, MARKER), `${version}\n`, "utf8");
       await rm(path, { recursive: true, force: true });
-      await cp(source, path, { recursive: true });
-      await writeFile(join(path, MARKER), `${version}\n`, "utf8");
+      await rename(temporary, path);
       installed.push(path);
     } catch (error) {
+      await rm(temporary, { recursive: true, force: true }).catch(() => undefined);
       skipped.push({ path, reason: error instanceof Error ? error.message : String(error) });
     }
   }

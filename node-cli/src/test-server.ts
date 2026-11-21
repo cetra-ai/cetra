@@ -22,8 +22,9 @@ export interface CannedServer {
 }
 
 /** A local HTTP server for tests. It answers the requests in order with `answers`, records each
- *  request, and answers 500 once the list is used up. Test helper only, not in the build. */
-export function startCanned(answers: CannedAnswer[]): Promise<CannedServer> {
+ *  request, and answers 500 once the list is used up. `port` 0 picks a free port. Test helper only,
+ *  not in the build. */
+export function startCanned(answers: CannedAnswer[], port = 0): Promise<CannedServer> {
   const requests: RecordedRequest[] = [];
   let next = 0;
   const server = createServer((req, res) => {
@@ -52,7 +53,7 @@ export function startCanned(answers: CannedAnswer[]): Promise<CannedServer> {
   });
   return new Promise((resolve, reject) => {
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(port, "127.0.0.1", () => {
       const address = server.address();
       if (address === null || typeof address === "string") {
         reject(new Error("the canned server has no port"));

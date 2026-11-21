@@ -1,5 +1,6 @@
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { Exit } from "./errors.js";
 import { ask, yes } from "./prompt-io.js";
 
 /** A writable that discards the prompt text. */
@@ -48,5 +49,12 @@ describe("ask", () => {
     await pending;
     expect(input.listenerCount("data")).toBe(0);
     expect(input.listenerCount("keypress")).toBe(0);
+  });
+
+  it("is cancelled, and does not hang, when the input closes before an answer", async () => {
+    const input = new PassThrough();
+    const pending = ask("Name? ", "fallback", input, sink());
+    input.end();
+    await expect(pending).rejects.toMatchObject({ message: "cancelled", code: Exit.Error });
   });
 });

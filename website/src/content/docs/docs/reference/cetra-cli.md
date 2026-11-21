@@ -24,13 +24,13 @@ npx @cetra-ai/cli@latest init [--url <URL>] [--project <org/project>] [--dir <PA
 | `--agents <LIST>` | Where the skill goes: `claude`, `agents`, or both as a comma list. Defaults to both. An unknown name is a usage error. |
 | `--no-skill` | Does not install the skill. Cannot be combined with `--agents`. |
 | `--no-browser` | Prints the sign-in URL and does not open a browser. |
-| `--yes` | Starts a local server without asking, uses the default admin email `admin@cetra.local` on its first start, and replaces an existing `CETRA_API_KEY` for the same server without asking. |
+| `--yes` | Starts a local server without asking, uses the default admin email `admin@cetra.local` on its first start, and replaces an existing `CETRA_API_KEY` without asking. |
 | `--json` | Prints one JSON object on stdout. |
 | `-h`, `--help` | Shows the options. |
 
 With `--json`, the object has these fields: `server`, `project` (`org/project`), `env_file`, `link_file`, `skills` (the installed directories), `prompt` and `traces_url`.
 
-If `.env` already has a `CETRA_API_KEY` for the same server, `init` asks before it replaces the key. Without a terminal and without `--yes`, it keeps the key and says so.
+If `.env` already has a `CETRA_API_KEY`, `init` asks before it replaces the key. Without a terminal and without `--yes`, it keeps the key and says so.
 
 On a first start of a local server, `init` prints the admin email and the generated password, and the UI address. The password is printed only when stderr is a terminal. Otherwise it is in no file, and you reset it with `cetra admin reset-password <EMAIL>`.
 
@@ -56,6 +56,8 @@ The statement is one positional argument, in quotes. The server comes from `--ur
 | `-h`, `--help` | Shows the options. |
 
 The table goes to stdout and the row count to stderr. When the server has more rows than `--limit`, the count says so. The `--json` output is not the Rust `cetra query` output: it is the object above, not a bare array of rows.
+
+Numbers in `--json` above 2^53 (9007199254740992) lose precision: JavaScript reads every JSON number as a 64-bit float. Integer columns such as epoch nanoseconds, hashes or large counters can come back rounded, in the table and in `--json` alike. Timestamps are RFC 3339 strings and are not affected. To keep a big integer exact, cast it to a string in the SQL, for example `SELECT CAST(counter AS VARCHAR) AS counter FROM ...`.
 
 The check step of the coding agent prompt runs this statement on the `traces` view:
 
@@ -92,7 +94,7 @@ After sign-in, `login` checks the token with the server and saves it. It does no
 | 3 | The server could not be reached, or no local server could be started. |
 | 4 | Sign-in failed: the device flow failed or expired, the server rejected the token, there is no saved token, or the server answered 401 to `query`. |
 | 5 | A file could not be written: the env file, `.gitignore`, the project link or the credentials file. |
-| 6 | The server rejected the SQL statement. |
+| 6 | The query failed (SQL error, timeout or a server refusal). |
 
 ## Files
 

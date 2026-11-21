@@ -66,10 +66,9 @@ export function serverUrl(raw: string): string {
   return normalizeServerUrl(trimmed);
 }
 
-/** The server URL a command uses: the flag (checked as `serverUrl`), else the only saved server.
- *  Several saved servers, or none, need `--url`. */
-export function chosenServer(flag: string | undefined, saved: Map<string, string>): string {
-  if (flag !== undefined) return serverUrl(flag);
+/** The server URL when no `--url` is given: the only saved server. Several saved servers, or none,
+ *  need `--url`. */
+export function chosenServer(saved: Map<string, string>): string {
   if (saved.size === 0) {
     throw new CliError("no saved server; run `cetra-cli login --url <URL>`", Exit.Usage);
   }

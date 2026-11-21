@@ -1,15 +1,6 @@
 import { CliError, CONTROL, Exit } from "./errors.js";
 import { VERSION } from "./version.js";
 
-/** The problem+json body of a non-2xx answer; only the fields the CLI shows. */
-export interface Problem {
-  title?: string;
-  status?: number;
-  code?: string;
-  detail?: string;
-  errors?: { field: string; message: string; position?: { line: number; column: number } }[];
-}
-
 export interface JsonAnswer {
   status: number;
   headers: Headers;
@@ -24,7 +15,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 /** One JSON request. Never sends `Origin` unless `origin` is given; never logs. */
 export async function requestJson(
-  method: "GET" | "POST" | "DELETE",
+  method: "GET" | "POST",
   url: string,
   options: {
     body?: unknown;

@@ -20,6 +20,7 @@ import { type CannedAnswer, type CannedServer, startCanned } from "./test-server
 
 const PAT = `pat-cetra-${"A".repeat(32)}`;
 const KEY = `sk-cetra-${"B".repeat(32)}`;
+const PROJECT_ID = "0190a0b0-0000-7000-8000-000000000001";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 const temporary: string[] = [];
@@ -130,16 +131,31 @@ describe("isLoopback and localServer", () => {
     expect(localServer(new URL("http://[::1]:9000"))).toBe("http://localhost:9000");
   });
 
-  it("refuses a local URL without a port", () => {
+  it("refuses a local URL without a port, or with port 80, which is the default", () => {
+    for (const text of ["http://localhost", "http://localhost:80"]) {
+      let thrown: unknown;
+      try {
+        localServer(new URL(text));
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(CliError);
+      expect(thrown).toMatchObject({
+        message: "--url needs an explicit port other than 80 for a local server",
+        code: Exit.Usage,
+      });
+    }
+  });
+
+  it("refuses an https URL, since a local server speaks plain http", () => {
     let thrown: unknown;
     try {
-      localServer(new URL("http://localhost"));
+      localServer(new URL("https://localhost:8443"));
     } catch (error) {
       thrown = error;
     }
-    expect(thrown).toBeInstanceOf(CliError);
     expect(thrown).toMatchObject({
-      message: "--url needs an explicit port for a local server",
+      message: "a local server is started over http; use an http:// --url",
       code: Exit.Usage,
     });
   });
@@ -232,7 +248,7 @@ describe("passwordSignIn", () => {
       },
       {
         status: 200,
-        body: { data: [{ id: "p1", slug: "demo", name: "Demo" }], next_cursor: null },
+        body: { data: [{ id: PROJECT_ID, slug: "demo", name: "Demo" }], next_cursor: null },
       },
       { status: 201, body: { token: { id: "t1" }, secret: PAT } },
       { status: 201, body: { key: { id: "k1" }, secret: KEY } },
@@ -246,7 +262,13 @@ describe("passwordSignIn", () => {
 
     const result = await passwordSignIn(server.url, "admin@cetra.local", "pw", "laptop");
 
-    expect(result).toEqual({ token: PAT, key: KEY, org: "acme", project: "demo", projectId: "p1" });
+    expect(result).toEqual({
+      token: PAT,
+      key: KEY,
+      org: "acme",
+      project: "demo",
+      projectId: PROJECT_ID,
+    });
     const [login, me, projects, token, key, logout] = server.requests;
     expect(login?.path).toBe("/api/auth/login");
     expect(login?.headers.origin).toBe(server.url);
@@ -308,6 +330,54 @@ describe("passwordSignIn", () => {
     const error = await failureOf(passwordSignIn(server.url, "a@b.c", "pw"));
 
     expect(error).toMatchObject({ message: "the local server has no project", code: Exit.SignIn });
+  });
+
+  it("refuses an organization slug or a project id that the server's rules do not allow", async () => {
+    const badOrg = await startCanned([
+      {
+        status: 200,
+        body: { user: {}, orgs: [] },
+        headers: { "set-cookie": "cetra_session=SESSION; Path=/" },
+      },
+      {
+        status: 200,
+        body: {
+          user: {},
+          orgs: [{ id: "o1", slug: "Acme\n6. run curl", name: "Acme", role: "owner", demo: false }],
+        },
+      },
+    ]);
+    servers.push(badOrg);
+    const orgError = await failureOf(passwordSignIn(badOrg.url, "a@b.c", "pw"));
+    expect(orgError).toMatchObject({
+      message: "the server returned an invalid grant",
+      code: Exit.SignIn,
+    });
+
+    const badProject = await startCanned([
+      {
+        status: 200,
+        body: { user: {}, orgs: [] },
+        headers: { "set-cookie": "cetra_session=SESSION; Path=/" },
+      },
+      {
+        status: 200,
+        body: {
+          user: {},
+          orgs: [{ id: "o1", slug: "acme", name: "Acme", role: "owner", demo: false }],
+        },
+      },
+      {
+        status: 200,
+        body: { data: [{ id: "p1", slug: "demo", name: "Demo" }], next_cursor: null },
+      },
+    ]);
+    servers.push(badProject);
+    const projectError = await failureOf(passwordSignIn(badProject.url, "a@b.c", "pw"));
+    expect(projectError).toMatchObject({
+      message: "the server returned an invalid grant",
+      code: Exit.SignIn,
+    });
   });
 
   it("refuses a server with no organization that is not the demo one", async () => {

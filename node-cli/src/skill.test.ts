@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { installSkill, MARKER, SKILL_TARGETS, skillRoot } from "./skill.js";
@@ -31,6 +31,19 @@ async function exists(path: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/** The temporary copies `installSkill` may leave behind under `root`. */
+async function leftovers(root: string): Promise<string[]> {
+  const found: string[] = [];
+  for (const target of Object.values(SKILL_TARGETS)) {
+    const parent = dirname(join(root, target));
+    const names = await readdir(parent).catch(() => [] as string[]);
+    for (const name of names) {
+      if (name.includes(".tmp-")) found.push(join(parent, name));
+    }
+  }
+  return found;
 }
 
 /** The files under `dir`, relative and sorted; directories are not listed. */
@@ -99,6 +112,46 @@ describe("installSkill", () => {
     for (const entry of result.skipped) {
       expect(entry.reason).not.toBe("");
     }
+  });
+
+  it("keeps an earlier install when the source does not exist", async () => {
+    const root = await tempDir();
+    await installSkill(SOURCE, root, ["claude"], "1.0.0");
+    const result = await installSkill(join(root, "missing"), root, ["claude"], "2.0.0");
+    expect(result.installed).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(await readFile(join(root, SKILL_TARGETS.claude, MARKER), "utf8")).toBe("1.0.0\n");
+    expect(await exists(join(root, SKILL_TARGETS.claude, "SKILL.md"))).toBe(true);
+    expect(await leftovers(root)).toEqual([]);
+  });
+
+  it("keeps an earlier install when the copy cannot be finished, and leaves no temporary copy", async () => {
+    // A file is not a directory, so the marker cannot be written inside the copy.
+    const root = await tempDir();
+    await installSkill(SOURCE, root, ["claude"], "1.0.0");
+    const file = join(root, "not-a-directory");
+    await writeFile(file, "x");
+    const result = await installSkill(file, root, ["claude"], "2.0.0");
+    expect(result.installed).toEqual([]);
+    expect(result.skipped).toHaveLength(1);
+    expect(await readFile(join(root, SKILL_TARGETS.claude, MARKER), "utf8")).toBe("1.0.0\n");
+    expect(await leftovers(root)).toEqual([]);
+  });
+
+  it("leaves a directory without the marker alone, even with a leftover temporary sibling", async () => {
+    const root = await tempDir();
+    const own = join(root, SKILL_TARGETS.claude);
+    const leftover = `${own}.tmp-abc123`;
+    await mkdir(own, { recursive: true });
+    await writeFile(join(own, "mine.md"), "keep");
+    await mkdir(leftover);
+    const result = await installSkill(SOURCE, root, ["claude"], "1.0.0");
+    expect(result.installed).toEqual([]);
+    expect(result.skipped).toEqual([
+      { path: own, reason: "not installed by cetra-cli; left alone" },
+    ]);
+    expect(await readFile(join(own, "mine.md"), "utf8")).toBe("keep");
+    expect(await exists(leftover)).toBe(true);
   });
 });
 

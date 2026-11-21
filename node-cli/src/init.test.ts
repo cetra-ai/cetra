@@ -1,12 +1,12 @@
-import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { type ChildProcess, execFile } from "node:child_process";
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { credentialsPath, loadCredentials } from "./credentials.js";
-import { CliError, Exit, type Io } from "./errors.js";
+import { CliError, type Deps, Exit, type Io } from "./errors.js";
 import { init } from "./init.js";
 import { type CannedAnswer, type CannedServer, startCanned } from "./test-server.js";
 import { VERSION } from "./version.js";
@@ -16,6 +16,7 @@ const SKILL_SOURCE = fileURLToPath(new URL("../../skills/cetra/", import.meta.ur
 const PAT = `pat-cetra-${"A".repeat(32)}`;
 const KEY = `sk-cetra-${"B".repeat(32)}`;
 const OLD_KEY = `sk-cetra-${"C".repeat(32)}`;
+const PROJECT_ID = "0190a0b0-0000-7000-8000-000000000002";
 // The grant names the public URL; the canned server is the one init talks to.
 const GRANT_SERVER = "https://eu1.cetra.test";
 const DEVICE_CODE = {
@@ -28,7 +29,7 @@ const DEVICE_CODE = {
 const GRANT = {
   server: GRANT_SERVER,
   token: PAT,
-  project: { id: "p1", org_slug: "acme", slug: "demo", name: "Demo" },
+  project: { id: PROJECT_ID, org_slug: "acme", slug: "demo", name: "Demo" },
   ingest_key: KEY,
 };
 const deps = { sleep: async () => {}, skillSource: SKILL_SOURCE };
@@ -152,7 +153,12 @@ describe.skipIf(process.platform !== "linux")("cetra-cli init", () => {
     expect((await stat(envPath)).mode & 0o777).toBe(0o600);
 
     const link = JSON.parse(await readFile(join(dir, ".cetra", "project.json"), "utf8"));
-    expect(link).toEqual({ server: server.url, org: "acme", project: "demo", project_id: "p1" });
+    expect(link).toEqual({
+      server: server.url,
+      org: "acme",
+      project: "demo",
+      project_id: PROJECT_ID,
+    });
 
     const saved = await loadCredentials(credentialsPath({ XDG_CONFIG_HOME: config }));
     expect(saved.get(server.url)).toBe(PAT);
@@ -213,6 +219,44 @@ describe.skipIf(process.platform !== "linux")("cetra-cli init", () => {
       `CETRA_API_KEY=${OLD_KEY}\nCETRA_BASE_URL=${GRANT_SERVER}\n`,
     );
     expect(stderr).toContain("kept the existing CETRA_API_KEY in .env");
+  });
+
+  it("keeps an existing key that has no CETRA_BASE_URL, without --yes and without a terminal", async () => {
+    const server = await canned(deviceAnswers());
+    const { config, dir } = await setup();
+    await writeFile(join(dir, ".env"), `CETRA_API_KEY=${OLD_KEY}\n`);
+    const { io, stderr } = capture({ XDG_CONFIG_HOME: config }, dir);
+
+    const code = await withoutTerminal(() =>
+      init(["--url", server.url, "--dir", dir, "--no-browser", "--no-skill"], io, deps),
+    );
+
+    expect(code).toBe(Exit.Ok);
+    expect(await readFile(join(dir, ".env"), "utf8")).toBe(
+      `CETRA_API_KEY=${OLD_KEY}\nCETRA_BASE_URL=${GRANT_SERVER}\n`,
+    );
+    expect(stderr).toContain("kept the existing CETRA_API_KEY in .env");
+  });
+
+  it("follows a symlinked .env: the target is updated and the link stays", async () => {
+    const server = await canned(deviceAnswers());
+    const { config, dir } = await setup();
+    const shared = join(dir, "shared.env");
+    await writeFile(shared, "FOO=bar\n");
+    await symlink(shared, join(dir, ".env"));
+    const { io } = capture({ XDG_CONFIG_HOME: config }, dir);
+
+    const code = await init(
+      ["--url", server.url, "--dir", dir, "--yes", "--no-browser", "--no-skill"],
+      io,
+      deps,
+    );
+
+    expect(code).toBe(Exit.Ok);
+    expect((await lstat(join(dir, ".env"))).isSymbolicLink()).toBe(true);
+    expect(await readFile(shared, "utf8")).toBe(
+      `FOO=bar\nCETRA_BASE_URL=${GRANT_SERVER}\nCETRA_API_KEY=${KEY}\n`,
+    );
   });
 
   it("adds the env file to .gitignore in a git work tree", async () => {
@@ -293,4 +337,167 @@ describe.skipIf(process.platform !== "linux")("cetra-cli init", () => {
     const missing = await failureOf(init(["--dir", resolve(dir, "no-such-directory")], io, deps));
     expect(missing.code).toBe(Exit.Usage);
   });
+});
+
+/** A `cetra` on the PATH: `cetra version` succeeds, and nothing else is run. */
+function cetraOnPath(): typeof execFile {
+  return ((
+    file: string,
+    args: readonly string[],
+    _options: unknown,
+    callback: (error: Error | null, stdout: string, stderr: string) => void,
+  ) => {
+    const found = file === "cetra" && args[0] === "version";
+    callback(found ? null : Object.assign(new Error("not found"), { code: 1 }), "", "");
+  }) as unknown as typeof execFile;
+}
+
+/** A free port on 127.0.0.1: a server started and closed again. */
+async function freePort(): Promise<number> {
+  const probe = await startCanned([]);
+  const port = Number(new URL(probe.url).port);
+  await probe.close();
+  return port;
+}
+
+/** Runs `body` with stderr not a terminal, so the admin password is not printed, then restores it. */
+async function withStderrNotTerminal<T>(body: () => Promise<T>): Promise<T> {
+  const before = Object.getOwnPropertyDescriptor(process.stderr, "isTTY");
+  Object.defineProperty(process.stderr, "isTTY", { value: false, configurable: true });
+  try {
+    return await body();
+  } finally {
+    if (before === undefined) {
+      delete (process.stderr as { isTTY?: boolean }).isTTY;
+    } else {
+      Object.defineProperty(process.stderr, "isTTY", before);
+    }
+  }
+}
+
+describe.skipIf(process.platform !== "linux")("cetra-cli init on a local first start", () => {
+  it("starts the server, signs in with the generated password, and keeps the password off every output", async () => {
+    const port = await freePort();
+    const url = `http://127.0.0.1:${port}`;
+    const dataHome = await tempDir();
+    const { config, dir } = await setup();
+    const io = capture({ XDG_CONFIG_HOME: config, XDG_DATA_HOME: dataHome }, dir);
+    // The server the fake child starts: the readiness check, the sign-in, then the logout.
+    const answers: CannedAnswer[] = [
+      { status: 200, body: { status: "ready" } },
+      {
+        status: 200,
+        body: { user: {}, orgs: [] },
+        headers: { "set-cookie": "cetra_session=SESSION; Path=/; HttpOnly" },
+      },
+      {
+        status: 200,
+        body: {
+          user: {},
+          orgs: [{ id: "o1", slug: "acme", name: "Acme", role: "owner", demo: false }],
+        },
+      },
+      {
+        status: 200,
+        body: { data: [{ id: PROJECT_ID, slug: "demo", name: "Demo" }], next_cursor: null },
+      },
+      { status: 201, body: { token: { id: "t1" }, secret: PAT } },
+      { status: 201, body: { key: { id: "k1" }, secret: KEY } },
+      { status: 204, body: undefined },
+    ];
+    const spawned: { args: string[]; env: NodeJS.ProcessEnv | undefined }[] = [];
+    let served: Promise<CannedServer> | undefined;
+    // The fake child is the canned server: it starts listening on the port when it is spawned.
+    const fakeSpawn = ((
+      _file: string,
+      args: readonly string[],
+      options: { env?: NodeJS.ProcessEnv },
+    ) => {
+      spawned.push({ args: [...args], env: options.env });
+      served = startCanned(answers, port).then((server) => {
+        servers.push(server);
+        return server;
+      });
+      return { pid: 4242, on: () => undefined, unref: () => undefined } as unknown as ChildProcess;
+    }) as unknown as NonNullable<Deps["spawn"]>;
+    let clock = 0;
+    const localDeps = {
+      sleep: async () => {},
+      now: () => (clock += 1000),
+      execFile: cetraOnPath(),
+      spawn: fakeSpawn,
+      skillSource: SKILL_SOURCE,
+    };
+
+    const code = await withStderrNotTerminal(() =>
+      init(["--url", url, "--dir", dir, "--yes", "--no-browser", "--no-skill"], io.io, localDeps),
+    );
+    await served;
+
+    expect(code).toBe(Exit.Ok);
+    const password = spawned[0]?.env?.CETRA_INIT_ADMIN_PASSWORD ?? "";
+    expect(password).toMatch(/^[A-Za-z0-9]{24}$/);
+    expect(spawned[0]?.args).toEqual(["serve", "--config", join(dataHome, "cetra", "local.toml")]);
+    expect(spawned[0]?.env?.CETRA_INIT_ADMIN_EMAIL).toBe("admin@cetra.local");
+
+    // The password is in the child's environment only: no output, and no file but the server's own.
+    const everything = [...io.stdout, ...io.stderr].join("\n");
+    expect(everything).not.toContain(password);
+    expect(everything).toContain("Stop the server: kill 4242");
+    expect(everything).toContain(
+      `Start it again: cetra serve --config ${join(dataHome, "cetra", "local.toml")}`,
+    );
+    expect(everything).toContain("Admin: admin@cetra.local");
+    expect(everything).toContain("reset it with cetra admin reset-password admin@cetra.local");
+    expect(await readFile(join(dir, ".env"), "utf8")).toContain(`CETRA_API_KEY=${KEY}\n`);
+
+    // The data dir and its log are owner only.
+    const dataDir = join(dataHome, "cetra", "local");
+    expect((await stat(dataDir)).mode & 0o777).toBe(0o700);
+    expect((await stat(join(dataDir, "server.log"))).mode & 0o777).toBe(0o600);
+    expect(await readFile(join(dataHome, "cetra", "local.toml"), "utf8")).toContain(
+      `http_addr = "127.0.0.1:${port}"`,
+    );
+  }, 20_000);
+
+  it("names the reset command when the password sign-in fails after a first start", async () => {
+    const port = await freePort();
+    const dataHome = await tempDir();
+    const { config, dir } = await setup();
+    const { io } = capture({ XDG_CONFIG_HOME: config, XDG_DATA_HOME: dataHome }, dir);
+    let served: Promise<CannedServer> | undefined;
+    const fakeSpawn = (() => {
+      served = startCanned(
+        [
+          { status: 200, body: { status: "ready" } },
+          { status: 429, body: { title: "Too Many Requests" } },
+        ],
+        port,
+      ).then((server) => {
+        servers.push(server);
+        return server;
+      });
+      return { pid: 4343, on: () => undefined, unref: () => undefined } as unknown as ChildProcess;
+    }) as unknown as NonNullable<Deps["spawn"]>;
+    let clock = 0;
+
+    const error = await failureOf(
+      init(
+        ["--url", `http://127.0.0.1:${port}`, "--dir", dir, "--yes", "--no-browser", "--no-skill"],
+        io,
+        {
+          sleep: async () => {},
+          now: () => (clock += 1000),
+          execFile: cetraOnPath(),
+          spawn: fakeSpawn,
+          skillSource: SKILL_SOURCE,
+        },
+      ),
+    );
+    await served;
+
+    expect(error.code).toBe(Exit.SignIn);
+    expect(error.message).toContain("the local server refused the sign-in for now");
+    expect(error.message).toContain("reset it with `cetra admin reset-password admin@cetra.local`");
+  }, 20_000);
 });

@@ -1,10 +1,10 @@
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomInt } from "node:crypto";
 import { closeSync, openSync } from "node:fs";
-import { access, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, posix, win32 } from "node:path";
-import { isPersonalToken, isSecretKey } from "./device.js";
+import { INVALID_GRANT, isPersonalToken, isSecretKey, isSlug, isUuid } from "./device.js";
 import { CliError, type Deps, Exit, type Io } from "./errors.js";
 import { problemMessage, requestJson } from "./http.js";
 import { yes as affirmative, ask, interactive } from "./prompt-io.js";
@@ -34,10 +34,15 @@ export function isLoopback(url: URL): boolean {
   return host === "localhost" || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host) || host === "[::1]";
 }
 
-/** The server URL a local start uses: `http://localhost:<port>`, whatever loopback spelling was typed. */
+/** The server URL a local start uses: `http://localhost:<port>`, whatever loopback spelling was typed.
+ *  The server only speaks plain http, and a port of 80 (or none, which is 80) reads as the default
+ *  port, so both are refused. */
 export function localServer(url: URL): string {
+  if (url.protocol !== "http:") {
+    throw new CliError("a local server is started over http; use an http:// --url", Exit.Usage);
+  }
   if (url.port === "") {
-    throw new CliError("--url needs an explicit port for a local server", Exit.Usage);
+    throw new CliError("--url needs an explicit port other than 80 for a local server", Exit.Usage);
   }
   return `http://localhost:${url.port}`;
 }
@@ -121,7 +126,6 @@ export function configToml(dataDir: string, port: number): string {
 /** What `startLocal` started. `email` and `password` are set on a first start only; the password
  *  is a secret: never print it. */
 export interface Started {
-  how: "binary" | "docker";
   firstStart: boolean;
   server: string;
   stop: string;
@@ -183,9 +187,14 @@ async function startBinary(context: StartContext): Promise<Started> {
 
   let child: ChildProcess | undefined;
   try {
-    await mkdir(dataDir, { recursive: true });
-    await writeFile(toml, configToml(dataDir, port), "utf8");
-    const fd = openSync(log, "a");
+    // The data dir holds the database and every trace payload: owner only, also when it exists.
+    await mkdir(dataDir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await chmod(dataDir, 0o700);
+    // The config is written on a first start, and on a later start only when its port changed.
+    if (firstStart || !(await configKeepsPort(toml, port))) {
+      await writeFile(toml, configToml(dataDir, port), "utf8");
+    }
+    const fd = openSync(log, "a", 0o600);
     let spawned: ChildProcess;
     try {
       spawned = (deps.spawn ?? spawn)("cetra", ["serve", "--config", toml], {
@@ -215,7 +224,6 @@ async function startBinary(context: StartContext): Promise<Started> {
       throw new CliError(`cetra did not start; see ${log}`, Exit.Unreachable);
     }
     return {
-      how: "binary",
       firstStart,
       server,
       stop: `kill ${pid}`,
@@ -228,6 +236,16 @@ async function startBinary(context: StartContext): Promise<Started> {
       await rm(dataDir, { recursive: true, force: true });
     }
     throw error;
+  }
+}
+
+/** Whether the config file exists and listens on `port`. A missing or unreadable file is no. */
+async function configKeepsPort(path: string, port: number): Promise<boolean> {
+  try {
+    const lines = (await readFile(path, "utf8")).split("\n");
+    return lines.includes(`http_addr = "127.0.0.1:${port}"`);
+  } catch {
+    return false;
   }
 }
 
@@ -275,7 +293,6 @@ async function startDocker(context: StartContext): Promise<Started> {
     }
     await waitReady(server, deps, () => false, DOCKER_NOT_STARTED);
     return {
-      how: "docker",
       firstStart: false,
       server,
       stop: `docker stop ${CONTAINER}`,
@@ -325,7 +342,6 @@ async function startDocker(context: StartContext): Promise<Started> {
     throw error;
   }
   return {
-    how: "docker",
     firstStart,
     server,
     stop: `docker stop ${CONTAINER}`,
@@ -499,21 +515,33 @@ function sessionCookie(headers: Headers): string | undefined {
   return undefined;
 }
 
-/** The slug of the first organization that is not the demo one. */
+/** The slug of the first organization that is not the demo one. A slug the server's rule refuses
+ *  is an invalid grant: the slug is written into the prompt and the env file. */
 function firstOrganization(body: unknown): string | undefined {
   if (!isRecord(body) || !Array.isArray(body.orgs)) return undefined;
   for (const org of body.orgs) {
-    if (isRecord(org) && org.demo === false && typeof org.slug === "string") return org.slug;
+    if (isRecord(org) && org.demo === false && typeof org.slug === "string") {
+      if (!isSlug(org.slug)) throw new CliError(INVALID_GRANT, Exit.SignIn);
+      return org.slug;
+    }
   }
   return undefined;
 }
 
-/** The id and slug of the first project of a project page. */
+/** The id and slug of the first project of a project page; undefined when the page is empty. The
+ *  id must be a UUID and the slug must follow the server's rule, as for the device grant. */
 function firstProject(body: unknown): { id: string; slug: string } | undefined {
   if (!isRecord(body) || !Array.isArray(body.data)) return undefined;
   const first: unknown = body.data[0];
-  if (!isRecord(first) || typeof first.id !== "string" || typeof first.slug !== "string") {
-    return undefined;
+  if (first === undefined) return undefined;
+  if (
+    !isRecord(first) ||
+    typeof first.id !== "string" ||
+    !isUuid(first.id) ||
+    typeof first.slug !== "string" ||
+    !isSlug(first.slug)
+  ) {
+    throw new CliError(INVALID_GRANT, Exit.SignIn);
   }
   return { id: first.id, slug: first.slug };
 }

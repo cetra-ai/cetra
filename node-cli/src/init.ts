@@ -96,7 +96,8 @@ export async function init(args: string[], io: Io, deps: Deps = {}): Promise<Exi
   const envName = basename(envPath);
   const existing = await readEnvFile(envPath);
   const assignments: Record<string, string> = { CETRA_BASE_URL: signedIn.grantServer };
-  if (keyReplaceable(existing, signedIn.grantServer)) {
+  if (existing !== undefined && readVariable(existing, "CETRA_API_KEY") !== undefined) {
+    // A new key always differs from the existing one, so any existing key is asked about.
     const replace =
       yesToAll ||
       (interactive() &&
@@ -246,13 +247,23 @@ function checkEnvValue(server: string): void {
   }
 }
 
-/** Signs in to a local first start with its generated admin password. */
+/** Signs in to a local first start with its generated admin password. The password is shown only
+ *  after a successful sign-in, so a failure names the reset command instead. */
 async function signInWithPassword(
   server: string,
   email: string,
   password: string,
 ): Promise<SignedIn> {
-  const local = await passwordSignIn(server, email, password, localHost());
+  let local: Awaited<ReturnType<typeof passwordSignIn>>;
+  try {
+    local = await passwordSignIn(server, email, password, localHost());
+  } catch (error) {
+    if (!(error instanceof CliError)) throw error;
+    throw new CliError(
+      `${error.message}; the generated admin password is not kept, reset it with \`cetra admin reset-password ${email}\``,
+      error.code,
+    );
+  }
   return {
     grantServer: server,
     token: local.token,
@@ -292,16 +303,6 @@ async function signInWithDevice(
     project: granted.slug,
     projectId: granted.id,
   };
-}
-
-/** Whether an existing `CETRA_API_KEY` for the same server may be replaced (the question is asked
- *  by the caller). */
-function keyReplaceable(text: string | undefined, server: string): boolean {
-  if (text === undefined) return false;
-  return (
-    readVariable(text, "CETRA_API_KEY") !== undefined &&
-    readVariable(text, "CETRA_BASE_URL") === server
-  );
 }
 
 /** The env file's text, or undefined when it does not exist. Any other read error stops `init`

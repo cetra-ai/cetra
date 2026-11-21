@@ -38,9 +38,7 @@ export async function login(args: string[], io: Io, deps: Deps = {}): Promise<Ex
   const credentials = credentialsPath(io.env);
   const flag = values.url ?? nonEmpty(io.env.CETRA_URL);
   const server =
-    flag !== undefined
-      ? serverUrl(flag)
-      : chosenServer(undefined, await loadCredentials(credentials));
+    flag !== undefined ? serverUrl(flag) : chosenServer(await loadCredentials(credentials));
 
   const grant = await deviceSignIn({
     server,

@@ -31,8 +31,8 @@ export interface Io {
   cwd: string;
 }
 
-/** Test seams; production passes nothing. sleep and now: C3 (device flow); skillSource: C5a/C5c;
- *  spawn and execFile: C3 (browser) and C5b (local server). */
+/** Test seams; production passes nothing. sleep and now: the device flow and the wait for a local
+ *  server; skillSource: the skill to copy; spawn and execFile: the browser and the local server. */
 export interface Deps {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number; // milliseconds, like Date.now
@@ -41,8 +41,13 @@ export interface Deps {
   execFile?: typeof execFile;
 }
 
-/** The real Io: process.stdout / process.stderr with "\n" added, process.env, process.cwd(). */
+/** The real Io: process.stdout / process.stderr with "\n" added, process.env, process.cwd(). A reader
+ *  that stops early (`cetra-cli query ... | head`) ends the command with 0, as the Rust CLI does. */
 export function realIo(): Io {
+  process.stdout.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "EPIPE") process.exit(Exit.Ok);
+    throw error;
+  });
   return {
     stdout: (line) => {
       process.stdout.write(`${line}\n`);

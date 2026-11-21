@@ -112,13 +112,6 @@ describe("requestJson", () => {
     expect(JSON.parse(last?.body ?? "")).toEqual({ email: "a@example.com" });
   });
 
-  it("passes DELETE through without a body", async () => {
-    await requestJson("DELETE", `${base}/echo`, { token: "pat-cetra-abc" });
-    expect(last?.method).toBe("DELETE");
-    expect(last?.body).toBe("");
-    expect(last?.headers["content-type"]).toBeUndefined();
-  });
-
   it("returns a non-JSON body as text with an undefined body", async () => {
     const answer = await requestJson("GET", `${base}/text`);
     expect(answer.status).toBe(200);

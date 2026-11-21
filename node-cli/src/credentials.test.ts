@@ -110,30 +110,24 @@ describe("server URLs", () => {
 });
 
 describe("chosenServer", () => {
-  it("uses the flag, normalized", () => {
-    expect(chosenServer(" http://h:1/ ", new Map())).toBe("http://h:1");
-  });
-
   it("uses the only saved server", () => {
-    expect(chosenServer(undefined, new Map([["http://h:1", "pat-a"]]))).toBe("http://h:1");
+    expect(chosenServer(new Map([["http://h:1", "pat-a"]]))).toBe("http://h:1");
   });
 
   it("refuses when nothing is saved, or several servers are", () => {
-    expect(thrown(() => chosenServer(undefined, new Map())).message).toBe(
+    expect(thrown(() => chosenServer(new Map())).message).toBe(
       "no saved server; run `cetra-cli login --url <URL>`",
     );
     const two = new Map([
       ["http://a:1", "pat-a"],
       ["http://b:1", "pat-b"],
     ]);
-    expect(thrown(() => chosenServer(undefined, two)).message).toBe(
-      "more than one saved server; pass --url",
-    );
+    expect(thrown(() => chosenServer(two)).message).toBe("more than one saved server; pass --url");
   });
 
   it("refuses a saved server URL that holds credentials", () => {
     const saved = new Map([["http://user:pw@h:1", "pat-a"]]);
-    expect(thrown(() => chosenServer(undefined, saved)).message).toBe(CREDENTIALS);
+    expect(thrown(() => chosenServer(saved)).message).toBe(CREDENTIALS);
   });
 });
 

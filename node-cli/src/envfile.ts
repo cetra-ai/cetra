@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { appendFile, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, realpath, rename, rm } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { CliError, Exit } from "./errors.js";
@@ -12,11 +12,13 @@ const run = promisify(execFile);
 
 /** Writes a private (0600) text file: a `<name>.tmp` file, synced, renamed over the target; the
  *  temporary file is removed on failure. Creates missing parent directories, never changes an
- *  existing directory's mode. Used for `.env` and `credentials.toml`. */
+ *  existing directory's mode. Used for `.env` and `credentials.toml`. A symlink at `path` is
+ *  followed: its target is replaced and the link stays (a dangling link is replaced itself). */
 export async function writeEnvFile(path: string, text: string): Promise<void> {
-  const temporary = `${path}.tmp`;
+  const target = await realpath(path).catch(() => path);
+  const temporary = `${target}.tmp`;
   try {
-    await mkdir(dirname(path), { recursive: true });
+    await mkdir(dirname(target), { recursive: true });
     const handle = await open(temporary, "w", 0o600);
     try {
       await handle.writeFile(text, "utf8");
@@ -25,7 +27,7 @@ export async function writeEnvFile(path: string, text: string): Promise<void> {
     } finally {
       await handle.close();
     }
-    await rename(temporary, path);
+    await rename(temporary, target);
   } catch {
     await rm(temporary, { force: true }).catch(() => undefined);
     throw new CliError(`could not write ${basename(path)}`, Exit.Write);

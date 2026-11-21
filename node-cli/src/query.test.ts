@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -38,9 +38,13 @@ async function tempDir(): Promise<string> {
   return dir;
 }
 
-/** The config directory and a working directory with no link, both temporary. */
+/** The config directory and a working directory with no link, both temporary. The working directory
+ *  is its own git work tree, so the link walk stops there and never reads a file above it (the
+ *  temporary directory may sit inside a repository, or have a stray `.cetra` above it). */
 async function dirs(): Promise<{ config: string; cwd: string }> {
-  return { config: await tempDir(), cwd: await tempDir() };
+  const cwd = await tempDir();
+  await mkdir(join(cwd, ".git"));
+  return { config: await tempDir(), cwd };
 }
 
 /** An Io that records its lines. The environment is exactly the one given. */
