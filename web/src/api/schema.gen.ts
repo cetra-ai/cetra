@@ -408,6 +408,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/internal/v1/device/codes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register a device code the control plane issued
+         * @description Needs a `control_plane` bearer token with the `device` scope (D-AO-14). The control plane sends the lowercase hex SHA-256 of a device code it issued, its user code, purpose, host and expiry; the cell then answers that code as if it had issued it. An identical retry of a pending code answers 204 again. Any other clash with a registered code (the same hash or the same user code, with other details) answers 409. A malformed field answers 400. Registered codes count against the same 10 000 pending codes as issued ones: a full cell answers 503.
+         */
+        post: operations["post_internal_device_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/internal/v1/memberships/lookup": {
         parameters: {
             query?: never;
@@ -6912,6 +6932,26 @@ export interface components {
              */
             row: number;
         };
+        /**
+         * @description `POST /api/internal/v1/device/codes` body: the control plane registers a code it issued
+         *     (D-AO-14). `Debug` is derived: the hash is not a secret, since the device code cannot be
+         *     recovered from it.
+         */
+        InternalDeviceCode: {
+            /** @description The lowercase hex SHA-256 of the device code: 64 characters. */
+            device_code_sha256: string;
+            /**
+             * Format: date-time
+             * @description When the code expires. JSON is RFC 3339.
+             */
+            expires_at: string;
+            /** @description The machine's name the CLI reported. Sanitised as `DeviceCodeRequest.host` is. */
+            host?: string;
+            /** @description What the code is for. */
+            purpose: components["schemas"]["DevicePurpose"];
+            /** @description The user code the user types, `XXXX-XXXX`. */
+            user_code: string;
+        };
         /** @description One applied drop in the feed (D-P-49). */
         InternalDrop: {
             /**
@@ -12275,6 +12315,73 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_internal_device_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InternalDeviceCode"];
+            };
+        };
+        responses: {
+            /** @description The code is registered, or the identical registration was already there. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

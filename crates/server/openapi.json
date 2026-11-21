@@ -1262,6 +1262,86 @@
         ]
       }
     },
+    "/api/internal/v1/device/codes": {
+      "post": {
+        "tags": [
+          "internal"
+        ],
+        "summary": "Register a device code the control plane issued",
+        "description": "Needs a `control_plane` bearer token with the `device` scope (D-AO-14). The control plane sends the lowercase hex SHA-256 of a device code it issued, its user code, purpose, host and expiry; the cell then answers that code as if it had issued it. An identical retry of a pending code answers 204 again. Any other clash with a registered code (the same hash or the same user code, with other details) answers 409. A malformed field answers 400. Registered codes count against the same 10 000 pending codes as issued ones: a full cell answers 503.",
+        "operationId": "post_internal_device_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InternalDeviceCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The code is registered, or the identical registration was already there."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/v1/memberships/lookup": {
       "post": {
         "tags": [
@@ -32047,6 +32127,40 @@
             "description": "CSV: the 1-based data record (the header is not counted). JSONL: the 1-based line."
           }
         }
+      },
+      "InternalDeviceCode": {
+        "type": "object",
+        "description": "`POST /api/internal/v1/device/codes` body: the control plane registers a code it issued\n(D-AO-14). `Debug` is derived: the hash is not a secret, since the device code cannot be\nrecovered from it.",
+        "required": [
+          "device_code_sha256",
+          "user_code",
+          "purpose",
+          "expires_at"
+        ],
+        "properties": {
+          "device_code_sha256": {
+            "type": "string",
+            "description": "The lowercase hex SHA-256 of the device code: 64 characters."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the code expires. JSON is RFC 3339."
+          },
+          "host": {
+            "type": "string",
+            "description": "The machine's name the CLI reported. Sanitised as `DeviceCodeRequest.host` is."
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/DevicePurpose",
+            "description": "What the code is for."
+          },
+          "user_code": {
+            "type": "string",
+            "description": "The user code the user types, `XXXX-XXXX`."
+          }
+        },
+        "additionalProperties": false
       },
       "InternalDrop": {
         "type": "object",
