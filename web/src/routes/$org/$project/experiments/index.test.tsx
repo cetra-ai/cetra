@@ -293,7 +293,11 @@ it("filters the rows by status from the summary counts", async () => {
 
 it("selecting the selected status chip again clears the filter", async () => {
   const user = userEvent.setup();
-  const running = { ...fixtureExperiment(BASELINE_ID), name: "in-flight", status: "running" as const };
+  const running = {
+    ...fixtureExperiment(BASELINE_ID),
+    name: "in-flight",
+    status: "running" as const,
+  };
   server.use(
     http.get(EXPERIMENTS_PATH, () =>
       HttpResponse.json({ data: [fixtureExperiment(CANDIDATE_ID), running], next_cursor: null }),
@@ -304,7 +308,9 @@ it("selecting the selected status chip again clears the filter", async () => {
 
   await user.click(screen.getByRole("button", { name: "Completed 1" }));
   await waitFor(() => expect(router.state.location.href).toContain("status=completed"));
-  expect(within(screen.getByRole("table", { name: "Experiments" })).queryByText("in-flight")).toBeNull();
+  expect(
+    within(screen.getByRole("table", { name: "Experiments" })).queryByText("in-flight"),
+  ).toBeNull();
 
   await user.click(screen.getByRole("button", { name: "Completed 1" }));
   await waitFor(() => expect(router.state.location.href).not.toContain("status="));

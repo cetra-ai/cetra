@@ -605,4 +605,3 @@ function filmstripStatus(bucket: RuleBucket): Schema<"SpanStatus"> {
   }
   return bucket === "paused" ? "error" : "unset";
 }
-

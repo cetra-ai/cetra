@@ -350,20 +350,20 @@ function EvaluatorsPage() {
               </TableBody>
             </Table>
           )}
-      {query.hasNextPage ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="w-fit"
-          disabled={query.isFetchingNextPage}
-          onClick={() => {
-            void query.fetchNextPage();
-          }}
-        >
-          {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
-          Load more
-        </Button>
-      ) : null}
+          {query.hasNextPage ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-fit"
+              disabled={query.isFetchingNextPage}
+              onClick={() => {
+                void query.fetchNextPage();
+              }}
+            >
+              {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
+              Load more
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>

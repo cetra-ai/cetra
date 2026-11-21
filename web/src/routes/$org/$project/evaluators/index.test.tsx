@@ -173,7 +173,10 @@ it("selecting the selected kind chip again clears the filter", async () => {
   await user.click(screen.getByRole("button", { name: "Webhook 1" }));
   await waitFor(() => expect(within(table).getByText("Relevance")).toBeInTheDocument());
   expect(within(table).getByText("Answer is JSON")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Webhook 1" })).toHaveAttribute("aria-pressed", "false");
+  expect(screen.getByRole("button", { name: "Webhook 1" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
   expect(router.state.location.search).toEqual({});
 });
 

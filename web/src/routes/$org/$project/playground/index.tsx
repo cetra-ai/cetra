@@ -901,58 +901,63 @@ function PlaygroundWorkspace({
         )}
       </PageToolbar>
       <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
-      <FormError message={formError} />
-      {cut ? (
-        <p className="border-b bg-muted px-3 py-1 text-caption">
-          This span was cut at ingest; the playground shows what was stored.
-        </p>
-      ) : null}
-      {opening === undefined ? null : (
-        <p role="status" className="text-caption text-muted-foreground">
-          {opening}
-        </p>
-      )}
-      <FormError message={openError} />
-      <ResizablePanelGroup
-        id="playground-split"
-        orientation="horizontal"
-        className="min-h-0 flex-1"
-      >
-        <ResizablePanel id="playground-editor" defaultSize="40%" minSize="25%" className="min-h-0">
-          <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-3">
-            <MessageEditor
-              key={loadKey}
-              entries={draft.entries}
-              errors={editorErrors}
-              onChange={setEntries}
-            />
-            <SettingsPanel draft={draft} errors={settingsErrors} onChange={updateDraft} />
-          </div>
-        </ResizablePanel>
-        <ResizableHandle withHandle />
-        <ResizablePanel id="playground-columns" minSize="30%" className="min-h-0">
-          <div className="flex h-full min-h-0 gap-3 overflow-x-auto pb-2 pl-3">
-            {draft.columns.map((column, index) => (
-              <RunColumn
-                key={column.id}
-                number={index + 1}
-                column={column}
-                run={runs[column.id] ?? IDLE_RUN}
-                connections={connections}
-                errors={columnErrors[column.id] ?? NO_ERRORS}
-                runReason={runReason}
-                shortcut={shortcut}
-                canRemove={draft.columns.length > 1}
-                onChange={updateColumn}
-                onRun={startRun}
-                onStop={stopColumn}
-                onRemove={removeColumn}
-                onAddAnswer={addAnswer}
+        <FormError message={formError} />
+        {cut ? (
+          <p className="border-b bg-muted px-3 py-1 text-caption">
+            This span was cut at ingest; the playground shows what was stored.
+          </p>
+        ) : null}
+        {opening === undefined ? null : (
+          <p role="status" className="text-caption text-muted-foreground">
+            {opening}
+          </p>
+        )}
+        <FormError message={openError} />
+        <ResizablePanelGroup
+          id="playground-split"
+          orientation="horizontal"
+          className="min-h-0 flex-1"
+        >
+          <ResizablePanel
+            id="playground-editor"
+            defaultSize="40%"
+            minSize="25%"
+            className="min-h-0"
+          >
+            <div className="flex h-full min-h-0 flex-col gap-6 overflow-y-auto pr-3">
+              <MessageEditor
+                key={loadKey}
+                entries={draft.entries}
+                errors={editorErrors}
+                onChange={setEntries}
               />
-            ))}
-          </div>
-        </ResizablePanel>
-      </ResizablePanelGroup>
+              <SettingsPanel draft={draft} errors={settingsErrors} onChange={updateDraft} />
+            </div>
+          </ResizablePanel>
+          <ResizableHandle withHandle />
+          <ResizablePanel id="playground-columns" minSize="30%" className="min-h-0">
+            <div className="flex h-full min-h-0 gap-3 overflow-x-auto pb-2 pl-3">
+              {draft.columns.map((column, index) => (
+                <RunColumn
+                  key={column.id}
+                  number={index + 1}
+                  column={column}
+                  run={runs[column.id] ?? IDLE_RUN}
+                  connections={connections}
+                  errors={columnErrors[column.id] ?? NO_ERRORS}
+                  runReason={runReason}
+                  shortcut={shortcut}
+                  canRemove={draft.columns.length > 1}
+                  onChange={updateColumn}
+                  onRun={startRun}
+                  onStop={stopColumn}
+                  onRemove={removeColumn}
+                  onAddAnswer={addAnswer}
+                />
+              ))}
+            </div>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </div>
       <SaveDialog
         open={saveOpen}
