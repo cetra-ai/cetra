@@ -447,7 +447,11 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
      ```
 
      Then the package's Settings → Trusted publishing → GitHub Actions: organization `cetra-ai`,
-     repository `cetra`, workflow `release.yml`, environment `npm`. Set "Publishing access" to
+     repository `cetra`, workflow `release.yml`, environment `npm`, with "Allow npm publish"
+     ticked ("Allow npm dist-tag" stays off: the workflow sets the tag with `--tag`). npm marks the
+     setup "Pending validation" until a publish through it, and expires it after about two days:
+     add it no more than two days before the first tag (or delete and re-add it then), and that
+     tag's run validates it. Set "Publishing access" to
      require two-factor authentication and disallow tokens, so only the workflow can publish.
 
 **Dry run (until D46):**
