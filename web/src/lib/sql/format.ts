@@ -31,13 +31,3 @@ export function resultStatus(count: number, truncated: boolean, durationMs: numb
   const rows = `${count} ${count === 1 ? "row" : "rows"}${truncated ? " (truncated)" : ""}`;
   return `${rows} · ${durationMs} ms`;
 }
-
-/** `⌘↵` on Apple platforms, `Ctrl↵` elsewhere, for the Run button's title. */
-export function runShortcutLabel(userAgent: string): string {
-  return /Mac|iPhone|iPad/.test(userAgent) ? "⌘↵" : "Ctrl↵";
-}
-
-/** `⇧⌥F` on Apple platforms, `Shift+Alt+F` elsewhere, for the Format button's title. */
-export function formatShortcutLabel(userAgent: string): string {
-  return /Mac|iPhone|iPad/.test(userAgent) ? "⇧⌥F" : "Shift+Alt+F";
-}

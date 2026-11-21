@@ -4,10 +4,12 @@ import {
   goDestination,
   goKeyOf,
   hexId,
+  isApplePlatform,
   isTypingTarget,
   matchesBinding,
   reduceShortcut,
   SHORTCUTS,
+  shortcutLabel,
 } from "@/lib/shortcuts";
 
 const plain = { metaKey: false, ctrlKey: false, altKey: false };
@@ -129,4 +131,38 @@ it("treats fields and the code editor as typing", () => {
   expect(isTypingTarget(document.body)).toBe(false);
   input.remove();
   editor.remove();
+});
+
+const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)";
+const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)";
+const LINUX = "Mozilla/5.0 (X11; Linux x86_64)";
+const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+
+it("tells Apple platforms apart", () => {
+  expect(isApplePlatform(MAC)).toBe(true);
+  expect(isApplePlatform(IPHONE)).toBe(true);
+  expect(isApplePlatform(LINUX)).toBe(false);
+  expect(isApplePlatform(WINDOWS)).toBe(false);
+});
+
+it("keeps the Apple symbols on Apple platforms", () => {
+  for (const keys of ["⌘↵", "⌘⇧↵", "⌘K", "⌘I", "⇧⌥F"]) {
+    expect(shortcutLabel(keys, MAC)).toBe(keys);
+    expect(shortcutLabel(keys, IPHONE)).toBe(keys);
+  }
+});
+
+it("spells chords out on other platforms", () => {
+  expect(shortcutLabel("⌘↵", LINUX)).toBe("Ctrl+Enter");
+  expect(shortcutLabel("⌘⇧↵", WINDOWS)).toBe("Ctrl+Shift+Enter");
+  expect(shortcutLabel("⌘K", LINUX)).toBe("Ctrl+K");
+  expect(shortcutLabel("⌘I", WINDOWS)).toBe("Ctrl+I");
+  expect(shortcutLabel("⇧⌥F", LINUX)).toBe("Shift+Alt+F");
+  expect(shortcutLabel("⌘↵", navigator.userAgent)).toBe("Ctrl+Enter");
+});
+
+it("leaves keys without a modifier unchanged", () => {
+  for (const keys of ["/", "j / k, ↓ / ↑", "Enter", "g then a letter", "?"]) {
+    expect(shortcutLabel(keys, LINUX)).toBe(keys);
+  }
 });

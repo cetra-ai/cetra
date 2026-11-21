@@ -5,7 +5,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { SHORTCUTS } from "@/lib/shortcuts";
+import { SHORTCUTS, shortcutLabel } from "@/lib/shortcuts";
 
 export function ShortcutsHelp({
   open,
@@ -32,7 +32,9 @@ export function ShortcutsHelp({
           <tbody>
             {SHORTCUTS.map((row) => (
               <tr key={row.keys} className="border-t">
-                <td className="py-1.5 pr-3 font-mono text-caption whitespace-nowrap">{row.keys}</td>
+                <td className="py-1.5 pr-3 font-mono text-caption whitespace-nowrap">
+                  {shortcutLabel(row.keys, navigator.userAgent)}
+                </td>
                 <td className="py-1.5 pr-3">{row.description}</td>
                 <td className="py-1.5 whitespace-nowrap text-muted-foreground">{row.scope}</td>
               </tr>

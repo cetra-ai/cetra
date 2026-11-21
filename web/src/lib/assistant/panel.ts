@@ -2,12 +2,8 @@ import { useSyncExternalStore } from "react";
 import { STORAGE_PREFIX } from "@/product";
 
 const OPEN_KEY = `${STORAGE_PREFIX}assistant.open`;
-const SIZE_KEY = `${STORAGE_PREFIX}assistant.size`;
 const CONVERSATION_KEY = `${STORAGE_PREFIX}assistant.conversation.`;
-
-const DEFAULT_SIZE = 30;
-const MIN_SIZE = 20;
-const MAX_SIZE = 50;
+const WINDOW_KEY = `${STORAGE_PREFIX}assistant.window`;
 
 const listeners = new Set<() => void>();
 /**
@@ -95,20 +91,84 @@ export function setCurrentConversation(ref: string, id: string | undefined): voi
   emit();
 }
 
-function clampSize(percent: number): number {
-  return Math.min(MAX_SIZE, Math.max(MIN_SIZE, percent));
+/** The floating window's position and size, in CSS pixels from the viewport's top left. */
+export type WindowRect = { x: number; y: number; width: number; height: number };
+
+type Viewport = { width: number; height: number };
+
+export const WINDOW_MIN = { width: 320, height: 360 };
+const WINDOW_DEFAULT = { width: 420, height: 600 };
+/** The gap the default window keeps from the viewport's edges. */
+const WINDOW_MARGIN = 16;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }
 
-/** The panel's width in percent of the page area, between 20 and 50. */
-export function readPanelSize(): number {
-  const raw = readItem(SIZE_KEY);
-  const stored = raw === null || raw.trim() === "" ? Number.NaN : Number(raw);
-  if (!Number.isFinite(stored)) {
-    return DEFAULT_SIZE;
+/**
+ * `rect` fitted to the viewport: at least the minimum size, at most the viewport less a margin on
+ * each side, and inside the viewport. A viewport smaller than the minimum keeps the minimum and
+ * puts the window at its top left.
+ */
+export function fitWindow(rect: WindowRect, viewport: Viewport): WindowRect {
+  const width = clamp(
+    rect.width,
+    WINDOW_MIN.width,
+    Math.max(WINDOW_MIN.width, viewport.width - 2 * WINDOW_MARGIN),
+  );
+  const height = clamp(
+    rect.height,
+    WINDOW_MIN.height,
+    Math.max(WINDOW_MIN.height, viewport.height - 2 * WINDOW_MARGIN),
+  );
+  return {
+    x: clamp(rect.x, 0, Math.max(0, viewport.width - width)),
+    y: clamp(rect.y, 0, Math.max(0, viewport.height - height)),
+    width,
+    height,
+  };
+}
+
+/** The first window: the default size in the bottom right corner, fitted to the viewport. */
+export function defaultWindow(viewport: Viewport): WindowRect {
+  const { width, height } = fitWindow({ x: 0, y: 0, ...WINDOW_DEFAULT }, viewport);
+  return fitWindow(
+    {
+      x: viewport.width - width - WINDOW_MARGIN,
+      y: viewport.height - height - WINDOW_MARGIN,
+      width,
+      height,
+    },
+    viewport,
+  );
+}
+
+function isRect(value: unknown): value is WindowRect {
+  if (typeof value !== "object" || value === null) {
+    return false;
   }
-  return clampSize(stored);
+  const record = value as Record<string, unknown>;
+  return ["x", "y", "width", "height"].every(
+    (key) => typeof record[key] === "number" && Number.isFinite(record[key]),
+  );
 }
 
-export function writePanelSize(percent: number): void {
-  writeItem(SIZE_KEY, String(clampSize(percent)));
+/** The saved window fitted to the viewport, or the default one when none is saved or it is bad. */
+export function readWindowRect(viewport: Viewport): WindowRect {
+  const raw = readItem(WINDOW_KEY);
+  if (raw !== null) {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (isRect(parsed)) {
+        return fitWindow(parsed, viewport);
+      }
+    } catch {
+      // A bad value falls back to the default window.
+    }
+  }
+  return defaultWindow(viewport);
+}
+
+export function writeWindowRect(rect: WindowRect): void {
+  writeItem(WINDOW_KEY, JSON.stringify(rect));
 }

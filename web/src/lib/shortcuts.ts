@@ -255,3 +255,27 @@ export function dispatchShortcut(id: ShortcutId, event: KeyboardEvent): void {
     handler(event);
   }
 }
+
+/** Whether the browser runs on an Apple platform, where the shortcuts' modifier is ⌘. */
+export function isApplePlatform(userAgent: string): boolean {
+  return /Mac|iPhone|iPad/.test(userAgent);
+}
+
+/** How the other platforms spell the Apple key symbols. */
+const OTHER_PLATFORM_KEYS: Record<string, string> = {
+  "⌘": "Ctrl",
+  "⇧": "Shift",
+  "⌥": "Alt",
+  "↵": "Enter",
+};
+
+/**
+ * A shortcut as the user's platform spells it. `keys` is written the Apple way (`⌘⇧↵`); elsewhere
+ * a chord becomes `Ctrl+Shift+Enter`. Keys without a modifier (`g then a letter`) are unchanged.
+ */
+export function shortcutLabel(keys: string, userAgent: string): string {
+  if (isApplePlatform(userAgent) || !/[⌘⇧⌥]/.test(keys)) {
+    return keys;
+  }
+  return [...keys].map((key) => OTHER_PLATFORM_KEYS[key] ?? key).join("+");
+}

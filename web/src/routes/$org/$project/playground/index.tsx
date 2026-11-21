@@ -42,8 +42,7 @@ import {
 } from "@/lib/playground";
 import { VIEWER_REASON as PROMPT_EDIT_REASON } from "@/lib/prompts";
 import { canManagePrompts, canRunPlayground } from "@/lib/roles";
-import { hexId } from "@/lib/shortcuts";
-import { runShortcutLabel } from "@/lib/sql/format";
+import { hexId, shortcutLabel } from "@/lib/shortcuts";
 import { uuidv7 } from "@/lib/uuid";
 
 type Connection = Schema<"LlmConnection">;
@@ -577,7 +576,7 @@ function PlaygroundWorkspace({
   );
   const running = Object.values(runs).some((run) => run.status === "running");
   const runReason = runBlockReason(canRun, blocked, connections.length);
-  const shortcut = runShortcutLabel(navigator.userAgent);
+  const shortcut = shortcutLabel("⌘↵", navigator.userAgent);
 
   // The server indexes messages after its placeholders are expanded, so `messages[n]` is entry n
   // only when no placeholder comes at or before it. Other message errors go to the form.

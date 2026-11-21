@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import { server } from "@/mocks/node";
@@ -13,6 +13,7 @@ import meDocument from "../../../../fixtures/api/static/me.json";
 import projectDocument from "../../../../fixtures/api/static/project.json";
 
 const DESKTOP_WIDTH = window.innerWidth;
+const DESKTOP_HEIGHT = window.innerHeight;
 const PROJECT = "/api/v1/projects/:project";
 const STATUS = "/api/v1/projects/:project/assistant";
 const LIST = "/api/v1/projects/:project/assistant/conversations";
@@ -35,6 +36,7 @@ beforeEach(() => {
 
 afterEach(() => {
   window.innerWidth = DESKTOP_WIDTH;
+  window.innerHeight = DESKTOP_HEIGHT;
   localStorage.clear();
 });
 
@@ -44,7 +46,7 @@ function panel(): HTMLElement | null {
 }
 
 async function openPanelFromTopBar(user: Awaited<ReturnType<typeof renderApp>>["user"]) {
-  await user.click(await screen.findByRole("button", { name: "Assistant" }));
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
   return screen.findByRole("region", { name: "Assistant" });
 }
 
@@ -95,12 +97,69 @@ it("keeps the panel open when the user goes to a project settings page", async (
   expect(panel()).toBeInTheDocument();
 });
 
+const WINDOW_KEY = `${STORAGE_PREFIX}assistant.window`;
+
+it("drags the window by its header and remembers where it is", async () => {
+  localStorage.setItem(WINDOW_KEY, JSON.stringify({ x: 100, y: 100, width: 420, height: 600 }));
+  window.innerHeight = 900;
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
+  const frame = await screen.findByTestId("assistant-window");
+  const header = within(frame).getByRole("region", { name: "Assistant" }).querySelector("header");
+  if (header === null) {
+    throw new Error("the panel has no header");
+  }
+
+  fireEvent.pointerDown(header, { button: 0, clientX: 200, clientY: 120 });
+  fireEvent.pointerMove(window, { clientX: 260, clientY: 170 });
+  fireEvent.pointerUp(window);
+  fireEvent.pointerMove(window, { clientX: 400, clientY: 400 });
+
+  await waitFor(() => {
+    expect(frame).toHaveStyle({ left: "160px", top: "150px" });
+  });
+  expect(JSON.parse(localStorage.getItem(WINDOW_KEY) ?? "{}")).toMatchObject({ x: 160, y: 150 });
+});
+
+it("does not drag the window from a header button", async () => {
+  localStorage.setItem(WINDOW_KEY, JSON.stringify({ x: 100, y: 100, width: 420, height: 600 }));
+  window.innerHeight = 900;
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
+  const frame = await screen.findByTestId("assistant-window");
+
+  const newChat = within(frame).getByRole("button", { name: "New chat" });
+  fireEvent.pointerDown(newChat, { button: 0, clientX: 200, clientY: 120 });
+  fireEvent.pointerMove(window, { clientX: 260, clientY: 170 });
+  fireEvent.pointerUp(window);
+
+  expect(frame).toHaveStyle({ left: "100px", top: "100px" });
+});
+
+it("uses the sheet on a narrow window", async () => {
+  window.innerWidth = 800;
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await openPanelFromTopBar(user);
+
+  expect(screen.queryByTestId("assistant-window")).not.toBeInTheDocument();
+  expect(panel()).toBeInTheDocument();
+});
+
+it("opens the panel in a window over the page on a wide window", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await openPanelFromTopBar(user);
+
+  const frame = await screen.findByTestId("assistant-window");
+  expect(within(frame).getByRole("region", { name: "Assistant" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1, name: "Traces" })).toBeInTheDocument();
+});
+
 it("hides the button from viewers", async () => {
   server.use(http.get(PROJECT, () => HttpResponse.json({ ...projectDocument, role: "viewer" })));
   await renderApp("/acme/support-bot/traces");
 
   await screen.findByRole("heading", { level: 1, name: "Traces" });
-  expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Ask AI" })).not.toBeInTheDocument();
 });
 
 it("says the assistant is off in the organization, with a link for admins", async () => {

@@ -1,12 +1,12 @@
+import { shortcutLabel } from "@/lib/shortcuts";
 import { SQL_EXAMPLES, type SqlExample } from "@/lib/sql/examples";
-import { runShortcutLabel } from "@/lib/sql/format";
 
 /** The first lines of a query, enough to tell the examples apart. */
 const PREVIEW_LINES = 3;
 
 /** Shown before the first run: how to run, and the examples to start from. */
 export function ResultsEmpty({ onPick }: { onPick: (example: SqlExample) => void }) {
-  const shortcut = runShortcutLabel(navigator.userAgent);
+  const shortcut = shortcutLabel("⌘↵", navigator.userAgent);
   return (
     <div className="mx-auto w-full max-w-4xl overflow-y-auto pt-4 text-ui">
       <h2 className="flex flex-wrap items-center gap-2 font-medium text-ui">
