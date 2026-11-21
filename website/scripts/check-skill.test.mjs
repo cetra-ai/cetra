@@ -118,7 +118,18 @@ test("finds the subcommands of the real CLI reference", () => {
   const cli = readFileSync("src/content/docs/docs/reference/cli.md", "utf8");
   assert.deepEqual(
     [...cliCommands(cli)],
-    ["serve", "admin", "version", "health", "login", "logout", "query", "traces", "projects", "agents"],
+    [
+      "serve",
+      "admin",
+      "version",
+      "health",
+      "login",
+      "logout",
+      "query",
+      "traces",
+      "projects",
+      "agents",
+    ],
   );
 });
 

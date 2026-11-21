@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { diffFiles, expectedFiles, header, validateList } from "./skill-references.mjs";
 import { toMarkdown } from "./markdown.mjs";
+import { diffFiles, expectedFiles, header, validateList } from "./skill-references.mjs";
 
 const exists = () => true;
 
@@ -41,17 +41,15 @@ test("validateList reports a page without .md or .mdx", () => {
 
 test("validateList reports a page that does not exist", () => {
   const list = [{ name: "openai", page: "integrations/openai.mdx" }];
-  assert.deepEqual(validateList(list, () => false), [
-    "references[0]: page integrations/openai.mdx does not exist",
-  ]);
+  assert.deepEqual(
+    validateList(list, () => false),
+    ["references[0]: page integrations/openai.mdx does not exist"],
+  );
 });
 
 test("expectedFiles returns the header plus the converted page", () => {
   const source = "---\ntitle: OpenAI\ndescription: Trace OpenAI calls.\n---\n\nSome text.\n";
-  const files = expectedFiles(
-    [{ name: "openai", page: "integrations/openai.mdx" }],
-    () => source,
-  );
+  const files = expectedFiles([{ name: "openai", page: "integrations/openai.mdx" }], () => source);
   assert.deepEqual(
     [...files.entries()],
     [["openai.md", header("integrations/openai.mdx") + toMarkdown(source)]],

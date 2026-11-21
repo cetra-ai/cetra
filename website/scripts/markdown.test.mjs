@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { SITE, prepass, toMarkdown } from "./markdown.mjs";
+import { prepass, SITE, toMarkdown } from "./markdown.mjs";
 
 const TABS = `<Tabs syncKey="lang">
 <TabItem label="Python">
@@ -42,9 +42,7 @@ test("prepass drops a one-line Backing element", () => {
 });
 
 test("prepass drops a Backing element that spans three lines", () => {
-  const out = prepass(
-    'Before.\n<Backing\n  fixtures={["a/b"]}\n  tests={["x"]}\n/>\nAfter.',
-  );
+  const out = prepass('Before.\n<Backing\n  fixtures={["a/b"]}\n  tests={["x"]}\n/>\nAfter.');
   assert.equal(out, "Before.\nAfter.");
 });
 

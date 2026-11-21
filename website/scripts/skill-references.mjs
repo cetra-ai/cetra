@@ -1,7 +1,7 @@
 // Generates skills/cetra/references/ from the docs pages that skills/references.json lists (D-AO-8).
 // Checks them by default; CETRA_DOCS_WRITE=1 rewrites them (`just docs-gen`).
 // Prints one finding per line to stderr and exits 1 when there is any.
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { toMarkdown } from "./markdown.mjs";

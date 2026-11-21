@@ -11,7 +11,14 @@ export const PAGES = "src/content/docs/docs";
 export const CLI_REFERENCE = "src/content/docs/docs/reference/cli.md";
 
 const MAX_LINES = 500;
-const FRONTMATTER_KEYS = new Set(["name", "description", "allowed-tools", "license", "compatibility", "metadata"]);
+const FRONTMATTER_KEYS = new Set([
+  "name",
+  "description",
+  "allowed-tools",
+  "license",
+  "compatibility",
+  "metadata",
+]);
 
 /** `cetra` subcommand names: the `### cetra <name>` headings of the CLI reference. */
 export function cliCommands(cliReference) {
@@ -58,7 +65,8 @@ function checkFrontmatter(text, lines) {
     errors.push({ line: 1, message: "allowed-tools must be a string" });
   }
   for (const key of Object.keys(data)) {
-    if (!FRONTMATTER_KEYS.has(key)) errors.push({ line: 1, message: `unknown frontmatter key ${key}` });
+    if (!FRONTMATTER_KEYS.has(key))
+      errors.push({ line: 1, message: `unknown frontmatter key ${key}` });
   }
   return errors;
 }

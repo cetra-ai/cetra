@@ -84,11 +84,7 @@ export function prepass(source) {
       i += 1;
       continue;
     }
-    if (
-      /^<Tabs\b[^>]*>$/.test(trimmed) ||
-      trimmed === "</Tabs>" ||
-      trimmed === "</TabItem>"
-    ) {
+    if (/^<Tabs\b[^>]*>$/.test(trimmed) || trimmed === "</Tabs>" || trimmed === "</TabItem>") {
       i += 1;
       continue;
     }
