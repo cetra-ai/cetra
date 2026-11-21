@@ -1097,7 +1097,7 @@ impl Storage {
             Ok(catalog) => snapshot::read_copy(path)
                 .await
                 .map(|(objects, flushed_seq)| (catalog, objects, flushed_seq)),
-            Err(error) => Err(error.into()),
+            Err(error) => Err(error),
         };
         let (catalog, objects, flushed_seq) = match copied {
             Ok(copied) => copied,
@@ -1219,7 +1219,8 @@ impl Storage {
             .await
     }
 
-    /// Stops writers, flushes both memtables, and releases the data directory lock.
+    /// Stops writers, flushes both memtables, closes `catalog.db`, and releases
+    /// the data directory lock.
     ///
     /// Other tasks may still hold this value and be inside `append`. An append
     /// that has not been acknowledged returns [`AppendError::ShuttingDown`].
@@ -1231,6 +1232,11 @@ impl Storage {
     /// Each flush task gets up to 30 seconds, together, to commit. A flush that
     /// is still running is cancelled; its rows stay in the WAL and are replayed
     /// on the next [`Self::open`].
+    ///
+    /// `catalog.db` is closed before the lock is released: closing its
+    /// connection checkpoints the SQLite WAL into the file, and that write must
+    /// not land after the next owner of the directory has started. A failed
+    /// close is reported after the writer failures.
     pub async fn shutdown(&self) -> Result<(), StorageError> {
         self.shutting_down.store(true, Ordering::Release);
         // Compaction stops first, so a job never commits against a catalog
@@ -1246,6 +1252,7 @@ impl Storage {
         let spans = self.spans.shutdown().await;
         let scores = self.scores.shutdown().await;
         self.finish_flushes().await;
+        let closed = self.committer.close().await;
         drop(
             self.lock
                 .lock()
@@ -1254,6 +1261,7 @@ impl Storage {
         );
         writer_exit("spans", &spans)?;
         writer_exit("scores", &scores)?;
+        closed?;
         Ok(())
     }
 
@@ -3472,6 +3480,35 @@ mod tests {
         assert_eq!(storage.published_rows(Table::Spans), 0);
         assert_eq!(storage.catalog_rows(Table::Spans), 1);
         storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shutdown_closes_the_catalog_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = config_in(dir.path());
+        config.flush.max_age = Duration::from_secs(60 * 60);
+        let storage = Storage::open(config).await.unwrap();
+        storage
+            .append_spans(project(), spans_at(&[1]))
+            .await
+            .unwrap();
+        // The shutdown flush commits, so the catalog has WAL frames to checkpoint.
+        storage.shutdown().await.unwrap();
+        // Closing the last connection checkpointed the WAL into `catalog.db` and
+        // deleted it: the file is final while `storage` is still alive.
+        assert!(!dir.path().join("catalog.db-wal").exists());
+        let catalog = std::fs::read(dir.path().join("catalog.db")).unwrap();
+        assert!(matches!(
+            storage.committer.staged_paths().await,
+            Err(CatalogError::Closed)
+        ));
+        // A second shutdown has nothing left to close.
+        storage.shutdown().await.unwrap();
+        drop(storage);
+        assert_eq!(
+            std::fs::read(dir.path().join("catalog.db")).unwrap(),
+            catalog
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

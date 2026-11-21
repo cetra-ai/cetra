@@ -7,6 +7,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Fixed
+
+- Shutdown closes `catalog.db` before it releases the data directory lock, so the SQLite
+  checkpoint no longer writes the file after the server has stopped.
+
 ## [0.1.0-rc.1] - 2026-11-21
 
 ### Upgrade notes
