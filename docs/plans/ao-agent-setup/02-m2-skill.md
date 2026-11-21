@@ -135,7 +135,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
       - `t` matches `/^<TabItem\b[^>]*\blabel="([^"]+)"[^>]*>$/`: replace the line with three lines: `""`, `**<label>**`, `""`.
       - `t` starts with `<Backing` or `<Image`: drop lines starting with this one, up to and including the first line, **this one included**, whose trimmed text ends with `/>`. A one-line element drops just its own line. If no such line comes before the end of the text, throw `Error("unclosed <Backing> or <Image> at line <n>")` (1-based).
       - `t` is `<CardGrid>` or `</CardGrid>`, or matches `/^<CardGrid\b[^>]*>$/`: drop the line.
-      - `t` matches `/^<LinkCard\b[^>]*\btitle="([^"]+)"[^>]*\bhref="([^"]+)"[^>]*\/>$/`: replace the line with `- [<title>](<href>)`, followed by `: <description>` when the tag also has `description="…"`. tidymd alone runs the cards of a grid together on indented lines (`integrations/index.mdx`).
+      - `t` matches `/^<LinkCard\b[^>]*\btitle="([^"]+)"[^>]*\bhref="([^"]+)"[^>]*\/>$/`: replace the line with `- [<title>](<href>)`, followed by `: <description>` when the tag also has `description="…"`. tidymd alone runs the cards of a grid together on indented lines (`integrations/index.mdx`). A `<LinkCard` line that does not match (a tag over several lines, or without `title` or `href`) is left to tidymd; the guard of step 4.5 then throws if a tag survives, which is the wanted failure.
       - Any other line: copy it unchanged.
    4. Join with `\n`.
 4. **`toMarkdown(source)`:**
@@ -144,7 +144,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    3. If `fm?.description` is a non-empty string, insert `""` and the description right after the first line that starts with `# `. If there is no such line, put the description, then `""`, at the start.
    4. **Post-pass**, line by line:
       - remove trailing whitespace on every line;
-      - outside fences, remove leading spaces before a line whose trimmed text starts with `#` or with three backticks, because tidymd leaves such indentation behind;
+      - outside fences, remove leading spaces before a line whose trimmed text starts with `#` or with three backticks, because tidymd leaves such indentation behind. Track fences in the post-pass with the same rule as the pre-pass (step 3.2): the leading spaces of a fence's opening and closing lines are removed too, but lines inside the fence are left as they are;
       - collapse runs of more than one blank line into one;
       - end the text with exactly one `\n`.
    5. **Guard.** Outside fences, remove inline code spans (`` `…` ``) from each line, then test it against `/<\/?[A-Z][a-z][A-Za-z]*\b/`. A match means an unconverted component: throw `Error("line <n>: unconverted component <match>")`. `<YOUR_KEY>`-style placeholders do not match, because their second character is uppercase or `_`.
@@ -385,7 +385,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    - When the app has conversations or signed-in users, set `session_id` and `user_id` with `context` (Python) or `withContext` (TypeScript). See [sessions.md](references/sessions.md) and [users.md](references/users.md).
    - In scripts, tests and serverless handlers, call `flush()` (Python) or `await flush()` (TypeScript) before the process ends. Otherwise the last spans are lost.
    - If the app already has its own OpenTelemetry setup, keep it, and read the OpenTelemetry page of its language before changing anything.
-   - To leave prompts and answers out of the traces, see [privacy-controls.md](references/privacy-controls.md).
+   - To leave prompts and answers out of the traces, set `CETRA_CAPTURE_CONTENT=false` (or `capture_content=False` / `captureContent: false` in `init`); see [privacy-controls.md](references/privacy-controls.md).
 
    ## 4. Run the app
 
@@ -447,6 +447,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
       - `allowed-tools`, when present, must be a string.
       - Any other key except `license`, `compatibility` and `metadata` is an error (`unknown frontmatter key <k>`).
       - `extractStarlightFrontmatter` throws on invalid YAML or a YAML value that is not an object. Catch any error and report it at line 1.
+      - When the frontmatter is missing or cannot be parsed, report that one error and skip the `name`, `description`, `allowed-tools` and key checks; the other rules still run.
    2. **Length.** At most 500 lines in total (`SKILL.md has <n> lines; the limit is 500`).
    3. **Reference links.** Every Markdown link target matching `/^references\/([a-z0-9-]+)\.md$/` needs `ctx.referenceExists(<name>)`; otherwise `missing reference references/<name>.md`. Any other relative link target (one that does not start with `http://`, `https://` or `#`) is an error: `link <target> must be references/<name>.md or an absolute URL`.
    4. **Docs pages.** For every `https://cetra.sh/docs/<path>` in the text, in a link target or bare, `<path>` must end with `/` and `ctx.pageExists(<path>)` must be true; otherwise `no docs page for https://cetra.sh/docs/<path>`. Cut `<path>` at `#`, `)`, `` ` ``, whitespace or the end of the line, then strip trailing `.`, `,`, `;` and `:`. Other `https://cetra.sh/` URLs (`/llms.txt`, `/mcp`) are not checked.
@@ -458,7 +459,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    4. `commands` is `cliCommands(readFileSync(CLI_REFERENCE, "utf8"))`. If it is empty, print `website/src/content/docs/docs/reference/cli.md: no command headings found` and return 1.
    5. Also list `SKILL_DIR`. It may hold only `SKILL.md` and `references/`, and `references/` only `*.md` files. Anything else is `skills/cetra/<path>: not part of the skill`.
    6. Print each error as `skills/cetra/SKILL.md:<line>: <message>`, and return 1 if there are any.
-6. **`check-env-vars.mjs`.** In `main`, the `pages` object is keyed by absolute paths (`join(root, …)`). Add `join(root, "skills/cetra/SKILL.md")` and every `*.md` under `join(root, "skills/cetra/references")` to it, keyed the same way. Use the file's existing `walk` helper, which already skips a missing directory. Their `CETRA_*` names then go through the existing rule. Change nothing else.
+6. **`check-env-vars.mjs`.** In `main`, the `pages` object is keyed by absolute paths (`join(root, …)`). Add `join(root, "skills/cetra/SKILL.md")` and every `*.md` under `join(root, "skills/cetra/references")` to it, keyed the same way. Use the file's existing `walk` helper, which already skips a missing directory, with an accept function that keeps names ending in `.md`. Their `CETRA_*` names then go through the existing rule. Change nothing else.
 7. In `website/package.json`, append ` && node scripts/check-skill.mjs` to the end of `check:content`, after `skill-references.mjs`.
 
 **Tests:**
@@ -639,7 +640,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 - both manual runs above behave as described;
 - `just check-workflows` passes, if `actionlint` and `zizmor` are installed; otherwise say so in the report;
 - `shellcheck tools/skills/mirror.sh` passes, if `shellcheck` is installed;
-- `claude plugin validate skills/manifests`, if `claude` is installed; otherwise say so in the report. If it asks for fields the plan does not give, stop and report.
+- `claude plugin validate skills/manifests`, if `claude` is installed; otherwise say so in the report. A warning that no version is set is expected (the manifests carry none on purpose); report other warnings, and stop only on an error.
 
 **Commit:** `Mirror the agent skill to cetra-ai/skills`
 
