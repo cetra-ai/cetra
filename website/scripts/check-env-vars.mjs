@@ -65,6 +65,9 @@ export function main(root) {
     (p) => /\.mdx?$/.test(p) && p !== generated,
     pagePaths,
   );
+  // The agent skill (D-AO-8) names CETRA_* variables too.
+  pagePaths.push(join(root, "skills/cetra/SKILL.md"));
+  walk(join(root, "skills/cetra/references"), (p) => p.endsWith(".md"), pagePaths);
   const pages = Object.fromEntries(pagePaths.map((p) => [p, readFileSync(p, "utf8")]));
 
   const codePaths = [];
