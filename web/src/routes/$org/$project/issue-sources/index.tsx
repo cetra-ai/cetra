@@ -5,6 +5,7 @@ import { issueSourcesQuery } from "@/api/queries-issues";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { SourceList } from "@/components/issue-sources/source-list";
+import { PageToolbar } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -25,43 +26,46 @@ function IssueSourcesPage() {
     throw sources.error;
   }
 
-  return (
-    <div className="flex w-full flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex flex-wrap items-center justify-between gap-4">
-        <h2 className="text-title font-medium">Issue sources</h2>
-        <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
-          {canManage ? (
-            <Button asChild>
-              <Link to="/$org/$project/issue-sources/new" params={{ org, project }}>
-                <Plus />
-                New source
-              </Link>
-            </Button>
-          ) : (
-            <Button disabled>
-              <Plus />
-              New source
-            </Button>
-          )}
-        </DisabledReason>
-      </div>
-      {sources.isPending ? (
-        <Skeleton className="h-48 w-full" />
+  const newSource = (
+    <DisabledReason reason={canManage ? undefined : NO_PERMISSION}>
+      {canManage ? (
+        <Button asChild size="sm">
+          <Link to="/$org/$project/issue-sources/new" params={{ org, project }}>
+            <Plus />
+            New source
+          </Link>
+        </Button>
       ) : (
-        <SourceList
-          org={org}
-          project={project}
-          rows={sources.data.data}
-          canManage={canManage}
-          emptyState={
-            <EmptyState
-              icon={Radar}
-              title="No issue sources yet"
-              description="Add an error source to start finding issues."
-            />
-          }
-        />
+        <Button disabled size="sm">
+          <Plus />
+          New source
+        </Button>
       )}
+    </DisabledReason>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar actions={newSource} />
+      <div className="min-h-0 flex-1 overflow-auto px-3 py-3">
+        {sources.isPending ? (
+          <Skeleton className="h-48 w-full" />
+        ) : (
+          <SourceList
+            org={org}
+            project={project}
+            rows={sources.data.data}
+            canManage={canManage}
+            emptyState={
+              <EmptyState
+                icon={Radar}
+                title="No issue sources yet"
+                description="Add an error source to start finding issues."
+              />
+            }
+          />
+        )}
+      </div>
     </div>
   );
 }

@@ -144,12 +144,37 @@ it("filters the rows by kind and keeps the kind in the URL", async () => {
   const { user, router } = await renderApp("/acme/support-bot/evaluators");
   const table = await screen.findByRole("table", { name: "Evaluators" });
 
-  await user.click(screen.getByRole("button", { name: "Webhook" }));
+  await user.click(screen.getByRole("button", { name: /^Webhook/ }));
 
   await waitFor(() => expect(within(table).queryByText("Relevance")).toBeNull());
   expect(within(table).getByText("Toxicity webhook")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Webhook" })).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: /^Webhook/ })).toHaveAttribute("aria-pressed", "true");
   expect(router.state.location.search).toMatchObject({ kind: "webhook" });
+});
+
+it("shows the kind chips with each kind's count, and no All chip", async () => {
+  await renderApp("/acme/support-bot/evaluators");
+  await screen.findByRole("table", { name: "Evaluators" });
+
+  expect(screen.getByRole("region", { name: "Kind" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "LLM judge 1" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Check 1" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Webhook 1" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "All" })).toBeNull();
+});
+
+it("selecting the selected kind chip again clears the filter", async () => {
+  const { user, router } = await renderApp("/acme/support-bot/evaluators");
+  const table = await screen.findByRole("table", { name: "Evaluators" });
+
+  await user.click(screen.getByRole("button", { name: "Webhook 1" }));
+  await waitFor(() => expect(within(table).queryByText("Relevance")).toBeNull());
+
+  await user.click(screen.getByRole("button", { name: "Webhook 1" }));
+  await waitFor(() => expect(within(table).getByText("Relevance")).toBeInTheDocument());
+  expect(within(table).getByText("Answer is JSON")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Webhook 1" })).toHaveAttribute("aria-pressed", "false");
+  expect(router.state.location.search).toEqual({});
 });
 
 it("says when no evaluator matches, and clears the filters", async () => {
