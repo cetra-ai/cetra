@@ -5,13 +5,12 @@ Status: design, for review with the user (2026-11-21). No plan is written yet.
 Track AO lets a developer set up cetra with **one command and one prompt to their coding agent**. The command signs in, picks the project, writes the key to `.env` and installs a cetra skill. The prompt tells the agent (Claude Code, Codex, Cursor, Gemini CLI, Copilot) to instrument the app, run it and check that the traces arrived.
 
 ```bash
-curl -fsSL https://cetra.sh/install.sh | sh
-cetra init
+npx @cetra-ai/cli@latest init
 ```
 
-`cetra init` ends by printing a prompt like this:
+`init` ends by printing a prompt like this:
 
-> Use the cetra skill to add cetra tracing to this app. Use the cetra SDK for this app's language; the API key and URL are in `.env`. Run the app once. Check that traces arrived with `cetra query "SELECT name, start_time FROM traces ORDER BY start_time DESC LIMIT 5" --project acme/demo --since 15m`, then give me the link `https://eu1.cetra.sh/acme/demo/traces`.
+> Use the cetra skill to add cetra tracing to this app. Use the cetra SDK for this app's language; the API key and URL are in `.env`. Run the app once. Check that traces arrived with `npx @cetra-ai/cli query "SELECT name, start_time FROM traces ORDER BY start_time DESC LIMIT 5" --since 15m --json`, then give me the link `https://eu1.cetra.sh/acme/demo/traces`.
 
 The launch plan measures **time to first trace**: under 5 minutes self-hosted and under 2 minutes on the cloud. This track is how we hit those numbers for users who work with a coding agent.
 
@@ -25,6 +24,7 @@ The launch plan measures **time to first trace**: under 5 minutes self-hosted an
   - 11 (the `/cli-auth` page);
   - 12 (configuration, `init.*`).
 - `crates/cli/src/{main,login,credentials,client,query}.rs`, `crates/cli/src/agents/setup.rs`.
+- `sdks/typescript/package.json` and `.github/workflows/release.yml`: how an npm package of this repository is built, versioned and published (PR #207 adds the npm publish).
 - `web/src/routes/cli-auth.tsx`.
 - `website/astro.config.mjs`, `website/wrangler.jsonc`, `website/src/content/docs/docs/get-started/quickstart.mdx`.
 - Competitor notes: `ao-competitors.md` in the session notes folder (Laminar's `lmnr-cli setup`, Langfuse's skills and docs MCP).
@@ -47,62 +47,65 @@ This document holds the decisions, the contracts and the milestones. Each milest
 - `langfuse.com/api/mcp` is a docs MCP without auth, with tools to search the docs and fetch a page.
 
 **What we take, and what we leave:**
-- From Laminar we take one command that leaves the project ready, the device flow, `--json` and exit codes for agents, and checking with SQL.
+- From Laminar we take a Node CLI run with `npx` (nothing to install), one command that leaves the project ready, the device flow, a project link file, `--json` and exit codes for agents, and checking with SQL.
 - From Langfuse we take a thin skill that sends the agent to the docs, a `.md` copy of every page, and a docs MCP.
 - We leave Laminar's keys that never expire and its pickers that run in the terminal: our project picker runs in the browser, so creating a key still needs a browser session (D-P-70).
-- We leave skills downloaded from a moving branch: ours is built into the binary, so the skill matches the CLI that installs it.
+- We leave skills downloaded from a moving branch: ours ships inside the npm package, so the skill matches the CLI that installs it.
 
 ## Goals
 
-1. **`cetra init`.** One command that:
+1. **`npx @cetra-ai/cli init`.** A small Node CLI, `@cetra-ai/cli`, with one command that:
    - signs in;
    - picks or creates a project, in the browser;
    - creates an ingest-only project key and writes `CETRA_API_KEY` and `CETRA_BASE_URL` to `.env`;
-   - saves a token for `cetra query`;
+   - saves a read-only token and links the directory to the project, for its `query` command;
    - installs the cetra skill for the coding agents;
    - prints the agent prompt.
 
-   It works on the cloud with no flags, against a self-hosted URL, and on a laptop with no server yet: there it offers to start a local `cetra serve`.
-2. **A device authorization flow** (RFC 8628) on the server. It replaces the localhost-callback login, so `cetra login` and `cetra init` work over SSH, in containers and in cloud agents.
+   It works on the cloud with no flags, against a self-hosted URL, and on a laptop with no server yet: there it offers to start a local server (the `cetra` binary or Docker).
+
+   The CLI also has `query` (the agent's check step) and `login`. The Rust `cetra` binary stays the server and operator tool and gets no `init` (D-AO-2).
+2. **A device authorization flow** (RFC 8628) on the server. It replaces the localhost-callback login, so `cetra login`, `npx @cetra-ai/cli login` and `init` work over SSH, in containers and in cloud agents.
 3. **A cetra agent skill.**
    - `SKILL.md` plus reference pages taken from the docs. It teaches an agent to instrument an app with the Python or TypeScript SDK, or with plain OTLP, and then to check the result.
    - It lives in this repository and is checked against the docs in `just check-docs`.
-   - It is built into the binary and mirrored to a public `cetra-ai/skills` repository, for `npx skills add` and the agents' plugin marketplaces.
+   - It ships inside the `@cetra-ai/cli` package and is mirrored to a public `cetra-ai/skills` repository, for `npx skills add` and the agents' plugin marketplaces.
 4. **Docs for agents.**
    - `llms.txt` already exists (D-W-19).
    - Every page gets a `.md` copy and a "Copy page" button.
    - A docs MCP at `https://cetra.sh/mcp` with `search_docs` and `get_page`.
-5. **Cloud routing.** `cetra init` with no URL goes to `app.cetra.sh`, which hands the device code to the cell that holds the user's org. Secrets never pass through the control plane.
+5. **Cloud routing.** `init` with no URL goes to `app.cetra.sh`, which hands the device code to the cell that holds the user's org. Secrets never pass through the control plane.
 6. **Docs and tests.**
    - A "Set up with your coding agent" page.
    - The quick start gets a coding-agent tab.
    - The CLI reference is regenerated.
-   - An end-to-end test from `cetra init` to a traced span read back with `cetra query`.
+   - An end-to-end test from `init` to a traced span read back with the CLI's `query`, against a real `cetra serve`.
 
 ## Non-goals
 
-- **A JavaScript or Python wrapper for the CLI** (`npx @cetra-ai/cli`, `uvx cetra`). The user chose install.sh and the binary (D-AO-2). The one-liner is `curl … | sh && cetra init`.
-- **Editing the app's code.** That is the coding agent's job, guided by the skill and the prompt. `cetra init` changes only `.env`, `.gitignore` and the skill directories.
-- **Changing the agent's MCP settings.** `cetra init` does not register the trace MCP (`/mcp`) or the docs MCP in the agent's config files: that needs a token in the agent's config, and every agent keeps that config differently. The skill names both MCPs, and the docs page shows how to add them.
-- **Tracing the coding agent itself.** That is `cetra agents setup` (track CA). The two commands share nothing but the binary, and the docs keep them apart (D-AO-1).
+- **`cetra init` in the Rust binary**, and an npm package that carries the Rust binary. Setup has one implementation, the Node CLI (D-AO-2), as Laminar's `lmnr-cli` is its only setup path. The binary (server, UI, DataFusion) is far too large to fetch through `npx`.
+- **A Python CLI** (`uvx`). Developers who use coding agents have Node; one CLI is enough for the MVP.
+- **Editing the app's code.** That is the coding agent's job, guided by the skill and the prompt. `init` changes only `.env`, `.gitignore`, `.cetra/project.json` and the skill directories.
+- **Changing the agent's MCP settings.** `init` does not register the trace MCP (`/mcp`) or the docs MCP in the agent's config files: that needs a token in the agent's config, and every agent keeps that config differently. The skill names both MCPs, and the docs page shows how to add them.
+- **Tracing the coding agent itself.** That is `cetra agents setup` in the Rust binary (track CA). The two share nothing, and the docs keep them apart (D-AO-1).
 - **AI search on the docs site** (D-W-11 stands): the docs MCP returns pages and snippets, with no model behind it.
-- **A Windows build of `cetra init`.** It follows the release targets (D-N-1: Linux and macOS).
+- **Windows support for the local server.** The CLI itself runs wherever Node runs, but starting a local server follows the binary's release targets (D-N-1: Linux and macOS) or Docker.
 
 ## Architecture
 
 ```
 developer's terminal                 browser                       cell (cetra serve)
 ─────────────────────               ─────────                     ──────────────────
-cetra init ──POST /api/auth/device/code──────────────────────────► device store (in memory)
+npx @cetra-ai/cli init ─POST /api/auth/device/code──────────────────────────► device store (in memory)
    │  prints the code and the URL                                    │
    │                          /device?code=… ── session ────────────►│ approve: project,
    │                          picks or creates the project           │ mints the PAT and the
    │                                                                 │ ingest key, holds them
    ├──POST /api/auth/device/token (polls) ──────────────────────────►│ hands them over once
-   ├─ writes .env, ~/.config/cetra/credentials.toml
-   ├─ installs .claude/skills/cetra and .agents/skills/cetra (built into the binary)
+   ├─ writes .env, .cetra/project.json, ~/.config/cetra/credentials.toml
+   ├─ installs .claude/skills/cetra and .agents/skills/cetra (shipped in the npm package)
    └─ prints the prompt ──► coding agent ── reads the skill, cetra.sh/llms.txt, cetra.sh/mcp
-                                 └─ instruments, runs the app, `cetra query` checks the traces
+                                 └─ instruments, runs the app, `npx @cetra-ai/cli query` checks
 ```
 
 On the cloud, step one goes to `app.cetra.sh` instead. The control plane signs the user in, finds the org's cell and registers the code there; the CLI is then sent on to the cell (§ Cloud routing).
@@ -116,9 +119,9 @@ On the cloud, step one goes to `app.cetra.sh` instead. The control plane signs t
 | `cetra login` on the device flow; the callback deleted | `crates/cli/src/login.rs` | M1 |
 | The skill | `skills/cetra/` (new), `website/scripts/` (generate and check) | M2 |
 | Mirror to `cetra-ai/skills` | `.github/workflows/skills-mirror.yml` (new), `justfile` | M2 |
-| `cetra init` | `crates/cli/src/init/` (new) | M3 |
+| `@cetra-ai/cli`: `init`, `query`, `login` | `node-cli/` (new pnpm workspace package), `release.yml`, `justfile` | M3 |
 | `.md` pages, Copy page, docs MCP | `website/` (plugin, Worker script, build script) | M4 |
-| Internal route for the control plane | `crates/server` | M5 |
+| Internal route for the control plane; `moved` in the Node CLI | `crates/server`, `node-cli/` | M5 |
 | The relay on `app.cetra.sh` | the private `cetra-control` repository (track Q) | Q's request |
 
 ## Contracts
@@ -150,8 +153,8 @@ DeviceGrant = {
   - Both expire after 10 minutes. `verification_uri` is `<public_url>/device`, and `verification_uri_complete` adds `?code=XXXX-XXXX`.
 - **Polling.** A `token` call within `interval` of the previous one answers `slow_down` and adds 5 s to that code's interval.
 - **Approval** mints the secrets on the server, at approval time, as the session user:
-  - `login`: a PAT with scopes `read, write`, as `cetra login` gets today.
-  - `init`: a PAT with scope `read`, which is what `cetra query` and the trace MCP need. It also mints an ingest-only project key named `cetra init (<host>)`. The user needs a project role that may create keys; otherwise the approval answers 403.
+  - `login` (the Rust `cetra login` and `cetra-cli login`): a PAT with scopes `read, write`, as `cetra login` gets today.
+  - `init`: a PAT with scope `read`, which is what `query` and the trace MCP need. It also mints an ingest-only project key named `cetra-cli init (<host>)`. The user needs a project role that may create keys; otherwise the approval answers 403.
 
   The PAT's name is `cetra <purpose> on <host>`, as today.
 - **Hand-over.** The plaintext secrets stay **in memory only**, in the code's entry, until the first successful `token` call takes them, at most 10 minutes. They are never written to disk or logged.
@@ -161,29 +164,41 @@ DeviceGrant = {
   - At most 10 000 pending codes per process; one more answers `503`.
   - Expired entries are swept every minute.
   - A denied or expired code never hands anything over.
-- **Phishing.** The approval page shows the `host` the CLI reported and the purpose, warns "Only continue if you just ran `cetra init` (or `cetra login`) on this computer", and needs an explicit click. The code alone never approves.
+- **Phishing.** The approval page shows the `host` the CLI reported and the purpose, warns "Only continue if you just ran `cetra-cli init`, `cetra-cli login` or `cetra login` on this computer", and needs an explicit click. The code alone never approves.
 - **Approval page** (`/device`, web):
   1. It asks for the code, or reads `?code=`. A user who is not signed in goes through login first and comes back.
   2. For `init`, it lists the orgs and projects the user can create keys in, offers "New project" (name, then the org's project-creation route), and preselects the only project when there is one.
   3. Approve or Deny.
 - **Deleted:** the `/cli-auth` page, its tests, the localhost callback server in `login.rs`, and the callback's sections in spec 08. There is no compatibility path (`AGENTS.md`).
 
-### `cetra init` (M3)
+### `@cetra-ai/cli` (M3)
+
+**The package.**
+- **Name and command.** `@cetra-ai/cli` on npm, next to `@cetra-ai/sdk`. Its bin is `cetra-cli`, so it never clashes with the Rust `cetra` binary on PATH. Users run it through `npx @cetra-ai/cli@latest …`.
+- **Where it lives.** `node-cli/`, a new package in the pnpm workspace. It is TypeScript compiled to one ESM bundle and needs Node `>=22.12`, the TypeScript SDK's floor.
+- **Release.** It ships from the same release workflow as `@cetra-ai/sdk` (PR #207), at the workspace version, with npm provenance, and `just versions-check` covers it.
+- **Dependencies.** Only Node built-ins: `fetch`, `node:util` `parseArgs`, `node:readline`, `node:child_process` and `node:fs`. The one exception is `smol-toml` 1.9.1 (latest on 2026-11-21), which reads and writes the shared credentials file. The plan re-checks the version.
+- **Output.** Human text goes to stderr and `--json` output to stdout, so an agent can run any command.
+
+**Commands:**
 
 ```
-cetra init [--url <URL>] [--project <org/project>] [--dir <path>] [--env-file <path>]
-           [--agents claude,agents | --no-skill] [--no-browser] [--yes] [--json]
+cetra-cli init  [--url <URL>] [--project <org/project>] [--dir <path>] [--env-file <path>]
+                [--agents claude,agents | --no-skill] [--no-browser] [--yes] [--json]
+cetra-cli query "<sql>" [--since 15m | --from … --to …] [--limit n] [--json] [--url …] [--project …]
+cetra-cli login [--url <URL>] [--no-browser]
 ```
 
-**Steps, in order:**
+#### `init`, step by step
 
-1. **Choose the server.** The URL comes from `--url`, then `CETRA_URL`, then `https://app.cetra.sh` (the cloud).
+1. **Choose the server.** The URL comes from `--url`, then `CETRA_URL`, then the link file (§ Project link), then `https://app.cetra.sh` (the cloud).
    - On a loopback URL with no answer on `/readyz`, init offers to start a local server (§ Local server). With `--yes` it starts one without asking. Without a terminal and without `--yes` it fails with exit code 3.
    - Any other URL with no answer fails with exit code 3.
 2. **Run the device flow** with `purpose: init`. It prints the code and the URL and opens the browser, unless `--no-browser` is given or there is no display. Then it polls.
+   - The browser opens with `open` on macOS and `xdg-open` on Linux, if present.
    - `--project` preselects that project on the approval page (`&project=org/slug` is added to the URL). The user still approves.
    - On the cloud the first answers come from `app.cetra.sh` (§ Cloud routing).
-3. **Save the PAT** in `~/.config/cetra/credentials.toml` under the grant's `server`, as `cetra login` does. It replaces the token saved for that server.
+3. **Save the PAT** in the credentials file the Rust CLI already uses, `<config dir>/cetra/credentials.toml`, mode 0600 (D-AO-17). It is saved under the grant's `server` and replaces the token saved for that server. Afterwards the Rust `cetra query` and `cetra traces` work too.
 4. **Write the env file** (`--env-file`, default `<dir>/.env`, where `--dir` defaults to the current directory). Init sets two variables, the SDK's own (spec 10):
 
    ```
@@ -191,11 +206,12 @@ cetra init [--url <URL>] [--project <org/project>] [--dir <path>] [--env-file <p
    CETRA_BASE_URL=https://eu1.cetra.sh
    ```
 
-   - **Existing lines.** A line that already sets one of the two variables is replaced in place. Other lines, comments and their order are kept. The file is written 0600 through a temporary file and a rename. A new file gets a `# cetra (cetra init)` comment above the two lines.
+   - **Existing lines.** A line that already sets one of the two variables is replaced in place. Other lines, comments and their order are kept. The file is written 0600 through a temporary file and a rename. A new file gets a `# cetra (npx @cetra-ai/cli init)` comment above the two lines.
    - **An existing key.** When the file already has a `CETRA_API_KEY` for the same server, init asks before replacing it. With `--yes` it replaces it. The key the grant brought stays valid on the server either way.
    - **Git.** When `<dir>` is inside a git work tree and the env file is not ignored (`git check-ignore`), init adds its name to `<dir>/.gitignore` and says so. Init runs no other git command.
-5. **Install the skill** (§ Skill install).
-6. **Print the agent prompt** (§ Prompt) and the project's traces URL. With `--json`, stdout carries one JSON object and nothing else:
+5. **Write the project link** (§ Project link).
+6. **Install the skill** (§ Skill install).
+7. **Print the agent prompt** (§ Prompt) and the project's traces URL. With `--json`, stdout carries one JSON object and nothing else:
 
    ```json
    {"server": "…", "project": "org/slug", "env_file": "/abs/.env",
@@ -204,59 +220,88 @@ cetra init [--url <URL>] [--project <org/project>] [--dir <path>] [--env-file <p
 
    It never carries a secret.
 
-**Exit codes:**
+**Exit codes** (every command):
 
 | Code | Meaning |
 |---|---|
 | 0 | done |
 | 1 | other error |
-| 2 | usage error (clap) |
+| 2 | usage error |
 | 3 | server not reachable, or the local server would not start |
-| 4 | sign-in denied, or the code expired |
-| 5 | the env file could not be written |
+| 4 | sign-in denied, the code expired, or no saved token (`query`) |
+| 5 | the env file or the link could not be written |
+| 6 | the query failed (`query`: SQL error, timeout, 4xx) |
 
 Skill install failures are warnings, not errors: the setup works without the skill.
 
-**Privacy.** Init never prints or logs the key or the token. `--json` carries neither. Error messages name files by their base name, as `credentials.rs` does.
+**Privacy.** The CLI never prints or logs the key or the token, and `--json` carries neither. Error messages name files by their base name, as the Rust `credentials.rs` does.
+
+#### `query` and `login`
+
+- **`query`.** It reads the server and project from `--url` and `--project`, then `CETRA_URL` and `CETRA_PROJECT`, then the link file. The token comes from `CETRA_TOKEN`, then the credentials file for that server. It calls `POST /api/v1/projects/{project}/sql`, the SQL console endpoint, with the window and limit.
+  - The window is `--since` (default `24h`) or `--from`/`--to`. The default limit is 100.
+  - It prints a table on a terminal, and `{columns, rows, truncated}` with `--json`.
+  - It is a thin client: no export formats, no `--file`, no params. The Rust `cetra query` keeps those.
+- **`login`.** The device flow with `purpose: login`, which saves a `read, write` PAT, as the Rust `cetra login` does. It is there for when the 90-day token from `init` has expired.
+
+#### Project link
+
+`init` writes `<dir>/.cetra/project.json`:
+
+```json
+{"server": "https://eu1.cetra.sh", "org": "acme", "project": "demo", "project_id": "…"}
+```
+
+It holds no secret, so it may be committed. That lets a teammate run `query` with their own login, and later inits keep the same server. `query` looks for the file in the current directory and its parents, up to the git work tree's top level. The Rust CLI does not read it.
 
 ### Local server (M3)
 
-When the URL is loopback (the default for a self-hosted trial is `http://localhost:8080`) and nothing answers, init asks: "No cetra server at http://localhost:8080. Start one on this machine? [Y/n]".
+When the URL is loopback (the default for a self-hosted trial is `http://localhost:8080`) and nothing answers, init offers to start a server on this machine, in this order:
 
-1. **The data directory** is `<data_local_dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS.
-   - Init writes `cetra.toml` there, with `data_dir`, `listen` and `public_url`.
-   - When the directory already holds data, init only starts the server: the `init.*` values below apply on a first start only (spec 12).
-2. **First-start values** go in the environment of the child, never in the file:
-   - `CETRA_INIT_ADMIN_EMAIL`, asked for at the prompt; `--yes` uses `admin@localhost`;
-   - a generated 24-character `CETRA_INIT_ADMIN_PASSWORD`;
-   - `CETRA_INIT_ORG=local`;
-   - `CETRA_INIT_PROJECT`, the base name of `<dir>` made into a slug, else `default`;
-   - a generated `CETRA_INIT_SECRET_KEY`.
-3. **Start.** Init starts `cetra serve --config <dir>/cetra.toml` as a detached child (its own session, `setsid`). Its output goes to `<data dir>/server.log` and its PID to `<data dir>/server.pid`. Then init waits up to 30 s for `/readyz`.
-4. **Sign in without a browser.** On a first start init knows the password and the key. It signs in with `POST /api/auth/login`, creates the `read` PAT with that session (`POST /api/v1/me/tokens`), then signs out.
-   - The device flow is skipped, and the key is the generated `CETRA_INIT_SECRET_KEY`.
-   - Init prints the admin email and password once, with the UI's URL.
-   - On a later start, when the data was already there, it runs the device flow as on any server.
-5. **The last lines** print how to stop the server (`kill <pid>`) and how to start it again (`cetra serve --config …`). There is no `cetra stop` command: one `kill` does it.
+1. **The `cetra` binary**, if it is on PATH: "No cetra server at http://localhost:8080. Start one with `cetra serve`? [Y/n]".
+   - **Data directory.** It is `<data dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS. Init writes `cetra.toml` there, with `data_dir`, `listen` and `public_url`.
+   - **Start.** `cetra serve --config <that dir>/cetra.toml` runs as a detached child (`spawn` with `detached: true`, then `unref`). Its output goes to `server.log` in the data directory, and its PID to `server.pid`.
+   - **Last lines.** Init prints how to stop it (`kill <pid>`) and how to start it again.
+2. **Docker**, if `docker version` answers: "Start one with Docker? [Y/n]".
+   - The command is the quick start's `docker run -d` (`ghcr.io/cetra-ai/cetra:<the CLI's version>`), with the volume `cetra-local`, the container name `cetra-local` and the ports on `127.0.0.1`.
+   - **Last lines.** Init prints `docker stop cetra-local` and `docker start cetra-local`.
+3. **Neither**: init prints the install.sh and Docker steps from the quick start and exits with code 3.
+
+**First-start values.** In both cases they go in the child's environment, never in a file:
+- `CETRA_INIT_ADMIN_EMAIL`, asked for at the prompt; `--yes` uses `admin@localhost`;
+- a generated 24-character `CETRA_INIT_ADMIN_PASSWORD`;
+- `CETRA_INIT_ORG=local`;
+- `CETRA_INIT_PROJECT`, the base name of `<dir>` made into a slug, else `default`;
+- a generated `CETRA_INIT_SECRET_KEY`.
+
+They apply on a first start only (spec 12). Init waits up to 30 s for `/readyz`.
+
+**Sign in without a browser.** On a first start init knows the password and the key:
+- It signs in with `POST /api/auth/login`, creates the `read` PAT with that session (`POST /api/v1/me/tokens`), then signs out.
+- The device flow is skipped, and the key is the generated `CETRA_INIT_SECRET_KEY`.
+- Init prints the admin email and password once, with the UI's URL.
+
+When the data was already there, init only starts the server and then runs the device flow as on any server.
 
 ### Skill install (M3)
 
-- **Where.** The skill is built into the binary (`include_str!` of every file under `skills/cetra/`; a test checks that the list matches the directory). It is written to:
+- **What ships.** The skill ships inside the npm package. The package's build copies `skills/cetra/` into it, and a test checks that the copy equals the source.
+- **Where it goes.** It is written to:
   - `<root>/.claude/skills/cetra/`, read by Claude Code;
   - `<root>/.agents/skills/cetra/`, read by Codex, Cursor, Gemini CLI, Copilot and OpenCode (the shared project path the agents settled on; see the competitor notes for sources).
 
   `<root>` is the git work tree's top level when `<dir>` is inside one, else `<dir>`. `--agents` picks a subset (`claude`, `agents`), and `--no-skill` skips the step.
-- **Ownership.** Init writes a `.cetra-skill` file with the binary's version next to `SKILL.md`. It replaces a directory that has this file. A directory without it is not ours: init leaves it alone and warns.
-- **Updates.** Running `cetra init` again with a newer binary updates the skill. The mirror (M2) serves users who install skills another way.
+- **Ownership.** Init writes a `.cetra-skill` file with the CLI's version next to `SKILL.md`. It replaces a directory that has this file. A directory without it is not ours: init leaves it alone and warns.
+- **Updates.** `npx @cetra-ai/cli@latest init` updates the skill. The mirror (M2) serves users who install skills another way.
 
 ### Prompt (M3)
 
-The prompt is a template in `crates/cli`. Init fills it with the project (`org/slug`), the server, the env file's name and the traces URL. It names the skill and gives these steps:
+The prompt is a template in `node-cli/`. Init fills it with the project (`org/slug`), the env file's name and the traces URL. It names the skill and gives these steps:
 
 1. Read the cetra skill. If it is not installed, read `https://cetra.sh/llms.txt`.
-2. Find the app's language and LLM libraries. Install the cetra SDK with the matching extras or instrumentors. Call `init` once at startup, reading the key and URL from the environment (`.env`). Never paste the key into code or chat.
+2. Find the app's language and LLM libraries, and install the cetra SDK with the matching extras or instrumentors. Call `init` once at startup, reading the key and URL from the environment (`.env`). Never paste the key into code or chat.
 3. Run the app, or its tests, once so that it makes at least one LLM call. Flush before exit in short scripts.
-4. Check with `cetra query "<sql>" --url <server> --project <org/slug> --since 15m --format json`. If it finds no rows, follow the skill's troubleshooting steps.
+4. Check with `npx @cetra-ai/cli query "<sql>" --since 15m --json`. The link file gives the server and project. If it finds no rows, follow the skill's troubleshooting steps.
 5. Report what changed and give the traces URL.
 
 The same text is in the docs page, with placeholders, so users of another setup can copy it.
@@ -276,12 +321,12 @@ skills.json                   the list: reference name → docs page path
 **`SKILL.md`** has the Agent Skills frontmatter:
 - `name: cetra`;
 - `description`, which says when to load it: adding LLM tracing or observability, cetra, OpenTelemetry for LLM apps;
-- `allowed-tools`, limited to read-only commands (`cetra query`, `cetra traces`, `cetra projects`).
+- `allowed-tools`, limited to read-only commands (`npx @cetra-ai/cli query`, and the Rust `cetra query`, `cetra traces` and `cetra projects` for users who have the binary).
 
 Its body is short (about 150 lines) and **routes**:
 - how to detect the language and the LLM libraries, and which reference page to read for each;
 - the rules: the key comes from the environment, flush in scripts, `capture_content`, never paste the key into code or chat;
-- how to check the result with `cetra query`, and the trace MCP as an alternative;
+- how to check the result with `npx @cetra-ai/cli query`, and the trace MCP as an alternative;
 - when to read `https://cetra.sh/llms.txt` or use the docs MCP.
 
 **References are generated** from the docs' MDX by the same converter that produces the site's `.md` pages (M4 adds it; M2 adds the script and M4 reuses it). `website/scripts/skill-references.mjs` reads `skills.json`, converts each page, rewrites site links to absolute `https://cetra.sh/...` URLs, and writes `skills/cetra/references/`.
@@ -315,7 +360,7 @@ Its body is short (about 150 lines) and **routes**:
   - **Logging.** No query or page is logged, in line with D-W-10's "no data leaves the page" spirit. Cloudflare's own request metrics are all we keep.
   - **Tests.** `node --test` covers the tools against a built index (unknown page, cut page, empty query). `just check-docs` builds the index.
 - **Docs pages** (M3 and M4):
-  - a new "Set up with your coding agent" page under Get started, with the one-liner, what `cetra init` changes, the prompt, the manual path (`npx skills add cetra-ai/skills`, setting the variables yourself), and how to add the trace and docs MCPs to Claude Code, Codex, Cursor and Gemini CLI;
+  - a new "Set up with your coding agent" page under Get started, with the one-liner, what `init` changes, the prompt, the manual path (`npx skills add cetra-ai/skills`, setting the variables yourself), and how to add the trace and docs MCPs to Claude Code, Codex, Cursor and Gemini CLI;
   - the quick start gets a "Coding agent" tab next to Python, TypeScript and OpenTelemetry (amends D-W-4's "without its agent-install preamble");
   - the CLI reference is regenerated (`init`, and `login` on the device flow);
   - the CA pages say "to trace the agent itself" and link the new page the other way.
@@ -332,31 +377,33 @@ Its body is short (about 150 lines) and **routes**:
    The cell stores the entry as if it had issued it. The control plane then redirects the browser to `<cell>/device?code=…`, where the cell's own page approves it with a cloud session (D183 sign-in).
 3. **The CLI moves to the cell.** The CLI keeps polling `app.cetra.sh` with its `device_code`. Once the code is registered on a cell, the control plane answers `400 {error: "moved", server: "<cell public_url>"}`. The CLI then polls the cell with the same `device_code`, and the cell hands the grant over.
 
-The secrets are minted on the cell and leave it only toward the CLI: the control plane never sees a token or a key. The cell side (the internal route and the `moved` handling in the CLI) is M5. The control-plane side is a request to track Q, written to the session notes as `ao-requests-for-q.md` when M5's plan is written. Until Q ships it, `cetra init --url https://eu1.cetra.sh` works directly.
+The secrets are minted on the cell and leave it only toward the CLI: the control plane never sees a token or a key. The cell side (the internal route and the `moved` handling in the CLI) is M5. The control-plane side is a request to track Q, written to the session notes as `ao-requests-for-q.md` when M5's plan is written. Until Q ships it, `npx @cetra-ai/cli init --url https://eu1.cetra.sh` works directly.
 
 ## Decisions
 
 | ID | Topic | Decision |
 |---|---|---|
-| D-AO-1 | Name | **`cetra init`** sets up an app to send traces. **`cetra agents setup`** (track CA) traces a coding agent itself. They are different commands with different docs pages, and each page links the other in one sentence. Rejected: `cetra setup`, too close to `cetra agents setup`; `cetra agents init`, which would put app setup under the coding-agent command. |
-| D-AO-2 | Distribution | **The existing binary and `install.sh` only** (the user, 2026-11-21). The one-liner is `curl -fsSL https://cetra.sh/install.sh \| sh` then `cetra init`. Rejected for now: an npm package with platform binaries (`npx @cetra-ai/cli`) and a PyPI wheel (`uvx`), which mean more release work. The same binary already has `cetra query` for the check step. |
+| D-AO-1 | Name | **`npx @cetra-ai/cli init`** sets up an app to send traces. **`cetra agents setup`** (track CA, Rust binary) traces a coding agent itself. They are different tools with different docs pages, and each page links the other in one sentence. Rejected: `setup` as the subcommand, too close to `cetra agents setup`. |
+| D-AO-2 | Distribution | **A Node CLI, `@cetra-ai/cli` (bin `cetra-cli`), run with `npx @cetra-ai/cli@latest init`, as Laminar's `npx lmnr-cli setup`** (the user, 2026-11-21, replacing a first choice of install.sh and the binary). Setup lives only there, and the Rust binary gets no `init`, so setup has one implementation; Laminar likewise has only its Node CLI. Its commands are `init`, `query` and `login`. Rejected: `cetra init` in the Rust binary (needs install.sh first and a large download); an npm package carrying the Rust binary (the server and UI are far too large for `npx`); `uvx` (one CLI is enough); the npm name `cetra`, which is taken. |
 | D-AO-3 | Sign-in | **A device authorization flow (RFC 8628) on the cell, and the browser picks the project** (the user, 2026-11-21). The approval page mints a 90-day PAT and, for `init`, an ingest-only project key, with the session, so creating keys stays session-only (D-P-70). Rejected: extending the localhost-callback page, which fails when the browser is on another machine (SSH, devcontainers, cloud agents); letting PATs create keys, which loosens D-P-70; Laminar's keys that never expire. |
 | D-AO-4 | One sign-in flow | **`cetra login` moves to the device flow; the localhost callback and `/cli-auth` are deleted.** Two browser flows in one CLI would be two paths to maintain and test (`AGENTS.md`). Amends D140 and spec 08 § CLI login. |
 | D-AO-5 | Secrets in transit | **The grant's secrets are minted at approval and held in memory only, until the first successful poll or 10 minutes.** A restart loses pending codes, and the user runs the command again. Rejected: storing them in `meta.db`, which would put plaintext secrets on disk for a 10-minute convenience. |
 | D-AO-6 | Scopes | **`init` gets a `read` PAT and an `ingest` key; `login` keeps a `read, write` PAT.** The app needs only ingest. The agent's check step needs only read, and a read-only token in a coding agent's reach cannot delete data. |
-| D-AO-7 | Env file | **`CETRA_API_KEY` and `CETRA_BASE_URL`, the SDK's own names (spec 10).** The existing lines are replaced in place, the file is written 0600, the file is added to `.gitignore` inside a git work tree, and an existing key is replaced only after asking. No `CETRA_PROJECT`: the SDK does not read it, and the prompt passes `--project` to `cetra query`. |
+| D-AO-7 | Env file | **`CETRA_API_KEY` and `CETRA_BASE_URL`, the SDK's own names (spec 10).** The existing lines are replaced in place, the file is written 0600, the file is added to `.gitignore` inside a git work tree, and an existing key is replaced only after asking. No `CETRA_PROJECT`: the SDK does not read it, and the project link gives `query` its project (D-AO-16). |
 | D-AO-8 | Skill source and sync | **`skills/cetra/` in this repository**: `SKILL.md` is hand-written, and `references/` is generated from the docs pages that `skills.json` lists, by the converter behind the site's `.md` pages. `just check-docs` fails when the references are stale or `SKILL.md` names an unknown variable, command or page (the user chose this repository, mirrored, 2026-11-21). Rejected: a hand-written copy of the docs, which drifts; a skill that only links to the live docs, which fails offline and for self-hosted versions behind the site. |
-| D-AO-9 | Skill delivery | **Built into the binary and installed by `cetra init` into `.claude/skills/cetra/` and `.agents/skills/cetra/` at the repository root; mirrored by CI to the public `cetra-ai/skills` repository, with the Claude, Codex and Cursor plugin manifests.** The installed skill matches the CLI version. Rejected: downloading from a moving branch at setup time (Laminar), which needs the network, is not pinned to the version, and installs code from outside the release. A directory without our `.cetra-skill` marker is never overwritten. |
-| D-AO-10 | Check step | **`cetra query` over the `traces` view**, with `--format json` and a 15-minute window. Every cetra user already has the CLI, and the PAT from `init` is enough. The trace MCP is mentioned in the skill as an alternative but not configured (non-goal). |
-| D-AO-11 | Local server | **On a loopback URL with nothing listening, `cetra init` offers to start `cetra serve` detached**, with a data directory under the user's data dir and generated `CETRA_INIT_*` values (the user, 2026-11-21). On a first start it signs in with the generated password, without a browser, and prints the password once. Rejected: printing the start command and exiting, which is one more step before the first trace. |
+| D-AO-9 | Skill delivery | **Shipped inside `@cetra-ai/cli` and installed by `init` into `.claude/skills/cetra/` and `.agents/skills/cetra/` at the repository root; mirrored by CI to the public `cetra-ai/skills` repository, with the Claude, Codex and Cursor plugin manifests.** The installed skill matches the CLI version. Rejected: downloading from a moving branch at setup time (Laminar), which needs the network, is not pinned to the version, and installs content from outside the release. A directory without our `.cetra-skill` marker is never overwritten. |
+| D-AO-10 | Check step | **`npx @cetra-ai/cli query` over the `traces` view**, with `--json` and a 15-minute window, through the SQL console endpoint. The PAT from `init` is enough, and the project link gives the server and project. The trace MCP is mentioned in the skill as an alternative but not configured (non-goal). |
+| D-AO-11 | Local server | **On a loopback URL with nothing listening, `init` offers to start a local server: `cetra serve` detached when the binary is on PATH, else the quick start's `docker run` when Docker answers, else the install steps.** It uses generated `CETRA_INIT_*` values (the user, 2026-11-21). On a first start it signs in with the generated password, without a browser, and prints the password once. Rejected: printing the start command and exiting, which is one more step before the first trace. |
 | D-AO-12 | Markdown pages | **`starlight-page-actions` 0.7.1, without `baseUrl`**: `.md` copies of every page, "Copy Markdown" and "Open in Claude / ChatGPT". `llms.txt` stays with `starlight-llms-txt` (D-W-19). Rejected: `starlight-dot-md` 0.2.1 (no button), and a hand-written component (we would own the MDX-to-Markdown conversion). |
 | D-AO-13 | Docs MCP | **In this track** (the user, 2026-11-21). The tools are `search_docs` and `get_page` on the `cetra-site` Worker at `/mcp`: stateless, no auth, MiniSearch over the `.md` pages, nothing logged. Amends D-W-3: the Worker gains a script for that one path. D-W-11 stands: search without a model. |
 | D-AO-14 | Cloud routing | **`app.cetra.sh` issues the code and registers it on the org's cell through a control-plane call. The CLI is sent on to the cell with `moved`, and the secrets never pass through the control plane** (the user chose routing through `app.cetra.sh`, 2026-11-21). The cell side is in this track; the control-plane side is a request to track Q. Rejected: asking the region in the CLI, which hard-codes cell URLs in the binary. |
-| D-AO-15 | Agent-friendly CLI | **`--json` (one object on stdout, no secrets), `--yes`, `--no-browser`, and fixed exit codes 3–5** for an agent that runs `cetra init` itself. |
+| D-AO-15 | Agent-friendly CLI | **Human text on stderr; `--json` (one object on stdout, no secrets), `--yes`, `--no-browser`, and fixed exit codes 3–6** for an agent that runs the CLI itself. |
+| D-AO-16 | Project link | **`init` writes `.cetra/project.json` (server, org, project, project id; no secret)**, which `query` finds in the directory or its parents, as Laminar's `.lmnr/project.json` (the user, 2026-11-21). The agent's check step then needs no `--url` or `--project`. It can be committed, so teammates query with their own login. The Rust CLI does not read it. |
+| D-AO-17 | Credentials | **The Node CLI reads and writes the Rust CLI's `credentials.toml` (same path, format and mode)**, through `smol-toml`. A login with either CLI serves both. Rejected: a second credentials file, which would leave the user signed in with one CLI and not the other. |
 
 ## Milestones
 
-M1 and M2 do not depend on each other. M4 depends only on M2's script (it can run after or alongside M2's last phase). M3 needs M1 and M2. M5 needs M1 and M3.
+M1 and M2 do not depend on each other. M4 depends only on M2's script (it can run after or alongside M2's last phase). M3 needs M1, M2 and the npm publishing of PR #207. M5 needs M1 and M3.
 
 ### M1 — Device flow on the server, the approval page, `cetra login` on it
 
@@ -387,16 +434,25 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 - creating the `cetra-ai/skills` repository and its deploy key: the user does that (§ Open questions);
 - installing the skill from the CLI (M3).
 
-### M3 — `cetra init`
+### M3 — `@cetra-ai/cli`
 
 **Delivers:**
-- `cetra init` with every step and flag above: the device flow with `purpose: init`, the credentials, the env file and `.gitignore`, the skill built in and installed, the prompt, `--json`, the exit codes, and the local server.
-- Spec 09 § CLI, and the regenerated CLI reference.
-- The "Set up with your coding agent" docs page and the quick-start tab.
+- The `node-cli/` package with `init`, `query` and `login`, every step and flag above:
+  - the device flow;
+  - the shared credentials file;
+  - the env file and `.gitignore`;
+  - the project link;
+  - the skill, shipped and installed;
+  - the prompt, `--json` and the exit codes;
+  - the local server through the binary or Docker.
+- Its publishing in `release.yml` next to `@cetra-ai/sdk`, and `just check-cli-js` in `just check`.
+- `AGENTS.md`'s layout and commands updated.
+- The "Set up with your coding agent" docs page, the quick-start tab, and a CLI page under Reference.
 - `CHANGELOG.md`.
-- An end-to-end test: `cetra serve` started by `cetra init` on a temporary data dir, then a span sent with the written key, then `cetra query` with the saved token reads it back.
+- Unit tests against a mock server (`node --test`).
+- An end-to-end test in `just e2e`: `init --url` against a real `cetra serve` started with `CETRA_INIT_*`, the device approval through the API with a session, then a span sent with the written key, then `query` reading it back through the link file.
 
-**Depends on:** M1 and M2.
+**Depends on:** M1 and M2, and the npm publishing of PR #207.
 
 **Leaves out:** the cloud's `moved` answer (M5).
 
@@ -416,7 +472,7 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 
 **Delivers:**
 - `POST /api/internal/v1/device/codes` with the scope `device` on control-plane tokens.
-- The CLI following `moved` once, to the cell named in the answer, only over `https` (or loopback in tests).
+- The Node CLI following `moved` once, to the cell named in the answer, only over `https` (or loopback in tests).
 - Tests with a fake control plane.
 - `ao-requests-for-q.md`, Q's side as a request.
 
@@ -427,6 +483,6 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 ## Open questions
 
 1. **The `cetra-ai/skills` repository and its deploy key.** The user creates the public repository and adds the deploy key secret (`SKILLS_MIRROR_KEY`) before M2's workflow can run. Until then the workflow's job is skipped when the secret is missing.
-2. **The cloud default before Q ships the relay.** Until then, `cetra init` with no URL would reach `app.cetra.sh` without the device routes. Proposed: the CLI reads a 404 there as "use `--url <your cell>`" and says so. Is that acceptable for launch, or must M5 and Q's side land before launch?
+2. **The cloud default before Q ships the relay.** Until then, `init` with no URL would reach `app.cetra.sh` without the device routes. Proposed: the CLI reads a 404 there as "use `--url <your cell>`" and says so. Is that acceptable for launch, or must M5 and Q's side land before launch?
 3. **The local admin email.** Init asks for it, and `--yes` uses `admin@localhost`. Should it default to `git config user.email` instead? Proposed: no, the CLI reads no personal data it does not need.
 4. **Plugin marketplaces.** Should the mirror also be submitted to the Claude Code and Cursor plugin directories at launch? That is a one-off manual step for the user, not code.
