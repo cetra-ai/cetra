@@ -46,7 +46,7 @@ pub enum FacetView {
 
 /// Most fields one facet batch asks.
 pub const MAX_FACET_FIELDS: usize = 20;
-/// Fields of one batch computed at the same time (D-C-23).
+/// Fields of one batch computed at the same time (D-C-24).
 const FIELDS_AT_ONCE: usize = 4;
 
 /// One field of a facet batch.
@@ -60,7 +60,7 @@ pub struct FacetField<'a> {
     pub limit: usize,
 }
 
-/// A facet batch: fields over the rows of one list (D-C-23).
+/// A facet batch: fields over the rows of one list (D-C-24).
 #[derive(Debug, Clone, Copy)]
 pub struct FacetsRequest<'a> {
     /// The list the facets describe.
@@ -341,7 +341,7 @@ fn check_field<'a>(view: FacetView, field: &FacetField<'a>) -> Result<CheckedFie
 
 /// The facets of `request`, one result per field in request order: each field's values, keys or
 /// histogram, over the rows of the list. The rows are built once and the fields run
-/// concurrently under one deadline (D-C-23).
+/// concurrently under one deadline (D-C-24).
 ///
 /// # Errors
 ///

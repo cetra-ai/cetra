@@ -96,10 +96,25 @@ Copy the traces of an issue into a dataset to use them in an experiment or as re
 
 1. Open the issue and select **Add examples to dataset**. You need permission to manage datasets.
 2. In the dialog, choose a dataset, or enter a name to create one.
-3. Set the number of traces, from 1 to 100. The default is 100.
-4. Select **Add**.
+3. Select **Add**.
 
-cetra takes the newest occurrences of the issue and of the issues merged into it, one trace each, and adds them to the dataset as one new version. An item uses the span that raised the error when there is one, and the trace root otherwise. Each item carries the metadata key `cetra.issue_id`. The result lists the traces cetra could not copy. Read more about datasets in [Datasets](/docs/evaluation/datasets/).
+cetra takes the newest occurrences of the issue and of the issues merged into it, one trace each, up to 100, and adds them to the dataset as one new version. An item uses the span that raised the error when there is one, and the trace root otherwise. Each item carries the metadata key `cetra.issue_id`. The result lists the traces cetra could not copy. Through the API, `limit` takes 1 to 100. Read more about datasets in [Datasets](/docs/evaluation/datasets/).
+
+## Send to a queue
+
+Send the newest occurrences of an issue to an annotation queue, to review them there.
+
+1. Open the issue and select **Send to queue**. You need permission to manage annotation queues. Members and above have it.
+2. Choose a queue, or select **New queue…** to create one.
+3. Select **Add**.
+
+cetra takes the newest occurrences of the issue and of the issues merged into it, up to 100. What it adds depends on the kind of the queue:
+
+- A trace queue gets one item per trace.
+- A span queue gets the span of each occurrence. Error issues have a span for each occurrence. An occurrence without a span is listed as not added.
+- A session queue gets one item per session. An occurrence without a session is listed as not added.
+
+An item that is already in the queue is not added twice. A trace or session that a deletion is removing is skipped. The result says how many items were added, how many were already in the queue, and which occurrences were skipped. Through the API you can send up to 1,000 at a time. See the [API reference](/docs/reference/api/overview/). To review the items, see [Annotation queues](/docs/evaluation/annotation-queues/).
 
 ## Create an alert
 

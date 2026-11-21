@@ -12,6 +12,7 @@ import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
 import annotationQueueDocument from "../../../fixtures/api/static/annotation-queue.json";
 import annotationQueueItemDocument from "../../../fixtures/api/static/annotation-queue-item.json";
+import annotationQueueItemsAddedDocument from "../../../fixtures/api/static/annotation-queue-items-added.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import backfillDocument from "../../../fixtures/api/static/backfill.json";
 import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
@@ -319,6 +320,11 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_issue_dataset_items",
     method: "post",
     path: "/api/v1/projects/{project}/issues/{id}/dataset-items",
+  },
+  {
+    operationId: "post_issue_queue_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/queue-items",
   },
   {
     operationId: "post_online_rule_resume",
@@ -872,6 +878,8 @@ const RESPONSES: Record<string, Respond> = {
   post_issue_merge: () => HttpResponse.json(issueDocument),
   post_issue_dataset_items: () =>
     HttpResponse.json(datasetItemsFromTracesDocument, { status: 201 }),
+  post_issue_queue_items: () =>
+    HttpResponse.json(annotationQueueItemsAddedDocument, { status: 201 }),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),

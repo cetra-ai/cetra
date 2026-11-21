@@ -49,10 +49,20 @@ const DESCRIPTION_CHARS: usize = 400;
 const NAME_TOKENS: u32 = 300;
 /// Whole-call timeout of the naming call.
 const NAME_TIMEOUT: Duration = Duration::from_secs(60);
-/// The wait between two tries of a chat slot (M3.5 step 7.3.2).
-const SLOT_RETRY: Duration = Duration::from_secs(1);
+/// The wait between two tries of a chat slot (M3.5 step 7.3.2). Tests use a short real wait
+/// instead of a paused clock: tokio's paused clock jumps ahead whenever the runtime waits on
+/// SQLite's blocking threads, which fires sqlx's own timeouts under load.
+const SLOT_RETRY: Duration = if cfg!(test) {
+    Duration::from_millis(10)
+} else {
+    Duration::from_secs(1)
+};
 /// How long a naming call waits for a chat slot before the refit stops as `busy`.
-const SLOT_WAIT: Duration = Duration::from_secs(120);
+const SLOT_WAIT: Duration = if cfg!(test) {
+    Duration::from_millis(50)
+} else {
+    Duration::from_secs(120)
+};
 
 /// Runs the refit loop until `stop` is set. Each pass refits the due sources one after the other,
 /// so the loop is the process-wide limit of one refit at a time.
@@ -1587,7 +1597,7 @@ mod tests {
         assert_eq!(stored.paused_reason.as_deref(), Some("budget"));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn naming_waits_for_a_chat_slot_and_the_refit_stops_busy_when_none_comes() {
         let (app, seeded) = llm_app().await;
         let mock = MockLlm::start(vec![name("Unused")]).await;

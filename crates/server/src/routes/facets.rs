@@ -1,4 +1,4 @@
-//! Facets (filtering plan D1, D-C-23): a batch of values, keys or histograms over a list's rows.
+//! Facets (filtering plan D1, D-C-24): a batch of values, keys or histograms over a list's rows.
 
 use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::http::Method;

@@ -696,6 +696,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     (
         "post",
+        "/api/v1/projects/{project}/issues/{id}/queue-items",
+        "post_issue_queue_items",
+    ),
+    (
+        "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
     ),
@@ -1496,6 +1501,9 @@ fn document_lint() {
             || *id == "remove_annotation_queue_item"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_issue_queue_items" {
+            // The test only collects 4xx codes; the operation also declares 503. No 413, 415: the body is small.
+            expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
         } else if *id == "add_annotation_queue_items" {
             // The test only collects 4xx codes; the add and preview operations also declare 503.
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);

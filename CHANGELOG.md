@@ -39,6 +39,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Alert rules on issues: the `issue_occurrences` metric counts the occurrences of one issue or of a source's issues in a window of 15 minutes or more (D-IC-20).
 - Issue notifications: an issue source can send its new and regressed issues to project channels, in one message per 10 minutes at most (D-IC-21).
 - Issues: "Add examples to dataset" copies an issue's newest occurrence traces into a dataset, and "Create alert" opens an alert rule for the issue (D-IC-22, D-IC-23).
+- Issues: "Send to queue" adds an issue's newest occurrences (traces, spans or sessions, by the queue's kind) to an annotation queue (D-IC-27 to D-IC-31).
 - MCP: the read-only `list_issues` tool lists a project's issues with their state and counts over the last 7 days (D-IC-24).
 - Issue sources for bad scores, user feedback and topics: LLM summaries and embeddings group them into issues, refreshed every 6 hours (D-IC-4, D-IC-8).
 - MCP tools `list_prompts` and `get_prompt` (D-V-39): coding agents read the project's prompts, their labels and a version's template, config and variables, with the same access and limits as the other MCP tools.
@@ -125,7 +126,10 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
-- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens without a filter or search (D-C-23).
+- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens without a filter or search (D-C-24).
+- Traces, Spans, Sessions and Users come back from cache within 15 minutes, with the same rows and
+  scroll position; newer rows wait behind an "N new … ↑" pill, and a new filter or range keeps the
+  previous rows dimmed until the answer arrives.
 - The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
 - The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
   cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.

@@ -1,14 +1,14 @@
 //! Facets: the values, keys or histogram of one field over a list's rows (filtering plan D1).
 //!
 //! `POST /api/v1/projects/{project}/facets` answers a batch of fields over one list's rows
-//! (D-C-23). The field grammar and the counting rules are in the operation's description.
+//! (D-C-24). The field grammar and the counting rules are in the operation's description.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use super::common::{Problem, TimeParam};
 
-/// Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-23).
+/// Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-24).
 // Deserialize only, because `TimeParam` has no `Serialize`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]

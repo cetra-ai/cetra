@@ -2,7 +2,7 @@ import { api } from "./client";
 import type { Schema } from "./types";
 
 /**
- * Fields asked within this many milliseconds share one `POST /facets` (D-C-23). One frame is
+ * Fields asked within this many milliseconds share one `POST /facets` (D-C-24). One frame is
  * enough for the sections and preset chips a page mounts together.
  */
 export const FACET_BATCH_MS = 10;

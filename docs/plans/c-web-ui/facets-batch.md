@@ -21,22 +21,22 @@ When it is done:
 - `POST /api/v1/projects/{project}/facets` answers a batch of 1 to 20 fields over one list's rows; `GET` on that path is 405 (no route).
 - The Traces, Spans, Sessions and Users pages send one `/facets` request when they open with no filter, and one request with only the changed field when a section opens, its value search changes, or "Show more" raises its limit.
 - The filter bar's value autocomplete and the chip editor's value suggestions send a batch of one field.
-- Specs 05, 09 and 11, D-C-13 and a new decision D-C-23, the CHANGELOG, the OpenAPI document, the generated TS schema, the API examples and the MSW mocks describe and serve the batch.
+- Specs 05, 09 and 11, D-C-13 and a new decision D-C-24, the CHANGELOG, the OpenAPI document, the generated TS schema, the API examples and the MSW mocks describe and serve the batch.
 
 Out of scope:
 - The list row queries and their caching (another session owns them).
 - A server-side cache of facet answers (D-C-13 keeps none).
-- One scan for all fields (see D-C-23: rejected for now).
+- One scan for all fields (see D-C-24: rejected for now).
 - A per-field `filter`. A section asks its counts with the filter minus its own chips (spec 11), so when the filter is not empty, sections whose own chips differ ask with different filters, and the batcher sends one request per distinct filter. The preset chips ask without filter and search, so with a search active they also go out apart from the sections. With an empty filter and no search (opening a page plainly) all fields share one request.
 
 ## Decisions this plan relies on
 
 | ID | Summary |
 |---|---|
-| D-C-13 | Facets: one field per request (changed by D-C-23), counted over the list's rows, no server cache, UI keeps answers 30 s. |
+| D-C-13 | Facets: one field per request (changed by D-C-24), counted over the list's rows, no server cache, UI keeps answers 30 s. |
 | D129 | The filter text is the truth; values autocomplete from facets. |
 | D-H-4 | A read made with POST uses `ProjectPerm::Query`: a read-only PAT and a `read` key may call it. |
-| D-C-23 (new) | `POST /facets` batches 1–20 fields sharing view, window, flags, filter and search; one result per field in request order, each with its own `facet` or `error` (a problem document). Shared problems (bad filter, search on sessions, bad window, empty or too many fields) fail the whole request. Storage builds the rows once and computes the fields concurrently under one deadline. The web client keeps one TanStack Query entry per field and a 10 ms batcher sends one POST per distinct shared part. Rejected: caching the window's rows (`DataFrame::cache`) for a single scan (memory grows with the window); one combined aggregate plan over heterogeneous fields (list unnest, keys, histograms each need their own grouping; complex for a small gain); keeping `GET` for single fields (two paths for one thing, AGENTS.md). |
+| D-C-24 (new) | `POST /facets` batches 1–20 fields sharing view, window, flags, filter and search; one result per field in request order, each with its own `facet` or `error` (a problem document). Shared problems (bad filter, search on sessions, bad window, empty or too many fields) fail the whole request. Storage builds the rows once and computes the fields concurrently under one deadline. The web client keeps one TanStack Query entry per field and a 10 ms batcher sends one POST per distinct shared part. Rejected: caching the window's rows (`DataFrame::cache`) for a single scan (memory grows with the window); one combined aggregate plan over heterogeneous fields (list unnest, keys, histograms each need their own grouping; complex for a small gain); keeping `GET` for single fields (two paths for one thing, AGENTS.md). |
 
 User decisions (from the session that started this one, relayed from the user): batch with a POST body holding the shared window and filters once plus `fields: [{ field, limit?, q? }]`; one result per field in request order, each with its own error; `GET /facets` removed with no compatibility layer; every caller moves to the batch including the filter bar (batch of one); client cache stays per field, with a batcher for fields asked in the same frame; keep `staleTime`, `keepPreviousData` and the latest-cached-answer placeholder.
 
@@ -123,7 +123,7 @@ pub struct FacetField<'a> {
     pub limit: usize,
 }
 
-/// A facet batch: fields over the rows of one list (D-C-23).
+/// A facet batch: fields over the rows of one list (D-C-24).
 #[derive(Debug, Clone, Copy)]
 pub struct FacetsRequest<'a> {
     /// The list the facets describe.
@@ -244,7 +244,7 @@ The private enum named `FacetField` today (the parsed field) is renamed `ParsedF
 **Types** (`api/facets.rs`; delete `FacetsParams` and the old `FacetsResponse`; keep `FacetView`, `FacetKind`, `FacetValue`, `FacetBucket`, `FacetHistogram` unchanged; update the module comment to `POST /api/v1/projects/{project}/facets`):
 
 ```rust
-/// Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-23).
+/// Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-24).
 // Deserialize only, because `TimeParam` has no `Serialize`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -402,7 +402,7 @@ import { api } from "./client";
 import type { Schema } from "./types";
 
 /**
- * Fields asked within this many milliseconds share one `POST /facets` (D-C-23). One frame is
+ * Fields asked within this many milliseconds share one `POST /facets` (D-C-24). One frame is
  * enough for the sections and preset chips a page mounts together.
  */
 export const FACET_BATCH_MS = 10;
@@ -538,7 +538,7 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
      });
    }
    ```
-   (`queryOptions` from `@tanstack/react-query`; import `askFacet` and `FacetShared` from `./facet-batch`.) Update the doc comment above `FacetAsk`: "One facet of a list (D1). Each field has its own cache entry, kept 30 seconds; fields asked together go out as one `POST /facets` (D-C-23). The server keeps none."
+   (`queryOptions` from `@tanstack/react-query`; import `askFacet` and `FacetShared` from `./facet-batch`.) Update the doc comment above `FacetAsk`: "One facet of a list (D1). Each field has its own cache entry, kept 30 seconds; fields asked together go out as one `POST /facets` (D-C-24). The server keeps none."
 4. `type FacetAnswer = Schema<"Facet">;`. `FacetKey` stays `ReturnType<typeof facetQuery>["queryKey"]`.
 5. Rewrite `latestFacetAnswer(client, key)` for the new key, with the same rule: `const [, ref, shared, field] = key;`, `const { from, to, ...rest } = shared;`, length from `windowLength(from, to)` (return `undefined` when undefined), `const same = JSON.stringify([rest, field]);`, then scan `client.getQueryCache().findAll({ queryKey: ["facets", ref] })`; for each entry with data, read `const [, , cachedShared, cachedField] = cached.queryKey as FacetKey;`, skip unless `windowLength(cachedShared.from, cachedShared.to) === length` and `JSON.stringify([cachedRest, cachedField]) === same` (where `cachedRest` is `cachedShared` without `from`/`to`); keep the newest `dataUpdatedAt`. `useFacetQuery` stays as it is.
 6. `preset-chips.tsx`: remove `limit: 1` from its `useFacetQuery` ask (a histogram ignores `limit`; without it the key equals the range facet's when the filter is empty, so both share one entry). Nothing else changes there.
@@ -576,7 +576,7 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
    3. The window, flags, filter and search: build `const url = new URL(request.url);` and, for each of `from`, `to`, `filter`, `search`, `include_eval` and `include_experiments` present in the body, `url.searchParams.set(name, String(value))`; then call the existing `readQuery(url)` and return its `Response` when it is one (a `filter` of `bad` stays the mock's `invalid_filter`). `readQuery` also reads `limit`, `cursor`, `sort` and `order`; leave them unset so their defaults apply (the field's `limit` is checked per field below, not by `readQuery`).
    4. `const rows = facetRows(dataset, view, parsed);` once.
    5. For each field, in order, produce a `Schema<"FacetResult">`: the existing per-field checks (field, limit, q, same messages) become `{ field: ask.field, error: { type: "about:blank", title: "Bad Request", status: 400, code: "bad_request", errors: [{ field: "fields[<index>]", message }] } }`; a good field is `{ field: ask.field, facet }` where `facet` is today's `facetAnswer(view, field, rows, q, limit)` without its `view` and `field` members (change `facetAnswer` to return `Schema<"Facet">`).
-   6. Answer `HttpResponse.json({ view, results })`. Update the doc comment to `POST …/facets` (D-C-23).
+   6. Answer `HttpResponse.json({ view, results })`. Update the doc comment to `POST …/facets` (D-C-24).
 3. `web/src/mocks/generated/handlers.test.ts`: port the facet tests (lines ~405–520) to `fetch(\`${PROJECT}/facets\`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ view, fields: [...] }) })`, reading `results[0].facet` where they read the answer. The bad-request test(s) at ~513: a bad field/limit/q is now `200` with `results[0].error.code === "bad_request"`; a bad view stays a `400`. Add `answers every field of a batch in order` (traces, fields `status` and `duration_ms`: two results, `values` then `histogram` kinds).
 4. `web/src/test/facets.ts` (new), a helper for page tests:
    ```ts
@@ -620,13 +620,13 @@ If `api.POST`'s inferred types reject this shape (for example `error` typed `nev
 Not an agent phase; the coordinator writes it.
 - `docs/spec/05-query.md` § Facets: the request line becomes `POST /api/v1/projects/{p}/facets` with the body (`view`, `from`, `to`, `filter`, `search`, `include_eval`, `include_experiments`, `fields: [{ field, limit?, q? }]`, 1–20 fields) and the answer (`results` in request order, each `facet` or `error`); which errors fail the whole request and which only a field; the storage builds the rows once and computes the fields concurrently under one deadline; the cost paragraph: "the UI fetches only expanded facets, keeps each answer 30 s, and sends the fields it asks together as one request".
 - `docs/spec/09-api.md`: the `GET /facets` row becomes `POST /facets`, a read by POST (D-H-4).
-- `docs/spec/11-ui.md`: `GET /facets` → `POST /facets` (filter bar, presets); the facet sidebar paragraph adds: "Each section keeps its own cached answer; the fields asked together (a page opening, the presets) go out as one request per distinct filter (D-C-23)."
-- `docs/mvp-decisions.md`: D-C-13 says "one field per request" → "one request per batch of fields (D-C-23)", and "(plus one `limit=1` histogram per Slow/Expensive preset for its p95)" → "(plus the duration and cost histograms for the Slow/Expensive presets' p95)"; D129 `GET /facets` → `POST /facets`; add D-C-23 (the text of the table row above).
-- `CHANGELOG.md` § `[Unreleased]` › `Changed`: "`GET /facets` is replaced by `POST /facets`, which answers up to 20 fields in one request; the facet sidebar and presets send one request when a list opens (D-C-23)." and update the `Added` line that says "Backed by the new `GET /facets` endpoint" to `POST /facets`.
+- `docs/spec/11-ui.md`: `GET /facets` → `POST /facets` (filter bar, presets); the facet sidebar paragraph adds: "Each section keeps its own cached answer; the fields asked together (a page opening, the presets) go out as one request per distinct filter (D-C-24)."
+- `docs/mvp-decisions.md`: D-C-13 says "one field per request" → "one request per batch of fields (D-C-24)", and "(plus one `limit=1` histogram per Slow/Expensive preset for its p95)" → "(plus the duration and cost histograms for the Slow/Expensive presets' p95)"; D129 `GET /facets` → `POST /facets`; add D-C-24 (the text of the table row above).
+- `CHANGELOG.md` § `[Unreleased]` › `Changed`: "`GET /facets` is replaced by `POST /facets`, which answers up to 20 fields in one request; the facet sidebar and presets send one request when a list opens (D-C-24)." and update the `Added` line that says "Backed by the new `GET /facets` endpoint" to `POST /facets`.
 - `docs/roadmap.md`: the track C row gets this plan and its PR.
 - `website/`: no page names the endpoint (checked: `grep -rn "/facets" website/src` is empty).
 
-Commit: `Document the facet batch (D-C-23)`.
+Commit: `Document the facet batch (D-C-24)`.
 
 ## Final checks (coordinator)
 

@@ -42,10 +42,10 @@ use super::alerts::{
 };
 use super::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
-    AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue, NextQueueItem,
-    QueueCounts, QueueItemAddedBy, QueueItemStatus, QueueItemTarget, QueueMatchingAdded,
-    QueueMatchingPreview, QueueMatchingRequest, QueueTarget, SkipQueueItem, SkippedQueueItem,
-    UpdateAnnotationQueue,
+    AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue,
+    IssueQueueItemsRequest, NextQueueItem, QueueCounts, QueueItemAddedBy, QueueItemStatus,
+    QueueItemTarget, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, QueueTarget,
+    SkipQueueItem, SkippedQueueItem, UpdateAnnotationQueue,
 };
 use super::assistant::{
     AssistantConversation, AssistantConversationDetail, AssistantDraftKind, AssistantFeedback,
@@ -333,6 +333,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<QueueItemAddedBy>();
     set.insert::<QueueItemTarget>();
     set.insert::<AddQueueItems>();
+    set.insert::<IssueQueueItemsRequest>();
     set.insert::<SkippedQueueItem>();
     set.insert::<AddedQueueItems>();
     set.insert::<QueueMatchingRequest>();
@@ -3160,6 +3161,22 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 409, 429, 503],
     ))
     .build();
+    let queue_items = operation(
+        "post_issue_queue_items",
+        "issues",
+        "Send an issue's occurrences to an annotation queue",
+    )
+    .description(Some(
+        "Project members and above, a read-write personal access token, or an API key with `write` (D-IC-30). Adds the targets of the most recent occurrences of the issue and of the issues merged into it (the issue and its 7 busiest merged issues over the last 14 days, newest first) to the annotation queue `queue`, up to `limit` targets (default 100, at most 1 000), through the same path as `POST …/annotation-queues/{id}/items`. A trace queue gets each occurrence's trace, a span queue its span, a session queue its session; each target once. An occurrence without that target is listed in `skipped`, its `index` being its position among the occurrences read newest first; so is a target that is unknown, hidden by the data window, an evaluation trace or blocked by a deletion. A target already in the queue counts as `existing`. The answer is 201 whatever the counts. 400 on `limit`, or on `issue` when the issue has no occurrence in the data window; 404 for a missing issue or queue; a queue that would pass 100 000 items is 422 and nothing is added.",
+    ))
+    .parameters(Some(vec![project_param(), id.clone()]))
+    .request_body(Some(json_body("IssueQueueItemsRequest")))
+    .responses(responses(
+        "201",
+        json_of::<AddedQueueItems>("The counts and the skipped targets."),
+        &[400, 401, 403, 404, 422, 429, 503],
+    ))
+    .build();
     let occurrences = operation(
         "get_issue_occurrences",
         "issues",
@@ -3209,6 +3226,10 @@ fn issue_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             format!("{PROJECT}/issues/{{id}}/dataset-items"),
             PathItem::new(HttpMethod::Post, dataset_items),
+        )
+        .path(
+            format!("{PROJECT}/issues/{{id}}/queue-items"),
+            PathItem::new(HttpMethod::Post, queue_items),
         )
         .path(
             format!("{PROJECT}/issues/{{id}}/occurrences"),

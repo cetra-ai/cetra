@@ -2748,6 +2748,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{project}/issues/{id}/queue-items": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send an issue's occurrences to an annotation queue
+         * @description Project members and above, a read-write personal access token, or an API key with `write` (D-IC-30). Adds the targets of the most recent occurrences of the issue and of the issues merged into it (the issue and its 7 busiest merged issues over the last 14 days, newest first) to the annotation queue `queue`, up to `limit` targets (default 100, at most 1 000), through the same path as `POST …/annotation-queues/{id}/items`. A trace queue gets each occurrence's trace, a span queue its span, a session queue its session; each target once. An occurrence without that target is listed in `skipped`, its `index` being its position among the occurrences read newest first; so is a target that is unknown, hidden by the data window, an evaluation trace or blocked by a deletion. A target already in the queue counts as `existing`. The answer is 201 whatever the counts. 400 on `limit`, or on `issue` when the issue has no occurrence in the data window; 404 for a missing issue or queue; a queue that would pass 100 000 items is 422 and nothing is added.
+         */
+        post: operations["post_issue_queue_items"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/{project}/media/{sha256}": {
         parameters: {
             query?: never;
@@ -6526,7 +6546,7 @@ export interface components {
          * @enum {string}
          */
         FacetView: "traces" | "spans" | "sessions";
-        /** @description Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-23). */
+        /** @description Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-24). */
         FacetsRequest: {
             /** @description The fields, 1 to 20. Answered in this order. */
             fields: components["schemas"]["FacetFieldRequest"][];
@@ -7106,6 +7126,19 @@ export interface components {
             data: components["schemas"]["Issue"][];
             /** @description Opaque cursor for the next page, or null when this is the last page. */
             next_cursor: string | null;
+        };
+        /** @description Body of `POST /api/v1/projects/{project}/issues/{id}/queue-items` (D-IC-30). */
+        IssueQueueItemsRequest: {
+            /**
+             * Format: int32
+             * @description Most targets to add, 1 to 1 000. Default 100.
+             */
+            limit?: number;
+            /**
+             * Format: uuid
+             * @description The queue: its id. A queue of this project.
+             */
+            queue: string;
         };
         /** @description One refit of an LLM source (D-IC-8). */
         IssueRefit: {
@@ -24947,6 +24980,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["IssueOccurrences"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The query took longer than its time limit, needed more memory or temporary disk space than allowed, a filter deletion matched more than 100,000 traces, or the owner cannot be that user (code owner_not_allowed). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_issue_queue_items: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
+                project: string;
+                /** @description Issue id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IssueQueueItemsRequest"];
+            };
+        };
+        responses: {
+            /** @description The counts and the skipped targets. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AddedQueueItems"];
                 };
             };
             /** @description The request is malformed or a filter is invalid. */

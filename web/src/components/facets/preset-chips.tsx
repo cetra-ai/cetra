@@ -27,7 +27,7 @@ import { formatCost, formatDuration } from "@/lib/format";
 /**
  * The preset chips of row 2 (D6). `scope` is the list's window and flags, as the facet panel's.
  * While `hold` (the list waits for its default saved view), the p95s are not asked: the view may
- * change the window, and asking with the panel's sections makes one facet request (D-C-23).
+ * change the window, and asking with the panel's sections makes one facet request (D-C-24).
  */
 export function PresetChips({
   view,

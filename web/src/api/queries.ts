@@ -97,6 +97,7 @@ export function spanListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"SpanSort">;
     order?: Schema<"SortOrder">;
     search?: string;
@@ -107,7 +108,7 @@ export function spanListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
@@ -170,6 +171,7 @@ export function sessionListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"SessionSort">;
     order?: Schema<"SortOrder">;
     filter?: string;
@@ -179,7 +181,7 @@ export function sessionListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
@@ -237,6 +239,7 @@ export function userListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"UserSort">;
     order?: Schema<"SortOrder">;
     filter?: string;
@@ -246,7 +249,7 @@ export function userListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
@@ -332,7 +335,7 @@ export function userQuery(
 
 /**
  * One facet of a list (D1). Each field has its own cache entry, kept 30 seconds; fields asked
- * together go out as one `POST /facets` (D-C-23). The server keeps none.
+ * together go out as one `POST /facets` (D-C-24). The server keeps none.
  */
 export type FacetAsk = {
   view: Schema<"FacetView">;

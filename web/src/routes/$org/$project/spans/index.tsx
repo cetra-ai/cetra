@@ -21,6 +21,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { countLabel, NewRowsPill, useNewRows } from "@/components/data-table/new-rows";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
@@ -46,6 +47,13 @@ import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
@@ -123,15 +131,19 @@ function SpansPage() {
   const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
-  const [anchor, setAnchor] = useState(() => Date.now());
-  const seenRange = useRef(rangeKey);
-  useEffect(() => {
-    if (seenRange.current === rangeKey) {
-      return;
-    }
-    seenRange.current = rangeKey;
-    setAnchor(Date.now());
-  }, [rangeKey]);
+  const windowKey = anchorKey(org, project, "spans", {
+    rangeKey,
+    filter: search.filter,
+    search: search.search,
+    sort: search.sort ?? "start_time",
+    order: search.order ?? "desc",
+    eval: search.eval === 1,
+    exp: search.exp === 1,
+  });
+  const listAnchor = useListAnchor(windowKey, false);
+  const anchor = listAnchor.anchor;
+  const windowId = `${windowKey}\n${anchor}`;
+  const [restoreAtMount] = useState(() => (listAnchor.reused ? listAnchor.scroll : undefined));
   const resolved = resolveRange(range, anchor);
   /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
   const facetScope: FacetScope = {
@@ -160,19 +172,39 @@ function SpansPage() {
   const [queueOpen, setQueueOpen] = useState(false);
   const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
   const [matchOpen, setMatchOpen] = useState(false);
+  const listOptions = spanListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    search: search.search,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...spanListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
+    ...listOptions,
+    ...LIST_CACHE,
+    placeholderData: keepSameProject(listOptions.queryKey),
+    enabled: !hold,
+  });
+  // Spans that arrived since the anchor: asked once after a return to a remembered window.
+  const newRows = useNewRows(
+    spanListOptions(org, project, {
+      from: new Date(anchor).toISOString(),
+      to: new Date(listAnchor.lookedUpAt).toISOString(),
       search: search.search,
       filter: search.filter,
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
+      limit: NEW_ROWS_LIMIT,
     }),
-    enabled: !hold,
-  });
+    listAnchor.reused &&
+      range.kind === "preset" &&
+      !hold &&
+      list.isSuccess &&
+      !list.isPlaceholderData,
+  );
   const fetchNextPage = useCallback(() => {
     void list.fetchNextPage();
   }, [list.fetchNextPage]);
@@ -248,6 +280,22 @@ function SpansPage() {
 
   const selectedRowId = search.trace && search.span ? `${search.trace}:${search.span}` : undefined;
 
+  // A new window (a search change, refresh or the pill) starts at the top, where its rows show.
+  const seenWindow = useRef(windowId);
+  useLayoutEffect(() => {
+    if (seenWindow.current === windowId) {
+      return;
+    }
+    seenWindow.current = windowId;
+    const node = document.querySelector<HTMLElement>(
+      '[aria-label="Spans"] [data-scroll-container]',
+    );
+    if (node && node.scrollTop !== 0) {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    }
+  }, [windowId]);
+
   return (
     <div className="relative h-full min-h-0 flex-1">
       <div className="absolute inset-0">
@@ -292,16 +340,19 @@ function SpansPage() {
                 <ListToolbar
                   range={range}
                   onRange={(next) => {
-                    seenRange.current =
+                    const nextKey =
                       next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-                    setAnchor(Date.now());
+                    if (nextKey === rangeKey) {
+                      listAnchor.renew();
+                    }
                     void navigate({
                       to: "/$org/$project/spans",
                       params: { org, project },
                       search: (prev) => withRange(prev, next),
                     });
                   }}
-                  onRefresh={() => setAnchor(Date.now())}
+                  onRefresh={listAnchor.renew}
+                  updatedAt={anchor}
                   search={search.search ?? ""}
                   onSearch={(value) => {
                     void navigate({
@@ -454,7 +505,7 @@ function SpansPage() {
                         <h2 className="text-body font-medium">{filterError.title}</h2>
                         <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                       </div>
-                    ) : !hold && list.data ? (
+                    ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
                       <DataTable
                         tableId="spans"
                         ariaLabel="Spans"
@@ -492,7 +543,25 @@ function SpansPage() {
                             replace: true,
                           });
                         }}
-                        hasNextPage={list.hasNextPage}
+                        stale={list.isPlaceholderData}
+                        notice={
+                          newRows && newRows.count > 0 ? (
+                            <NewRowsPill
+                              label={countLabel(
+                                newRows.count,
+                                newRows.more,
+                                "new span",
+                                "new spans",
+                              )}
+                              onClick={listAnchor.renew}
+                            />
+                          ) : null
+                        }
+                        onScrollAnchor={
+                          list.isPlaceholderData ? undefined : listAnchor.rememberScroll
+                        }
+                        restoreAnchor={restoreAtMount}
+                        hasNextPage={list.hasNextPage && !list.isPlaceholderData}
                         isFetchingNextPage={list.isFetchingNextPage}
                         fetchNextPage={fetchNextPage}
                         sorting={{

@@ -8,7 +8,7 @@ const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 const PROJECT = `${location.origin}/api/v1/projects/acme%2Fsupport-bot`;
 const DAY_MS = 86_400_000;
 
-/** `POST …/facets` with a batch body (D-C-23). */
+/** `POST …/facets` with a batch body (D-C-24). */
 function postFacets(body: unknown): Promise<Response> {
   return fetch(`${PROJECT}/facets`, {
     method: "POST",

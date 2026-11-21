@@ -960,7 +960,7 @@ function fieldError(field: string, message: string): Schema<"FacetResult"> {
 }
 
 /**
- * `POST …/facets` (D-C-23): one result per field of the batch, in request order. The mock ignores
+ * `POST …/facets` (D-C-24): one result per field of the batch, in request order. The mock ignores
  * `filter` and `search`; a field's `q` narrows its values.
  */
 async function facets(dataset: Dataset, request: Request): Promise<Response> {
