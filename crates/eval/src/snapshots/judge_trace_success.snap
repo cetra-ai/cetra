@@ -35,7 +35,7 @@ expression: "&normalized.spans"
       "cetra.span.kind": "evaluator"
     },
     "scope_name": "cetra-eval",
-    "scope_version": "0.0.0",
+    "scope_version": "[version]",
     "conventions": [
       "cetra"
     ],
@@ -88,7 +88,7 @@ expression: "&normalized.spans"
       "gen_ai.usage.reasoning.output_tokens": "0"
     },
     "scope_name": "cetra-eval",
-    "scope_version": "0.0.0",
+    "scope_version": "[version]",
     "conventions": [
       "cetra",
       "genai"

@@ -13,7 +13,7 @@ import { SidebarAccount } from "@/components/shell/sidebar-account";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Sidebar, SidebarFooter, SidebarProvider } from "@/components/ui/sidebar";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { DOCS_URL } from "@/product";
+import { APP_VERSION, DOCS_URL } from "@/product";
 
 /** Renders the account footer in a bare sidebar. A root-only router provides the links. */
 async function renderAccount({ defaultOpen = true }: { defaultOpen?: boolean } = {}) {
@@ -75,7 +75,7 @@ describe("SidebarAccount", () => {
   it("shows the version and a docs link", async () => {
     await renderAccount();
 
-    expect(await screen.findByText("v0.0.0")).toBeInTheDocument();
+    expect(await screen.findByText(`v${APP_VERSION}`)).toBeInTheDocument();
     const docs = screen.getByRole("link", { name: /Docs/ });
     expect(docs).toHaveAttribute("href", DOCS_URL);
     expect(docs).toHaveAttribute("target", "_blank");
@@ -86,6 +86,6 @@ describe("SidebarAccount", () => {
     await renderAccount({ defaultOpen: false });
 
     expect(await screen.findByRole("link", { name: "Docs" })).toHaveAttribute("href", DOCS_URL);
-    expect(screen.queryByText("v0.0.0")).not.toBeInTheDocument();
+    expect(screen.queryByText(`v${APP_VERSION}`)).not.toBeInTheDocument();
   });
 });
