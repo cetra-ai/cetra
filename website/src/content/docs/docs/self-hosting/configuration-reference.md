@@ -22,7 +22,7 @@ For how to choose values, see [Configuration](/docs/self-hosting/configuration/)
 | `trusted_proxies` | `CETRA_TRUSTED_PROXIES` | list of CIDRs | empty | Proxies whose `X-Forwarded-For` header cetra trusts. |
 | `restore_mode` | | boolean | `false` | Serve reads and run no outbound work (alert deliveries, webhooks, judges, email, identity providers). For restore drills. |
 | `encryption_key` | `CETRA_ENCRYPTION_KEY` | secret | unset | 32 bytes in standard base64 that encrypt stored secrets. Unset: cetra reads `<data_dir>/secret.key` and generates it on the first start of a new data directory. |
-| `license_key` | `CETRA_LICENSE_KEY` | secret | unset | The licence key that unlocks enterprise features. Unset: they stay locked. |
+| `license_key` | `CETRA_LICENSE_KEY` | secret | unset | The licence key that unlocks enterprise features. Unset: an installed key applies, else they stay locked. When set, it wins over a key installed from the admin settings. |
 | `smtp_url` | `CETRA_SMTP_URL` | secret URL | unset (email off) | `smtp://` (STARTTLS required), `smtps://` (TLS from the first byte) or `smtp://host?tls=none` (a local relay), with optional `user:password@`. Needs `email_from`. |
 | `email_from` | `CETRA_EMAIL_FROM` | mailbox | unset | The `From` address of emails, such as `cetra <noreply@example.com>`. Required when `smtp_url` is set. |
 

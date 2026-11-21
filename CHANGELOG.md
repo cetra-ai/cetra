@@ -7,6 +7,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Added
+
+- Instance admins install a licence key from the admin settings, and it applies without a restart. A key in `CETRA_LICENSE_KEY` still wins.
+- The licence card links to the licence store to buy or renew a licence.
+
 ## [0.1.0-rc.1] - 2026-11-21
 
 ### Upgrade notes

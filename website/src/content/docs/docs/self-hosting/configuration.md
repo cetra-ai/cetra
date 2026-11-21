@@ -25,7 +25,7 @@ defaults is in the [configuration reference](/docs/self-hosting/configuration-re
 | `restore_mode` | `CETRA_RESTORE_MODE` | `false` | no outbound calls, for restore drills ([Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)) |
 | `smtp_url`, `email_from` | `CETRA_SMTP_URL`, `CETRA_EMAIL_FROM` | unset (email off) | invites, password reset |
 | `encryption_key` | `CETRA_ENCRYPTION_KEY` | `<data_dir>/secret.key`, generated | encrypts stored secrets |
-| `license_key` | `CETRA_LICENSE_KEY` | unset | enterprise features |
+| `license_key` | `CETRA_LICENSE_KEY` | unset | enterprise features; wins over a key installed from the admin settings |
 | `storage.object_store` | `CETRA_OBJECT_STORE` | `file://<data_dir>/objects` | `s3://bucket[/prefix]`: [Object storage](/docs/self-hosting/s3/) |
 | `storage.gc.grace` | `CETRA_STORAGE__GC__GRACE` | `5m` | how long obsolete files stay; at most `30d`. In S3 mode, how long a meta-only backup stays restorable |
 | `log.level` | `CETRA_LOG` | `info` | |
