@@ -7,6 +7,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+## [0.1.0-rc.1] - 2026-11-21
+
 ### Upgrade notes
 
 - The control plane's `users/revoke`, `users/disable` and `users/delete` calls must now send

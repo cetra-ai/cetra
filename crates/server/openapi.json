@@ -3,7 +3,7 @@
   "info": {
     "title": "cetra API",
     "description": "The cetra REST API: traces, spans, sessions, users, scores, evaluation, datasets, experiments, alerts and administration. Authenticate with an API key (`sk-cetra-…`) or a personal access token (`pat-cetra-…`) as a bearer token.",
-    "version": "0.0.0"
+    "version": "0.1.0-rc.1"
   },
   "paths": {
     "/api/auth/authorize/{provider}": {

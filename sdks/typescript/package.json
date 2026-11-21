@@ -1,6 +1,6 @@
 {
   "name": "@cetra-ai/sdk",
-  "version": "0.0.0",
+  "version": "0.1.0-rc.1",
   "description": "TypeScript SDK for cetra.",
   "license": "MIT",
   "keywords": [
