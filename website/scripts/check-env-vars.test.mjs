@@ -44,6 +44,11 @@ test("checks names inside code fences", () => {
   assert.equal(check("```bash\nCETRA_NOPE=1\n```").length, 1);
 });
 
+test("accepts a name that only the node CLI reads", () => {
+  const cli = "const project = env.CETRA_PROJECT;";
+  assert.deepEqual(checkSite({ "p.md": "Set `CETRA_PROJECT`." }, cli, keys), []);
+});
+
 test("checks the agent skill's pages too", () => {
   assert.deepEqual(checkSite({ "skills/cetra/SKILL.md": "Set `CETRA_NOPE`." }, code, keys), [
     "skills/cetra/SKILL.md:1: CETRA_NOPE is not read by the code",

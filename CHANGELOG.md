@@ -33,6 +33,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- `npx @cetra-ai/cli init` sets an app up for cetra in one command and prints a prompt for your coding agent; `cetra-cli query` checks the traces from the terminal; the cetra agent skill is installed in `.claude/skills/cetra/` and `.agents/skills/cetra/`.
 - The Python SDK is published to PyPI as `cetra-sdk` and the TypeScript SDK to npm as
   `@cetra-ai/sdk`, with the server's version, from each release tag (D-N-37).
 - `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their

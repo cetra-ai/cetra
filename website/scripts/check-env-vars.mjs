@@ -75,7 +75,13 @@ export function main(root) {
   for (const crate of readdirSync(join(root, "crates"))) {
     walk(join(root, "crates", crate, "src"), () => true, codePaths);
   }
-  for (const dir of ["sdks/python/src", "sdks/typescript/src", "deploy", "tools/packaging"]) {
+  for (const dir of [
+    "sdks/python/src",
+    "sdks/typescript/src",
+    "node-cli/src",
+    "deploy",
+    "tools/packaging",
+  ]) {
     walk(join(root, dir), () => true, codePaths);
   }
   const codeText = readAll(codePaths);

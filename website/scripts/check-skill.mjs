@@ -1,6 +1,6 @@
 // Checks skills/cetra/SKILL.md (D-AO-8): the Agent Skills frontmatter, links to references and docs
-// pages, and the `cetra` subcommands it names. Prints `path:line: message` per finding and exits 1
-// when there is any.
+// pages, the `cetra` subcommands it names and the `npx @cetra-ai/cli` (`cetra-cli`) subcommands.
+// Prints `path:line: message` per finding and exits 1 when there is any.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,10 @@ import { extractStarlightFrontmatter } from "tidymd";
 export const SKILL_DIR = "../skills/cetra";
 export const PAGES = "src/content/docs/docs";
 export const CLI_REFERENCE = "src/content/docs/docs/reference/cli.md";
+export const NODE_CLI_REFERENCE = "src/content/docs/docs/reference/cetra-cli.md";
+
+// `npx @cetra-ai/cli init`, `npx @cetra-ai/cli@latest init` or `cetra-cli init`: the name group.
+const NODE_CLI_CALL = /(?:^|[\s`("'])(?:npx @cetra-ai\/cli(?:@[\w.-]+)?|cetra-cli) ([a-z][a-z-]*)/g;
 
 const MAX_LINES = 500;
 const FRONTMATTER_KEYS = new Set([
@@ -25,6 +29,16 @@ export function cliCommands(cliReference) {
   const names = new Set();
   for (const line of cliReference.split("\n")) {
     const match = line.match(/^### `cetra ([a-z][a-z-]*)`/);
+    if (match) names.add(match[1]);
+  }
+  return names;
+}
+
+/** `cetra-cli` subcommand names: the `### \`cetra-cli <name>\`` headings of its reference page. */
+export function nodeCliCommands(nodeReference) {
+  const names = new Set();
+  for (const line of nodeReference.split("\n")) {
+    const match = line.match(/^### `cetra-cli ([a-z][a-z-]*)`/);
     if (match) names.add(match[1]);
   }
   return names;
@@ -96,7 +110,8 @@ function checkFrontmatter(text, lines) {
  * Returns `{line, message}` errors for SKILL.md's text.
  * ctx = { referenceExists(name: string) => boolean,
  *         pageExists(docsPath: string) => boolean,   // path after `/docs/`, e.g. `integrations/claude-code/`
- *         commands: Set<string> }
+ *         commands: Set<string>,        // `cetra` subcommands
+ *         nodeCommands: Set<string> }   // `cetra-cli` subcommands
  */
 export function checkSkill(text, ctx) {
   const lines = text.split("\n");
@@ -155,6 +170,11 @@ export function checkSkill(text, ctx) {
           errors.push({ line: index + 1, message: `unknown command \`cetra ${name}\`` });
         }
       }
+      for (const [, name] of code.matchAll(NODE_CLI_CALL)) {
+        if (!ctx.nodeCommands.has(name)) {
+          errors.push({ line: index + 1, message: `unknown command \`cetra-cli ${name}\`` });
+        }
+      }
     }
   });
 
@@ -173,6 +193,7 @@ export function realContext() {
         join(PAGES, path, "index.md"),
       ].some((candidate) => existsSync(candidate)),
     commands: cliCommands(readFileSync(CLI_REFERENCE, "utf8")),
+    nodeCommands: nodeCliCommands(readFileSync(NODE_CLI_REFERENCE, "utf8")),
   };
 }
 
@@ -187,6 +208,12 @@ export function main() {
   const ctx = realContext();
   if (ctx.commands.size === 0) {
     console.error("website/src/content/docs/docs/reference/cli.md: no command headings found");
+    return 1;
+  }
+  if (ctx.nodeCommands.size === 0) {
+    console.error(
+      "website/src/content/docs/docs/reference/cetra-cli.md: no command headings found",
+    );
     return 1;
   }
 

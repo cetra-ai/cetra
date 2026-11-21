@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { checkSkill, cliCommands, realContext } from "./check-skill.mjs";
+import { checkSkill, cliCommands, nodeCliCommands, realContext } from "./check-skill.mjs";
 
 const valid = [
   "---",
@@ -18,6 +18,7 @@ const ctx = {
   referenceExists: (name) => name === "ok",
   pageExists: (path) => path === "integrations/claude-code/",
   commands: new Set(["query"]),
+  nodeCommands: new Set(["init", "query"]),
 };
 
 const check = (text, context = ctx) => checkSkill(text, context);
@@ -160,6 +161,31 @@ test("accepts a reference link with a #fragment and checks its file name", () =>
 test("checks cetra subcommands after a double or single quote in a fence", () => {
   const text = `${valid}\`\`\`bash\necho "cetra frob"\necho 'cetra frob'\n\`\`\`\n`;
   assert.equal(check(text).length, 2);
+});
+
+test("accepts npx @cetra-ai/cli with a version tag and cetra-cli in code", () => {
+  const text = `${valid}\`npx @cetra-ai/cli@latest init\`\n\`\`\`bash\ncetra-cli query "SELECT 1"\n\`\`\`\n`;
+  assert.deepEqual(check(text), []);
+});
+
+test("reports an npx @cetra-ai/cli subcommand the node CLI does not have", () => {
+  const errors = check(`${valid}Run \`npx @cetra-ai/cli frob\`.\n`);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /unknown command `cetra-cli frob`/);
+});
+
+test("reports a cetra-cli subcommand the node CLI does not have, in a fence", () => {
+  assert.equal(check(`${valid}\`\`\`bash\ncetra-cli frob\n\`\`\`\n`).length, 1);
+});
+
+test("finds the subcommands of the cetra-cli headings", () => {
+  const headings = "### `cetra-cli init`\n#### `cetra-cli x`\n### `cetra-cli query`\n";
+  assert.deepEqual([...nodeCliCommands(headings)], ["init", "query"]);
+});
+
+test("finds the subcommands of the real cetra-cli reference", () => {
+  const page = readFileSync("src/content/docs/docs/reference/cetra-cli.md", "utf8");
+  assert.deepEqual([...nodeCliCommands(page)], ["init", "query", "login"]);
 });
 
 test("checks the real SKILL.md against the real context", () => {

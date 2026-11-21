@@ -334,6 +334,8 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `cetra version` | |
 | `cetra health [--url http://127.0.0.1:8080]` | exits 0 when `GET <url>/readyz` answers 200 within 5 s, else 1; the container healthcheck (D-N-4) |
 
+`npx @cetra-ai/cli` (`cetra-cli`, package `node-cli/`) is the setup CLI: `init`, `query`, `login` (D-AO-2). Its reference is the site page `reference/cetra-cli`.
+
 The remote commands (`query`, `traces`, `projects`) take the server and token from `--url`/`--token`, then `CETRA_URL`/`CETRA_TOKEN`, then the `cetra login` credentials file; `--project` or `CETRA_PROJECT` names the project (D-H-12).
 
 `cetra agents hook <agent>` is hidden: the agents' hooks run it to send the session context (D-CA-8).

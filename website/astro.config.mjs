@@ -52,6 +52,10 @@ export default defineConfig({
                 {
                   label: "Get started",
                   items: [
+                    {
+                      label: "Set up with your coding agent",
+                      link: "/docs/get-started/coding-agent/",
+                    },
                     { label: "Quick start", link: "/docs/get-started/quickstart/" },
                     { label: "Run cetra", link: "/docs/get-started/run-cetra/" },
                     { label: "Send OpenTelemetry", link: "/docs/get-started/opentelemetry/" },
@@ -271,6 +275,7 @@ export default defineConfig({
                 },
                 { label: "OTLP endpoint", link: "/docs/reference/otlp/" },
                 { label: "CLI", link: "/docs/reference/cli/" },
+                { label: "cetra-cli", link: "/docs/reference/cetra-cli/" },
                 { label: "Span attributes", link: "/docs/reference/attributes/" },
                 { label: "Filter language", link: "/docs/reference/filter-language/" },
                 { label: "SQL schema", link: "/docs/reference/sql-schema/" },

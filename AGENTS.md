@@ -119,6 +119,7 @@ web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)         
 website/                     docs site and landing page (Astro, Starlight)            (docs/plans/docs-site)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
+node-cli/                     the cetra-cli package (npx @cetra-ai/cli): init, query, login (D-AO-2)
 skills/                      the cetra agent skill (skills/cetra/), its reference list and plugin manifests; mirrored to cetra-ai/skills (D-AO-9)
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
 fixtures/storage/golden/     golden data directories, written from the first stable release on (track R M8, spec 03 § 12)
@@ -158,13 +159,15 @@ Run everything through `just`:
 
 | Command | What it does |
 |---|---|
-| `just check` | Rust, web, Python SDK, TypeScript SDK and the docs site (D79); **must pass before every commit** |
+| `just check` | Rust, web, Python SDK, TypeScript SDK, cetra-cli and the docs site (D79); **must pass before every commit** |
 | `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories, cargo-deny's bans, licences and sources (D196) |
 | `just check-web` | web lint, types, tests, production build |
 | `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
 | `just check-ts` | TypeScript SDK lint, types, tests, package exports |
+| `just check-cli-js` | cetra-cli: lint, types, build, tests, package lint |
+| `just cli-smoke <tarball>` | install a packed cetra-cli and run --version |
 | `just fmt` | format Rust, the web and TypeScript SDK (Biome), and the Python SDK (ruff) |
 | `just lint` | clippy, warnings as errors |
 | `just test` | all Rust tests |
