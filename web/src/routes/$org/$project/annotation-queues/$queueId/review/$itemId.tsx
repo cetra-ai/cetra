@@ -6,6 +6,7 @@ import { annotationQueueQuery } from "@/api/queries-annotation-queues";
 import { NextItem } from "@/components/annotation-queues/next-item";
 import { Reviewer } from "@/components/annotation-queues/reviewer";
 import { BACK_LINK_CLASS } from "@/components/back-link";
+import { ITEM_TITLE_CLASS, PageToolbar, PageToolbarTitle } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
 import { parseReviewSearch } from "@/lib/annotation-queues";
@@ -39,23 +40,24 @@ function ReviewPage() {
       <TopBarCrumb>
         <span className="text-body">Review</span>
       </TopBarCrumb>
-      <header className="flex min-h-9 shrink-0 items-center gap-2 border-b px-3">
-        <nav aria-label="Annotation queue" className="flex min-w-0 items-center gap-1.5">
-          <Link
-            to="/$org/$project/annotation-queues/$queueId"
-            params={{ org, project, queueId }}
-            aria-label={`Back to ${name}`}
-            className={BACK_LINK_CLASS}
-          >
-            <ChevronLeft aria-hidden="true" className="size-3.5" />
-            <span className="max-w-64 truncate">{name}</span>
-          </Link>
-          <span aria-hidden="true" className="text-muted-foreground/60">
-            /
-          </span>
-          <h2 className="text-ui font-medium">Review</h2>
-        </nav>
-      </header>
+      <PageToolbar>
+        <PageToolbarTitle
+          back={
+            <Link
+              to="/$org/$project/annotation-queues/$queueId"
+              params={{ org, project, queueId }}
+              aria-label={`Back to ${name}`}
+              className={BACK_LINK_CLASS}
+            >
+              <ChevronLeft aria-hidden="true" className="size-3.5" />
+              <span className="max-w-64 truncate">{name}</span>
+            </Link>
+          }
+          label="Annotation queue"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>Review</h2>
+        </PageToolbarTitle>
+      </PageToolbar>
       <div className="relative min-h-0 flex-1">
         <div className="absolute inset-0 flex min-h-0 flex-col">
           {itemId === "next" ? (
