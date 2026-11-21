@@ -2,8 +2,8 @@ name: Release
 
 # A tag v<version> on main publishes that version (D-N-5, D-N-6): archives, checksums, SBOMs and
 # install.sh on a GitHub release, the multi-arch image and the chart on GHCR, and build
-# provenance attestations (D-N-7), then the Python SDK on PyPI and the TypeScript SDK on npm through
-# OIDC trusted publishing (D-N-37). A version with a pre-release part (v0.1.0-rc.1) makes a draft
+# provenance attestations (D-N-7), then the Python SDK on PyPI and the TypeScript SDK and the
+# cetra-cli on npm through OIDC trusted publishing (D-N-37, D-AO-2). A version with a pre-release part (v0.1.0-rc.1) makes a draft
 # pre-release, only the exact image tag, a PyPI pre-release (0.1.0rc1) and the npm dist-tag
 # `next`. docs/plans/n-packaging/README.md § Releasing.
 on:
@@ -188,6 +188,7 @@ jobs:
           tool: just@1.59.0
       - run: just check-py
       - run: just check-ts
+      - run: just check-cli-js
       - name: Build the SDK packages
         run: |
           set -euo pipefail
@@ -196,8 +197,11 @@ jobs:
           (cd sdks/python && uv build --no-sources --out-dir "$out/python")
           pnpm --dir sdks/typescript run build
           pnpm --dir sdks/typescript pack --pack-destination "$out/npm"
+          pnpm --dir node-cli run build
+          pnpm --dir node-cli pack --pack-destination "$out/npm"
           ls "$out/python/cetra_sdk-$py_version-py3-none-any.whl" "$out/python/cetra_sdk-$py_version.tar.gz"
           ls "$out/npm/cetra-ai-sdk-$VERSION.tgz"
+          ls "$out/npm/cetra-ai-cli-$VERSION.tgz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-python
@@ -388,3 +392,4 @@ jobs:
             tag=next
           fi
           npm publish "$RUNNER_TEMP/npm/cetra-ai-sdk-$VERSION.tgz" --provenance --access public --tag "$tag"
+          npm publish "$RUNNER_TEMP/npm/cetra-ai-cli-$VERSION.tgz" --provenance --access public --tag "$tag"

@@ -349,6 +349,26 @@ ts-smoke tarball:
     EXPECTED="$expected" node -e 'const { VERSION } = require("@cetra-ai/sdk"); if (VERSION !== process.env.EXPECTED) { console.error(`CJS: VERSION ${VERSION}`); process.exit(1); }'
     echo "cetra ${expected} loads from ESM and CommonJS on Node $(node --version)"
 
+# Install a packed cetra-cli into a scratch project and check that its bin prints the tarball's version (D-AO-2)
+cli-smoke tarball:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    tarball="$(realpath '{{tarball}}')"
+    expected="$(tar -xOzf "$tarball" package/package.json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).version')"
+    dir="$(mktemp -d)"
+    trap 'rm -rf "$dir"' EXIT
+    cd "$dir"
+    npm init -y >/dev/null
+    # The same 7-day age gate as ts-smoke (D74); npm 10, shipped with Node 22.12, supports --before.
+    before="$(node -p 'new Date(Date.now() - 7*24*3600*1000).toISOString()')"
+    npm install --no-audit --no-fund --ignore-scripts --before "$before" "$tarball" >/dev/null
+    actual="$(node_modules/.bin/cetra-cli --version)"
+    if [ "$actual" != "$expected" ]; then
+        echo "cetra-cli --version prints $actual, not $expected" >&2
+        exit 1
+    fi
+    echo "cetra-cli ${expected} runs on Node $(node --version)"
+
 # Lint GitHub Actions workflows (actionlint) and audit them for security issues (zizmor)
 check-workflows:
     actionlint
