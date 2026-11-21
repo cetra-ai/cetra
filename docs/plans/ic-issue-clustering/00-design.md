@@ -247,7 +247,7 @@ This gives, with no new storage:
   - **Condition.** See D-IC-20.
   - **Notifications.** See D-IC-21.
 - **Datasets** (track J): "Add examples to dataset" on an issue adds up to 100 of its most recent occurrence traces through J's bulk-add code, with metadata `cetra.issue_id` (D-IC-22).
-- **Annotation queues** (track AQ): "Send to queue" on an issue, through AQ's add-items API, in the milestone after AQ's API lands. IC does not design queues.
+- **Annotation queues** (track AQ): "Send to queue" on an issue adds its newest occurrences to a queue through AQ's add-by-id path (D-IC-27 to D-IC-31).
 - **Trace view**: an Issues chip row on a trace or session links to each issue, and the trace list gets an "Issue" facet.
 - **MCP** (D-IC-24): a read-only `list_issues` tool (open issues of a project with counts) joins H's tools.
 
@@ -344,6 +344,24 @@ These are fixed here so the plans copy them, not choose them.
 - The CLI e2e (`crates/cli/tests/e2e.rs`) covers error issues with the real binary: an error trace creates an open issue with the trace as an example, resolve, a second trace regresses it, then "add examples to dataset" copies it. It does not wait for alerts (60 s tick).
 - Alerts on `issue_occurrences` and issue notifications are covered in-process with `AlertTiming::TEST`, a `HookReceiver` and the manual clock (the 10-minute throttle).
 
+### D-IC-27 Send to queue
+- The issue page gets **Send to queue**, next to "Add examples to dataset" and "Create alert", for callers who can manage queues (`ProjectPerm::ManageQueues`: members and above). It is hidden on merged issues, like the other actions. There is no bulk action on the issue list. The user chose this scope.
+- Web: a dialog with the project's queues (each with its kind, and "New queue…") and the add result with the skipped list, the shell shared with AQ's add dialog.
+
+### D-IC-28 Which occurrences
+- The same selection as D-IC-22: the issue and its 7 most-occurring merged issues (`example_issues`), over the default 14-day occurrences window ending now, any issue state, newest occurrence first. Default `limit` 100, `limit` 1 to 1 000 (AQ's by-id cap, D-AQ-8). `limit` counts targets, not occurrences.
+
+### D-IC-29 Targets by queue kind
+- A **trace** queue gets the occurrences' traces (one item per trace). A **span** queue gets each occurrence's span: `cetra.issue.span_id` in the occurrence score's metadata, or the span of a span-target occurrence (error issues and span-target LLM candidates have one). A **session** queue gets the distinct sessions of the occurrences (the score's `session_id`, or the session of a session-target occurrence). Each target is added once.
+- An occurrence that has no such target (a trace queue with a session-target occurrence, a span queue without a span, a session queue without a session) is listed in `skipped` with a fixed message: "the occurrence has no trace", "the occurrence has no span", "the occurrence has no session". `skipped[].index` is the occurrence's position among the occurrences read newest first. A group whose occurrences all lack the target answers 201 with `added` 0; a group with no occurrence at all is a 400 on `issue`: "the issue has no occurrences in the data window".
+
+### D-IC-30 The route
+- `POST /api/v1/projects/{project}/issues/{id}/queue-items`, body `{"queue": "<queue id>", "limit": 1..=1000 (default 100)}`, permission `ManageQueues` (a session, a read-write personal access token, or an API key with `write`, as AQ allows). `queue` is an **id**, as every AQ route takes one (queue names are editable and AQ has no lookup by name). Answer: AQ's `AddedQueueItems` (`added`, `existing`, `skipped`) with 201, so the web reuses AQ's result view. 404 for an unknown issue or a queue not of the project; 400 on `limit`; 422 `too_many_items` from AQ's cap.
+
+### D-IC-31 One add path, no migration
+- The route goes through AQ's own add path: the core of `add_items` (lookup of the targets over the data window, evaluation traces left out, the deletion guard re-checked in the insert transaction, the 100 000-item cap, one item per target, `added_by`) is extracted into one `pub(crate)` function that both routes call, the way D-IC-22 extracted J's bulk-add core. No check is written twice, and AQ's API, limits and permissions are unchanged.
+- Queue items have no metadata column, so an item does not record its issue (unlike the dataset item's `cetra.issue_id`). M5 adds no migration.
+
 ## Architecture
 
 ```
@@ -406,9 +424,9 @@ Each milestone ends in working, tested behaviour, with its spec sections, `CHANG
 | **M2** Provider calls | `cetra-eval`: the embedding call (OpenAI-compatible, Gemini) with its traced span and price, the generic structured completion, the clustering math with property tests; an embedding model test on the connection test route | E, I (done) | Server use of them |
 | **M3** LLM sources | Kinds `score`, `feedback`, `topic`: the score-write and completion triggers, candidates, summarize and embed jobs on I's dispatcher, the budget and pauses, assignment, the refit with naming, the refit history and "Refit now", candidate pruning, the deletion cascade for candidates, the editor for LLM kinds | M1, M2 | Alerts, datasets |
 | **M4** Links | `AlertMeasure::ScoreCount` in storage, K's `issue_occurrences` condition, the `notification_deliveries` change and the new or regressed notifications, "Add examples to dataset", MCP `list_issues`, the end-to-end test | M3; K, J, H (done) | Annotation queues |
-| **M5** Queues | "Send to queue" from an issue | M4 and AQ's API | — |
+| **M5** Queues | "Send to queue" on the issue page: `POST …/issues/{id}/queue-items`, the shared AQ add core, the dialog | M4; AQ (done) | Bulk send from the list, a count field in the dialog, a record of the issue on the item |
 
-M1 and M2 can run in parallel: M1 touches `cetra-core`, `cetra-storage`, `cetra-server` and `web/`, and M2 only `cetra-eval`; they share `CHANGELOG.md` and the decision log, merged by hand. There is no backfill: a source sees traces and scores from its creation on (a non-goal of the MVP; I's backfill is the model if users ask). M5 is a small plan written when AQ has landed.
+M1 and M2 can run in parallel: M1 touches `cetra-core`, `cetra-storage`, `cetra-server` and `web/`, and M2 only `cetra-eval`; they share `CHANGELOG.md` and the decision log, merged by hand. There is no backfill: a source sees traces and scores from its creation on (a non-goal of the MVP; I's backfill is the model if users ask). M5 has its own plan (`05-m5-queues.md`).
 
 ## Decided questions
 
