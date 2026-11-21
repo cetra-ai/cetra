@@ -324,7 +324,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `cetra admin gc-orphans [--min-age 1h] [--dry-run] [--rollback-bucket]` | with the server stopped: deletes objects the catalog does not know (older than `--min-age`); in S3 mode a real run needs `--rollback-bucket`, since it rolls the bucket back and reports objects it needs but the store lacks; exit 1 when some are missing (D-N-21) |
 | `cetra admin migrate` | with the server stopped: run the migrations of `meta.db` and `catalog.db`, then exit (restores of older backups, D-N-22) |
 | `cetra admin compact --project … --day …` · `cetra admin wal-inspect` | maintenance |
-| `cetra login --url …` · `cetra logout` | PAT login; the token expires after 90 days, so run `cetra login` again then (08 § CLI login) |
+| `cetra login --url …` · `cetra logout` | PAT login with a device code approved in the browser; the token expires after 90 days, so run `cetra login` again then (08 § CLI login, D-AO-4) |
 | `cetra query "<sql>" \| --file <path> --project … [--param k=v]… [--from … --to … \| --since 24h] [--limit n] [--timeout-ms n] [--format table\|csv\|json\|ndjson\|parquet] [-o <path>]` | SQL console from the terminal; CSV, NDJSON and Parquet stream through the export path (D-H-12) |
 | `cetra traces list [--filter …] [--search …] [--from …] [--to …] [--since 24h] [--sort …] [--order …] [--limit n] [--cursor …] [--include-eval] [--include-experiments] [--format table\|json]` · `cetra traces get <id> [--around <time>] [--format tree\|json]` | inspect traces |
 | `cetra projects list [--format table\|json]` | projects the token can read |

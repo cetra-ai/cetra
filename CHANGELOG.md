@@ -182,6 +182,12 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   no Total chip and Evaluators no All button: select the selected chip again to clear the filter.
 - Item pages (new and edit forms, and the evaluator, issue, issue source, dataset and annotation queue pages) use the list pages' toolbar and left-aligned layout. The alert rule editor gets a back link.
 
+- `cetra login` signs in with a code you approve in the browser, so it works over SSH and in containers.
+
+### Removed
+
+- The `/cli-auth` page and the CLI's localhost callback.
+
 ### Fixed
 
 - Alerts: a firing rule whose data stops (two readings below `min_count`) no longer reports itself resolved; it moves to `no_data` and sends a no data notification, and resolves when a reading with data is clear (D-K-20).
