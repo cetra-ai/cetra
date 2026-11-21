@@ -1395,12 +1395,13 @@ async fn error_issues_end_to_end() {
     )
     .await;
 
-    // The trace completes after its 5 s idle timer, and its error becomes one open issue.
+    // The trace completes after its 5 s idle timer, and its error becomes one open issue. The
+    // issue row is listed before its occurrence score is readable, so wait for the count too.
     let issues_path = format!("{project}/issues");
     let listed = poll_json(
         &server.api,
         &issues_path,
-        |body| body["data"][0]["state"] == "open",
+        |body| body["data"][0]["state"] == "open" && body["data"][0]["count"] == 1,
         Duration::from_secs(30),
     )
     .await;
