@@ -11,6 +11,7 @@ import { BACK_LINK_CLASS, BackLink } from "@/components/back-link";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
 import { KIND_LABELS } from "@/components/issue-sources/source-list";
+import { ITEM_TITLE_CLASS, PageToolbar, PageToolbarTitle } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
@@ -112,81 +113,88 @@ function IssueSourcePage() {
   const llm = source.kind !== "error";
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <BackLink
-            fallback={
-              <Link
-                to="/$org/$project/issue-sources"
-                params={{ org, project }}
-                aria-label="Back to issue sources"
-                className={BACK_LINK_CLASS}
-              >
-                <ChevronLeft aria-hidden="true" className="size-3.5" />
-                Issue sources
-              </Link>
-            }
-          />
-          <span aria-hidden="true" className="text-muted-foreground/60">
-            /
-          </span>
-          <h2 className="text-title font-medium">{source.name}</h2>
-        </div>
-        <Button asChild variant="outline">
-          <Link
-            to="/$org/$project/issue-sources/$sourceId/edit"
-            params={{ org, project, sourceId: source.id }}
-          >
-            Edit
-          </Link>
-        </Button>
-      </div>
-
-      {sourcePausedMessage(source) ? (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-body"
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar
+        actions={
+          <Button asChild variant="outline" size="sm">
+            <Link
+              to="/$org/$project/issue-sources/$sourceId/edit"
+              params={{ org, project, sourceId: source.id }}
+            >
+              Edit
+            </Link>
+          </Button>
+        }
+      >
+        <PageToolbarTitle
+          back={
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/issue-sources"
+                  params={{ org, project }}
+                  aria-label="Back to issue sources"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Issue sources
+                </Link>
+              }
+            />
+          }
+          label="Issue source"
         >
-          {sourcePausedMessage(source)}
+          <h2 className={ITEM_TITLE_CLASS}>{source.name}</h2>
+        </PageToolbarTitle>
+      </PageToolbar>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="flex flex-col gap-6 px-3 py-3">
+          {sourcePausedMessage(source) ? (
+            <div
+              role="alert"
+              className="rounded-md border border-destructive/40 bg-destructive/5 px-4 py-3 text-body"
+            >
+              {sourcePausedMessage(source)}
+            </div>
+          ) : null}
+
+          <SourceDetails source={source} org={org} />
+
+          {llm ? (
+            <>
+              <section aria-label="Spend" className="flex flex-col gap-2">
+                <h2 className="text-body font-medium">Spend</h2>
+                <SpendText source={source} />
+              </section>
+
+              <section aria-label="Candidates, last 24 hours" className="flex flex-col gap-2">
+                <h2 className="text-body font-medium">Candidates, last 24 hours</h2>
+                {source.candidates_24h ? (
+                  <dl className="flex flex-wrap gap-6 text-body">
+                    {(
+                      [
+                        ["queued", "Queued"],
+                        ["pending", "Pending"],
+                        ["assigned", "Assigned"],
+                        ["dropped", "Dropped"],
+                        ["failed", "Failed"],
+                        ["skipped", "Skipped"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <div key={key} className="flex flex-col">
+                        <dt className="text-caption text-muted-foreground">{label}</dt>
+                        <dd className="text-title tabular-nums">{source.candidates_24h?.[key]}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : null}
+              </section>
+
+              <RefitsSection org={org} project={project} source={source} canManage={canManage} />
+            </>
+          ) : null}
         </div>
-      ) : null}
-
-      <SourceDetails source={source} org={org} />
-
-      {llm ? (
-        <>
-          <section aria-label="Spend" className="flex flex-col gap-2">
-            <h2 className="text-body font-medium">Spend</h2>
-            <SpendText source={source} />
-          </section>
-
-          <section aria-label="Candidates, last 24 hours" className="flex flex-col gap-2">
-            <h2 className="text-body font-medium">Candidates, last 24 hours</h2>
-            {source.candidates_24h ? (
-              <dl className="flex flex-wrap gap-6 text-body">
-                {(
-                  [
-                    ["queued", "Queued"],
-                    ["pending", "Pending"],
-                    ["assigned", "Assigned"],
-                    ["dropped", "Dropped"],
-                    ["failed", "Failed"],
-                    ["skipped", "Skipped"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <div key={key} className="flex flex-col">
-                    <dt className="text-caption text-muted-foreground">{label}</dt>
-                    <dd className="text-title tabular-nums">{source.candidates_24h?.[key]}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : null}
-          </section>
-
-          <RefitsSection org={org} project={project} source={source} canManage={canManage} />
-        </>
-      ) : null}
+      </div>
     </div>
   );
 }
