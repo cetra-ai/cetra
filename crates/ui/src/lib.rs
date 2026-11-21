@@ -22,7 +22,7 @@ struct Asset {
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
 
-const CONTENT_SECURITY_POLICY_VALUE: &str = "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self' http://127.0.0.1:*; frame-ancestors 'none'";
+const CONTENT_SECURITY_POLICY_VALUE: &str = "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'";
 
 /// Whether `web/dist` was present at build time.
 pub fn embedded() -> bool {
@@ -434,7 +434,7 @@ mod tests {
         assert!(csp.contains("base-uri 'none'"));
         assert_eq!(
             csp,
-            "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self' http://127.0.0.1:*; frame-ancestors 'none'"
+            "default-src 'self'; img-src 'self' blob: data:; media-src 'self'; style-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         );
     }
 
