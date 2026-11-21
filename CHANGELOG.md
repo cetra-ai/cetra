@@ -33,6 +33,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- The Python SDK is published to PyPI as `cetra-sdk` and the TypeScript SDK to npm as
+  `@cetra-ai/sdk`, with the server's version, from each release tag (D-N-37).
 - `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their
   test sends to the org's verified members whatever `auth.signup` is (D-K-21). Unset, it keeps the
   old rule: members only under open signup.

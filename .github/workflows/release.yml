@@ -2,8 +2,10 @@ name: Release
 
 # A tag v<version> on main publishes that version (D-N-5, D-N-6): archives, checksums, SBOMs and
 # install.sh on a GitHub release, the multi-arch image and the chart on GHCR, and build
-# provenance attestations (D-N-7). A version with a pre-release part (v0.1.0-rc.1) makes a draft
-# pre-release and only the exact image tag. docs/plans/n-packaging/README.md § Releasing.
+# provenance attestations (D-N-7), then the Python SDK on PyPI and the TypeScript SDK on npm through
+# OIDC trusted publishing (D-N-37). A version with a pre-release part (v0.1.0-rc.1) makes a draft
+# pre-release, only the exact image tag, a PyPI pre-release (0.1.0rc1) and the npm dist-tag
+# `next`. docs/plans/n-packaging/README.md § Releasing.
 on:
   push:
     tags: ["v*"]
@@ -157,6 +159,57 @@ jobs:
           retention-days: 7
       - run: just assert-clean
 
+  sdks:
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Not ./.github/actions/js: a release build uses no cache.
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.7"
+          enable-cache: false
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: just@1.59.0
+      - run: just check-py
+      - run: just check-ts
+      - name: Build the SDK packages
+        run: |
+          set -euo pipefail
+          py_version="$(tools/packaging/pep440.sh "$VERSION")"
+          out="$GITHUB_WORKSPACE/target/sdk"
+          (cd sdks/python && uv build --no-sources --out-dir "$out/python")
+          pnpm --dir sdks/typescript run build
+          pnpm --dir sdks/typescript pack --pack-destination "$out/npm"
+          ls "$out/python/cetra_sdk-$py_version-py3-none-any.whl" "$out/python/cetra_sdk-$py_version.tar.gz"
+          ls "$out/npm/cetra-ai-sdk-$VERSION.tgz"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-python
+          path: target/sdk/python/
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-npm
+          path: target/sdk/npm/
+          if-no-files-found: error
+          retention-days: 7
+      - run: just assert-clean
+
   publish:
     needs: [verify, linux, macos]
     runs-on: ubuntu-24.04
@@ -268,3 +321,68 @@ jobs:
             target/dist/SHA256SUMS \
             "target/dist/cetra-$VERSION.tgz" \
             deploy/install.sh
+
+  # The SDKs go out after the GitHub release, so a failed server build publishes no SDK version
+  # (PyPI and npm versions cannot be reused). Trusted publishing: no token is stored (D-N-37).
+  pypi:
+    needs: [sdks, publish]
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/project/cetra-sdk/
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-python
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+        with:
+          packages-dir: dist
+          attestations: true
+
+  npm:
+    needs: [verify, sdks, publish]
+    runs-on: ubuntu-24.04
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@cetra-ai/sdk
+    permissions:
+      contents: read
+      id-token: write
+    timeout-minutes: 10
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      PRERELEASE: ${{ needs.verify.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+          package-manager-cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-npm
+          path: ${{ runner.temp }}/npm
+      - name: Publish to npm
+        run: |
+          set -euo pipefail
+          # Trusted publishing needs npm >= 11.5.1; Node's bundled npm is used, not installed.
+          npm_version="$(npm --version)"
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$npm_version"; then
+            echo "npm $npm_version is older than 11.5.1, which trusted publishing needs" >&2
+            exit 1
+          fi
+          tag=latest
+          if [[ "$PRERELEASE" == "true" ]]; then
+            tag=next
+          fi
+          npm publish "$RUNNER_TEMP/npm/cetra-ai-sdk-$VERSION.tgz" --provenance --access public --tag "$tag"

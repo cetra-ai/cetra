@@ -1,9 +1,22 @@
 {
   "name": "@cetra-ai/sdk",
   "version": "0.0.0",
-  "private": true,
   "description": "TypeScript SDK for cetra.",
   "license": "MIT",
+  "keywords": [
+    "llm",
+    "observability",
+    "opentelemetry",
+    "tracing",
+    "evaluation"
+  ],
+  "homepage": "https://cetra.sh/docs/reference/typescript/",
+  "bugs": "https://github.com/cetra-ai/cetra/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cetra-ai/cetra.git",
+    "directory": "sdks/typescript"
+  },
   "type": "module",
   "sideEffects": false,
   "engines": {
@@ -34,6 +47,9 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",

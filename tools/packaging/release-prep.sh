@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prepares release <version> (D-N-5): sets the workspace version, Cargo.lock, the chart's version
-# and appVersion and the compose image, and turns CHANGELOG.md's Unreleased section into
-# `## [<version>] - <today, UTC>` under a new empty Unreleased section. Commit the result, merge
+# and appVersion, the compose image and the SDK versions (D-N-37; PEP 440 form for Python, and
+# its uv.lock), and turns CHANGELOG.md's Unreleased section into `## [<version>] - <today, UTC>`
+# under a new empty Unreleased section. Commit the result, merge
 # it to main, then tag that commit `v<version>`.
 #
 # Usage: release-prep.sh <version>, e.g. 0.1.0 or 0.1.0-rc.1
@@ -19,6 +20,7 @@ if ! [[ "$new" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z
   echo "release-prep: '$new' is not a SemVer version without build metadata" >&2
   exit 1
 fi
+py_new="$(tools/packaging/pep440.sh "$new")"
 old="$(tools/packaging/version.sh)"
 if [[ "$new" == "$old" ]]; then
   echo "release-prep: the workspace is already at $new" >&2
@@ -42,12 +44,18 @@ sed -i.bak -e "s/^version: .*/version: $new/" -e "s/^appVersion: .*/appVersion: 
 sed -i.bak "s|ghcr.io/cetra-ai/cetra:$old}|ghcr.io/cetra-ai/cetra:$new}|" deploy/compose/compose.yaml
 sed -i.bak "s|^#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$old$|#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$new|" \
   deploy/compose/.env.example
+sed -i.bak "s/^  \"version\": \".*\",$/  \"version\": \"$new\",/" sdks/typescript/package.json
+sed -i.bak "s/^export const VERSION = \".*\";$/export const VERSION = \"$new\";/" \
+  sdks/typescript/src/index.ts
+sed -i.bak "/^\[project\]/,/^\[/{s/^version = \".*\"$/version = \"$py_new\"/;}" sdks/python/pyproject.toml
 today="$(date -u +%Y-%m-%d)"
 sed -i.bak "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$new] - $today/" CHANGELOG.md
 rm -f Cargo.toml.bak deploy/helm/cetra/Chart.yaml.bak deploy/compose/compose.yaml.bak \
-  deploy/compose/.env.example.bak CHANGELOG.md.bak
+  deploy/compose/.env.example.bak CHANGELOG.md.bak sdks/typescript/package.json.bak \
+  sdks/typescript/src/index.ts.bak sdks/python/pyproject.toml.bak
 
 cargo update --workspace --offline
+(cd sdks/python && uv lock)
 tools/packaging/versions-check.sh
 # A stable release writes its golden data directory with this build (spec 03 § 12, D-R-30);
 # a pre-release gets none.
