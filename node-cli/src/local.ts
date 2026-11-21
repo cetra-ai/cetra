@@ -181,14 +181,14 @@ async function startBinary(context: StartContext): Promise<Started> {
   const toml = join(dirname(dataDir), "local.toml");
   const log = join(dataDir, "server.log");
 
+  let child: ChildProcess | undefined;
   try {
     await mkdir(dataDir, { recursive: true });
     await writeFile(toml, configToml(dataDir, port), "utf8");
     const fd = openSync(log, "a");
-    let child: ChildProcess;
-    let spawnFailed = false;
+    let spawned: ChildProcess;
     try {
-      child = (deps.spawn ?? spawn)("cetra", ["serve", "--config", toml], {
+      spawned = (deps.spawn ?? spawn)("cetra", ["serve", "--config", toml], {
         detached: true,
         stdio: ["ignore", fd, fd],
         env: childEnvironment(admin?.variables),
@@ -196,11 +196,13 @@ async function startBinary(context: StartContext): Promise<Started> {
     } finally {
       closeSync(fd);
     }
-    child.on("error", () => {
+    child = spawned;
+    let spawnFailed = false;
+    spawned.on("error", () => {
       spawnFailed = true;
     });
-    child.unref();
-    if (child.pid !== undefined) await writeFile(join(dataDir, "server.pid"), `${child.pid}\n`);
+    spawned.unref();
+    if (spawned.pid !== undefined) await writeFile(join(dataDir, "server.pid"), `${spawned.pid}\n`);
 
     await waitReady(
       server,
@@ -208,7 +210,7 @@ async function startBinary(context: StartContext): Promise<Started> {
       () => spawnFailed,
       `cetra did not start; see ${log} (another program may use port ${port}, 4317 or 4318)`,
     );
-    const pid = child.pid;
+    const pid = spawned.pid;
     if (pid === undefined) {
       throw new CliError(`cetra did not start; see ${log}`, Exit.Unreachable);
     }
@@ -221,8 +223,22 @@ async function startBinary(context: StartContext): Promise<Started> {
       ...admin?.started,
     };
   } catch (error) {
-    if (firstStart) await rm(dataDir, { recursive: true, force: true });
+    if (firstStart) {
+      killChild(child);
+      await rm(dataDir, { recursive: true, force: true });
+    }
     throw error;
+  }
+}
+
+/** Kills a first start's child before its data dir is removed. A child that has already exited
+ *  makes `process.kill` throw, which is ignored. */
+function killChild(child: ChildProcess | undefined): void {
+  if (child?.pid === undefined) return;
+  try {
+    process.kill(child.pid);
+  } catch {
+    // The child has already exited.
   }
 }
 
@@ -251,9 +267,13 @@ async function startDocker(context: StartContext): Promise<Started> {
     }
     const hostPort = await publishedPort(deps, port);
     if (hostPort !== port) {
-      options.io.stderr(`the container publishes port ${hostPort}, not ${port}; waiting on it`);
+      // The container's public_url is fixed at its creation, so the URL the user passes must change.
+      throw new CliError(
+        `the cetra-local container listens on port ${hostPort}; run again with --url http://localhost:${hostPort}`,
+        Exit.Usage,
+      );
     }
-    await waitReady(`http://localhost:${hostPort}`, deps, () => false, DOCKER_NOT_STARTED);
+    await waitReady(server, deps, () => false, DOCKER_NOT_STARTED);
     return {
       how: "docker",
       firstStart: false,

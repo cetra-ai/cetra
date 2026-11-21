@@ -2,7 +2,7 @@ import type { ChildProcess, execFile, spawn } from "node:child_process";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { CliError, Exit, type Io } from "./errors.js";
 import {
   configToml,
@@ -26,6 +26,7 @@ const temporary: string[] = [];
 const servers: CannedServer[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const server of servers.splice(0)) await server.close();
   for (const dir of temporary.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -383,6 +384,8 @@ describe.skipIf(process.platform !== "linux")("startLocal", () => {
     const child = fakeSpawn();
     let clock = 0;
     const url = await closedUrl();
+    // The fake child has pid 4242: the kill is a spy, so no real process is signalled.
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
 
     const error = await failureOf(
       startLocal(url, dir, {
@@ -410,6 +413,39 @@ describe.skipIf(process.platform !== "linux")("startLocal", () => {
     expect(env.CETRA_INIT_ORG).toBe("local");
     expect(env.CETRA_INIT_PROJECT).toBe("my-app");
     expect(env.CETRA_INIT_ADMIN_PASSWORD).toMatch(/^[A-Za-z0-9]{24}$/);
+    expect(kill).toHaveBeenCalledWith(4242);
     await expect(stat(dataDir)).rejects.toThrow();
+  });
+
+  it("refuses a container that publishes another port, before it waits", async () => {
+    const dataHome = await tempDir();
+    const { io } = fakeIo({ XDG_DATA_HOME: dataHome });
+    const { execFile: exec } = fakeExecFile({
+      "docker version": { ok: true },
+      "docker ps": { ok: true, stdout: "cetra-local\n" },
+      "docker start": { ok: true },
+      "docker port": { ok: true, stdout: "127.0.0.1:9999\n" },
+    });
+    let sleeps = 0;
+
+    const error = await failureOf(
+      startLocal(new URL("http://127.0.0.1:8080"), join(dataHome, "app"), {
+        yes: true,
+        io,
+        deps: {
+          execFile: exec,
+          sleep: async () => {
+            sleeps += 1;
+          },
+        },
+      }),
+    );
+
+    expect(error).toMatchObject({
+      message:
+        "the cetra-local container listens on port 9999; run again with --url http://localhost:9999",
+      code: Exit.Usage,
+    });
+    expect(sleeps).toBe(0);
   });
 });

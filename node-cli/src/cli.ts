@@ -2,12 +2,14 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { CliError, Exit, type ExitCode, type Io, realIo } from "./errors.js";
+import { init } from "./init.js";
 import { login } from "./login.js";
 import { query } from "./query.js";
 import { VERSION } from "./version.js";
 
-/** Commands register here: C5c (init) adds its own. */
+/** Commands register here. */
 export const COMMANDS: Record<string, (args: string[], io: Io) => Promise<ExitCode>> = {
+  init: (args, io) => init(args, io),
   login: (args, io) => login(args, io),
   query: (args, io) => query(args, io),
 };
