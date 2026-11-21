@@ -66,7 +66,9 @@ No phase edits those generated files by hand.
 | D141 | CSRF `Origin` check on `/api/auth/` writes; the two public device routes are exempt (design § Device flow, CSRF) |
 | D138 | 404 for a resource outside the caller's reach, 403 for a visible one with too low a role |
 
-The decisions this plan settles from the code (recorded in the design on 2026-11-21):
+The decisions this plan settles from the code (all recorded in the design's § Device flow on 2026-11-21):
+- **Bounds.** 10 codes a minute per IP, an IPv6 address counted by its /64; 30 lookups, approvals and denials a minute per user; an approval in progress falls back to pending after 60 s; an uncollected grant is dropped one minute after the code's expiry.
+- **No caching.** The grant answer carries `Cache-Control: no-store`.
 - **Error bodies.** The RFC 8628 errors are problem+json with four new problem codes (`authorization_pending`, `slow_down`, `access_denied` and `expired_token`), all with status 400. Every 4xx in the API is problem+json, and `document_lint` enforces it.
 - **Permission.** Approving for a project needs `ProjectPerm::ManageSettings`, the permission behind `POST …/api-keys`.
 - **Credentials key.** The CLI saves the token under the URL the user passed (`server_url(raw)`), as today. `DeviceGrant.server` is the server's `public_url` origin; the Node CLI (M3) uses it for `CETRA_BASE_URL`.
@@ -86,7 +88,7 @@ D3 and D4 do not depend on each other and touch disjoint files; they may run in 
 - D1: `crates/server/src/auth/{device.rs (new), mod.rs, limits.rs}`, `crates/server/src/api/common.rs`, `crates/server/src/http/{error.rs, mod.rs}`, `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs`.
 - D2: `website/src/content/docs/docs/reference/api/overview.mdx`, `crates/server/src/routes/{device.rs (new), mod.rs}`, `crates/server/src/api/{device.rs (new), mod.rs, openapi.rs}`, `crates/server/src/http/{access.rs, csrf.rs, access_suite.rs}`, `crates/server/src/meta/orgs.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/{openapi.rs, api_examples.rs}`, `fixtures/api/static/device-request.json` (new), `docs/spec/08-auth.md`, `docs/spec/09-api.md`.
 - D3: `web/src/routes/device.tsx` and `device.test.tsx` (new); `web/src/routes/cli-auth.tsx`, `cli-auth.test.tsx`, `web/src/lib/cli-auth.ts` and `cli-auth.test.ts` (deleted); `web/src/lib/{external-navigation.ts, external-navigation.test.ts, redirect.test.ts}`; `web/src/routes/invite/$token.test.tsx`; `web/src/routes/login.test.tsx` (only if it sets `submit`); `web/src/mocks/writes.ts`; `crates/ui/src/lib.rs`; `docs/spec/11-ui.md`; `docs/spec/12-operations.md`.
-- D4: `crates/cli/src/{login.rs, main.rs}`, `crates/cli/Cargo.toml`, `Cargo.lock`, `docs/spec/08-auth.md` (the CLI login bullet only), `docs/spec/09-api.md` (the CLI row only), `docs/mvp-decisions.md`, `CHANGELOG.md`, `website/src/content/docs/docs/platform/api-keys.mdx`, `docs/roadmap.md`.
+- D4: `crates/cli/src/{login.rs, main.rs}`, `crates/cli/Cargo.toml`, `docs/spec/08-auth.md` (the CLI login bullet only), `docs/spec/09-api.md` (the CLI row only), `docs/mvp-decisions.md`, `CHANGELOG.md`, `website/src/content/docs/docs/platform/api-keys.mdx`, `docs/roadmap.md`.
 
 D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2's commit, so there is no conflict.
 
@@ -291,7 +293,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    5. **`Pending` or `Approving`:** if `last_poll` is `Some(t)` and `now - t < i64::try_from(interval_s).unwrap_or(i64::MAX).saturating_mul(1_000_000_000)` (`unwrap_or` is allowed; it is not `unwrap`), set `interval_s += SLOW_DOWN_STEP_S` and `last_poll = Some(now)`, and return `SlowDown`. Otherwise set `last_poll = Some(now)` and return `Pending`.
 10. **`sweep(now)`:**
     - Apply the stale-approval rule, then remove every entry whose `expires_at <= now` and whose state is `Pending` or `Denied`.
-    - Also remove an `Approved` entry whose `expires_at + CODE_TTL_NS <= now`: a grant nobody collected within 10 minutes after the expiry is dropped.
+    - Also remove an `Approved` entry whose `expires_at + APPROVING_TTL_NS <= now`: a grant nobody collected within one minute after the code's expiry is dropped (D-AO-5).
 
     `by_user` is kept in step.
 11. **Wiring.**
@@ -311,7 +313,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
 - **Release.** `claim` then `release` gives `Pending` again, and a second `claim` works.
 - **Deny.** `deny` then `poll` gives `Denied`, and the next poll gives `Expired`.
 - **Expiry.** After `CODE_TTL_NS`, `pending` is `None`, `claim` is `NotFound`, and `poll` is `Expired`.
-- **Sweep.** It removes expired pending entries. It removes an approved entry only after `expires_at + CODE_TTL_NS`.
+- **Sweep.** It removes expired pending entries. It removes an approved entry only after `expires_at + APPROVING_TTL_NS`.
 - **Full.** With `MAX_CODES` entries, `issue` is `Full`. After they expire, `issue` succeeds, because it sweeps first. Build the full table with a test-only loop of `issue` calls.
 - **`Debug`.** `format!("{:?}", grant)` and `format!("{:?}", issued)` contain neither the token, the key nor the device code.
 - **Limiters** (`auth/limits.rs`'s tests):
@@ -434,6 +436,20 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    | `POST /api/auth/device/{user_code}/approve` | `Access::User { session_only: true }` | `post(approve)` |
    | `POST /api/auth/device/{user_code}/deny` | `Access::User { session_only: true }` | `post(deny)` |
 
+   **Imports** (`routes/device.rs`):
+   - `crate::http::client_ip::ClientIp`;
+   - `crate::auth::principal::{session_user, AuthUser, Principal}`;
+   - `crate::auth::limits::network_key`;
+   - `crate::auth::roles::{KeyScope, ProjectPerm}` and `crate::auth::secret::{self, KeyKind}`;
+   - `crate::auth::device::{Grant, GrantProject, Pending, Purpose}`;
+   - `crate::http::access::user_project` and `crate::http::error::{self, field_error, ApiError}`;
+   - `crate::meta::orgs::org_by_id`, and `crate::meta::{personal_tokens::{self, NewToken}, api_keys::{self, NewApiKey}}`;
+   - `axum::http::{header, StatusCode}` and `axum::response::{IntoResponse, Response}`.
+
+   If one of these paths does not exist, find the path the crate uses (`grep -rn "use crate::.*<Name>"`) and report it.
+
+   One private helper names the secrets, so that the call sites cannot diverge: `fn token_name(prefix: &str, host: Option<&str>) -> String` returns `"<prefix> on <host>"`, or `prefix` without a host. Its prefixes are `"CLI"` (login) and `"CLI init"` (init).
+
    **Extractors.** Handlers use `State(state): State<AppState>`, `ClientIp(ip): ClientIp`, `Extension(principal): Extension<Principal>`, `error::Path(user_code): error::Path<String>` and `error::Json(body): error::Json<T>`, as `routes/tokens.rs` does. Never axum's own `Path` or `Json`.
 
    **The three session handlers** start with `let user = session_user(&principal)?;`, then `state.limits.device_lookup.check(&user.id, now)`. A refusal maps to `ApiError::RateLimited { retry_after_s: retry.0.as_secs().max(1) }`.
@@ -509,7 +525,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    ```
 
    A session request to those two paths is still checked, because `session` is true.
-9. **Reserved slugs** (`meta/orgs.rs` `RESERVED`). Replace `"cli-auth"` with `"device"`, keeping the list's order rule. Update the test `slugs_match_the_shape_and_the_reserved_list` the same way.
+9. **Reserved slugs** (`meta/orgs.rs` `RESERVED`). Remove `"cli-auth"` and insert `"device"` right after `"demo"` (`"demo", "device", "healthz", …`). The shorter line lets rustfmt reflow it; `just fmt` after D4 does that. Update the test `slugs_match_the_shape_and_the_reserved_list` the same way.
 10. **Access suite** (`http/access_suite.rs` `concrete_path`). Add `.replace("{user_code}", "BCDF-GHJK")` next to the other replacements.
 11. **OpenAPI** (`api/openapi.rs`):
     - Insert the eight types (`DevicePurpose`, `DeviceCodeRequest`, `DeviceCodeResponse`, `DeviceTokenRequest`, `DeviceGrantProject`, `DeviceGrant`, `DeviceRequest`, `DeviceApproveRequest`) in `collect_schemas`, with a `use crate::api::device::{…};` at the top of `openapi.rs`.
@@ -530,9 +546,17 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
     - Put `post_device_code` and `post_device_token` in the public security list, and the other three in the session-only list.
     - Add an `else if` arm per id with the error sets of step 11. If an id's set equals the fallthrough default, no arm is needed.
 13. **Example fixture:**
-    - `fixtures/api/static/device-request.json` is `{"purpose":"init","host":"dev-laptop","created_at":"2026-01-01T00:00:00.000000000Z"}`, canonical JSON as the other static files.
+    - `fixtures/api/static/device-request.json` is exactly this, pretty-printed with two spaces and a trailing newline (the round-trip test compares `to_string_pretty` output):
+
+      ```json
+      {
+        "purpose": "init",
+        "host": "dev-laptop",
+        "created_at": "2026-01-01T00:00:00.000000000Z"
+      }
+      ```
     - In `api_examples.rs`, add `example("get_device_request", params(&[("user_code", "BCDF-GHJK")]), BTreeMap::new(), "static/device-request.json", "application/json")` next to `get_invite_preview`.
-    - In `tests/api_examples.rs`, add the arm `"get_device_request" => roundtrip::<DeviceRequest>(&example.file)`.
+    - In `tests/api_examples.rs`, add the arm `"get_device_request" => roundtrip::<DeviceRequest>(&example.file)` and `use cetra_server::api::device::DeviceRequest;`.
 14. **Spec 08:**
     - **Line 41 (CSRF).** After "…whatever its credentials (…)", add: "except the device flow's `POST /api/auth/device/code` and `POST /api/auth/device/token`, which carry no cookie (D-AO-3)".
     - **Line 27 (rate limits).** Add "Device codes: 10 per minute per client IP."
@@ -548,7 +572,11 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
     - **§ Auth table.** Add the five routes in the existing row style.
     - **§ Conventions, errors.** Add `authorization_pending`, `slow_down`, `access_denied`, `expired_token` (400; device flow) to the list of codes.
     - **Line 10** (the `/api/auth/*` row): add "device flow" to its list.
-16. **`website/src/content/docs/docs/reference/api/overview.mdx`.** Add one row per new problem code to its problem-code table (about lines 56–67): status 400, with spec 09's wording.
+16. **`website/src/content/docs/docs/reference/api/overview.mdx`.** Add four rows to its problem-code table (about lines 56–67), after `query_failed`, in the table's column format, status 400:
+    - `authorization_pending`: "Device sign-in: the code is not approved or denied yet. Poll again after the interval."
+    - `slow_down`: "Device sign-in: polled too fast. The interval grew by 5 seconds."
+    - `access_denied`: "Device sign-in: the user denied the code."
+    - `expired_token`: "Device sign-in: the code expired or was already used. Start again."
 
 **Tests:**
 - **Inline in `routes/device.rs`** (`TestApp`, `app.seed()`, the manual clock, `TestRequest` with `.origin(None)` on the two public calls so that the CSRF exemption is really exercised):
@@ -560,11 +588,11 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
   - **Login flow.** `GET /api/auth/device/{code}` with the seeded cookie is `{purpose: "login", host}`. Approve with `{}` is 204. The poll returns `server` = public origin, a `pat-cetra-` token, and no project or key. `GET /api/auth/me` with that bearer answers 200. The token's row has scopes `read, write`, name `CLI on <host>`, and expires 90 days after `now`. A second poll is `expired_token`.
   - **Init flow.** Approve with the seeded project's id. The grant has the project (`acme`, `support-bot`) and an `sk-cetra-` key. The key's row has scopes `ingest` only and the name `CLI init on <host>`. The PAT has scope `read` only.
   - Init approve without `project_id` is 400 on `project_id`; login approve with one is 400. The code stays pending after both: `GET` still answers 200.
-  - Init approve by an org member (role `member`, `app.add_member`) is 403. For a project of another org it is 404: create it with `test_support::second_org(app, slug, owner_email)`, which returns `(OrgId, Member)`, then insert a project in that org the way `second_org`'s callers do. The seeded user is an instance admin, and instance admins have no implicit access to other orgs, so the 404 holds. The code stays pending after both.
+  - Init approve by an org member (role `member`, `app.add_member`) is 403. For a project of another org it is 404: `let (org, _) = second_org(&app, "other", "o@other.test").await;`, then `crate::meta::projects::insert_project(conn, org, "Other", "other", None, now)` inside `app.state.meta.write(move |conn| Box::pin(async move { … }))` (as `ingest/mod.rs` does about line 1051), and use the returned row's `id` as `project_id`. The seeded user is an instance admin, and instance admins have no implicit access to other orgs, so the 404 holds. The code stays pending after both.
   - Deny gives 204, then the poll gives `access_denied`. Deny of an unknown code is 404.
   - A bearer PAT on `GET`, approve and deny is 403, because they are session-only.
   - A session approve with no `Origin` is 403, because CSRF still applies to the session.
-  - The logs contain neither the token nor the key. Wrap approve and the poll in `let (grant, logs) = capture_logs(async { … }).await;`, return the `DeviceGrant` from the block, then assert `!logs.contains(&grant.token)` and `!logs.contains(<the key>)`, and that the approve body is empty. `assert_logs_clean` does not fit here: it needs the needles before the block runs.
+  - The logs contain neither the token nor the key. Use the init flow. Wrap approve and the poll in `let (grant, logs) = capture_logs(async { … }).await;`, return the `DeviceGrant` from the block, then assert `!logs.contains(&grant.token)` and `!logs.contains(grant.ingest_key.as_deref().unwrap())`, and that the approve body is empty. `assert_logs_clean` does not fit here: it needs the needles before the block runs.
 - **The access suite** covers the five routes automatically once `concrete_path` knows `{user_code}`.
 - **`tests/openapi.rs`** and **`tests/api_examples.rs`** cover the contract and the fixture.
 
@@ -587,7 +615,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
 - `web/src/lib/external-navigation.test.ts`
 - `web/src/lib/redirect.test.ts`
 - `web/src/routes/invite/$token.test.tsx`
-- `web/src/routes/login.test.tsx` (only if it sets `submit`)
+- `web/src/routes/login.test.tsx`
 - `web/src/mocks/writes.ts`
 - `crates/ui/src/lib.rs`
 - `docs/spec/11-ui.md`
@@ -597,7 +625,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 
 **Steps.**
 1. **`web/src/routes/device.tsx`.** `createFileRoute("/device")`.
-   - `validateSearch` turns unknown input into `{ code?: string; project?: string }`. Keep a value only when it is a string; TanStack may parse `123` as a number, so a number becomes `String(value)`. Follow `parseLoginSearch` in `web/src/lib/search/auth.ts`.
+   - Read `code` and `project` from the raw query string, `new URLSearchParams(router.history.location.search)`, as `cli-auth.tsx` did: the router JSON-parses search values, so `1234` would become a number. No `validateSearch`.
    - The page is not public: `isPublicPath` stays as it is, so the root gate sends a signed-out user to `/login?redirect=/device?code=…` and back.
    - The layout is `AuthLayout`, with the title `` `Connect the ${PRODUCT_NAME} CLI` ``.
 2. **No `code` in the search.** A form with one text field, "Code" (placeholder `XXXX-XXXX`), and a "Continue" button that navigates to `/device?code=<value>`. It keeps `project` when present.
@@ -634,7 +662,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 6. **Delete** `web/src/routes/cli-auth.tsx`, `cli-auth.test.tsx`, `web/src/lib/cli-auth.ts` and `cli-auth.test.ts`.
 7. **`external-navigation.ts`.**
    - Remove `submitExternalForm` and the `submit` member of `ExternalNavigator` and `browserNavigator`. Their only caller was `cli-auth.tsx`.
-   - Remove the form test and the `submit:` members from `external-navigation.test.ts`, `routes/invite/$token.test.tsx`, and `routes/login.test.tsx` if it has one.
+   - Remove the form test and the `submit:` members from `external-navigation.test.ts`, `routes/invite/$token.test.tsx`, and `routes/login.test.tsx` (two places, about lines 71 and 418).
    - Run `grep -rn "submitExternalForm\|submit:" web/src` to find every other use. If a non-test file still uses them, stop and report.
 8. **`redirect.test.ts`.** Change `isPublicPath("/cli-auth")` to `isPublicPath("/device")`; it is still expected to be `false`.
 9. **`web/src/mocks/writes.ts`.** It has two structures, and `writes.test.ts` checks both: the `WRITE_OPERATIONS` array (about line 62) and the `RESPONSES` record (about line 540). Add the four ids to `WRITE_OPERATIONS`, after `post_invite_accept`, and four keys to `RESPONSES`:
@@ -645,12 +673,11 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
    `writes.test.ts` needs no edit: it reads `openapi.json` and passes once that is regenerated.
 10. **CSP** (`crates/ui/src/lib.rs`).
     - Remove ` http://127.0.0.1:*` from `form-action` in `CONTENT_SECURITY_POLICY_VALUE`, which becomes `form-action 'self'`, and from its test.
-    - Update the comment that cites the CLI callback.
 11. **Spec 11 line 12.** Replace the `/cli-auth?port=&state=&host=` row with `/device?code=&project=     CLI sign-in: approve a device code; for init, pick or create the project (D-AO-3)`, in that block's column alignment.
 12. **Spec 12 line 165.** The CSP becomes `form-action 'self'`; remove the sentence about the loopback callback.
 
 **Tests** (`device.test.tsx`, `renderApp`, `server.use` for every call; the vitest server fails on unhandled requests):
-- `/device?code=1234&project=123/456` keeps both values as strings (`"1234"`, `"123/456"`), and `?project=1e3` gives the string `"1e3"`. Read the raw query string with `router.history.location.search` and `URLSearchParams`, as `cli-auth.tsx` did, if `validateSearch` cannot give that.
+- `/device?code=1234&project=acme/123` gives the strings `"1234"` and `"acme/123"`.
 - A signed-out visit to `/device?code=BCDF-GHJK` redirects to `/login` with `redirect=/device?code=BCDF-GHJK`.
 - Without a code, typing `bcdf-ghjk` and pressing Continue navigates to `/device?code=bcdf-ghjk`.
 - An unknown code (404) shows the unknown-or-expired text.
@@ -678,7 +705,6 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 - `crates/cli/src/login.rs`
 - `crates/cli/src/main.rs` (the `Login` doc comments only)
 - `crates/cli/Cargo.toml`
-- `Cargo.lock` (only the `cetra-cli` entry, as cargo rewrites it)
 - `docs/spec/08-auth.md` (the CLI login bullet)
 - `docs/spec/09-api.md` (the CLI row)
 - `docs/mvp-decisions.md`
@@ -694,14 +720,14 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
    - their tests;
    - the imports nothing uses afterwards: `base64`, `URL_SAFE_NO_PAD`, `rand::TryRng`, `tokio::io::{AsyncReadExt, AsyncWriteExt}`, `tokio::net::{TcpListener, TcpStream}`. `Duration` stays.
 
-   Keep the test helpers `LineWriter` and `query_value` (the real-server test uses them).
+   Also delete the test helpers `start_wait`, `send_raw` and `form_post`, and the test import `use tokio::task::JoinHandle`. Keep the test helpers `example_token`, `LineWriter` and `query_value` (the real-server test uses them).
 
    Keep:
    - `sanitise_host`, `local_host`, `open_browser`, `browser_command`, `verify`, `revoke`, `http_client`, `warn`, `logout`;
    - `is_personal_token`, used in step 4;
    - the tests `a_personal_token_has_the_pat_shape` and `login_refuses_a_url_with_credentials_before_printing`;
    - the sanitising part of `the_host_is_sanitised_and_truncated_before_it_is_sent`, renamed `the_host_is_sanitised_and_truncated`.
-3. **Private serde types**, local to `login.rs`:
+3. **Private serde types**, local to `login.rs` (add `use serde::{Deserialize, Serialize};`):
 
    ```rust
    #[derive(Serialize)]
@@ -770,7 +796,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 5. **`main.rs`.** Change only the `Login` doc comments:
    - command: `/// Sign in with a code you approve in the browser, and save a personal access token for a server.` and `/// The token expires after 90 days. Run \`cetra login\` again when it does.`;
    - `--no-browser`: `/// Print the sign-in URL and code, and do not open a browser.`
-6. **`Cargo.toml`.** Remove `rand` and `base64` from `crates/cli/Cargo.toml` `[dependencies]`: only the deleted `new_state` used them. A `base64` hit in a `main.rs` doc comment is prose, not a use. `Cargo.lock` changes with it; cargo rewrites it at the final check, and that commit includes it.
+6. **`Cargo.toml`.** Remove `rand` and `base64` from `crates/cli/Cargo.toml` `[dependencies]`: only the deleted `new_state` used them. A `base64` hit in a `main.rs` doc comment is prose, not a use. `Cargo.lock` changes with it; cargo rewrites it at the final check, and the after-D4 commit includes it.
 7. **Spec 08, the CLI login bullet (line 158).** Replace it whole with:
 
    "CLI login: `cetra login --url https://…` gets a device code (§ Device authorization), prints the URL and the code, and opens the browser unless `--no-browser` is given. It polls until the user approves or denies on `/device`, or the code expires after 10 minutes. On approval it gets a `read, write` PAT named `CLI on <host>` (`CLI` without a host) that expires after 90 days, checks it with `GET /api/auth/me`, and saves it in `~/.config/cetra/credentials.toml` (0600) under the URL given to `--url`. Because the token expires after 90 days, `cetra login` must be run again then. `cetra logout` revokes that PAT with `DELETE /api/v1/me/tokens/current`. The device flow works when the browser runs on another machine (SSH, containers) (D-AO-4)."
@@ -782,7 +808,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 10. **`CHANGELOG.md` `[Unreleased]`.**
     - `### Changed`: "`cetra login` signs in with a code you approve in the browser, so it works over SSH and in containers."
     - `### Removed`: "The `/cli-auth` page and the CLI's localhost callback."
-11. **`api-keys.mdx` line 31.** It becomes: "For the CLI, `cetra login` shows a code that you approve in the browser, and saves a token that expires after 90 days."
+11. **`api-keys.mdx` line 31.** Replace only the sentence "For the CLI, `cetra login` creates a token for you in the browser. It expires after 90 days." with: "For the CLI, `cetra login` shows a code that you approve in the browser, and saves a token that expires after 90 days."
 12. **`docs/roadmap.md`.** In the AO row's Status, write `**Design** approved; M1 implemented (the device flow, \`/device\`, \`cetra login\` on it).` If M2 is already marked there, keep its words.
 
 **Tests** (in `login.rs`):
@@ -813,6 +839,6 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 
 ## After D4 (the coordinating session)
 
-1. `just openapi`, `just api-examples`, `just docs-gen` (commit the regenerated `openapi.json`, `schema.gen.ts`, `fixtures/api/manifest.json` and `reference/cli.md` as `Regenerate the API contract and the CLI reference`).
+1. `just fmt`, then `just openapi`, `just api-examples`, `just docs-gen` (commit the formatting changes, `Cargo.lock`, and the regenerated `openapi.json`, `schema.gen.ts`, `fixtures/api/manifest.json` and `reference/cli.md` as `Regenerate the API contract and the CLI reference`).
 2. `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just check`, once; fixes go back to a Haiku agent with an exact brief.
 3. A Sonnet code review of D1–D4.
