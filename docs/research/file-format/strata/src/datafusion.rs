@@ -17,8 +17,8 @@ use arrow::compute::{SortColumn, concat_batches, lexsort_to_indices, take_record
 use arrow::compute::{SortOptions, cast};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use async_trait::async_trait;
-use futures::TryStreamExt;
 use futures::future::try_join_all;
+use futures::{StreamExt as _, TryStreamExt};
 use object_store::ObjectStore;
 use object_store::path::Path;
 
@@ -184,6 +184,40 @@ pub(crate) fn to_table_batch(batch: &RecordBatch, table_schema: &SchemaRef) -> R
         columns,
         &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
     )?)
+}
+
+/// The batches of `batches`, built on a blocking thread up to `ahead` batches ahead of the
+/// consumer, so that a partition builds its next batches while DataFusion works on the ones
+/// before: built in the consumer's task, the build threads waited for it between steps
+/// (`real-data.md` § Payload scans). Dropping the stream stops the building.
+fn built_ahead(
+    batches: Box<dyn Iterator<Item = Result<RecordBatch>> + Send>,
+    ahead: usize,
+) -> impl futures::Stream<Item = Result<RecordBatch>> + Send {
+    let (tx, rx) = tokio::sync::mpsc::channel(ahead.max(1));
+    let task = SpawnedTask::spawn_blocking(move || {
+        for batch in batches {
+            // The receiver is gone: the stream was dropped.
+            if tx.blocking_send(batch).is_err() {
+                break;
+            }
+        }
+    });
+    // The task is kept with the receiver: dropping it aborts the building.
+    futures::stream::unfold((rx, task), |(mut rx, task)| async move {
+        rx.recv().await.map(|batch| (batch, (rx, task)))
+    })
+}
+
+/// Whether `projection` holds a payload column of one of `files`.
+fn reads_payload(files: &[Arc<StrataFile>], projection: &[usize]) -> bool {
+    files.iter().any(|file| {
+        projection.iter().any(|&column| {
+            file.directory()
+                .get(column)
+                .is_some_and(|record| record.layer == Layer::Payload)
+        })
+    })
 }
 
 /// Fewest rows in one partition's range when a file is split.
@@ -960,8 +994,11 @@ fn kth_int(batch: &RecordBatch, position: usize, row: usize) -> Result<Option<i6
 
 impl StrataExec {
     /// An exec over `files`. `schema` is the output schema, the projection of the table schema.
-    /// A scan splits each file into row ranges so that there are about `target_partitions`
-    /// partitions; a lookup reads each file whole.
+    /// A scan of narrow columns splits each file into row ranges so that there are about
+    /// `target_partitions` partitions. A lookup, and a scan that reads a payload column, read
+    /// each file whole: a row's value shares chunks with earlier rows, so the partitions of one
+    /// file would fetch and decode the same frames, 25% more on WildChat (`real-data.md`
+    /// § Payload scans). Such a partition builds its batches on its share of the cores.
     fn new(
         files: Vec<Arc<StrataFile>>,
         projection: Vec<usize>,
@@ -971,14 +1008,8 @@ impl StrataExec {
         schema: SchemaRef,
         target_partitions: usize,
     ) -> StrataExec {
-        let parts = split_files(
-            &files,
-            if lookup.is_some() {
-                1
-            } else {
-                target_partitions
-            },
-        );
+        let whole = lookup.is_some() || reads_payload(&files, &projection);
+        let parts = split_files(&files, if whole { 1 } else { target_partitions });
         let props = plan_properties(&files, &projection, &schema, parts.len().max(1), None);
         StrataExec {
             files,
@@ -1284,12 +1315,21 @@ impl ExecutionPlan for StrataExec {
         // Partitions run at once: each builds its batches on its share of the cores.
         let cores = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         let threads = cores.div_ceil(self.partitions()).max(1);
+        // Only a scan that rebuilds payload values builds its batches ahead: handing small,
+        // cheap batches over a channel cost more than it saved (`real-data.md` § Payload scans).
+        let payload = reads_payload(&self.files, &self.projection);
         type Batches = Box<dyn Iterator<Item = Result<RecordBatch>> + Send>;
         let fut = async move {
             let Some(file) = file else {
-                return Ok::<Batches, DataFusionError>(Box::new(std::iter::empty()));
+                return Ok::<(Batches, bool), DataFusionError>((
+                    Box::new(std::iter::empty()),
+                    false,
+                ));
             };
             let before = file.io_stats();
+            // Whether the batches are built ahead: a payload scan with more than one step of
+            // batches left; the others are built already, in one step, or cheap.
+            let mut ahead = false;
             let batches: Batches = match lookup {
                 Some(key) => Box::new(
                     file.lookup_scan(&key, &projection, true)
@@ -1322,7 +1362,10 @@ impl ExecutionPlan for StrataExec {
                             let sorted = sort_rows(rows, &scan_schema, keys, fetch).map_err(df)?;
                             Box::new(sorted.into_iter().map(Ok))
                         }
-                        None => Box::new(scanned),
+                        None => {
+                            ahead = payload && scanned.steps_left() > 1;
+                            Box::new(scanned)
+                        }
                     }
                 }
             };
@@ -1339,21 +1382,26 @@ impl ExecutionPlan for StrataExec {
             );
             // The batches are built as DataFusion asks for them, so a partition holds a few
             // batches and the frames they share, not the whole file's values.
-            Ok(batches)
+            Ok((batches, ahead))
         };
         let stream = futures::stream::once(fut)
-            .map_ok(move |batches| {
+            .map_ok(move |(batches, ahead)| {
                 // `map_ok` takes an `FnMut`; it runs once.
                 let (elapsed, output_rows, schema) =
                     (elapsed.clone(), output_rows.clone(), Arc::clone(&schema));
-                futures::stream::iter(batches.map(move |batch| {
+                let batches = if ahead {
+                    built_ahead(batches, threads).boxed()
+                } else {
+                    futures::stream::iter(batches).boxed()
+                };
+                batches.map(move |batch| {
                     let _timer = elapsed.timer();
                     let batch = batch
                         .and_then(|b| to_table_batch(&b, &schema))
                         .map_err(df)?;
                     output_rows.add(batch.num_rows());
                     Ok(batch)
-                }))
+                })
             })
             .try_flatten();
         Ok(Box::pin(RecordBatchStreamAdapter::new(
@@ -1770,6 +1818,99 @@ mod tests {
             8,
         );
         assert!(without_key.properties().output_ordering().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_scan_that_reads_a_payload_column_reads_each_file_whole() {
+        // 140,000 rows: two partitions of at least `MIN_PARTITION_ROWS` when split. The config
+        // makes the string columns payload columns.
+        let config = Config {
+            payload_min_avg: 1,
+            ..Config::default()
+        };
+        let file = open(&wide_batch(140_000), config).await;
+        let table = StrataTable::new(vec![Arc::clone(&file)]).unwrap();
+        let schema = Arc::clone(&table.schema);
+        let exec = |projection: Vec<usize>| {
+            StrataExec::new(
+                table.files.clone(),
+                projection.clone(),
+                None,
+                None,
+                None,
+                project_schema(&schema, Some(&projection)).unwrap(),
+                8,
+            )
+        };
+        let column_in = |layer: Layer| {
+            (0..schema.fields().len())
+                .find(|&c| file.directory()[c].layer == layer)
+                .unwrap()
+        };
+        let (narrow, payload) = (column_in(Layer::Narrow), column_in(Layer::Payload));
+        assert_eq!(exec(vec![narrow]).partitions(), 2);
+        assert_eq!(exec(vec![payload]).partitions(), 1);
+        assert_eq!(exec(vec![narrow, payload]).partitions(), 1);
+    }
+
+    #[tokio::test]
+    async fn batches_built_ahead_keep_their_order_and_errors_and_stop_when_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let batch = |n: i64| {
+            RecordBatch::try_from_iter([(
+                "n",
+                Arc::new(arrow::array::Int64Array::from(vec![n])) as arrow::array::ArrayRef,
+            )])
+            .unwrap()
+        };
+        let value = |b: &RecordBatch| {
+            b.column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        // Every batch, in order, with an error in its place.
+        let items: Vec<Result<RecordBatch>> = (0..20)
+            .map(|n| {
+                if n == 7 {
+                    Err(StrataError::Corrupt {
+                        what: "test",
+                        offset: 7,
+                    })
+                } else {
+                    Ok(batch(n))
+                }
+            })
+            .collect();
+        let got: Vec<Result<RecordBatch>> =
+            built_ahead(Box::new(items.into_iter()), 3).collect().await;
+        assert_eq!(got.len(), 20);
+        for (n, item) in got.iter().enumerate() {
+            match item {
+                Ok(b) => assert_eq!(value(b), n as i64),
+                Err(StrataError::Corrupt { offset: 7, .. }) => assert_eq!(n, 7),
+                Err(e) => panic!("{e}"),
+            }
+        }
+        // A consumer that stops after two batches: the building stops too, at most the channel's
+        // capacity and the batch being sent ahead of it.
+        let built = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&built);
+        let endless = (0..).map(move |n| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(batch(n))
+        });
+        let mut stream = Box::pin(built_ahead(Box::new(endless), 3));
+        for n in 0..2 {
+            assert_eq!(value(&stream.next().await.unwrap().unwrap()), n);
+        }
+        drop(stream);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after_drop = built.load(Ordering::SeqCst);
+        assert!(after_drop <= 2 + 3 + 2, "{after_drop} batches built");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(built.load(Ordering::SeqCst), after_drop);
     }
 
     /// The rows of `sql`, the segment bytes it fetched, and its physical plan, with DataFusion's sort

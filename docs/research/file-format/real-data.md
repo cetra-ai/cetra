@@ -341,6 +341,44 @@ Before, the file pruning already dropped the files outside the range, but inside
 - **Frames: +4%** against Parquet's text column. Frames are 64 KiB so that a point read decompresses little; Parquet's pages are about 1 MB.
 - **Previews: +23%**, of which about 64 MiB is the preview store's own index and refs. Previews are rarely searched; dropping their index would save 0.7% of the file, and make a `LIKE` on a preview column read every frame.
 
+## Payload scans
+
+`scan_all_payload` reads every value of `input` and `output` (`sum(length(…))`). It was the query where Strata trailed most: on wildchat 587 ms against Vortex compact's 424 and Parquet's 657, with 6.2 s of CPU against 4.6 and 2.6.
+
+**Where the time went** (wildchat, 2026-11-20; pprof, then perf with kernel stacks):
+- zstd decompression of the frames: about 40%. Strata decompresses 3.2 GB of frames for 5.9 GB of values.
+- Rebuilding the values whose chunks are not consecutive in one frame: 19% of the rows, but 3.4 GB of the values, mostly conversation histories made of chunks of earlier values. Each is copied into the array (libc `memcpy` 14%); the other 2.5 GB are views into the frames.
+- DataFusion's `length()`: 12–16%, the same work for every format.
+- Local reads (`pread` and the page-cache copy): about 10%. Zeroing fresh pages in the kernel: under 2%.
+- **Frames decoded twice.** DataFusion's 12 partitions split each of the 4 files into 3 row ranges. A row in one range points back to chunks of frames in the range before, so both partitions fetch and decode them: 48,214 frames instead of 38,582 (+25%).
+- **Idle build threads.** A partition built a step of batches on its threads, then waited while DataFusion computed `length()` on them in its own task.
+
+**The changes:**
+- A scan that reads a payload column takes one partition per file, each building on its share of the cores (`StrataExec::new`). Narrow scans are still split.
+- Such a scan builds its batches on a blocking thread, up to a step ahead of DataFusion (`built_ahead`). Dropping the stream stops the building. On every scan, the channel cost light's small scans 0.4–1.5 ms, so only payload scans with more than one step of batches use it.
+
+**Results** (Strata, ms, mean of three alternating rounds of 20 runs; CPU in ms):
+
+| Dataset | Before | After | CPU before | CPU after | Vortex compact | Parquet default |
+|---|---|---|---|---|---|---|
+| wildchat | 586 | **517** | 6,233 | 5,016 | 424 | 657 |
+| toucan | 281 | 285 | 2,570 | 2,582 | 211 | 299 |
+| payload | 350 | 353 | 2,975 | 3,020 | 266 | 340 |
+| swe | 241 | 243 | 2,446 | 2,447 | | |
+| openswe | 242 | 245 | 1,050 | 1,041 | | |
+
+- Wildchat: −12% in time, −20% in CPU. With one partition per file and no build-ahead, CPU fell as much but the time did not move (577 against 576 ms): the cores were idle a quarter of the time (5.1 s of CPU in 576 ms on 12 cores).
+- Toucan, payload, swe and openswe moved within ±2%: their partitions shared few frames.
+- The other queries (two rounds over the six datasets and FineWeb's Braintrust queries, then the doubtful ones again in four rounds) stayed within the spread between two binaries, a few percent; light's queries of 1–10 ms moved by at most 0.45 ms, including `substring_input`, whose code path did not change.
+- Simulated S3: payload's scan 664 → 558 ms, toucan's 516 → 500, wildchat's 804 → 828 (one round each).
+
+**Tried and dropped:**
+- Copying a rebuilt value's chunks straight into the array's blocks instead of through a scratch buffer: 1–4% slower. The cost is writing 3.4 GB to fresh memory, not the extra copy.
+- Checking a rebuilt value's UTF-8 by its chunks' boundaries in already-checked frames instead of in full: no difference. Almost all of `simdutf8`'s time is the one check of each frame.
+- `MIMALLOC_PURGE_DELAY=-1`, keeping freed memory instead of returning it to the system: 2–5% faster for every format, Parquet and Vortex too. It is a setting of the server, not of the format.
+
+**What is left.** Vortex compact still takes 18–26% less time on these scans. It also decompresses with zstd; most likely the repeated histories inside its larger blocks become long matches, which zstd copies as it decompresses (its profile is dominated by the copy loop of `ZSTD_decompressFrame`). Strata decompresses less, then copies the histories again to make each value contiguous, as `Utf8View` requires. That copy is the price of deduplication, which makes Strata's files 4–20% smaller than Vortex compact's on these datasets and makes trace reads and searches faster.
+
 ## Narrow aggregates
 
 Vortex compact won `model_rollup_day` on toucan and wildchat and FineWeb's spans per hour. After the changes above (ms, local, median of 30 runs; FineWeb 10):

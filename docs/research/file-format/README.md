@@ -415,7 +415,7 @@ Strata v1 is v0 with the changes below, each made after a profile or a byte coun
 
 | Area | Change | Why |
 |---|---|---|
-| DataFusion scan | Each file is split into row-range partitions, about `target_partitions` in all; files that no chunk can match are dropped first (`StrataFile::may_match`). | v0 gave one partition per file: 4 cores of 12. |
+| DataFusion scan | Each file is split into row-range partitions, about `target_partitions` in all; files that no chunk can match are dropped first (`StrataFile::may_match`). A scan that reads a payload column takes one partition per file and builds its batches ahead of DataFusion (`real-data.md` § Payload scans). | v0 gave one partition per file: 4 cores of 12. Split payload scans decoded shared frames once per partition. |
 | Scan internals | Chunks are found once per chunk, not once per row; contiguous runs are sliced instead of gathered; no error value is built on the success path. | Per-row binary searches and `BTreeSet` inserts took about 30% of the CPU. |
 | Dictionary strings | Decoded as `Dictionary(UInt32, Utf8)` over the file dictionary's shared values; comparisons run on codes (the dictionary is sorted); `Utf8View` is built only for DataFusion's output. | v0 copied every string twice. |
 | Decoding | Bit-unpacking reads one unaligned word per value; numeric chunks decode in one pass into the Arrow buffer. | Three intermediate copies per chunk. |

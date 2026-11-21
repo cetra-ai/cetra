@@ -723,6 +723,13 @@ impl ScanBatches {
         self.selection.len().div_ceil(BATCH_ROWS)
     }
 
+    /// The steps of batches left to build: each builds up to `threads` batches at once.
+    pub(crate) fn steps_left(&self) -> usize {
+        self.batch_count()
+            .saturating_sub(self.next)
+            .div_ceil(self.threads.max(1))
+    }
+
     /// Builds batch `index`: the rows of `selection` from `index * BATCH_ROWS`.
     fn build(&self, index: usize) -> Result<RecordBatch> {
         let start = index * BATCH_ROWS;
@@ -2006,6 +2013,8 @@ mod tests {
                         top: None,
                     };
                     let mut batches = file.scan_batches(&req, threads).await.unwrap();
+                    // Four batches, built `threads` at a time.
+                    assert_eq!(batches.steps_left(), 4usize.div_ceil(threads));
                     let all = batches.frames_held();
                     let mut got: Vec<Option<String>> = Vec::with_capacity(n);
                     let mut held = Vec::new();
@@ -2019,6 +2028,7 @@ mod tests {
                     assert_eq!(got, text, "views {views}, {threads} threads");
                     assert_eq!(held.len(), 4);
                     assert_eq!(batches.frames_held(), 0);
+                    assert_eq!(batches.steps_left(), 0);
                     if threads == 1 {
                         // Each batch drops the frames no later batch uses. The first batch's
                         // frames are almost all used again by the second.
