@@ -133,8 +133,8 @@ The routes follow RFC 8628, plus a project step and the cetra secrets. Every rou
 | Route | Access | Body → answer |
 |---|---|---|
 | `POST /api/auth/device/code` | public, rate-limited per IP (10 a minute) | `{purpose: "login" \| "init", host?: string}` → `200 {device_code, user_code, verification_uri, verification_uri_complete, expires_in: 600, interval: 5}` |
-| `POST /api/auth/device/token` | public | `{device_code}` → `200 DeviceGrant`, or `400 {error}` with `error` ∈ `authorization_pending`, `slow_down`, `access_denied`, `expired_token` (RFC 8628 § 3.5 names) |
-| `GET /api/auth/device/{user_code}` | session | `{purpose, host?, created_at}` for the approval page; 404 when unknown or expired |
+| `POST /api/auth/device/token` | public | `{device_code}` → `200 DeviceGrant`, or a `400` problem whose `code` is `authorization_pending`, `slow_down`, `access_denied` or `expired_token` (RFC 8628 § 3.5 names, in our problem+json shape) |
+| `GET /api/auth/device/{user_code}` | session only | `{purpose, host?, created_at}` for the approval page; 404 when unknown or expired |
 | `POST /api/auth/device/{user_code}/approve` | session only | `{project_id?}`: required for `init`, refused for `login` → `204` |
 | `POST /api/auth/device/{user_code}/deny` | session only | → `204` |
 
@@ -154,9 +154,9 @@ DeviceGrant = {
 - **Polling.** A `token` call within `interval` of the previous one answers `slow_down` and adds 5 s to that code's interval.
 - **Approval** mints the secrets on the server, at approval time, as the session user:
   - `login` (the Rust `cetra login` and `cetra-cli login`): a PAT with scopes `read, write`, as `cetra login` gets today.
-  - `init`: a PAT with scope `read`, which is what `query` and the trace MCP need. It also mints an ingest-only project key named `cetra-cli init (<host>)`. The user needs a project role that may create keys; otherwise the approval answers 403.
+  - `init`: a PAT with scope `read`, which is what `query` and the trace MCP need. It also mints an ingest-only project key. The user needs the project permission that creating keys needs (`ManageSettings`: project admin, or org admin or owner). Otherwise the approval answers 403, or 404 for a project the user cannot see.
 
-  The PAT's name is `cetra <purpose> on <host>`, as today.
+  Names: `CLI on <host>` for `login`, as today (D-L-9), and `CLI init on <host>` for both secrets of `init`. Without a host they are `CLI` and `CLI init`.
 - **Hand-over.** The plaintext secrets stay **in memory only**, in the code's entry, until the first successful `token` call takes them, at most 10 minutes. They are never written to disk or logged.
   - A restart loses pending codes. The CLI then gets `expired_token` and says to run the command again.
   - The PAT and the key already exist in `meta.db` and appear on the account and project pages, where the user can revoke them.
@@ -164,12 +164,13 @@ DeviceGrant = {
   - At most 10 000 pending codes per process; one more answers `503`.
   - Expired entries are swept every minute.
   - A denied or expired code never hands anything over.
+- **CSRF.** `code` and `token` are exempt from the `Origin` check on `/api/auth/` (D141). They carry no ambient credential, and a CLI sends no `Origin`. Approve and deny are browser calls with a session, so the check applies to them as before.
 - **Phishing.** The approval page shows the `host` the CLI reported and the purpose, warns "Only continue if you just ran `cetra-cli init`, `cetra-cli login` or `cetra login` on this computer", and needs an explicit click. The code alone never approves.
 - **Approval page** (`/device`, web):
   1. It asks for the code, or reads `?code=`. A user who is not signed in goes through login first and comes back.
   2. For `init`, it lists the orgs and projects the user can create keys in, offers "New project" (name, then the org's project-creation route), and preselects the only project when there is one.
   3. Approve or Deny.
-- **Deleted:** the `/cli-auth` page, its tests, the localhost callback server in `login.rs`, and the callback's sections in spec 08. There is no compatibility path (`AGENTS.md`).
+- **Deleted:** the `/cli-auth` page and its tests, the localhost callback server in `login.rs`, the callback's sections in spec 08, the CSP's `form-action http://127.0.0.1:*`, and the reserved org slug `cli-auth` (`device` replaces it). There is no compatibility path (`AGENTS.md`).
 
 ### `@cetra-ai/cli` (M3)
 
@@ -312,10 +313,11 @@ The same text is in the docs page, with placeholders, so users of another setup 
 skills/cetra/
   SKILL.md                    hand-written
   references/                 generated from the docs; never edited by hand
-    python.md  typescript.md  opentelemetry.md  integrations.md
+    python.md  python-tracing.md  typescript.md  typescript-tracing.md  typescript-runtimes.md
+    opentelemetry.md  otlp.md  metadata-and-tags.md  privacy-controls.md  sql-schema.md
     <one page per integration: openai.md, anthropic.md, langchain.md, vercel-ai-sdk.md, …>
-    verify.md  troubleshooting.md
-skills.json                   the list: reference name → docs page path
+    troubleshooting.md
+references.json               (in skills/, outside the skill) reference name → docs page path
 ```
 
 **`SKILL.md`** has the Agent Skills frontmatter:
@@ -329,7 +331,7 @@ Its body is short (about 150 lines) and **routes**:
 - how to check the result with `npx @cetra-ai/cli query`, and the trace MCP as an alternative;
 - when to read `https://cetra.sh/llms.txt` or use the docs MCP.
 
-**References are generated** from the docs' MDX by the same converter that produces the site's `.md` pages (M4 adds it; M2 adds the script and M4 reuses it). `website/scripts/skill-references.mjs` reads `skills.json`, converts each page, rewrites site links to absolute `https://cetra.sh/...` URLs, and writes `skills/cetra/references/`.
+**References are generated** from the docs' MDX by **our converter**, `website/scripts/markdown.mjs`. It wraps `tidymd` 0.2.0 (the converter inside `starlight-page-actions`) with a pre-pass for our components: tab labels kept as bold lines, sample markers, `<Backing>` and `<Image>` dropped. `tidymd` alone loses the tab labels and leaves the markers (`ao-m2-code-facts.md` § 3). M4's `.md` pages use the same converter, so the skill and the pages say the same thing. `website/scripts/skill-references.mjs` reads `skills/references.json` (reference name → docs page), converts each page with absolute `https://cetra.sh/...` links, and writes `skills/cetra/references/`.
 
 **Checks** in `just check-docs`:
 - the generated references must equal what is committed (`CETRA_DOCS_WRITE=1` rewrites them, through `just docs-gen`, like the CLI reference);
@@ -342,10 +344,10 @@ Its body is short (about 150 lines) and **routes**:
 
 - **`llms.txt`, `llms-full.txt`, `llms-small.txt`**: already served by `starlight-llms-txt` 0.12.0 (D-W-19), the latest version on 2026-11-21. No change.
 - **Markdown pages and the "Copy page" button**:
-  - `starlight-page-actions` 0.7.1 (latest on 2026-11-21; peer `@astrojs/starlight >=0.36.0`, we have 0.42.10). Its build copies every page as cleaned Markdown at `<page>.md` and adds a "Copy Markdown" button and an "Open in" menu (Claude, ChatGPT).
-  - Configured **without `baseUrl`**: with one set it also writes `llms.txt`, which would clash with `starlight-llms-txt`.
-  - It overrides `PageTitle` and `TableOfContents`. M4's plan checks that this works with our `TwoColumnContent` override.
-  - The skill references reuse its converter (`tidymd`, its dependency), so the skill and the `.md` pages say the same thing.
+  - After `astro build`, `website/scripts/md-pages.mjs` writes `dist/docs/<page>/index.md` for every page with the M2 converter, so `https://cetra.sh/docs/<page>/index.md` serves the Markdown. Generated pages (the API reference from `starlight-openapi`) have no MDX source and get no `.md` copy.
+  - A `PageTitle` override adds two small actions next to the title: "Copy page", which fetches that `.md` and copies it, and "View as Markdown".
+  - `llms.txt` stays with `starlight-llms-txt` (D-W-19).
+  - `starlight-page-actions` is rejected: its transform cannot be changed, so its `.md` pages would keep our sample markers and lose the tab labels.
 - **Docs MCP** at `https://cetra.sh/mcp`:
   - **Where.** A Worker script is added to `cetra-site`. `run_worker_first: ["/mcp"]` sends only that path to the script; everything else stays static assets.
   - **Protocol.** `@modelcontextprotocol/sdk` 1.32.2, streamable HTTP, stateless, JSON responses, no auth. Cloudflare's `agents` 0.34.0 is rejected: it brings Durable Objects for sessions we do not need.
@@ -394,7 +396,7 @@ The secrets are minted on the cell and leave it only toward the CLI: the control
 | D-AO-9 | Skill delivery | **Shipped inside `@cetra-ai/cli` and installed by `init` into `.claude/skills/cetra/` and `.agents/skills/cetra/` at the repository root; mirrored by CI to the public `cetra-ai/skills` repository, with the Claude, Codex and Cursor plugin manifests.** The installed skill matches the CLI version. Rejected: downloading from a moving branch at setup time (Laminar), which needs the network, is not pinned to the version, and installs content from outside the release. A directory without our `.cetra-skill` marker is never overwritten. |
 | D-AO-10 | Check step | **`npx @cetra-ai/cli query` over the `traces` view**, with `--json` and a 15-minute window, through the SQL console endpoint. The PAT from `init` is enough, and the project link gives the server and project. The trace MCP is mentioned in the skill as an alternative but not configured (non-goal). |
 | D-AO-11 | Local server | **On a loopback URL with nothing listening, `init` offers to start a local server: `cetra serve` detached when the binary is on PATH, else the quick start's `docker run` when Docker answers, else the install steps.** It uses generated `CETRA_INIT_*` values (the user, 2026-11-21). On a first start it signs in with the generated password, without a browser, and prints the password once. Rejected: printing the start command and exiting, which is one more step before the first trace. |
-| D-AO-12 | Markdown pages | **`starlight-page-actions` 0.7.1, without `baseUrl`**: `.md` copies of every page, "Copy Markdown" and "Open in Claude / ChatGPT". `llms.txt` stays with `starlight-llms-txt` (D-W-19). Rejected: `starlight-dot-md` 0.2.1 (no button), and a hand-written component (we would own the MDX-to-Markdown conversion). |
+| D-AO-12 | Markdown pages | **Our own converter, `website/scripts/markdown.mjs` (`tidymd` 0.2.0 plus a pre-pass for our components), writes the skill references (M2) and a `.md` copy of every page after the build (M4); a `PageTitle` override adds "Copy page" and "View as Markdown".** One converter keeps the skill and the pages identical. `llms.txt` stays with `starlight-llms-txt` (D-W-19). Rejected: `starlight-page-actions` 0.7.1, whose fixed transform loses tab labels and keeps our sample markers; `starlight-dot-md` 0.2.1, which has no button and the same conversion problem. |
 | D-AO-13 | Docs MCP | **In this track** (the user, 2026-11-21). The tools are `search_docs` and `get_page` on the `cetra-site` Worker at `/mcp`: stateless, no auth, MiniSearch over the `.md` pages, nothing logged. Amends D-W-3: the Worker gains a script for that one path. D-W-11 stands: search without a model. |
 | D-AO-14 | Cloud routing | **`app.cetra.sh` issues the code and registers it on the org's cell through a control-plane call. The CLI is sent on to the cell with `moved`, and the secrets never pass through the control plane** (the user chose routing through `app.cetra.sh`, 2026-11-21). The cell side is in this track; the control-plane side is a request to track Q. Rejected: asking the region in the CLI, which hard-codes cell URLs in the binary. |
 | D-AO-15 | Agent-friendly CLI | **Human text on stderr; `--json` (one object on stdout, no secrets), `--yes`, `--no-browser`, and fixed exit codes 3–6** for an agent that runs the CLI itself. |
@@ -428,7 +430,7 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 - `skill-references.mjs` with its write and check modes; the checks in `just check-docs` and the rewrite in `just docs-gen`.
 - The plugin manifests in `skills/manifests/`, `just skills-mirror`, and `skills-mirror.yml`.
 
-**Depends on:** nothing new. The converter comes in with M2: M2 adds the `starlight-page-actions` dependency for its `tidymd` converter, or `tidymd` directly; M2's plan settles which from the code then.
+**Depends on:** nothing new. M2 adds the converter (`markdown.mjs`, `tidymd`).
 
 **Leaves out:**
 - creating the `cetra-ai/skills` repository and its deploy key: the user does that (§ Open questions);
@@ -459,12 +461,12 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 ### M4 — Docs for agents
 
 **Delivers:**
-- `starlight-page-actions` configured, with `.md` pages and the "Copy page" button.
+- `md-pages.mjs` writing the `.md` pages, and the `PageTitle` override with "Copy page" and "View as Markdown".
 - The docs MCP: the Worker script, the index build and its tests.
 - The `wrangler.jsonc` change, and D-W-3 amended in spec and decisions.
 - A docs page section on the docs MCP.
 
-**Depends on:** M2's converter choice.
+**Depends on:** M2's converter.
 
 **Leaves out:** AI answers (D-W-11).
 
