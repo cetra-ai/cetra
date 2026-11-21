@@ -291,6 +291,28 @@ it("filters the rows by status from the summary counts", async () => {
   expect(screen.getByRole("button", { name: "Failed 1" })).toHaveAttribute("aria-pressed", "true");
 });
 
+it("selecting the selected status chip again clears the filter", async () => {
+  const user = userEvent.setup();
+  const running = { ...fixtureExperiment(BASELINE_ID), name: "in-flight", status: "running" as const };
+  server.use(
+    http.get(EXPERIMENTS_PATH, () =>
+      HttpResponse.json({ data: [fixtureExperiment(CANDIDATE_ID), running], next_cursor: null }),
+    ),
+  );
+  const { router } = await renderApp("/acme/support-bot/experiments");
+  await screen.findByRole("table", { name: "Experiments" });
+
+  await user.click(screen.getByRole("button", { name: "Completed 1" }));
+  await waitFor(() => expect(router.state.location.href).toContain("status=completed"));
+  expect(within(screen.getByRole("table", { name: "Experiments" })).queryByText("in-flight")).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "Completed 1" }));
+  await waitFor(() => expect(router.state.location.href).not.toContain("status="));
+  expect(
+    within(screen.getByRole("table", { name: "Experiments" })).getByText("in-flight"),
+  ).toBeInTheDocument();
+});
+
 it("opens an experiment from a row click, but not from its link", async () => {
   const user = userEvent.setup();
   const { router } = await renderApp("/acme/support-bot/experiments");

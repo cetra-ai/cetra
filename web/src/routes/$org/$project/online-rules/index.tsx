@@ -15,6 +15,7 @@ import type { Schema } from "@/api/types";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { FilterChips } from "@/components/filter-chips";
 import { TraceLayoutControls } from "@/components/layout-switcher";
 import { EnabledSwitch } from "@/components/online-rules/enabled-switch";
 import { EvaluatorCell } from "@/components/online-rules/evaluator-cell";
@@ -41,12 +42,12 @@ import {
 import { ruleSummary } from "@/components/online-rules/rule-summary";
 import { ScoreSummary, scoreValue } from "@/components/online-rules/score-summary";
 import { SpendBar } from "@/components/online-rules/spend-bar";
+import { PageToolbar, PageToolbarSummary } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -179,14 +180,14 @@ function OnlineRulesPage() {
   const newRule = (
     <DisabledReason reason={canManage ? undefined : "Only members can create online rules"}>
       {canManage ? (
-        <Button asChild>
+        <Button asChild size="sm">
           <Link to="/$org/$project/online-rules/new" params={{ org, project }} state={newBackState}>
             <Plus />
             New rule
           </Link>
         </Button>
       ) : (
-        <Button disabled>
+        <Button disabled size="sm">
           <Plus />
           New rule
         </Button>
@@ -299,7 +300,55 @@ function OnlineRulesPage() {
             }
             start={
               <div className="flex h-full min-h-0 w-full flex-col">
-                <div className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3">
+                <PageToolbar actions={empty ? null : newRule}>
+                  {query.isPending || empty ? null : (
+                    <Input
+                      aria-label="Search rules"
+                      placeholder="Search rules"
+                      value={text}
+                      className="h-7 w-56 text-body"
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        setText(value);
+                        void navigate({
+                          to: "/$org/$project/online-rules",
+                          params: { org, project },
+                          search: (previous) => ({ ...previous, q: value || undefined }),
+                          replace: true,
+                        });
+                      }}
+                    />
+                  )}
+                  {query.isPending || empty ? null : (
+                    <FilterChips
+                      label="Status"
+                      chips={RULE_BUCKETS.map((bucket) => ({
+                        value: bucket,
+                        label: BUCKET_LABEL[bucket],
+                        count: counts[bucket],
+                        dot: BUCKET_DOT[bucket],
+                      }))}
+                      active={search.status}
+                      onSelect={(status) => {
+                        void navigate({
+                          to: "/$org/$project/online-rules",
+                          params: { org, project },
+                          search: (previous) => ({ ...previous, status }),
+                        });
+                      }}
+                    />
+                  )}
+                  {query.isPending || empty ? null : (
+                    <PageToolbarSummary>
+                      {dailySpend === undefined ? null : (
+                        <span>{`Spend today ${formatCost(dailySpend)}`}</span>
+                      )}
+                      <span>{`Jobs 24 h ${jobs24}`}</span>
+                      {failed24 > 0 ? (
+                        <span className="text-status-error">{`Failed ${failed24}`}</span>
+                      ) : null}
+                    </PageToolbarSummary>
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -321,55 +370,9 @@ function OnlineRulesPage() {
                       }`}
                     </TooltipContent>
                   </Tooltip>
-                  {query.isPending || empty ? null : (
-                    <StatusStrip
-                      counts={counts}
-                      active={search.status}
-                      onSelect={(status) => {
-                        void navigate({
-                          to: "/$org/$project/online-rules",
-                          params: { org, project },
-                          search: (previous) => ({ ...previous, status }),
-                        });
-                      }}
-                    />
-                  )}
-                  {query.isPending || empty ? null : (
-                    <div className="flex shrink-0 items-center gap-2 text-body tabular-nums text-muted-foreground">
-                      <Separator orientation="vertical" className="h-4" />
-                      {dailySpend === undefined ? null : (
-                        <span>{`Spend today ${formatCost(dailySpend)}`}</span>
-                      )}
-                      <span>{`Jobs 24 h ${jobs24}`}</span>
-                      {failed24 > 0 ? (
-                        <span className="text-status-error">{`Failed ${failed24}`}</span>
-                      ) : null}
-                    </div>
-                  )}
-                  <div className="ml-auto flex shrink-0 items-center gap-2">
-                    {query.isPending || empty ? null : (
-                      <Input
-                        aria-label="Search rules"
-                        placeholder="Search rules"
-                        value={text}
-                        className="h-7 w-56 text-body"
-                        onChange={(event) => {
-                          const value = event.target.value;
-                          setText(value);
-                          void navigate({
-                            to: "/$org/$project/online-rules",
-                            params: { org, project },
-                            search: (previous) => ({ ...previous, q: value || undefined }),
-                            replace: true,
-                          });
-                        }}
-                      />
-                    )}
-                    {empty ? null : newRule}
-                  </div>
-                </div>
+                </PageToolbar>
                 <div ref={bodyRef} data-scroll-container className="min-h-0 flex-1 overflow-auto">
-                  <div className="flex flex-col gap-4 px-3 py-4">
+                  <div className="flex flex-col gap-4 px-3 py-3">
                     {query.isPending ? (
                       <>
                         <Skeleton className="h-8 w-full" />
@@ -603,36 +606,3 @@ function filmstripStatus(bucket: RuleBucket): Schema<"SpanStatus"> {
   return bucket === "paused" ? "error" : "unset";
 }
 
-function StatusStrip({
-  counts,
-  active,
-  onSelect,
-}: {
-  counts: Record<RuleBucket, number>;
-  active: RuleBucket | undefined;
-  onSelect: (status: RuleBucket | undefined) => void;
-}) {
-  return (
-    <section aria-label="Status" className="flex shrink-0 items-center gap-2 text-body">
-      {RULE_BUCKETS.map((bucket) => {
-        const selected = active === bucket;
-        return (
-          <button
-            key={bucket}
-            type="button"
-            aria-pressed={selected}
-            onClick={() => onSelect(selected ? undefined : bucket)}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 hover:bg-muted",
-              selected && "border-foreground/30 bg-muted font-medium",
-            )}
-          >
-            <span aria-hidden="true" className={cn("size-1.5 rounded-full", BUCKET_DOT[bucket])} />
-            <span>{BUCKET_LABEL[bucket]}</span>{" "}
-            <span className="tabular-nums">{counts[bucket]}</span>
-          </button>
-        );
-      })}
-    </section>
-  );
-}
