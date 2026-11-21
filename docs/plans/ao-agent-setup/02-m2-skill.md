@@ -8,7 +8,7 @@ This milestone adds the cetra agent skill (`skills/cetra/`): a hand-written `SKI
 - S1 runs `pnpm install` to update the lockfile.
 - S2 runs the references generator once in write mode.
 - S1–S3 run their own unit tests: `cd website && node --test scripts/<file>.test.mjs`, which is fast.
-- S1–S3 format and lint their new scripts with `cd website && pnpm exec biome check --write scripts/<files>`. `pnpm check` runs `biome check .` over `website/`, and an unformatted script would fail the final check. Files under `skills/` are outside Biome: write them by hand exactly as shown.
+- S1–S3 format and lint their new scripts with `pnpm exec biome check --write website/scripts/<files>` from the repository root (Biome is a root devDependency). `pnpm check` runs `biome check .` over `website/`, and an unformatted script would fail the final check. Files under `skills/` are outside Biome: write them by hand exactly as shown.
 
 The full `just check` runs once, after S4, by the coordinating session.
 
@@ -172,7 +172,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
 **Done when:**
 - `cd website && node --test scripts/markdown.test.mjs` passes;
-- `cd website && pnpm exec biome check --write scripts/markdown.mjs scripts/markdown.test.mjs` leaves no error;
+- `pnpm exec biome check --write website/scripts/markdown.mjs website/scripts/markdown.test.mjs` (from the repository root) leaves no error;
 - `pnpm-lock.yaml` has `tidymd@0.2.0`.
 
 **Commit:** `Add the Markdown converter for agent docs`
@@ -299,7 +299,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 **Done when:**
 - `cd website && node --test scripts/skill-references.test.mjs` passes;
 - `cd website && node scripts/skill-references.mjs` (check mode) exits 0 right after the write;
-- `cd website && pnpm exec biome check --write scripts/skill-references.mjs scripts/skill-references.test.mjs` leaves no error.
+- `pnpm exec biome check --write website/scripts/skill-references.mjs website/scripts/skill-references.test.mjs` (from the repository root) leaves no error.
 
 **Commit:** `Generate the skill references from the docs`
 
@@ -480,7 +480,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 **Done when:**
 - `cd website && node --test scripts/check-skill.test.mjs scripts/check-env-vars.test.mjs` passes;
 - `cd website && node scripts/check-skill.mjs && node scripts/check-env-vars.mjs` exits 0;
-- `cd website && pnpm exec biome check --write scripts/check-skill.mjs scripts/check-skill.test.mjs scripts/check-env-vars.mjs scripts/check-env-vars.test.mjs` leaves no error.
+- `pnpm exec biome check --write website/scripts/check-skill.mjs website/scripts/check-skill.test.mjs website/scripts/check-env-vars.mjs website/scripts/check-env-vars.test.mjs` (from the repository root) leaves no error.
 
 **Commit:** `Add the cetra agent skill and its check`
 
