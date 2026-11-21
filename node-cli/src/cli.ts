@@ -3,11 +3,13 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { CliError, Exit, type ExitCode, type Io, realIo } from "./errors.js";
 import { login } from "./login.js";
+import { query } from "./query.js";
 import { VERSION } from "./version.js";
 
-/** Commands register here: C4 (query) and C5c (init) add theirs. */
+/** Commands register here: C5c (init) adds its own. */
 export const COMMANDS: Record<string, (args: string[], io: Io) => Promise<ExitCode>> = {
   login: (args, io) => login(args, io),
+  query: (args, io) => query(args, io),
 };
 
 const USAGE = `Usage: cetra-cli <command> [options]
