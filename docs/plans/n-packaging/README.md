@@ -441,7 +441,8 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
      `pypi`. The first upload creates the project in the organization.
    - npm: create the organization `cetra-ai`. Publish the first version of `@cetra-ai/sdk` by hand
      (npm configures trusted publishing only on a package that exists), e.g. a `0.0.0` placeholder
-     with the dist-tag `placeholder`, so `latest` stays free:
+     with the dist-tag `placeholder`. npm also points `latest` at a package's first version, so
+     `latest` is the placeholder until the first stable release moves it:
 
      ```bash
      cd sdks/typescript && pnpm run build && npm publish --access public --tag placeholder
@@ -455,7 +456,8 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
      tag's run validates it. Set "Publishing access" to
      require two-factor authentication and disallow tokens, so only the workflow can publish.
    - npm: `@cetra-ai/cli` gets the same treatment. Publish its first version by hand, with the
-     placeholder tag (the package does not exist until then):
+     placeholder tag (the package does not exist until then; as for the SDK, `latest` is that
+     placeholder until the first stable release):
 
      ```bash
      cd node-cli && pnpm run build && npm publish --access public --tag placeholder
