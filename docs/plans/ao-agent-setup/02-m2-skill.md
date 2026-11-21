@@ -8,6 +8,7 @@ This milestone adds the cetra agent skill (`skills/cetra/`): a hand-written `SKI
 - S1 runs `pnpm install` to update the lockfile.
 - S2 runs the references generator once in write mode.
 - S1–S3 run their own unit tests: `cd website && node --test scripts/<file>.test.mjs`, which is fast.
+- S1–S3 format and lint their new scripts with `cd website && pnpm exec biome check --write scripts/<files>`. `pnpm check` runs `biome check .` over `website/`, and an unformatted script would fail the final check. Files under `skills/` are outside Biome: write them by hand exactly as shown.
 
 The full `just check` runs once, after S4, by the coordinating session.
 
@@ -46,7 +47,8 @@ The full `just check` runs once, after S4, by the coordinating session.
 - installing the skill from the CLI (M3);
 - checking `npx @cetra-ai/cli <command>` names in `SKILL.md` (M3, when the Node CLI exists);
 - the site's `.md` pages, the "Copy page" button and the docs MCP (M4);
-- creating the `cetra-ai/skills` repository and its deploy key: the user does that (design § Open questions 1).
+- creating the `cetra-ai/skills` repository and its deploy key: the user does that (design § Open questions 1). The repository needs an initial commit (a README) and a default branch that accepts a direct push. **`SKILLS_MIRROR_KEY` is set only after M3 and M4 are merged**: `SKILL.md` names `npx @cetra-ai/cli` (M3) and `https://cetra.sh/mcp` (M4), and the mirror must not publish them before they exist. Until then the workflow does nothing;
+- the skill's docs page and its `CHANGELOG.md` line: M3 adds both with the "Set up with your coding agent" page, where users first meet the skill.
 
 ## Decisions this plan relies on
 
@@ -122,18 +124,24 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
 3. **`prepass(source)`**, line by line, in this order:
    1. If the text starts with a line `---`, copy every line up to and including the next line `---` unchanged. That is the front matter.
-   2. **Fences.** Track fenced code blocks. A line whose trimmed text starts with three or more backticks opens a fence when none is open, and closes it when its backtick run is at least as long as the opening one. Lines inside a fence, and the fence lines themselves, are copied unchanged.
+   2. **Fences.** Track fenced code blocks.
+      - A line whose trimmed text starts with three or more backticks opens a fence when none is open.
+      - Inside a fence, a line whose trimmed text is **only** backticks, at least as many as the opening run, closes it.
+      - Lines inside a fence, and the fence lines themselves, are copied unchanged.
+      - A line outside a fence whose trimmed text starts with `~~~` throws `Error("line <n>: use backtick fences")`: tidymd does not know `~~~` fences and would eat `import … from` lines inside them. The docs have none today.
    3. Outside fences, with `t` the line's trimmed text:
       - `t` matches `/^\{\/\*[\s\S]*\*\/\}$/` (a sample marker or MDX comment on its own line): drop the line.
       - `t` matches `/^<Tabs\b[^>]*>$/`, or is `</Tabs>` or `</TabItem>`: drop the line.
       - `t` matches `/^<TabItem\b[^>]*\blabel="([^"]+)"[^>]*>$/`: replace the line with three lines: `""`, `**<label>**`, `""`.
-      - `t` starts with `<Backing` or `<Image`: drop this line and every following line up to and including the first one whose trimmed text ends with `/>`. If no such line comes before the end of the text, throw `Error("unclosed <Backing> or <Image> at line <n>")` (1-based).
+      - `t` starts with `<Backing` or `<Image`: drop lines starting with this one, up to and including the first line, **this one included**, whose trimmed text ends with `/>`. A one-line element drops just its own line. If no such line comes before the end of the text, throw `Error("unclosed <Backing> or <Image> at line <n>")` (1-based).
+      - `t` is `<CardGrid>` or `</CardGrid>`, or matches `/^<CardGrid\b[^>]*>$/`: drop the line.
+      - `t` matches `/^<LinkCard\b[^>]*\btitle="([^"]+)"[^>]*\bhref="([^"]+)"[^>]*\/>$/`: replace the line with `- [<title>](<href>)`, followed by `: <description>` when the tag also has `description="…"`. tidymd alone runs the cards of a grid together on indented lines (`integrations/index.mdx`).
       - Any other line: copy it unchanged.
    4. Join with `\n`.
 4. **`toMarkdown(source)`:**
    1. `const fm = extractStarlightFrontmatter(source)`, imported from `tidymd`. It can be `null`.
    2. `let body = cleanStarlightMarkdown(prepass(source), { frontmatter: "title-as-heading", internalLinks: { mode: "baseUrl", baseUrl: SITE } })`.
-   3. If `fm?.description` is a non-empty string, insert `""` and the description right after the first line that starts with `# `.
+   3. If `fm?.description` is a non-empty string, insert `""` and the description right after the first line that starts with `# `. If there is no such line, put the description, then `""`, at the start.
    4. **Post-pass**, line by line:
       - remove trailing whitespace on every line;
       - outside fences, remove leading spaces before a line whose trimmed text starts with `#` or with three backticks, because tidymd leaves such indentation behind;
@@ -147,6 +155,8 @@ The phases run in order: each one uses the files of the one before. Files per ph
 - `prepass` drops `{/* untested: reason */}`, `{/* test */}` and `{/* example:quick-start */}` lines.
 - `prepass` drops a one-line `<Backing fixtures={["a/b"]} tests={["x"]} />`, and a `<Backing` that spans three lines.
 - `prepass` drops `<Image src={traceView} alt="The trace view" />`.
+- `prepass` turns `<CardGrid>`, `<LinkCard title="OpenAI" description="Chat and embeddings." href="/docs/integrations/openai/" />`, `<LinkCard title="DSPy" href="/docs/integrations/dspy/" />`, `</CardGrid>` into `- [OpenAI](/docs/integrations/openai/): Chat and embeddings.` and `- [DSPy](/docs/integrations/dspy/)`.
+- `prepass` throws on a `~~~` line outside fences. A fence opened by three backticks is not closed by a line reading three backticks followed by `bash` inside it.
 - `prepass` leaves a fence that contains `<TabItem label="X">` and `{/* test */}` untouched.
 - `prepass` leaves the front matter untouched.
 - `prepass` throws on a `<Backing` that is never closed.
@@ -162,6 +172,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
 **Done when:**
 - `cd website && node --test scripts/markdown.test.mjs` passes;
+- `cd website && pnpm exec biome check --write scripts/markdown.mjs scripts/markdown.test.mjs` leaves no error;
 - `pnpm-lock.yaml` has `tidymd@0.2.0`.
 
 **Commit:** `Add the Markdown converter for agent docs`
@@ -263,7 +274,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    ```
 
 3. **`main(write)`:**
-   1. Read and parse `LIST`. A missing file or invalid JSON prints `skills/references.json: <reason>` and returns 1.
+   1. Read and parse `LIST`. A missing file, invalid JSON, or a `references` that is not an array prints `skills/references.json: <reason>` and returns 1.
    2. Run `validateList(list.references, (p) => existsSync(join(PAGES, p)))`. Errors are printed as `skills/references.json: <message>` and return 1.
    3. Call `expectedFiles`. A converter error prints `<page>: <message>` and returns 1.
    4. **Write mode** (`write` true): create `OUT` if needed, delete every `*.md` in `OUT` that is not expected, write every expected file, print `wrote <n> references` to stderr, and return 0.
@@ -275,7 +286,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    - add the line `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` after its two cargo lines;
    - update its comment to "Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references, and the skill references (D-AO-8)".
 6. Generate the files: `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs`. Commit everything under `skills/cetra/references/`.
-7. Open three generated files: `openai.md`, `python.md` and `troubleshooting.md`. Check by eye that they read as plain Markdown, that tab labels are bold lines, and that no marker, `<Backing>` or JSX is left. If one does not, stop and report rather than adding special cases.
+7. Open four generated files: `openai.md`, `python.md`, `troubleshooting.md` and `integrations.md`. Check by eye that they read as plain Markdown, that tab labels are bold lines, that the integration cards are a bullet list, and that no marker, `<Backing>` or JSX is left. `sql-schema.md` keeps the page's own `<!-- Generated … -->` comment under our header; that is expected. If one does not, stop and report rather than adding special cases.
 
 **Tests** (`skill-references.test.mjs`):
 - `validateList` accepts a valid list.
@@ -287,7 +298,8 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
 **Done when:**
 - `cd website && node --test scripts/skill-references.test.mjs` passes;
-- `cd website && node scripts/skill-references.mjs` (check mode) exits 0 right after the write.
+- `cd website && node scripts/skill-references.mjs` (check mode) exits 0 right after the write;
+- `cd website && pnpm exec biome check --write scripts/skill-references.mjs scripts/skill-references.test.mjs` leaves no error.
 
 **Commit:** `Generate the skill references from the docs`
 
@@ -306,7 +318,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 - `website/package.json`
 
 **Steps.**
-1. Create `skills/cetra/SKILL.md` with exactly this content. The fences inside it are part of the file.
+1. Create `skills/cetra/SKILL.md` with exactly this content. The file is what lies between the outer four-backtick fence lines, with the plan's three-space indent removed from every line. The three-backtick fences inside it are part of the file.
 
    ````markdown
    ---
@@ -392,7 +404,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    - **Rows come back:** check that `llm_count` is above 0 and `error_count` is 0. To see the spans of a trace, query the `spans` view with `WHERE trace_id = '<id>'`.
    - **No rows:** read "No traces at all" and "A short script loses its last spans" in [troubleshooting.md](references/troubleshooting.md). The usual causes are a missing `flush()`, a key or URL the app did not load, or `init` called after the LLM client was created.
 
-   If the user has the `cetra` binary, `cetra query "<sql>" --project <org>/<project> --since 15m --format json` works too.
+   If the user has the `cetra` binary and has run `cetra login`, `cetra query "<sql>" --project <org>/<project> --since 15m --format json` works too. An agent connected to cetra's MCP server can run the same SQL with its `query_sql` tool.
 
    ## 6. Report
 
@@ -403,7 +415,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
    - The whole documentation for agents: `https://cetra.sh/llms.txt`.
    - Search the docs with the docs MCP server at `https://cetra.sh/mcp`.
    - Span attributes cetra reads, for hand-made spans: [attributes.md](references/attributes.md) and [metadata-and-tags.md](references/metadata-and-tags.md).
-   - Tracing the coding agent itself (Claude Code, Codex, Gemini CLI, Copilot) is a different setup: `cetra agents setup`, see https://cetra.sh/docs/integrations/claude-code/.
+   - Tracing the coding agent itself (Claude Code, Codex, Gemini CLI, Copilot) is a different setup, `cetra agents setup`: see [Claude Code](https://cetra.sh/docs/integrations/claude-code/).
    ````
 
 2. Create `website/scripts/check-skill.mjs`. Header comment: "Checks skills/cetra/SKILL.md (D-AO-8): the Agent Skills frontmatter, links to references and docs pages, and the `cetra` subcommands it names." Its exports:
@@ -427,25 +439,26 @@ The phases run in order: each one uses the files of the one before. Files per ph
    export function main() {}
    ```
 
-3. **`cliCommands`.** For each line matching `/^### cetra ([a-z][a-z-]*)\b/`, take the first word after `cetra`. `### cetra admin create-user` gives `admin`.
+3. **`cliCommands`.** The reference's command headings are level 3 with the command in backticks: ``### `cetra query` ``. Sub-commands are level 4 (``#### `cetra agents setup` ``) and are not read. For each line matching ``/^### `cetra ([a-z][a-z-]*)`/``, take the name.
 4. **`checkSkill(text, ctx)`**, with each error carrying the 1-based line it concerns:
    1. **Frontmatter.** The text must start with `---\n` and have a closing `---` line. Parse it with `extractStarlightFrontmatter` from `tidymd`; a parse error is an error at line 1.
       - `name` must be the string `cetra`, which is the directory name.
       - `description` must be a string of 1 to 1024 characters.
       - `allowed-tools`, when present, must be a string.
-      - Any other key except `license` and `metadata` is an error (`unknown frontmatter key <k>`).
+      - Any other key except `license`, `compatibility` and `metadata` is an error (`unknown frontmatter key <k>`).
+      - `extractStarlightFrontmatter` throws on invalid YAML or a YAML value that is not an object. Catch any error and report it at line 1.
    2. **Length.** At most 500 lines in total (`SKILL.md has <n> lines; the limit is 500`).
    3. **Reference links.** Every Markdown link target matching `/^references\/([a-z0-9-]+)\.md$/` needs `ctx.referenceExists(<name>)`; otherwise `missing reference references/<name>.md`. Any other relative link target (one that does not start with `http://`, `https://` or `#`) is an error: `link <target> must be references/<name>.md or an absolute URL`.
-   4. **Docs pages.** For every `https://cetra.sh/docs/<path>` in the text, in a link target or bare, `<path>` must end with `/` and `ctx.pageExists(<path>)` must be true; otherwise `no docs page for https://cetra.sh/docs/<path>`. Cut `<path>` at `#`, `)`, `` ` ``, whitespace or the end of the line. Other `https://cetra.sh/` URLs (`/llms.txt`, `/mcp`) are not checked.
+   4. **Docs pages.** For every `https://cetra.sh/docs/<path>` in the text, in a link target or bare, `<path>` must end with `/` and `ctx.pageExists(<path>)` must be true; otherwise `no docs page for https://cetra.sh/docs/<path>`. Cut `<path>` at `#`, `)`, `` ` ``, whitespace or the end of the line, then strip trailing `.`, `,`, `;` and `:`. Other `https://cetra.sh/` URLs (`/llms.txt`, `/mcp`) are not checked.
    5. **Commands.** Only code counts here: inline code spans and lines inside fences. Every match of `/(?:^|[\s`(])cetra ([a-z][a-z-]*)/` needs its name in `ctx.commands`; otherwise ``unknown command `cetra <name>` ``. `npx @cetra-ai/cli …` does not match, since `@cetra-ai/cli` has no space after `cetra`. Prose such as "cetra shows them" is not code, so it is not checked.
 5. **`main()`:**
    1. Read `SKILL_DIR/SKILL.md`. If it is missing, print `skills/cetra/SKILL.md: missing` and return 1.
    2. `referenceExists(n)` is `existsSync(join(SKILL_DIR, "references", n + ".md"))`.
    3. `pageExists(p)` is true when one of `join(PAGES, p.slice(0, -1) + ".mdx")`, `….md`, `join(PAGES, p, "index.mdx")` or `join(PAGES, p, "index.md")` exists.
-   4. `commands` is `cliCommands(readFileSync(CLI_REFERENCE))`.
+   4. `commands` is `cliCommands(readFileSync(CLI_REFERENCE, "utf8"))`. If it is empty, print `website/src/content/docs/docs/reference/cli.md: no command headings found` and return 1.
    5. Also list `SKILL_DIR`. It may hold only `SKILL.md` and `references/`, and `references/` only `*.md` files. Anything else is `skills/cetra/<path>: not part of the skill`.
    6. Print each error as `skills/cetra/SKILL.md:<line>: <message>`, and return 1 if there are any.
-6. **`check-env-vars.mjs`.** In `main`, after the docs pages are collected, add `skills/cetra/SKILL.md` and every `skills/cetra/references/*.md` (paths relative to the repository root) to the same `pages` object. Their `CETRA_*` names then go through the existing rule. Change nothing else.
+6. **`check-env-vars.mjs`.** In `main`, the `pages` object is keyed by absolute paths (`join(root, …)`). Add `join(root, "skills/cetra/SKILL.md")` and every `*.md` under `join(root, "skills/cetra/references")` to it, keyed the same way. Use the file's existing `walk` helper, which already skips a missing directory. Their `CETRA_*` names then go through the existing rule. Change nothing else.
 7. In `website/package.json`, append ` && node scripts/check-skill.mjs` to the end of `check:content`, after `skill-references.mjs`.
 
 **Tests:**
@@ -456,12 +469,17 @@ The phases run in order: each one uses the files of the one before. Files per ph
   - `[x](references/nope.md)` gives a missing reference; `[x](other.md)` gives the relative-link error;
   - `https://cetra.sh/docs/nope/` with `pageExists` false gives an error; `https://cetra.sh/docs/x` without a trailing slash gives an error; `https://cetra.sh/llms.txt` gives none;
   - `` `cetra frobnicate` `` gives an unknown command; `` `npx @cetra-ai/cli query` `` and the prose "cetra shows traces" give none; `cetra query` on a line inside a fence is checked;
-  - `cliCommands` on three headings `### cetra serve`, `### cetra admin create-user` and `### cetra query` gives `{serve, admin, query}`.
+  - `cliCommands` on ``### `cetra serve` ``, ``#### `cetra agents setup` `` and ``### `cetra query` `` gives `{serve, query}`;
+  - `cliCommands` on the real `src/content/docs/docs/reference/cli.md` gives exactly `serve, admin, version, health, login, logout, query, traces, projects, agents`;
+  - a docs link followed by a full stop (`see https://cetra.sh/docs/integrations/claude-code/.`) gives no error when the page exists;
+  - a `compatibility` key is accepted, and a frontmatter of `- a list` reports a line-1 error instead of throwing;
+  - `checkSkill` on the real `../skills/cetra/SKILL.md` with the real context gives `[]`.
 - `check-env-vars.test.mjs`: add one case where a `pages` entry keyed `skills/cetra/SKILL.md` names an unknown `CETRA_NOPE` and is reported, through `checkSite`, as the existing cases do.
 
 **Done when:**
 - `cd website && node --test scripts/check-skill.test.mjs scripts/check-env-vars.test.mjs` passes;
-- `cd website && node scripts/check-skill.mjs && node scripts/check-env-vars.mjs` exits 0.
+- `cd website && node scripts/check-skill.mjs && node scripts/check-env-vars.mjs` exits 0;
+- `cd website && pnpm exec biome check --write scripts/check-skill.mjs scripts/check-skill.test.mjs scripts/check-env-vars.mjs scripts/check-env-vars.test.mjs` leaves no error.
 
 **Commit:** `Add the cetra agent skill and its check`
 
@@ -593,7 +611,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
              repository: cetra-ai/skills
              path: mirror
              ssh-key: ${{ secrets.SKILLS_MIRROR_KEY }}
-             persist-credentials: true # zizmor: ignore[artipacked] the push below needs the key; nothing is uploaded
+             persist-credentials: true # the push below needs the key; nothing is uploaded
          - if: steps.key.outputs.present == 'true'
            uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
            with:
@@ -606,7 +624,7 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
    The first checkout puts the repository at the workspace root, and the second puts the mirror under `mirror/` inside it. `mirror/` is never committed to this repository: the job ends after the push.
 
-   If `actionlint` or `zizmor` (`just check-workflows`) asks for a change, apply it and report it. If `zizmor` does not accept the inline ignore, stop and report.
+   If `actionlint` or `zizmor` (`just check-workflows`) asks for a change, apply it and report it. The cold review ran both on this YAML, and both were clean.
 7. **`AGENTS.md`:**
    - **§ Layout:** add the line `skills/                      the cetra agent skill (skills/cetra/), its reference list and plugin manifests; mirrored to cetra-ai/skills (D-AO-9)` after the `sdks/typescript/` line.
    - **§ Tests:** add a bullet after the `CETRA_DOCS_WRITE=1` one: "`skills/cetra/references/` is generated from the docs pages that `skills/references.json` lists. A docs change that touches one of them runs `just docs-gen` and commits the result; `just check-docs` fails otherwise (`skill-references.mjs`). `check-skill.mjs` checks `SKILL.md`'s frontmatter, links and `cetra` subcommands."
@@ -615,12 +633,13 @@ The phases run in order: each one uses the files of the one before. Files per ph
 
 **Tests:** none new; the script is exercised by hand:
 - `mkdir -p /tmp/claude-1000/mirror-test && git -C /tmp/claude-1000/mirror-test init -q && just skills-mirror /tmp/claude-1000/mirror-test` leaves `skills/cetra/SKILL.md`, `.claude-plugin/plugin.json` and `LICENSE` there;
-- running `just skills-mirror` without arguments exits 2.
+- `tools/skills/mirror.sh` without arguments, and with a directory that has no `.git`, exits 2; `just skills-mirror` without arguments fails (just itself refuses the missing argument).
 
 **Done when:**
 - both manual runs above behave as described;
 - `just check-workflows` passes, if `actionlint` and `zizmor` are installed; otherwise say so in the report;
-- `shellcheck tools/skills/mirror.sh` passes, if `shellcheck` is installed.
+- `shellcheck tools/skills/mirror.sh` passes, if `shellcheck` is installed;
+- `claude plugin validate skills/manifests`, if `claude` is installed; otherwise say so in the report. If it asks for fields the plan does not give, stop and report.
 
 **Commit:** `Mirror the agent skill to cetra-ai/skills`
 
