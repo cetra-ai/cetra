@@ -84,10 +84,11 @@ Settled here, written into the design's § Cloud routing in E3:
    - **Checks, in order:**
      1. `device_code_sha256` is 64 characters of `[0-9a-f]`; otherwise `Invalid("device_code_sha256")`.
      2. `normalize_user_code(user_code)` is `Some`; otherwise `Invalid("user_code")`.
-     3. `now < expires_at <= now + CODE_TTL_NS`; otherwise `Invalid("expires_at")`.
-     4. Sweep always (`inner.sweep(now)`), so that an expired entry never blocks a registration. Then refuse with `Full` at `MAX_CODES`.
+     3. `now < expires_at <= now + CODE_TTL_NS + 30 s`, where the 30 s absorbs clock skew between the control plane and the cell; otherwise `Invalid("expires_at")`.
+     4. Sweep always (`inner.sweep(now)`), so that an expired entry never blocks a registration.
      5. An entry with this hash exists: when it is `Pending` and its user code, purpose, host and `expires_at` are all equal, return `Ok(())` (a retry). Otherwise `Taken`.
      6. Another entry has this user code: `Taken`.
+     7. Only now, refuse a new entry with `Full` at `MAX_CODES`, so an identical retry at the cap still answers 204.
 
      Registered codes count against the same `MAX_CODES`; spec 08 says so.
    - **Insert** the entry exactly as `issue` does, with `created_at = now`, `interval_s = POLL_INTERVAL_S`, `last_poll = None`, `State::Pending` and the given `expires_at`.
@@ -136,7 +137,7 @@ Settled here, written into the design's § Cloud routing in E3:
      - that registered codes count against the 10 000 cap;
      - that a registered code then behaves exactly like an issued one.
 
-     Add a row for the route to the table of routes at the end of spec 08, if it has one: control-plane token, scope `device`, no `Origin`; 204, 400, 401, 403, 409, 503.
+     If the `### Device authorization` section has a routes table, add a row for the route there: control-plane token, scope `device`, no `Origin`; 204, 400, 401, 403, 409, 503.
    - **Spec 09:** in the long internal-routes cell of § Orgs, projects, members, keys, insert right after the `GET /api/internal/v1/deletions` item: `` · `POST /api/internal/v1/device/codes` (scope `device`; body `{device_code_sha256, user_code, purpose, host?, expires_at}`; 204; an identical retry is 204, any other clash 409) ``.
 
 **Tests:**
@@ -144,7 +145,7 @@ Settled here, written into the design's § Cloud routing in E3:
   - a register then `pending` sees the code; a lower-case `bcdf-ghjk` is accepted and normalized;
   - the same registration twice is `Ok`; the same hash with another user code is `Taken`;
   - an expired, unswept entry with the same user code does not block a new registration 11 minutes later;
-  - boundaries: `expires_at == now` is invalid, `now + CODE_TTL_NS` is valid, and `+ 1` is invalid; a 63- or 65-character hash, upper-case hex, and a user code with a vowel are invalid;
+  - boundaries: `expires_at == now` is invalid, `now + CODE_TTL_NS + 30 s` is valid, and `+ 1` past that is invalid; a 63- or 65-character hash, upper-case hex, and a user code with a vowel are invalid;
   - `claim`, `complete` and a `poll` with the original device code (hashed by the store) gives `Granted`;
   - each `Invalid` case;
   - `Taken` for the same hash, and for the same user code;
@@ -176,7 +177,7 @@ Settled here, written into the design's § Cloud routing in E3:
 1. **`step`.** A 400 problem whose `code` is `moved` gives the new step `{ moved: string }`, with the problem's `server` member. A `moved` without a string `server` gives `{ failed: 400 }`.
 2. **`deviceSignIn`** returns `{ grant: Grant; server: string }`, where `server` is the server that answered the grant. In the poll loop, on `{ moved: url }`:
    - **Second `moved`:** throw `CliError("sign-in failed: the server moved the sign-in twice", Exit.SignIn)`.
-   - **The new server:** `checkServerUrl(url)` must pass; then take `new URL(url).origin` only. Its protocol must be `https:`, or `http:` with a loopback host **and** a loopback typed server. Write the loopback test inline in `device.ts` (`localhost`, `127.0.0.0/8`, `[::1]`), without importing `local.ts`, which imports `device.ts`. Otherwise throw `CliError("the server sent an invalid sign-in server", Exit.SignIn)`.
+   - **The new server:** `checkServerUrl(url)` must pass (catch its error and throw the invalid-server message below instead, with `Exit.SignIn`); then take `new URL(url).origin` only. Its protocol must be `https:`, or `http:` with a loopback host **and** a loopback typed server. Write the loopback test inline in `device.ts` (`localhost`, `127.0.0.0/8`, `[::1]`), without importing `local.ts`, which imports `device.ts`. Otherwise throw `CliError("the server sent an invalid sign-in server", Exit.SignIn)`.
    - Print `Continuing the sign-in at <origin>` on stderr. The origin has no control characters, since `URL` serialises it.
    - From then on, poll the new origin with the same device code. The deadline, the interval and the "still waiting" warning state carry over unchanged. The `moved` count is per sign-in.
 3. **`init`.**
@@ -227,7 +228,7 @@ Settled here, written into the design's § Cloud routing in E3:
       - It mints a control-plane token with scope `device` for that cell, one per call: the token is bound to the method and path (D-P-71). It calls `POST <cell>/api/internal/v1/device/codes` with `{device_code_sha256 (lowercase hex SHA-256 of the device code), user_code, purpose ("login" or "init"), host?, expires_at (RFC 3339, the expiry it issued)}`.
       - **Answers:**
         - 204, including on an identical retry: go on;
-        - 409: the user code clashes, so issue a new code to the CLI;
+        - 409: the code cannot be registered (a clash). Mark it failed, and answer `expired_token` to the CLI's next poll; the user runs the command again;
         - 503: the cell is full, so retry later;
         - 400: a bug.
       - It then redirects the browser to `<cell>/device?code=<user_code>`. It forwards `project` when the CLI's URL had one.
@@ -241,6 +242,7 @@ Settled here, written into the design's § Cloud routing in E3:
 2. **Design § Cloud routing.**
    - Replace `answers 400 {error: "moved", server: …}` with the problem+json shape of step 1.3.
    - Add the decisions settled in this plan's header: the `moved` shape; following it once, to an origin, over https; the trust boundary; idempotent registration.
+   - Reword every sentence of the design that says the control plane "never sees" a token or key to "never receives".
 3. **D-AO-14** (`docs/mvp-decisions.md` and the design's table, kept identical): append "The `moved` answer is a 400 problem with `code: \"moved\"` and `server`; the CLI follows it once, to an https origin. The control plane, as the cells' identity provider, is trusted: the secrets are not sent through it, but it knows the device code."
 4. **Docs.**
    - **`coding-agent.mdx`:** one sentence on the cloud: with no `--url`, init signs you in at app.cetra.sh, and the sign-in continues on your organization's region.
