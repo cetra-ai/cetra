@@ -3,7 +3,7 @@
 # secret.key (D-N-9). Set the four GARAGE_* values in .env first (.env.example).
 #   docker compose -f compose.yaml -f compose.s3.yaml up -d
 # To use another S3-compatible service instead, drop this file and set CETRA_OBJECT_STORE,
-# CETRA_STORAGE__S3__* and AWS_* in cetra.env (docs/self-hosting/s3.md).
+# CETRA_STORAGE__S3__* and AWS_* in cetra.env (https://cetra.sh/docs/self-hosting/s3/).
 services:
   garage:
     image: dxflrs/garage:v2.5.0

@@ -22,10 +22,11 @@ use crate::meta::orgs::OrgRow;
 use crate::meta::projects::ProjectRow;
 use crate::meta::{self, MetaDb};
 use crate::meta::{
-    alerts, api_keys, backfills, connections, dashboards, datasets, deletions, entitlements,
-    eval_jobs, evaluators, experiments, identities, instance_settings, invites, members,
-    model_prices, online_rules, orgs, password_resets, pending_traces, personal_tokens, projects,
-    rule_spend, saved_views, score_definitions, usage, users, web_sessions,
+    agent_contexts, alerts, annotation_queues, api_keys, assistant, backfills, connections,
+    dashboards, datasets, deletions, entitlements, eval_jobs, evaluators, experiments, identities,
+    instance_settings, invites, issue_links, issues, members, model_prices, online_rules, orgs,
+    password_resets, pending_traces, personal_tokens, projects, prompts, rule_spend, saved_views,
+    score_definitions, usage, users, web_sessions,
 };
 use std::collections::BTreeMap;
 use uuid::Uuid;
@@ -185,7 +186,15 @@ fn word<T: std::fmt::Debug>(value: &T) -> Value {
 /// - `usage_notices`: only written (`notices.rs`) and counted in tests;
 /// - `alert_rule_channels`, `deletion_traces`, `deletion_sessions`, `deletion_projects`,
 ///   `dataset_versions`, `dataset_items`, `experiment_items`: read through their parent's
-///   section (`alert_rules`, `deletions`, `datasets`, `experiments`).
+///   section (`alert_rules`, `deletions`, `datasets`, `experiments`);
+/// - `prompt_versions`, `prompt_labels`, `prompt_label_events`: read through `prompts`;
+///   `prompt_settings`: the `prompts` section's protected labels;
+/// - `annotation_queue_definitions`, `annotation_queue_items`: read through `annotation_queues`;
+/// - `assistant_messages`: read through `assistant`; `org_assistant_settings`: its `settings`;
+/// - `issue_events`, `issue_candidates`, `issue_source_days`, `issue_refits`,
+///   `issue_source_channels`: read through `issues` (candidates only as counts by status);
+/// - `issue_notifications`: only written (`issue_links::notify_source`, which also queues
+///   deliveries) and counted in tests.
 async fn reads(meta: &MetaDb) -> Value {
     let pool = meta.reader();
     let org = orgs::org_by_slug(pool, "golden-org")
@@ -256,6 +265,11 @@ async fn reads(meta: &MetaDb) -> Value {
         ("datasets", datasets_section(&world).await),
         ("experiments", experiments_section(&world).await),
         ("dashboards", dashboards_section(&world).await),
+        ("prompts", prompts_section(&world).await),
+        ("agent_contexts", agent_contexts_section(&world).await),
+        ("annotation_queues", queues_section(&world).await),
+        ("assistant", assistant_section(&world).await),
+        ("issues", issues_section(&world).await),
     ] {
         out.insert(table.to_owned(), value);
     }
@@ -1194,4 +1208,278 @@ async fn auth(meta: &MetaDb) -> Value {
         "pat": pat_user.email,
         "session": session.user.email,
     })
+}
+
+/// The email of a user id, when the user is a golden one.
+fn email_of(world: &World<'_>, id: Uuid) -> Option<String> {
+    world.emails.get(&id).cloned()
+}
+
+/// prompts (with prompt_versions, prompt_labels, prompt_label_events and prompt_settings):
+/// `prompts::list_prompts`, `list_versions`, `list_label_events` and `protected_labels`, by
+/// prompt name.
+async fn prompts_section(world: &World<'_>) -> Value {
+    let mut map = Map::new();
+    for prompt in prompts::list_prompts(world.pool, world.p1.id, &prompts::PromptFilter::default())
+        .await
+        .expect("read the prompts")
+    {
+        let versions = prompts::list_versions(world.pool, prompt.id, None, 100)
+            .await
+            .expect("read the versions");
+        let events = prompts::list_label_events(world.pool, prompt.id, None, 100)
+            .await
+            .expect("read the label events");
+        map.insert(
+            prompt.name.clone(),
+            json!({
+                "type": prompt.prompt_type.as_str(),
+                "description": prompt.description,
+                "tags": prompt.tags,
+                "latest_version": prompt.latest_version,
+                "created_by": prompt.created_by,
+                "labels": prompt.labels.iter().map(|label| json!({
+                    "label": label.label,
+                    "version": label.version,
+                    "updated_by": label.updated_by,
+                })).collect::<Vec<_>>(),
+                "versions": versions.iter().map(|version| json!({
+                    "version": version.version,
+                    "template": json_text(&version.template),
+                    "config": json_text(&version.config),
+                    "commit_message": version.commit_message,
+                    "labels": version.labels,
+                    "created_by": version.created_by,
+                })).collect::<Vec<_>>(),
+                "label_events": events.iter().map(|event| json!({
+                    "label": event.label,
+                    "from_version": event.from_version,
+                    "to_version": event.to_version,
+                    "actor": event.actor,
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    let protected = prompts::protected_labels(world.pool, world.p1.id)
+        .await
+        .expect("read the protected labels");
+    json!({ "prompts": map, "protected_labels": protected })
+}
+
+/// agent_contexts: `agent_contexts::load_contexts`, by project slug, agent and session.
+async fn agent_contexts_section(world: &World<'_>) -> Value {
+    let mut map = Map::new();
+    for row in agent_contexts::load_contexts(world.pool)
+        .await
+        .expect("read the agent contexts")
+    {
+        let slug = world.slugs.get(&row.project_id.to_string());
+        map.insert(
+            format!(
+                "{}/{}/{}",
+                slug.map_or("", String::as_str),
+                row.agent,
+                row.session_id
+            ),
+            json!({
+                "repository": row.repository,
+                "branch": row.branch,
+                "user_id": row.user_id,
+            }),
+        );
+    }
+    Value::Object(map)
+}
+
+/// annotation_queues (with annotation_queue_definitions and annotation_queue_items):
+/// `annotation_queues::list`, `counts` and `list_items`, by queue name.
+async fn queues_section(world: &World<'_>) -> Value {
+    let (queues, _) = annotation_queues::list(world.pool, world.p1.id, None, 100, None, None)
+        .await
+        .expect("read the queues");
+    let ids: Vec<Uuid> = queues.iter().map(|queue| queue.id).collect();
+    let counts = annotation_queues::counts(world.pool, world.p1.id, &ids, None)
+        .await
+        .expect("read the counts");
+    let mut map = Map::new();
+    for queue in queues {
+        let (items, _) = annotation_queues::list_items(world.pool, queue.id, None, None, 100, None)
+            .await
+            .expect("read the items");
+        let count = counts.get(&queue.id).cloned().unwrap_or_default();
+        map.insert(
+            queue.name.clone(),
+            json!({
+                "description": queue.description,
+                "instructions": queue.instructions,
+                "target": queue.target.as_str(),
+                "definitions": queue.definition_ids.len(),
+                "version": queue.version,
+                "created_by": queue.created_by.and_then(|id| email_of(world, id)),
+                "counts": {
+                    "pending": count.pending,
+                    "completed": count.completed,
+                    "skipped": count.skipped,
+                },
+                "items": items.iter().map(|item| json!({
+                    "trace_id": item.trace_id,
+                    "span_id": item.span_id,
+                    "session_id": item.session_id,
+                    "status": item.status.as_str(),
+                    "added_by_kind": item.added_by_kind.as_str(),
+                    "added_by": email_of(world, item.added_by_id),
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    Value::Object(map)
+}
+
+/// assistant (with assistant_conversations, assistant_messages and org_assistant_settings):
+/// `assistant::get_settings`, `list_conversations` and `get_conversation_with_messages`, as the
+/// owner, by conversation title.
+async fn assistant_section(world: &World<'_>) -> Value {
+    let owner = world
+        .emails
+        .iter()
+        .find(|(_, email)| email.as_str() == "golden-owner@example.com")
+        .map(|(id, _)| *id)
+        .expect("the owner is a golden user");
+    let settings = assistant::get_settings(world.pool, world.org.id)
+        .await
+        .expect("read the settings")
+        .map(|row| {
+            json!({
+                "enabled": row.enabled,
+                "has_connection": row.connection_id.is_some(),
+                "model": row.model,
+                "updated_by": row.updated_by.and_then(|id| email_of(world, id)),
+            })
+        });
+    let mut conversations = Map::new();
+    for row in assistant::list_conversations(world.pool, world.p1.id, owner)
+        .await
+        .expect("read the conversations")
+    {
+        let (conversation, messages) =
+            assistant::get_conversation_with_messages(world.pool, world.p1.id, owner, row.id)
+                .await
+                .expect("read a conversation")
+                .expect("a listed conversation exists");
+        conversations.insert(
+            conversation.title.clone(),
+            json!({
+                "message_count": conversation.message_count,
+                "messages": messages.iter().map(|message| json!({
+                    "seq": message.seq,
+                    "role": message.role.as_str(),
+                    "parts": json_text(&message.parts),
+                    "context": message.context.as_deref().map(json_text),
+                    "status": message.status.as_str(),
+                    "feedback": message.feedback.map(|feedback| feedback.as_str()),
+                    "has_turn_trace": message.turn_trace_id.is_some(),
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    json!({ "settings": settings, "conversations": conversations })
+}
+
+/// issues (with issue_events, issue_candidates, issue_source_days, issue_refits and
+/// issue_source_channels): `issues::list_sources`, `list_issues`, `list_events`,
+/// `candidate_counts`, `spent_between`, `list_refits` and `issue_links::source_channel_ids`, by
+/// source name, then issue title.
+async fn issues_section(world: &World<'_>) -> Value {
+    let all = issues::list_issues(
+        world.pool,
+        world.p1.id,
+        &issues::IssueListQuery {
+            states: &[],
+            source: None,
+            q: None,
+            ids: None,
+            sort: issues::IssueSort::LastSeen,
+            cursor: None,
+            limit: 100,
+        },
+    )
+    .await
+    .expect("read the issues");
+    let mut map = Map::new();
+    for source in issues::list_sources(world.pool, world.p1.id)
+        .await
+        .expect("read the sources")
+    {
+        let mut by_title = Map::new();
+        for issue in all.iter().filter(|issue| issue.source_id == source.id) {
+            let events = issues::list_events(world.pool, issue.id, 100)
+                .await
+                .expect("read the events");
+            by_title.insert(
+                issue.title.clone(),
+                json!({
+                    "fingerprint": issue.fingerprint,
+                    "state": issue.state.as_str(),
+                    "regressed": issue.regressed,
+                    "centroid": issue.centroid,
+                    "member_count": issue.member_count,
+                    "events": events.iter().map(|event| json!({
+                        "kind": event.kind.as_str(),
+                        "actor": event.actor_user_id.and_then(|id| email_of(world, id)),
+                        "from": event.from_value,
+                        "to": event.to_value,
+                    })).collect::<Vec<_>>(),
+                }),
+            );
+        }
+        let counts = issues::candidate_counts(world.pool, source.id, 0)
+            .await
+            .expect("read the candidate counts");
+        let spent = issues::spent_between(world.pool, source.id, 0, i64::MAX)
+            .await
+            .expect("read the spend");
+        let refits = issues::list_refits(world.pool, source.id, 100)
+            .await
+            .expect("read the refits");
+        let channels = issue_links::source_channel_ids(world.pool, source.id)
+            .await
+            .expect("read the channels");
+        map.insert(
+            source.name.clone(),
+            json!({
+                "kind": source.kind.as_str(),
+                "enabled": source.enabled,
+                "sample_rate": source.sample_rate,
+                "daily_cap": source.daily_cap,
+                "chat_model": source.chat_model,
+                "embed_model": source.embed_model,
+                "embed_dimension": source.embed_dimension,
+                "floor": source.floor,
+                "min_issue_size": source.min_issue_size,
+                "created_by": source.created_by.and_then(|id| email_of(world, id)),
+                "channels": channels.len(),
+                "issues": by_title,
+                "candidates": {
+                    "queued": counts.queued,
+                    "pending": counts.pending,
+                    "assigned": counts.assigned,
+                    "dropped": counts.dropped,
+                    "failed": counts.failed,
+                    "skipped": counts.skipped,
+                },
+                "spent_usd": spent,
+                "refits": refits.iter().map(|refit| json!({
+                    "trigger": refit.trigger,
+                    "finished": refit.finished_at.is_some(),
+                    "pending": refit.pending,
+                    "clusters": refit.clusters,
+                    "created": refit.created,
+                    "joined": refit.joined,
+                    "outliers": refit.outliers,
+                    "error_class": refit.error_class,
+                })).collect::<Vec<_>>(),
+            }),
+        );
+    }
+    Value::Object(map)
 }

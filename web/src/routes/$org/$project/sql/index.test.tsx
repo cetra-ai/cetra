@@ -102,7 +102,7 @@ it("lists SQL in the sidebar and opens the console", async () => {
   expect(await screen.findByRole("button", { name: "Schema" })).toBeInTheDocument();
   expect(screen.getByText("Run a query to see results")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "SQL" })).toHaveAttribute("aria-current", "page");
-  expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute("title", "Run (Ctrl↵)");
+  expect(screen.getByRole("button", { name: "Run" })).toHaveAttribute("title", "Run (Ctrl+Enter)");
 });
 
 it("opens the console from the palette", async () => {

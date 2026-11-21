@@ -15,8 +15,12 @@ import { largeHandlers } from "@/mocks/generated/handlers";
 import { server } from "@/mocks/node";
 import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { type StreamEmit, spanStreamHandler, traceStreamHandler } from "@/mocks/sse";
+import { facetsHandler } from "@/test/facets";
 import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
+import { recordUrls } from "@/test/requests";
+import tracesFixture from "../../../../../../fixtures/api/responses/traces.json";
+import queuesFixture from "../../../../../../fixtures/api/static/annotation-queues.json";
 import projectFixture from "../../../../../../fixtures/api/static/project.json";
 
 const FIRST = "a1000000000000000000000000000006";
@@ -1011,11 +1015,11 @@ it("inserts buffered traces when the list scrolls back to the top", async () => 
   const scroller = tracesScroller();
   scroller.scrollTop = 400;
   emit.trace(liveTrace("c1000000000000000000000000000004", "scrolled arrival", LATER));
-  expect(await screen.findByRole("button", { name: "1 new traces ↑" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "1 new trace ↑" })).toBeInTheDocument();
   scroller.scrollTop = 0;
   fireEvent.scroll(scroller);
   expect(await screen.findByText("scrolled arrival")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "1 new traces ↑" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "1 new trace ↑" })).not.toBeInTheDocument();
 });
 
 it("refetches the list when the stream resyncs", async () => {
@@ -1645,25 +1649,21 @@ it("clears the checked traces when the search changes", async () => {
 
 it("keeps the facet panel and its typed value search when the filter changes", async () => {
   server.use(
-    http.get("/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const field = url.searchParams.get("field");
+    facetsHandler((ask) => {
       const values =
-        field === "status"
+        ask.field === "status"
           ? [
               { value: "ok", count: 100 },
               { value: "error", count: 17 },
             ]
           : [];
-      return HttpResponse.json({
-        view: url.searchParams.get("view"),
-        field,
+      return {
         kind: "values",
         total: values.reduce((sum, item) => sum + item.count, 0),
         missing: 0,
         values,
         more: false,
-      });
+      };
     }),
   );
   const { router, user } = await renderApp("/acme/support-bot/traces?range=15m");
@@ -1676,4 +1676,335 @@ it("keeps the facet panel and its typed value search when the filter changes", a
   // The same panel node, with the typed text still in its value search.
   expect(screen.getByRole("complementary", { name: "Filter facets" })).toBe(panel);
   expect(within(panel).getByRole("searchbox", { name: "Search Status values" })).toHaveValue("er");
+});
+
+const QUEUE_LIST = "/api/v1/projects/:project/annotation-queues";
+const QUEUE_ITEMS = "/api/v1/projects/:project/annotation-queues/:id/items";
+const QUEUE_PREVIEW = "/api/v1/projects/:project/annotation-queues/:id/items/matching/preview";
+const QUEUE: Schema<"AnnotationQueue"> = queuesFixture.data[0] as Schema<"AnnotationQueue">;
+
+/** Serves one trace queue for every list request. */
+function serveQueue() {
+  server.use(http.get(QUEUE_LIST, () => HttpResponse.json({ data: [QUEUE], next_cursor: null })));
+}
+
+/** Records the body of each add to a queue. */
+function captureQueueAdds() {
+  const calls: { id: string; body: { items: { trace_id?: string }[] } }[] = [];
+  server.use(
+    http.post(QUEUE_ITEMS, async ({ request, params }) => {
+      const body = (await request.json()) as { items: { trace_id?: string }[] };
+      calls.push({ id: String(params.id), body });
+      return HttpResponse.json(
+        { added: body.items.length, existing: 0, skipped: [] },
+        { status: 201 },
+      );
+    }),
+  );
+  return calls;
+}
+
+it("adds the checked traces to a trace queue", async () => {
+  serveQueue();
+  const calls = captureQueueAdds();
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await user.click(await rowBox(0));
+  await user.click(await rowBox(1));
+  await user.click(screen.getByRole("button", { name: "Add 2 to queue" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: QUEUE.name }));
+  await user.click(within(dialog).getByRole("button", { name: "Add" }));
+
+  expect(await within(dialog).findByText(`Added 2 to ${QUEUE.name}.`)).toBeInTheDocument();
+  expect(calls).toHaveLength(1);
+  expect(calls[0]?.id).toBe(QUEUE.id);
+  expect(calls[0]?.body.items).toHaveLength(2);
+  for (const item of calls[0]?.body.items ?? []) {
+    expect(item.trace_id).toMatch(/^[0-9a-f]{32}$/);
+  }
+  expect(router.state.location.search.trace).toBeUndefined();
+});
+
+it("adds the traces the list matches to a queue with the list's filter and search", async () => {
+  serveQueue();
+  const previews: unknown[] = [];
+  server.use(
+    http.post(QUEUE_PREVIEW, async ({ request }) => {
+      previews.push(await request.json());
+      return HttpResponse.json({ matched: 2, capped: false });
+    }),
+  );
+  const { user } = await renderApp(
+    "/acme/support-bot/traces?filter=status%20%3D%20'error'&search=refund&range=24h&exp=1",
+  );
+  await user.click(await screen.findByRole("button", { name: "Add matching to queue…" }));
+
+  const dialog = await screen.findByRole("dialog");
+  await user.click(within(dialog).getByRole("combobox", { name: "Queue" }));
+  await user.click(await screen.findByRole("option", { name: QUEUE.name }));
+
+  expect(await within(dialog).findByText("2 traces match.")).toBeInTheDocument();
+  expect(previews).toHaveLength(1);
+  expect(previews[0]).toMatchObject({
+    filter: "status = 'error'",
+    search: "refund",
+    include_experiments: true,
+  });
+});
+
+it("disables the queue actions for viewers and says why", async () => {
+  server.use(projectAs("viewer"));
+  await renderApp("/acme/support-bot/traces");
+
+  const button = await screen.findByRole("button", { name: "Add matching to queue…" });
+  expect(button).toBeDisabled();
+  expect(button.parentElement).toHaveAccessibleDescription("Only members can add to queues");
+});
+
+const TRACES_ENDPOINT = "*/api/v1/projects/:project/traces";
+const TRACES_PATH = { org: "acme", project: "support-bot" } as const;
+const FIRST_NAME = "chat claude-sonnet-4-5";
+
+type TracesRouter = Awaited<ReturnType<typeof renderApp>>["router"];
+
+/** A list request: the first page of the window (limit 100). */
+function isListRequest(url: URL): boolean {
+  return url.pathname.endsWith("/traces") && url.searchParams.get("limit") === "100";
+}
+
+/** A new-rows check request (limit 50). */
+function isCheckRequest(url: URL): boolean {
+  return url.pathname.endsWith("/traces") && url.searchParams.get("limit") === "50";
+}
+
+async function leaveTraces(router: TracesRouter) {
+  await router.navigate({ to: "/$org/$project/sessions", params: TRACES_PATH });
+}
+
+async function returnToTraces(router: TracesRouter, search: { live?: 1 } = {}) {
+  await router.navigate({ to: "/$org/$project/traces", params: TRACES_PATH, search });
+  await screen.findByRole("grid", { name: "Traces" });
+}
+
+it("a return within 15 minutes sends no list request", async () => {
+  const { router } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  const recording = recordUrls();
+  try {
+    await returnToTraces(router);
+    expect(screen.getByRole("grid", { name: "Traces" })).toHaveTextContent(FIRST_NAME);
+    expect(recording.urls.some(isListRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("the pill shows the new traces and loads them", async () => {
+  server.use(
+    http.get(TRACES_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({
+          ...tracesFixture,
+          data: tracesFixture.data.slice(0, 2),
+          next_cursor: null,
+        });
+      }
+      return undefined;
+    }),
+  );
+  const { router, user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  await returnToTraces(router);
+  const pill = await screen.findByRole("button", { name: "2 new traces ↑" });
+
+  const recording = recordUrls();
+  try {
+    await user.click(pill);
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.getByRole("grid", { name: "Traces" })).not.toHaveAttribute("aria-busy");
+    });
+    expect(screen.queryByRole("button", { name: /new trace/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("a single new trace reads in the singular", async () => {
+  server.use(
+    http.get(TRACES_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({
+          ...tracesFixture,
+          data: tracesFixture.data.slice(0, 1),
+          next_cursor: null,
+        });
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  await returnToTraces(router);
+  expect(await screen.findByRole("button", { name: "1 new trace ↑" })).toBeInTheDocument();
+});
+
+it("no pill without new traces", async () => {
+  server.use(
+    http.get(TRACES_ENDPOINT, ({ request }) => {
+      if (new URL(request.url).searchParams.get("limit") === "50") {
+        return HttpResponse.json({ data: [], next_cursor: null });
+      }
+      return undefined;
+    }),
+  );
+  const { router, queryClient } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  const recording = recordUrls();
+  try {
+    await returnToTraces(router);
+    await waitFor(() => {
+      expect(recording.urls.some(isCheckRequest)).toBe(true);
+    });
+    // The empty answer has landed once nothing is fetching.
+    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
+    expect(screen.queryByRole("button", { name: /new trace/ })).not.toBeInTheDocument();
+  } finally {
+    recording.stop();
+  }
+});
+
+it("an expired anchor refetches", async () => {
+  vi.useFakeTimers({ toFake: ["Date"], shouldAdvanceTime: true });
+  try {
+    const { router } = await renderApp("/acme/support-bot/traces");
+    await screen.findByRole("grid", { name: "Traces" });
+    await leaveTraces(router);
+    vi.setSystemTime(Date.now() + 16 * 60_000);
+    const recording = recordUrls();
+    try {
+      await returnToTraces(router);
+      await waitFor(() => {
+        expect(recording.urls.some(isListRequest)).toBe(true);
+      });
+      expect(recording.urls.some(isCheckRequest)).toBe(false);
+    } finally {
+      recording.stop();
+    }
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+it("a new window keeps the old rows dimmed", async () => {
+  server.use(
+    http.get(TRACES_ENDPOINT, async ({ request }) => {
+      if (new URL(request.url).searchParams.has("filter")) {
+        await new Promise(() => {});
+      }
+      return undefined;
+    }),
+  );
+  const { router } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  await router.navigate({
+    to: "/$org/$project/traces",
+    params: TRACES_PATH,
+    search: { filter: "status = 'error'" },
+  });
+  const grid = screen.getByRole("grid", { name: "Traces" });
+  await waitFor(() => {
+    expect(grid).toHaveAttribute("aria-busy", "true");
+  });
+  expect(grid).toHaveTextContent(FIRST_NAME);
+});
+
+it("an absolute range sends no list and no check request", async () => {
+  const from = "2026-01-01T09:00:00.000Z";
+  const to = "2026-01-01T11:00:00.000Z";
+  const { router } = await renderApp(`/acme/support-bot/traces?from=${from}&to=${to}`);
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  const recording = recordUrls();
+  try {
+    await router.navigate({
+      to: "/$org/$project/traces",
+      params: TRACES_PATH,
+      search: { from, to },
+    });
+    await screen.findByRole("grid", { name: "Traces" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(recording.urls.some(isListRequest)).toBe(false);
+    expect(recording.urls.some(isCheckRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("refresh sets a new window", async () => {
+  const { user } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  const recording = recordUrls();
+  try {
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => {
+      expect(recording.urls.filter(isListRequest)).toHaveLength(1);
+    });
+  } finally {
+    recording.stop();
+  }
+});
+
+it("live mode starts a new window on return", async () => {
+  server.use(traceStreamHandler(() => undefined));
+  const { router } = await renderApp("/acme/support-bot/traces?live=1");
+  await screen.findByRole("grid", { name: "Traces" });
+  await leaveTraces(router);
+  const recording = recordUrls();
+  try {
+    await returnToTraces(router, { live: 1 });
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+    expect(recording.urls.some(isCheckRequest)).toBe(false);
+  } finally {
+    recording.stop();
+  }
+});
+
+it("turning live off starts a new window", async () => {
+  server.use(traceStreamHandler(() => undefined));
+  const { router } = await renderApp("/acme/support-bot/traces?live=1");
+  await screen.findByRole("grid", { name: "Traces" });
+  const recording = recordUrls();
+  try {
+    await router.navigate({ to: "/$org/$project/traces", params: TRACES_PATH, search: {} });
+    await waitFor(() => {
+      expect(recording.urls.some(isListRequest)).toBe(true);
+    });
+  } finally {
+    recording.stop();
+  }
+});
+
+it("a return restores the first visible row", async () => {
+  const { router } = await renderApp("/acme/support-bot/traces");
+  await screen.findByRole("grid", { name: "Traces" });
+  tracesScroller().scrollTop = 2 * ROW_HEIGHT;
+  fireEvent.scroll(tracesScroller());
+  // The scroll position is remembered once it has settled.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  await leaveTraces(router);
+  await returnToTraces(router);
+  await waitFor(() => {
+    expect(tracesScroller().scrollTop).toBe(2 * ROW_HEIGHT);
+  });
 });

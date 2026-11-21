@@ -45,7 +45,7 @@ commit:  store media ─► build batch ─► append batch to WAL (group commit
 
 The server runs this per request, with no queue between the request and storage; decoding and normalization run on a blocking thread (D-G-2). `accept` exists only for OTLP. `commit` is the in-process entry point: track I commits judge traces with it, so they skip the environment rewrite (D-G-8).
 
-Normalization is a pure function in `cetra-otel`: `normalize(request, ingest_context, price_table) -> Normalized { spans, media, rejections }` (D102, D103, D105). It does no I/O. The server stores each returned media blob through `cetra-storage` before the WAL append. Re-sends are safe because blobs are content-addressed. `ingest_context` carries the project ID, the ingest time, the project's `retention_days` (capped by the org's retention cap from track P's M4, D-P-22) and the limits.
+Normalization is a pure function in `cetra-otel`: `normalize(request, ingest_context, price_table, agent_contexts) -> Normalized { spans, media, rejections, discarded }` (D102, D103, D105). `agent_contexts` is the coding-agents lookup (§ Coding agents); `discarded` counts spans dropped on purpose (§ Coding agents). It does no I/O. The server stores each returned media blob through `cetra-storage` before the WAL append. Re-sends are safe because blobs are content-addressed. `ingest_context` carries the project ID, the ingest time, the project's `retention_days` (capped by the org's retention cap from track P's M4, D-P-22) and the limits.
 
 Scalar fields (model, provider, tokens, context, parameters, reported cost) come from precedence tables. Span kind, payloads and time-to-first-token come from one function per convention, called in the order below. There is no per-convention type (D102). The result is a `Vec<Span>` (D105); the server converts it with `cetra_core::batch` before `append_spans`.
 
@@ -168,11 +168,12 @@ Per-modality counts (`gen_ai.usage.{audio,image,text}.*`, `llm.token_count.*_det
 | Field | Sources |
 |---|---|
 | `session_id` | `cetra.session.id`, `session.id`, `gen_ai.conversation.id`, `traceloop.association.properties.session_id`, `ai.telemetry.metadata.sessionId`, `ai.settings.context.sessionId` (Vercel v7, D-B1-5), `langfuse.session.id`, `lmnr.association.properties.session_id`, `gcp.vertex.agent.session_id` (D-B1-8) |
-| `user_id` | `cetra.user.id`, `user.id`, `enduser.id`, `traceloop.association.properties.user_id`, `ai.telemetry.metadata.userId`, `ai.settings.context.userId` (D-B1-5), `langfuse.user.id`, `lmnr.association.properties.user_id` |
+| `user_id` | `cetra.user.id`, `user.id`, `enduser.id`, `traceloop.association.properties.user_id`, `ai.telemetry.metadata.userId`, `ai.settings.context.userId` (D-B1-5), `langfuse.user.id`, `lmnr.association.properties.user_id`, `enduser.pseudo.id` (last; § Coding agents) |
 | `tags` | `cetra.tags`, `tag.tags`, `ai.telemetry.metadata.tags`, `langfuse.trace.tags`, `lmnr.association.properties.tags`. Each source is a string array or a string containing a JSON array of strings. Any other form, such as a comma-separated list, is not a tag source: it is consumed and stays in `attributes` (rule 2) |
 | `metadata` | `cetra.metadata.*` (one attribute per key), `metadata` (OI, JSON object string), `ai.telemetry.metadata.*`, `ai.settings.context.*` (Vercel v7's `context` option, D-B1-5), `ai.telemetry.functionId` (stored as `functionId`), `traceloop.association.properties.*`, `traceloop.workflow.name` (stored as `workflow`), `langfuse.trace.metadata.*`, `lmnr.association.properties.metadata.*` |
-| `environment` | `cetra.environment`, resource `deployment.environment.name`, `deployment.environment`, `langfuse.environment`. A value `cetra-eval` received over OTLP is rewritten to `cetra-eval-external` by the OTLP handler after normalization, and the warning code `reserved_environment` is added to `cetra.normalize_warning` (rule 18; D161, D-G-7). `normalize` itself does not rewrite it, so in-process evaluation spans keep the name |
+| `environment` | `cetra.environment`, resource `deployment.environment.name`, `deployment.environment`, `langfuse.environment`. A reserved value received over OTLP (`cetra-eval`, `cetra-playground` or `cetra-assistant`; D-V-33, D-AS-11) is rewritten to its `-external` alias (`cetra-eval-external`, `cetra-playground-external`, `cetra-assistant-external`) by the OTLP handler after normalization, and the warning code `reserved_environment` is added to `cetra.normalize_warning` (rule 18; D161, D-G-7). `normalize` itself does not rewrite it, so in-process evaluation spans keep the name |
 | `release` | `cetra.release`, resource `service.version`, `langfuse.release`, `lmnr.span.release` (span) |
+| `prompt_name`, `prompt_version` | Span attributes only (D-V-16). Pairs in precedence order: `cetra.prompt.name` with `cetra.prompt.version`, then `langfuse.observation.prompt.name` with `langfuse.observation.prompt.version`. The first name that is not blank (after trimming) wins, and it is stored as read. The version is read only from the pair of the winning name. The other pair's keys are never read and stay in `attributes`. A version must be an integer ≥ 1, given as an integer, a string holding one, or a whole double (rule 20). Any other value, such as `0`, `-1`, `1.5`, `"x"` or a boolean, leaves the version empty, keeps the key in `attributes` and records `invalid_prompt_version`; the name is still stored. A version whose pair has no name leaves its keys in `attributes` and records `prompt_version_without_name`. A blank or missing name means no prompt. The prompt is not checked against the registry |
 | `service_name` | resource `service.name` |
 | experiment linkage | `cetra.experiment.id`, `cetra.dataset_item.id` → stored in `metadata` under the reserved keys `cetra.experiment_id`, `cetra.dataset_item_id` (06) |
 
@@ -215,10 +216,92 @@ These rules resolve ambiguities in the tables above. They were fixed while writi
     The other spans of the request are still accepted. An all-zero `parentSpanId`, or one whose length is not 8 bytes, is treated as absent. `partial_success.error_message` is rule 21.
 16. **Finish reasons.** In a GenAI output message list, each message keeps its own `finish_reason`. A missing one is filled from `gen_ai.response.finish_reasons[i]`. For OpenLLMetry, `gen_ai.completion.N.finish_reason` goes on message N. For OpenInference, `llm.output_messages.N.message.finish_reason` goes on message N when present. For a message built from flat attributes (Vercel `doGenerate`/`doStream`): the first element of `gen_ai.response.finish_reasons` when present, else `ai.response.finishReason`. GenAI wins by the precedence of § Convention detection. The flat-attribute source attributes are consumed attributes (rule 2).
 17. **Timestamps** (D106). `start_time_unix_nano` and `end_time_unix_nano` above `i64::MAX` reject the span. `end < start` sets `end_time = start_time` and records the warning `end_before_start`. A zero `end_time_unix_nano` (an unended span) counts as `end < start`.
-18. **Warnings.** Recoverable oddities are recorded as warning codes in the attribute `cetra.normalize_warning`: a JSON array of strings, sorted, without duplicates. The normalizer writes this attribute and replaces a client-sent value with the same key. Codes: `duplicate_key`, `end_before_start`, `input_excludes_cache`, `invalid_event_time`, `invalid_number`, `max_depth`, and `reserved_environment`, which only the server's OTLP handler writes (D-G-7). The set is closed. Adding a code means updating this rule.
+18. **Warnings.** Recoverable oddities are recorded as warning codes in the attribute `cetra.normalize_warning`: a JSON array of strings, sorted, without duplicates. The normalizer writes this attribute and replaces a client-sent value with the same key. Codes: `duplicate_key`, `end_before_start`, `input_excludes_cache`, `invalid_event_time`, `invalid_number`, `invalid_prompt_version`, `max_depth`, `prompt_version_without_name`, and `reserved_environment`, which only the server's OTLP handler writes (D-G-7). The set is closed. Adding a code means updating this rule.
 19. **AnyValue limits** (D107). Nesting deeper than 32 levels (array or kvlist inside array or kvlist) is replaced at depth 33 by the string `[cetra: max depth]`. The attribute name goes into `truncated`, and the `max_depth` warning is recorded. Duplicate keys in one key-value list: the last one wins, and `duplicate_key` is recorded. This applies to attributes, resource attributes, event and link attributes, and nested kvlists.
 20. **Numbers.** A field typed as an integer accepts `intValue`, a `doubleValue` with no fractional part, or a string holding a decimal integer. A field typed as a float accepts `intValue`, `doubleValue` or a numeric string. Anything else does not fill the field. The attribute stays in `attributes`, unconsumed, and `invalid_number` is recorded. Negative token counts are invalid numbers.
 21. **Rejection reasons** (D111). The rejection reasons are `invalid_trace_id`, `invalid_span_id`, `timestamp_overflow` and `start_time_out_of_range`. `partial_success.error_message` lists at most 4 of them with counts, sorted by count descending then by code, for example `rejected 3 spans: invalid_span_id ×2, start_time_out_of_range ×1`. When more than 4 exist, the rest are `, … ×{rest}`. The word is `span` when the total is 1. The message never contains a value from the request.
+
+## Coding agents
+
+Claude Code, Codex CLI, Gemini CLI and GitHub Copilot write their spans in their own conventions. `normalize` recognizes them and fills the same columns as every other span (D-CA-3). Their rules run after the generic extraction and before cost. Each rule replaces a generic result only where it states one; a span the agent has no rule for keeps the generic result. The code is `crates/otel/src/agents/` (D-CA-3); `AgentContexts` and `canonical_repository` are its public items.
+
+**Detection.** The first rule that matches wins. It reads the raw attributes, before any convention:
+
+1. A span name that starts with `claude_code.` is Claude Code.
+2. A resource `service.name` that is `codex`, or starts with `codex_`, is Codex.
+3. `gen_ai.agent.name` equal to `gemini-cli`, or a `service.name` of `gemini-cli`, is Gemini CLI.
+4. A scope name that starts with `github.copilot` or `copilot`, a `service.name` of `github-copilot` or `copilot-chat`, or any attribute key that starts with `github.copilot.`, is Copilot.
+5. Otherwise the span is not a coding-agent span, and no rule below applies.
+
+**Codex discard.** Codex exports every internal `tracing` span of the process, about 700 for a one-tool prompt. A Codex span is kept only when it is `session_task.turn`, or when `codex.tool.phase` is `dispatch` and `tool_name` is a non-empty string. Every other Codex span is discarded before the id and time checks, so it is never counted as rejected. `normalize` counts it in `Normalized.discarded`. It is neither stored nor rejected, it does not appear in `partial_success`, and it is not a unit.
+
+**Re-link.** Codex's kept spans lose their real parents, so they are re-linked by rule (D-CA-6). `relink(turn id)` is the first 8 bytes of SHA-256(`cetra.codex.turn` ‖ turn id), and when that is all zeros, its last byte is set to 1. The turn id is `turn.id`, else `turn_id`. With a turn id, the turn span takes `relink(turn id)` as its `span_id` and has no parent, and a kept dispatch takes `relink(turn id)` as its parent. Without a turn id, nothing is re-linked: the ids and parents are kept. A kept dispatch takes its tool name in every case, with or without a turn id (§ Names).
+
+**Span kinds.** When an agent decides the kind, the generic `cetra.span.kind` is not read on that span. A span name the agent does not list uses the generic mapping.
+
+| Agent | Span | Kind |
+|---|---|---|
+| Claude Code | `claude_code.interaction` | `agent` |
+| Claude Code | `claude_code.llm_request` | `llm` |
+| Claude Code | `claude_code.tool` | `tool` |
+| Claude Code | any other `claude_code.*` | `span` |
+| Codex | `session_task.turn` | `llm` |
+| Codex | a kept dispatch | `tool` |
+| Gemini CLI | `llm_call` | `llm` |
+| Gemini CLI | `tool_call` | `tool` |
+| Gemini CLI | `schedule_tool_calls` | `chain` |
+| Gemini CLI | `user_prompt`, `agent_call` | `agent` |
+| Copilot | none | generic |
+
+**Tokens.** The usage columns are read from the agent's own names, on `llm` spans only (rule 3). A count that is negative or not numeric is an invalid number (rule 20): it stays in `attributes` and `invalid_number` is recorded. When an agent gives no count on the span, the generic rules apply.
+
+| Agent | Source | Rule |
+|---|---|---|
+| Claude Code | `claude_code.llm_request`: `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens` | `input_tokens` excludes the cache, so the input is `input_tokens + cache_read_tokens + cache_creation_tokens` (D110). Total is input plus output. The usage is `None` when neither `input_tokens` nor `output_tokens` is present. |
+| Codex | `session_task.turn`: `codex.turn.token_usage.input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens`, `total_tokens` | `input_tokens` and `output_tokens` already include the cache and the reasoning, so nothing is added back. The total is `total_tokens`, else input plus output. The usage is `None` when neither input nor output is present. |
+| Gemini CLI, Copilot | none | generic |
+
+**Time to first token.** On Claude Code spans, `ttft_ms` in milliseconds gives `ttft_ns`, when the generic rule gives none.
+
+**Payloads.**
+
+| Agent | Span | Input | Output |
+|---|---|---|---|
+| Claude Code | `claude_code.interaction` | `user_prompt` as text, unless it is empty or redacted. The attribute is removed in every case. | none |
+| Claude Code | `claude_code.tool` | A JSON object of the detail attributes `full_command`, `file_path`, `skill_name` and `subagent_type` that are present, when at least one is a non-empty string. | The `output` of the first `tool.output` event, else its `diff`, else its `content`, as text, unless it is empty or redacted. The event is removed from `events` in every case. |
+| Gemini CLI | `llm_call` | `gen_ai.input.messages` (an array) converted to canonical messages, when at least one message results. | `gen_ai.output.messages`, an object wrapped in an array first, converted the same way. |
+| Gemini CLI | `llm_call` | `gen_ai.tool.definitions`: the `functionDeclarations` of each element, flattened, become `tool_definitions`. `gen_ai.system_instructions` becomes `system_instructions`. | |
+| Gemini CLI | `tool_call`, `schedule_tool_calls` | `gen_ai.input.messages` as JSON, or as text when it is not JSON (rule 10). | `gen_ai.output.messages`, the same way. |
+
+On a Claude Code tool span, the agent's input and output replace the generic ones only when they are set, and the input and output errors of the convention that read them are removed. A Gemini conversion that fails leaves the generic result. Codex and Copilot spans have no payload rule. Codex spans carry no content, and Copilot's spans take the generic payload rules.
+
+Redacted content is no content. The placeholders `<REDACTED>` and `[REDACTED]` in Claude Code's `user_prompt` and tool output text mean that the agent did not capture the text, so no input or output is set from them.
+
+**Names.** A tool span takes the tool's name: Claude Code `gen_ai.tool.name`, else `tool_name`; Gemini CLI `tool_call` and Copilot tool spans `gen_ai.tool.name`; Codex a kept dispatch `tool_name`. The name is then `tool_name`, and the original name moves to `attributes['cetra.span_name']`. `cetra.span_name` is written only when a rename changes the name. A Claude Code span whose name is not `claude_code.tool` keeps its name. The call id of Gemini (`gen_ai.tool.call_id`) and Codex (`call_id`) is not read: it stays in `attributes`.
+
+**Person (D-CA-5).** `user_id` takes the first of these that has a value:
+
+1. Claude Code: `user.email`, lowercased, then the session context's user, then `user.account_uuid`, then `user.account_id`.
+2. Codex and Gemini CLI: the session context's user.
+3. Every agent: the generic `user_id` sources (the `enduser.pseudo.id` source below counts last).
+
+Copilot has no session context. Its `enduser.pseudo.id` is the last source in the generic `user_id` list (§ Context fields), so it fills `user_id` when no other source does.
+
+**Session ids.** A Codex span, the turn or any other kept span, takes `conversation.id`, else its first non-empty string `thread.id`. An integer `thread.id` is the OS thread and is ignored. Gemini CLI and Claude Code use the generic `session_id` sources. The Codex request model is `model`, when no other source gives one.
+
+**Metadata (D-CA-4).** Each coding-agent span gets `coding_agent`, one of `claude-code`, `codex`, `gemini-cli` or `copilot`. It also gets, when there is a value:
+
+- `repository`, in canonical form. The canonical form is `canonical_repository` of the URL: trimmed, lowercased, with the scheme, user-info and any port removed, `.git` and trailing slashes removed, and `host/seg1/…/segN`. It is `None` when the host is empty or there are fewer than two path segments. The source is the session context's repository, else Claude Code's `vcs.repository.url.full`, else Copilot's `github.copilot.git.repository`, else its `copilot_chat.repo.remote_url`.
+- `branch`: the session context's branch, else Copilot's `github.copilot.git.branch`, else its `copilot_chat.repo.head_branch_name`.
+
+The agent's own value replaces a client value (`cetra.metadata.*`) only when the agent has one. A client value stays when the agent has none.
+
+**Session context (D-CA-9).** `normalize` takes an `AgentContexts` lookup, keyed by agent name and session id, which the server fills. The lookup is read-only. When the span's session id has a stored context of the same agent, that context's repository and branch replace the span's own values, and its user takes the person's rank in the list above. Nothing is removed when the context has no value. The server passes an empty lookup until the coding-agent store is in place (track CA M3).
+
+**Settled rules.** These also hold:
+
+- Discards are counted, so that `spans + rejections + discarded` equals the input span count. The server ignores `discarded`.
+- Codex's kept spans are re-linked, so the fixtures for group `codex` do not require their expected ids to appear in `input.json`.
 
 ## Media extraction
 
@@ -297,6 +380,7 @@ The fixture format is defined in `fixtures/otlp/README.md` (D66). Each case is a
 | Langfuse SDK (Python, 5.x) | drop-in client | — | — | the SDK's own observations |
 | Laminar (Python) | client | — | — | the SDK's own spans |
 | Google ADK | — | — | native model calls | native agent spans |
+| Coding agents (§ Coding agents) | Codex CLI (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
 
 A captured case may be committed before its `expected.json`. The golden test skips it until bless mode writes that file, which is then reviewed ([`fixtures/otlp/README.md` § Workflows](../../fixtures/otlp/README.md#workflows), D118).
 

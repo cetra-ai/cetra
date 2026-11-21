@@ -10,7 +10,10 @@ use super::{META_FORMAT_VERSION, MetaDb, connect, migrator};
 
 /// Migrations from before the first public release that do more than add. Frozen at
 /// that release: never append to it afterwards (a later one is format-changing).
-const PRE_RELEASE_NON_ADDITIVE: &[i64] = &[8]; // 0008 drops orgs.limits (D-P-11)
+const PRE_RELEASE_NON_ADDITIVE: &[i64] = &[
+    8,  // 0008 drops orgs.limits (D-P-11)
+    30, // 0030 sets issue_sources.last_notified_at and rebuilds notification_deliveries (D-IC-21)
+];
 /// Released migrations that changed the format; each came with a META_FORMAT_VERSION bump.
 const FORMAT_CHANGING_MIGRATIONS: &[i64] = &[];
 
@@ -115,6 +118,65 @@ const ALTERING_CASES: &[AlteringCase] = &[
             || definition || '|' || version || '|' || created_at || '|' || updated_at || '|'
             || kind FROM dashboards",
         expected: "018f6b4e-7c1a-7c1a-8c1a-0000000000f3|018f6b4e-7c1a-7c1a-8c1a-0000000000f2|Costs|kept|{\"widgets\":[]}|3|5|6|custom",
+    },
+    AlteringCase {
+        version: 29,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001a1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO projects (id, org_id, name, slug, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001a2', '018f6b4e-7c1a-7c1a-8c1a-0000000001a1',
+            'P', 'p', 1, 2)",
+            "INSERT INTO issue_sources (id, project_id, name, kind, filter, enabled, created_at,
+            updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001a3', '018f6b4e-7c1a-7c1a-8c1a-0000000001a2',
+            'errors', 'errors', 'kept', 1, 3, 4)",
+            "INSERT INTO issues (id, project_id, source_id, fingerprint, title, state, first_seen,
+            last_seen, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001a4', '018f6b4e-7c1a-7c1a-8c1a-0000000001a2',
+            '018f6b4e-7c1a-7c1a-8c1a-0000000001a3', 'fp', 'Boom', 'open', 5, 6, 7, 8)",
+        ],
+        read: "SELECT s.id || '|' || s.name || '|' || s.kind || '|' || s.filter || '|' || s.enabled
+            || '|' || s.created_at || '|' || s.updated_at || '|' || COALESCE(s.sample_rate, 'NULL')
+            || '|' || COALESCE(s.chat_connection_id, 'NULL') || '|' || s.refit_trigger || '|'
+            || i.id || '|' || i.fingerprint || '|' || i.title || '|' || i.state || '|' || i.first_seen
+            || '|' || i.last_seen || '|' || (i.centroid IS NULL) || '|' || i.member_count
+            FROM issue_sources s JOIN issues i ON i.source_id = s.id",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001a3|errors|errors|kept|1|3|4|NULL|NULL|schedule|018f6b4e-7c1a-7c1a-8c1a-0000000001a4|fp|Boom|open|5|6|1|0",
+    },
+    AlteringCase {
+        version: 30,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO projects (id, org_id, name, slug, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b2', '018f6b4e-7c1a-7c1a-8c1a-0000000001b1',
+            'P', 'p', 1, 2)",
+            "INSERT INTO issue_sources (id, project_id, name, kind, enabled, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b3', '018f6b4e-7c1a-7c1a-8c1a-0000000001b2',
+            'off', 'errors', 0, 3, 4)",
+            "INSERT INTO alert_rules (id, project_id, name, metric, config, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b4', '018f6b4e-7c1a-7c1a-8c1a-0000000001b2',
+            'r', 'error_rate', '{}', 1, 2)",
+            "INSERT INTO alert_events (id, rule_id, kind, threshold, window_from, window_to, details,
+            created_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b5', '018f6b4e-7c1a-7c1a-8c1a-0000000001b4',
+            'fired', 0.5, 1, 2, '{}', 3)",
+            "INSERT INTO notification_channels (id, project_id, kind, name, config_enc, target_hint,
+            created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b6', '018f6b4e-7c1a-7c1a-8c1a-0000000001b2',
+            'webhook', 'c', x'00', 'hint', 1, 2)",
+            "INSERT INTO notification_deliveries (id, event_id, channel_id, status, attempts,
+            next_attempt_at, last_error, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001b7', '018f6b4e-7c1a-7c1a-8c1a-0000000001b5',
+            '018f6b4e-7c1a-7c1a-8c1a-0000000001b6', 'failed', 3, 9, 'timeout', 10, 11)",
+        ],
+        read: "SELECT id || '|' || event_id || '|' || channel_id || '|' || status || '|' || attempts
+            || '|' || next_attempt_at || '|' || last_error || '|' || created_at || '|' || updated_at
+            || '|' || COALESCE(issue_notification_id, 'NULL') FROM notification_deliveries
+            UNION ALL
+            SELECT id || '|' || COALESCE(last_notified_at, 'NULL') FROM issue_sources",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001b7|018f6b4e-7c1a-7c1a-8c1a-0000000001b5|018f6b4e-7c1a-7c1a-8c1a-0000000001b6|failed|3|9|timeout|10|11|NULL\n018f6b4e-7c1a-7c1a-8c1a-0000000001b3|NULL",
     },
 ];
 

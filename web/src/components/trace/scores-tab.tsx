@@ -138,15 +138,24 @@ function Author({ score }: { score: Schema<"Score"> }) {
   return "—";
 }
 
+// Issue occurrences are not scores to read here; the trace's issues have their own chips (D-IC-18).
 function forTrace(scores: Schema<"Score">[], traceId: string): Schema<"Score">[] {
   return scores.filter(
-    (score) => !score.deleted && score.target.type === "trace" && score.target.trace_id === traceId,
+    (score) =>
+      !score.deleted &&
+      score.source !== "issue" &&
+      score.target.type === "trace" &&
+      score.target.trace_id === traceId,
   );
 }
 
 function forSpan(scores: Schema<"Score">[], spanId: string): Schema<"Score">[] {
   return scores.filter(
-    (score) => !score.deleted && score.target.type === "span" && score.target.span_id === spanId,
+    (score) =>
+      !score.deleted &&
+      score.source !== "issue" &&
+      score.target.type === "span" &&
+      score.target.span_id === spanId,
   );
 }
 

@@ -9,7 +9,12 @@ import {
   canManageDashboards,
   canManageDatasets,
   canManageEvaluation,
+  canManagePrompts,
+  canManageQueues,
   canRemoveMember,
+  canReview,
+  canRunPlayground,
+  canUseAssistant,
   grantableRoles,
   overrideLabel,
   roleLabel,
@@ -95,6 +100,30 @@ it("lets members and above manage datasets", () => {
   expect(canManageDatasets(undefined)).toBe(false);
 });
 
+it("lets members and above manage prompts", () => {
+  expect(canManagePrompts("owner")).toBe(true);
+  expect(canManagePrompts("admin")).toBe(true);
+  expect(canManagePrompts("member")).toBe(true);
+  expect(canManagePrompts("viewer")).toBe(false);
+  expect(canManagePrompts(undefined)).toBe(false);
+});
+
+it("lets members and above run the playground", () => {
+  expect(canRunPlayground("owner")).toBe(true);
+  expect(canRunPlayground("admin")).toBe(true);
+  expect(canRunPlayground("member")).toBe(true);
+  expect(canRunPlayground("viewer")).toBe(false);
+  expect(canRunPlayground(undefined)).toBe(false);
+});
+
+it("lets members and above use the assistant", () => {
+  expect(canUseAssistant("owner")).toBe(true);
+  expect(canUseAssistant("admin")).toBe(true);
+  expect(canUseAssistant("member")).toBe(true);
+  expect(canUseAssistant("viewer")).toBe(false);
+  expect(canUseAssistant(undefined)).toBe(false);
+});
+
 it("overrides only members and viewers", () => {
   expect(canHaveOverride("member")).toBe(true);
   expect(canHaveOverride("viewer")).toBe(true);
@@ -107,4 +136,14 @@ it("lets members and above manage evaluation", () => {
   expect(canManageEvaluation("member")).toBe(true);
   expect(canManageEvaluation("viewer")).toBe(false);
   expect(canManageEvaluation(undefined)).toBe(false);
+});
+
+it("lets members and above manage and review queues", () => {
+  for (const check of [canManageQueues, canReview]) {
+    expect(check("owner")).toBe(true);
+    expect(check("admin")).toBe(true);
+    expect(check("member")).toBe(true);
+    expect(check("viewer")).toBe(false);
+    expect(check(undefined)).toBe(false);
+  }
 });

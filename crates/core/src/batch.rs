@@ -73,6 +73,8 @@ struct SpanColumns {
     request_model: StringBuilder,
     response_model: StringBuilder,
     model: StringBuilder,
+    prompt_name: StringBuilder,
+    prompt_version: Int64Builder,
     operation: StringBuilder,
     input_tokens: Int64Builder,
     output_tokens: Int64Builder,
@@ -147,6 +149,8 @@ impl SpanColumns {
                 sum_len(spans, |span| span.response_model.as_deref()),
             ),
             model: string_builder(rows, 0),
+            prompt_name: string_builder(rows, sum_len(spans, |span| span.prompt_name.as_deref())),
+            prompt_version: Int64Builder::with_capacity(rows),
             operation: string_builder(rows, sum_len(spans, |span| span.operation.as_deref())),
             input_tokens: Int64Builder::with_capacity(rows),
             output_tokens: Int64Builder::with_capacity(rows),
@@ -232,6 +236,8 @@ impl SpanColumns {
                 .as_deref()
                 .or(span.request_model.as_deref()),
         );
+        append_opt(&mut self.prompt_name, span.prompt_name.as_deref());
+        self.prompt_version.append_option(span.prompt_version);
         append_opt(&mut self.operation, span.operation.as_deref());
         self.input_tokens.append_option(span.input_tokens);
         self.output_tokens.append_option(span.output_tokens);
@@ -311,6 +317,8 @@ impl SpanColumns {
             finish_string(self.request_model),
             finish_string(self.response_model),
             finish_string(self.model),
+            finish_string(self.prompt_name),
+            Arc::new(self.prompt_version.finish()),
             finish_string(self.operation),
             Arc::new(self.input_tokens.finish()),
             Arc::new(self.output_tokens.finish()),
@@ -365,6 +373,7 @@ struct ScoreColumns {
     rule_id: StringBuilder,
     experiment_id: StringBuilder,
     dataset_item_id: StringBuilder,
+    queue_id: StringBuilder,
     author_user_id: StringBuilder,
     metadata: MapBuilder<StringBuilder, StringBuilder>,
     created_at: TimestampNanosecondBuilder,
@@ -395,6 +404,7 @@ impl ScoreColumns {
             rule_id: string_builder(rows, rows * 36),
             experiment_id: string_builder(rows, rows * 36),
             dataset_item_id: string_builder(rows, rows * 36),
+            queue_id: string_builder(rows, rows * 36),
             author_user_id: string_builder(rows, rows * 36),
             metadata: utf8_map(rows, metadata_bytes.0, metadata_bytes.1),
             created_at: timestamp_builder(rows),
@@ -436,6 +446,7 @@ impl ScoreColumns {
         append_uuid_opt(&mut self.rule_id, score.rule_id);
         append_uuid_opt(&mut self.experiment_id, score.experiment_id);
         append_uuid_opt(&mut self.dataset_item_id, score.dataset_item_id);
+        append_uuid_opt(&mut self.queue_id, score.queue_id);
         append_uuid_opt(&mut self.author_user_id, score.author_user_id);
         append_map(&mut self.metadata, &score.metadata)?;
         self.created_at.append_value(score.created_at);
@@ -464,6 +475,7 @@ impl ScoreColumns {
             finish_string(self.rule_id),
             finish_string(self.experiment_id),
             finish_string(self.dataset_item_id),
+            finish_string(self.queue_id),
             finish_string(self.author_user_id),
             Arc::new(self.metadata.finish()),
             finish_timestamp(self.created_at),
@@ -690,6 +702,8 @@ mod tests {
         fallback.request_model = Some("requested-only".to_owned());
         let batch = spans_to_record_batch(&[minimal_span(), full_span(), fallback]).unwrap();
         assert_eq!(batch.schema(), spans_schema());
+        assert!(is_null(&batch, schema::spans::PROMPT_NAME, 0));
+        assert!(is_null(&batch, schema::spans::PROMPT_VERSION, 0));
 
         assert_eq!(utf8(&batch, schema::spans::NAME, 0), Some("root"));
         assert_eq!(utf8(&batch, schema::spans::SPAN_KIND, 0), Some("span"));
@@ -732,6 +746,11 @@ mod tests {
             Some("computed")
         );
         assert_eq!(i64_at(&batch, schema::spans::TTFT_NS, 1), 42_000_000);
+        assert_eq!(
+            utf8(&batch, schema::spans::PROMPT_NAME, 1),
+            Some("support-reply")
+        );
+        assert_eq!(i64_at(&batch, schema::spans::PROMPT_VERSION, 1), 2);
         assert_eq!(list_at(&batch, schema::spans::TAGS, 1), vec!["beta"]);
         assert_eq!(
             list_at(&batch, schema::spans::CONVENTIONS, 1),
@@ -831,6 +850,7 @@ mod tests {
             (schema::scores::RULE_ID, full.rule_id),
             (schema::scores::EXPERIMENT_ID, full.experiment_id),
             (schema::scores::DATASET_ITEM_ID, full.dataset_item_id),
+            (schema::scores::QUEUE_ID, full.queue_id),
             (schema::scores::AUTHOR_USER_ID, full.author_user_id),
         ] {
             let text = uuid_text(id);
@@ -907,6 +927,7 @@ mod tests {
         score.rule_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e2".parse().unwrap());
         score.experiment_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e3".parse().unwrap());
         score.dataset_item_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e4".parse().unwrap());
+        score.queue_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e6".parse().unwrap());
         score.author_user_id = Some("018f6b4e-7c1a-7c1a-8c1a-0000000000e5".parse().unwrap());
         score.created_at = 1_767_261_600_000_000_000;
         score.updated_at = 1_767_261_601_000_000_000;
@@ -961,6 +982,7 @@ mod tests {
             rule_id: None,
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
             author_user_id: None,
             metadata,
             created_at: 0,

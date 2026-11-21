@@ -18,17 +18,11 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { atLeast } from "@/lib/roles";
 import type { SqlSearch } from "@/lib/search/sql";
+import { shortcutLabel } from "@/lib/shortcuts";
 import type { DraftUpdate, SqlDraft } from "@/lib/sql/draft";
 import type { SqlExample } from "@/lib/sql/examples";
 import { downloadSqlExport, type ExportFormat } from "@/lib/sql/export";
-import {
-  formatShortcutLabel,
-  isSqlResult,
-  RUN_FAILED,
-  resultStatus,
-  runShortcutLabel,
-  sqlProblemMessage,
-} from "@/lib/sql/format";
+import { isSqlResult, RUN_FAILED, resultStatus, sqlProblemMessage } from "@/lib/sql/format";
 import { formatSql } from "@/lib/sql/format-sql";
 import { pushHistory } from "@/lib/sql/history";
 import { paramValues, sqlParams, usedParams } from "@/lib/sql/params";
@@ -253,7 +247,7 @@ export function SqlTabBody({
           type="button"
           variant="outline"
           size="xs"
-          title={`Format (${formatShortcutLabel(navigator.userAgent)})`}
+          title={`Format (${shortcutLabel("⇧⌥F", navigator.userAgent)})`}
           disabled={draft.query.trim().length === 0}
           onClick={formatQuery}
         >
@@ -275,7 +269,7 @@ export function SqlTabBody({
             <Button
               type="button"
               size="xs"
-              title={`Run (${runShortcutLabel(navigator.userAgent)})`}
+              title={`Run (${shortcutLabel("⌘↵", navigator.userAgent)})`}
               disabled={draft.query.trim().length === 0 || busy}
               onClick={() => execute(draft.query)}
             >

@@ -158,6 +158,8 @@ pub enum ProblemCode {
     QueryTooLarge,
     /// A filter deletion would cover more than 100,000 traces.
     TooManyTraces,
+    /// Adding these items would pass the queue's cap of 100,000 items (D-AQ-8).
+    TooManyItems,
     /// Admission control refused the query.
     Busy,
     /// The server runs in restore mode: outbound calls are off (D-N-26).
@@ -215,7 +217,8 @@ impl ProblemCode {
             Self::QueryTimeout
             | Self::QueryTooLarge
             | Self::OwnerNotAllowed
-            | Self::TooManyTraces => 422,
+            | Self::TooManyTraces
+            | Self::TooManyItems => 422,
             Self::Conflict => 409,
             Self::QuotaExceeded => 402,
             Self::RateLimited => 429,
@@ -242,7 +245,8 @@ impl ProblemCode {
             Self::QueryTimeout
             | Self::QueryTooLarge
             | Self::OwnerNotAllowed
-            | Self::TooManyTraces => "Unprocessable Content",
+            | Self::TooManyTraces
+            | Self::TooManyItems => "Unprocessable Content",
             Self::Conflict => "Conflict",
             Self::QuotaExceeded => "Payment Required",
             Self::RateLimited => "Too Many Requests",
@@ -376,7 +380,7 @@ pub struct PageParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
 pub struct ExclusionParams {
-    /// Include traces from the evaluation environment. Default false.
+    /// Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false.
     #[serde(default)]
     pub include_eval: bool,
     /// Include experiment traces. Default false.
@@ -513,6 +517,7 @@ mod tests {
         assert_eq!(ProblemCode::SsoRequired.status(), 403);
         assert_eq!(ProblemCode::EmailNotVerified.status(), 403);
         assert_eq!(ProblemCode::PlanLimit.status(), 403);
+        assert_eq!(ProblemCode::TooManyItems.status(), 422);
         assert_eq!(ProblemCode::PlanRequired.status(), 403);
         assert_eq!(ProblemCode::QuotaExceeded.status(), 402);
         assert_eq!(

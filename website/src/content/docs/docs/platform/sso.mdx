@@ -1,0 +1,40 @@
+---
+title: Single sign-on
+description: The ways members sign in to cetra, and how an org can require single sign-on for its own email domains.
+---
+
+cetra supports password sign-in, GitHub, Google and any OpenID Connect (OIDC) provider. The operator of the instance chooses which ones to enable.
+
+## What members see
+
+The login page shows a password form when password login is on, and one button per configured provider, such as "Continue with GitHub" or the display name of an OIDC provider. If an org has set up its own single sign-on, the page first asks for an email address and sends members of that org's domains to the org's provider.
+
+When password login is off, no org has its own provider and exactly one instance provider is configured, the login page skips the button and sends you straight to that provider. It does not do this right after you sign out, after a failed sign-in, or on `/login?password=1`.
+
+When a sign-in fails, the page shows an error code, such as `domain_not_allowed`, `email_not_verified`, `signup_closed` or `sso_required`.
+
+## Instance providers
+
+The operator of a self-hosted instance configures GitHub, Google and OIDC providers in the configuration. They apply to the whole instance. See [Authentication setup](/docs/self-hosting/authentication/).
+
+A provider sign-in links to an existing account with the same email only when the provider is set to link by email and asserts that the email is verified. Linking signs the account out of its other sessions and revokes its personal access tokens.
+
+## Per-org SSO
+
+Per-org SSO is part of the Teams add-on. An org owner registers one OIDC provider for the org and proves ownership of the org's email domains with a DNS TXT record:
+
+1. Add the domain. cetra shows a value to publish.
+2. Create a TXT record named `_cetra-verify.<domain>` with the value `cetra-verify=<token>`.
+3. Verify the domain. cetra looks the record up, and checks it again once a day. If the record disappears, the domain stops routing and enforcing.
+
+A domain can be verified by one org at a time.
+
+A new provider starts disabled. While it is disabled, only an owner of the org can test a sign-in through it. To enforce single sign-on, the provider must be enabled, a sign-in through it must have succeeded, and the org needs a verified domain. If the domain of the person turning it on is covered, they must be signed in through the provider.
+
+When enforced, members of the org's verified domains cannot use passwords or other providers. Their password sessions, personal access tokens and password resets stop working at once. Project API keys keep working. Instance admins are exempt and sign in at `/login?password=1`, so a broken provider does not lock everyone out.
+
+A member who signs in through the org's provider for the first time joins with their pending invitation's role, or with the org's default role (viewer or member), within the org's seat limit.
+
+If the provider breaks, an operator on the server can run `cetra admin org-sso disable <org>`. It works while the server is stopped, and a running server applies it within a minute.
+
+SAML is not supported.

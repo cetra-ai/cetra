@@ -15,7 +15,7 @@ export function Markdown({ text }: { text: string }) {
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}
-        components={components}
+        components={markdownComponents}
       >
         {text}
       </ReactMarkdown>
@@ -23,7 +23,7 @@ export function Markdown({ text }: { text: string }) {
   );
 }
 
-const components: Components = {
+export const markdownComponents: Components = {
   h1: ({ children }) => <h1 className="mt-3 mb-1.5 text-heading font-semibold">{children}</h1>,
   h2: ({ children }) => <h2 className="mt-3 mb-1.5 text-title font-semibold">{children}</h2>,
   h3: ({ children }) => <h3 className="mt-2 mb-1 text-ui font-semibold">{children}</h3>,

@@ -10,7 +10,12 @@ import { expect, it, vi } from "vitest";
 import type { Schema } from "@/api/types";
 import { DataTable } from "@/components/data-table/data-table";
 import { ProjectProvider } from "@/components/shell/project-context";
-import { formatScore, orderedTraceColumns, traceRowTone } from "@/components/trace-columns";
+import {
+  formatScore,
+  orderedTraceColumns,
+  traceColumnSpecs,
+  traceRowTone,
+} from "@/components/trace-columns";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import projectFixture from "../../../fixtures/api/static/project.json";
 
@@ -93,6 +98,17 @@ it("filters a model with contains from the right-click menu", async () => {
   fireEvent.contextMenu(screen.getByText("gpt-4o +1"));
   fireEvent.click(await screen.findByRole("menuitem", { name: "Filter: models contains gpt-4o" }));
   expect(onFilter).toHaveBeenCalledWith("models @> ['gpt-4o']");
+});
+
+it("hides the prompts column by default", () => {
+  expect(traceColumnSpecs([]).find((column) => column.id === "prompts")?.defaultVisible).toBe(
+    undefined,
+  );
+});
+
+it("shows the first prompt and a count of the rest", async () => {
+  await renderTraces([trace({ prompts: ["a@1", "b@2"] })], ["prompts"], vi.fn());
+  expect(screen.getByText("a@1 +1")).toBeInTheDocument();
 });
 
 it("filters the status with equals from the right-click menu", async () => {

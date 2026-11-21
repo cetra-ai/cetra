@@ -1,0 +1,78 @@
+---
+source: crates/eval/src/trace.rs
+assertion_line: 830
+expression: "&normalized.spans"
+---
+[
+  {
+    "project_id": "01900000-0000-7000-8000-000000000001",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "3bfc48d12c72d4a9",
+    "name": "cetra.issue.embed",
+    "span_kind": "chain",
+    "start_time": "2025-12-31T23:59:58.500000000Z",
+    "end_time": "2026-01-01T00:00:00.000000000Z",
+    "status": "unset",
+    "service_name": "cetra-eval",
+    "environment": "cetra-eval",
+    "metadata": {
+      "k": "v"
+    },
+    "attributes": {
+      "cetra.environment": "cetra-eval",
+      "cetra.metadata.k": "v",
+      "cetra.span.kind": "chain"
+    },
+    "scope_name": "cetra-eval",
+    "scope_version": "0.0.0",
+    "conventions": [
+      "cetra"
+    ],
+    "ingest_time": "2026-01-01T00:00:00.000000000Z",
+    "schema_version": 2
+  },
+  {
+    "project_id": "01900000-0000-7000-8000-000000000001",
+    "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
+    "span_id": "b2c00e782784cf86",
+    "parent_span_id": "3bfc48d12c72d4a9",
+    "name": "embeddings text-embedding-3-small",
+    "span_kind": "embedding",
+    "start_time": "2025-12-31T23:59:58.500000000Z",
+    "end_time": "2026-01-01T00:00:00.000000000Z",
+    "status": "unset",
+    "service_name": "cetra-eval",
+    "environment": "cetra-eval",
+    "provider": "openai",
+    "request_model": "text-embedding-3-small",
+    "response_model": "text-embedding-3-small",
+    "operation": "embeddings",
+    "input_tokens": 1000,
+    "cost_input": 0.00002,
+    "cost_total": 0.00002,
+    "cost_source": "computed",
+    "input": "{\"chars\":14}",
+    "input_format": "json",
+    "output": "{\"dimensions\":3}",
+    "output_format": "json",
+    "input_preview": "{\"chars\":14}",
+    "output_preview": "{\"dimensions\":3}",
+    "attributes": {
+      "cetra.environment": "cetra-eval",
+      "cetra.span.kind": "embedding",
+      "gen_ai.operation.name": "embeddings",
+      "gen_ai.provider.name": "openai",
+      "gen_ai.request.model": "text-embedding-3-small",
+      "gen_ai.response.model": "text-embedding-3-small",
+      "gen_ai.usage.input_tokens": "1000"
+    },
+    "scope_name": "cetra-eval",
+    "scope_version": "0.0.0",
+    "conventions": [
+      "cetra",
+      "genai"
+    ],
+    "ingest_time": "2026-01-01T00:00:00.000000000Z",
+    "schema_version": 2
+  }
+]

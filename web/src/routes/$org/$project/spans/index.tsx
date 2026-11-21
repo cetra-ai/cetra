@@ -5,6 +5,12 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { problemOf } from "@/api/problem";
 import { spanListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
@@ -15,6 +21,8 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { countLabel, NewRowsPill, useNewRows } from "@/components/data-table/new-rows";
+import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
 import {
@@ -35,9 +43,17 @@ import { orderedSpanColumns, spanColumnSpecs, spanRowTone } from "@/components/s
 import { Filmstrip } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
 import { TraceView } from "@/components/trace/trace-view";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import { parseSpansSearch, type SpansSearch } from "@/lib/search/spans";
@@ -59,13 +75,23 @@ const COLUMN_SORT: Record<string, Schema<"SpanSort">> = {
   tokens: "total_tokens",
 };
 
+const NO_SPANS: ReadonlySet<string> = new Set();
+
+/** The checked rows (`trace_id:span_id`) as queue items. */
+function spanItems(ids: ReadonlySet<string>): QueueItemTarget[] {
+  return [...ids].map((id) => {
+    const [traceId, spanId] = id.split(":");
+    return { trace_id: traceId, span_id: spanId };
+  });
+}
+
 export const Route = createFileRoute("/$org/$project/spans/")({
   validateSearch: (search) => parseSpansSearch(search),
   component: SpansPage,
 });
 
 function SpansPage() {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const applyView = useCallback(
@@ -105,15 +131,19 @@ function SpansPage() {
   const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
-  const [anchor, setAnchor] = useState(() => Date.now());
-  const seenRange = useRef(rangeKey);
-  useEffect(() => {
-    if (seenRange.current === rangeKey) {
-      return;
-    }
-    seenRange.current = rangeKey;
-    setAnchor(Date.now());
-  }, [rangeKey]);
+  const windowKey = anchorKey(org, project, "spans", {
+    rangeKey,
+    filter: search.filter,
+    search: search.search,
+    sort: search.sort ?? "start_time",
+    order: search.order ?? "desc",
+    eval: search.eval === 1,
+    exp: search.exp === 1,
+  });
+  const listAnchor = useListAnchor(windowKey, false);
+  const anchor = listAnchor.anchor;
+  const windowId = `${windowKey}\n${anchor}`;
+  const [restoreAtMount] = useState(() => (listAnchor.reused ? listAnchor.scroll : undefined));
   const resolved = resolveRange(range, anchor);
   /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
   const facetScope: FacetScope = {
@@ -123,19 +153,58 @@ function SpansPage() {
     includeExperiments: search.exp === 1,
     search: search.search,
   };
+  // Checked spans belong to the list they were checked in: a new filter, search, range or
+  // eval/experiment flag clears them.
+  const selectionKey = JSON.stringify([
+    search.filter,
+    search.search,
+    rangeKey,
+    search.eval,
+    search.exp,
+  ]);
+  const [selection, setSelection] = useState<{ key: string; ids: ReadonlySet<string> }>({
+    key: selectionKey,
+    ids: NO_SPANS,
+  });
+  const checkedIds = selection.key === selectionKey ? selection.ids : NO_SPANS;
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
+  const listOptions = spanListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    search: search.search,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...spanListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
+    ...listOptions,
+    ...LIST_CACHE,
+    placeholderData: keepSameProject(listOptions.queryKey),
+    enabled: !hold,
+  });
+  // Spans that arrived since the anchor: asked once after a return to a remembered window.
+  const newRows = useNewRows(
+    spanListOptions(org, project, {
+      from: new Date(anchor).toISOString(),
+      to: new Date(listAnchor.lookedUpAt).toISOString(),
       search: search.search,
       filter: search.filter,
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
+      limit: NEW_ROWS_LIMIT,
     }),
-    enabled: !hold,
-  });
+    listAnchor.reused &&
+      range.kind === "preset" &&
+      !hold &&
+      list.isSuccess &&
+      !list.isPlaceholderData,
+  );
   const fetchNextPage = useCallback(() => {
     void list.fetchNextPage();
   }, [list.fetchNextPage]);
@@ -211,6 +280,22 @@ function SpansPage() {
 
   const selectedRowId = search.trace && search.span ? `${search.trace}:${search.span}` : undefined;
 
+  // A new window (a search change, refresh or the pill) starts at the top, where its rows show.
+  const seenWindow = useRef(windowId);
+  useLayoutEffect(() => {
+    if (seenWindow.current === windowId) {
+      return;
+    }
+    seenWindow.current = windowId;
+    const node = document.querySelector<HTMLElement>(
+      '[aria-label="Spans"] [data-scroll-container]',
+    );
+    if (node && node.scrollTop !== 0) {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    }
+  }, [windowId]);
+
   return (
     <div className="relative h-full min-h-0 flex-1">
       <div className="absolute inset-0">
@@ -255,16 +340,19 @@ function SpansPage() {
                 <ListToolbar
                   range={range}
                   onRange={(next) => {
-                    seenRange.current =
+                    const nextKey =
                       next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-                    setAnchor(Date.now());
+                    if (nextKey === rangeKey) {
+                      listAnchor.renew();
+                    }
                     void navigate({
                       to: "/$org/$project/spans",
                       params: { org, project },
                       search: (prev) => withRange(prev, next),
                     });
                   }}
-                  onRefresh={() => setAnchor(Date.now())}
+                  onRefresh={listAnchor.renew}
+                  updatedAt={anchor}
                   search={search.search ?? ""}
                   onSearch={(value) => {
                     void navigate({
@@ -323,6 +411,7 @@ function SpansPage() {
                   }
                   presets={
                     <PresetChips
+                      hold={hold}
                       view="spans"
                       filter={search.filter ?? ""}
                       onFilter={(text) => {
@@ -339,7 +428,61 @@ function SpansPage() {
                     <ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />
                   }
                   views={<SavedViewsMenu kind="spans" search={search} onApply={applyView} />}
+                  actions={
+                    <>
+                      {checkedIds.size > 0 ? (
+                        <DisabledReason reason={queueReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={queueReason !== undefined}
+                            onClick={() => {
+                              setQueueItems(spanItems(checkedIds));
+                              setQueueOpen(true);
+                            }}
+                          >
+                            {`Add ${checkedIds.size} to queue`}
+                          </Button>
+                        </DisabledReason>
+                      ) : null}
+                      <DisabledReason reason={matchingQueueReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={matchingQueueReason !== undefined}
+                          onClick={() => {
+                            setMatchOpen(true);
+                          }}
+                        >
+                          Add matching to queue…
+                        </Button>
+                      </DisabledReason>
+                    </>
+                  }
                   loaded={list.data ? rows.length : undefined}
+                />
+                <AddToQueueDialog
+                  open={queueOpen}
+                  onOpenChange={setQueueOpen}
+                  target="span"
+                  items={queueItems}
+                  onAdded={() => {
+                    setSelection({ key: selectionKey, ids: NO_SPANS });
+                  }}
+                />
+                <AddMatchingDialog
+                  open={matchOpen}
+                  onOpenChange={setMatchOpen}
+                  target="span"
+                  selection={{
+                    filter: search.filter,
+                    search: search.search,
+                    from: resolved.from,
+                    to: resolved.to,
+                    includeExperiments: search.exp === 1,
+                  }}
                 />
                 <div className="flex min-h-0 flex-1">
                   {facetsOpen && !hold ? (
@@ -362,7 +505,7 @@ function SpansPage() {
                         <h2 className="text-body font-medium">{filterError.title}</h2>
                         <p className="text-body text-destructive">{filterMessage(filterError)}</p>
                       </div>
-                    ) : !hold && list.data ? (
+                    ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
                       <DataTable
                         tableId="spans"
                         ariaLabel="Spans"
@@ -370,6 +513,10 @@ function SpansPage() {
                         rows={rows}
                         getRowId={(row) => `${row.trace_id}:${row.span_id}`}
                         selectedRowId={selectedRowId}
+                        checkedIds={checkedIds}
+                        onCheckedChange={(ids) => {
+                          setSelection({ key: selectionKey, ids });
+                        }}
                         rowTone={spanRowTone}
                         onReorder={onColumns}
                         lockedColumnIds={lockedIds}
@@ -396,7 +543,25 @@ function SpansPage() {
                             replace: true,
                           });
                         }}
-                        hasNextPage={list.hasNextPage}
+                        stale={list.isPlaceholderData}
+                        notice={
+                          newRows && newRows.count > 0 ? (
+                            <NewRowsPill
+                              label={countLabel(
+                                newRows.count,
+                                newRows.more,
+                                "new span",
+                                "new spans",
+                              )}
+                              onClick={listAnchor.renew}
+                            />
+                          ) : null
+                        }
+                        onScrollAnchor={
+                          list.isPlaceholderData ? undefined : listAnchor.rememberScroll
+                        }
+                        restoreAnchor={restoreAtMount}
+                        hasNextPage={list.hasNextPage && !list.isPlaceholderData}
                         isFetchingNextPage={list.isFetchingNextPage}
                         fetchNextPage={fetchNextPage}
                         sorting={{

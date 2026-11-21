@@ -37,10 +37,31 @@ pub(crate) fn save(path: &Path, file: &CredentialsFile) -> anyhow::Result<()> {
     fs::create_dir_all(directory).context("creating the credentials directory")?;
     set_dir_mode(directory)?;
     let text = toml::to_string(file).map_err(|_| anyhow::anyhow!("encoding credentials"))?;
+    write_private_file(path, text.as_bytes())
+}
+
+/// Writes `bytes` to `path` with mode 0600 (unix), through `<path>.tmp` and a rename.
+/// Creates missing parent directories, but never changes the mode of an existing directory.
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let directory = path.parent().context("file path has no directory")?;
+    fs::create_dir_all(directory).context("creating the directory")?;
     let temporary = temporary_path(path);
-    write_private(&temporary, text.as_bytes())?;
-    fs::rename(&temporary, path).context("replacing credentials")?;
-    Ok(())
+    let result = write_private(&temporary, bytes).and_then(|()| {
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", file_name(path)))
+    });
+    if result.is_err() {
+        // A failed write leaves no temporary file behind.
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+/// The last component of `path` for error messages; never the whole path.
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "file".to_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// Drops a trailing slash so one server is one map key.
@@ -120,14 +141,18 @@ fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path).context("creating credentials")?;
-    file.write_all(bytes).context("writing credentials")?;
-    file.sync_all().context("writing credentials")?;
+    let name = file_name(path);
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("writing {name}"))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {name}"))?;
+    file.sync_all().with_context(|| format!("writing {name}"))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.set_permissions(fs::Permissions::from_mode(0o600))
-            .context("setting the credentials file mode")?;
+            .with_context(|| format!("writing {name}"))?;
     }
     Ok(())
 }
@@ -148,8 +173,24 @@ fn set_dir_mode(_directory: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::{
         CredentialsFile, SavedToken, check_server_url, chosen_server, normalize_server_url,
-        server_url,
+        server_url, write_private_file,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_file_keeps_an_existing_directory_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = existing.join("file.toml");
+        write_private_file(&path, b"x = 1\n").unwrap();
+        let directory_mode = std::fs::metadata(&existing).unwrap().permissions().mode();
+        assert_eq!(directory_mode & 0o777, 0o755);
+        let file_mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(file_mode & 0o777, 0o600);
+    }
 
     #[test]
     fn server_url_loses_trailing_slashes() {

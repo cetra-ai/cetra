@@ -59,7 +59,7 @@ export function ExportMenu({ datasetId, version }: { datasetId: string; version:
     <div className="flex flex-col items-start gap-1">
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button type="button" variant="outline" disabled={pending}>
+          <Button type="button" variant="outline" size="sm" disabled={pending}>
             {pending ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
             {pending ? "Exporting…" : "Export"}
           </Button>

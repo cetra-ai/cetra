@@ -1,3 +1,4 @@
+mod agents;
 mod client;
 mod credentials;
 mod health;
@@ -86,6 +87,11 @@ enum Command {
     Projects {
         #[command(subcommand)]
         command: Box<projects::ProjectsCommand>,
+    },
+    /// Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra.
+    Agents {
+        #[command(subcommand)]
+        command: Box<agents::AgentsCommand>,
     },
 }
 
@@ -241,23 +247,44 @@ fn main() {
 }
 
 async fn async_main() -> i32 {
-    match run_cli(std::env::args_os()).await {
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let hook = is_hook_invocation(&args);
+    let code = match run_cli(args).await {
         Ok(()) => 0,
         Err(error) => {
             let mut stderr = io::stderr().lock();
             let _ = writeln!(stderr, "{error:#}");
             1
         }
+    };
+    if hook {
+        // Exit here, before the runtime is dropped: a blocked DNS lookup or blocking-pool task
+        // must not hold the agent past the hook's budget. The hook always exits 0.
+        std::process::exit(0);
     }
+    code
+}
+
+/// Whether argv starts with `agents hook` (argv[1] and argv[2]).
+fn is_hook_invocation(args: &[std::ffi::OsString]) -> bool {
+    args.get(1).and_then(|arg| arg.to_str()) == Some("agents")
+        && args.get(2).and_then(|arg| arg.to_str()) == Some("hook")
 }
 
 /// Run one CLI invocation. `main` turns `Err` into exit status 1.
 async fn run_cli(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
 ) -> anyhow::Result<()> {
+    let args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+    let hook = is_hook_invocation(&args);
     let cli = match Cli::try_parse_from(args) {
         Ok(cli) => cli,
         Err(error) => {
+            if hook {
+                // The hook never fails (D-CA-8): clap's message goes to stderr, the status is 0.
+                let _ = error.print();
+                return Ok(());
+            }
             error.print()?;
             if error.exit_code() == 0 {
                 return Ok(());
@@ -323,6 +350,22 @@ async fn run_cli(
                 stdout_is_terminal,
             };
             projects::run(&command, credentials::credentials_path, &mut streams).await?;
+        }
+        Command::Agents { command } => {
+            let mut out = io::stdout().lock();
+            let mut err = io::stderr().lock();
+            match agents::Paths::detect() {
+                Ok(paths) => {
+                    agents::run(&command, &paths, io::stdin(), &mut out, &mut err).await?;
+                }
+                // The hook never fails: without a home directory it can only note that.
+                Err(error) => match *command {
+                    agents::AgentsCommand::Hook { .. } => {
+                        let _ = writeln!(err, "cetra agents hook: cannot find the home directory");
+                    }
+                    _ => return Err(error),
+                },
+            }
         }
     }
     Ok(())
@@ -610,7 +653,7 @@ async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> an
             ) =>
         {
             anyhow::bail!(
-                "no running cetra serve answers on {}; start it, or for a stopped server copy the data directory (docs/self-hosting/backup.md)",
+                "no running cetra serve answers on {}; start it, or for a stopped server copy the data directory (https://cetra.sh/docs/self-hosting/backup/)",
                 socket.display()
             );
         }
@@ -810,8 +853,8 @@ fn write_entitlements(out: &mut impl Write, report: &EntitlementsReport) -> io::
     writeln!(out, "retention window: {window}")
 }
 
-/// The nine limits in D-P-13 order.
-fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 9] {
+/// The D-P-13 limits in order, then D-IC-13.
+fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 11] {
     [
         ("units_included", limits.units_included),
         ("units_cap", limits.units_cap),
@@ -822,6 +865,8 @@ fn limit_rows(limits: &OrgLimits) -> [(&'static str, Option<u64>); 9] {
         ("max_projects", limits.max_projects),
         ("max_alert_rules", limits.max_alert_rules),
         ("max_active_online_rules", limits.max_active_online_rules),
+        ("max_annotation_queues", limits.max_annotation_queues),
+        ("max_active_issue_sources", limits.max_active_issue_sources),
     ]
 }
 
@@ -921,6 +966,56 @@ mod tests {
     use cetra_server::admin::EntitlementsReport;
     use cetra_server::api::entitlements::{Feature, OrgLimits};
     use std::time::Duration;
+
+    /// The CLI reference page (D-W-7): every visible command's long help, in command order.
+    fn cli_reference() -> String {
+        use clap::CommandFactory;
+        let mut root = Cli::command();
+        root.build();
+        let mut page = String::from(
+            "---\n\
+             title: CLI\n\
+             description: Every cetra command and option, generated from the binary's own help.\n\
+             ---\n\n\
+             <!-- Generated by `just docs-gen` from crates/cli/src/main.rs. Do not edit. -->\n\n\
+             The `cetra` binary runs the server (`cetra serve`), administers a data directory \
+             (`cetra admin`) and talks to a running server (`cetra login`, `cetra query`, `cetra traces`, \
+             `cetra projects`, `cetra agents`). This page is generated from the binary's `--help`.\n",
+        );
+        fn walk(command: &clap::Command, path: &str, page: &mut String) {
+            let level = path.split(' ').count().min(4) + 1; // `cetra` is ##
+            page.push_str(&format!("\n{} `{path}`\n\n", "#".repeat(level)));
+            page.push_str("```text\n");
+            page.push_str(command.clone().render_long_help().to_string().trim_end());
+            page.push_str("\n```\n");
+            for sub in command.get_subcommands() {
+                if sub.is_hide_set() || sub.get_name() == "help" {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), page);
+            }
+        }
+        walk(&root, "cetra", &mut page);
+        page
+    }
+
+    #[test]
+    fn cli_reference_is_up_to_date() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../website/src/content/docs/docs/reference/cli.md");
+        let expected = cli_reference();
+        if std::env::var_os("CETRA_DOCS_WRITE").is_some() {
+            std::fs::create_dir_all(path.parent().expect("the page has a directory"))
+                .expect("create the reference directory");
+            std::fs::write(&path, &expected).expect("write the CLI reference");
+            return;
+        }
+        let actual = std::fs::read_to_string(&path).unwrap_or_default();
+        assert!(
+            actual == expected,
+            "website/src/content/docs/docs/reference/cli.md is stale: run `just docs-gen`"
+        );
+    }
 
     #[test]
     fn log_filter_caps_rmcp() {
@@ -1138,6 +1233,10 @@ mod tests {
         );
         assert!(text.contains("units_included: 200000\n"), "{text}");
         assert!(text.contains("units_cap: unlimited\n"), "{text}");
+        assert!(
+            text.contains("max_annotation_queues: unlimited\n"),
+            "{text}"
+        );
         assert!(text.contains("retention window: unlimited\n"), "{text}");
         assert!(text.contains("units this month: 1240\n"), "{text}");
     }
@@ -1340,7 +1439,10 @@ mod tests {
         .unwrap_err();
         let text = format!("{error:#}");
         assert!(text.contains("admin.sock"), "{text}");
-        assert!(text.contains("docs/self-hosting/backup.md"), "{text}");
+        assert!(
+            text.contains("https://cetra.sh/docs/self-hosting/backup/"),
+            "{text}"
+        );
     }
 
     #[tokio::test]

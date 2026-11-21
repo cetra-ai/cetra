@@ -1,0 +1,109 @@
+---
+title: Media
+description: How cetra stores images, audio and files from inputs and outputs, and how the UI shows them.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Send images, audio and files inside your messages, and cetra stores them next to the trace and shows them in the UI.
+
+Large binary values do not belong in a database row or a filter result. When cetra finds one in a payload, it stores the bytes once and leaves a reference in the span.
+
+## What cetra extracts
+
+cetra looks in the input, output and system instructions of each span, and extracts:
+
+- `blob` parts in messages, which hold base64 data;
+- data URIs of the form `data:<type>;base64,<data>` anywhere in a text value;
+- the media forms of the provider APIs: OpenAI image URLs and input audio, Anthropic base64 sources, and Gemini inline data;
+- image and file parts of the Vercel AI SDK.
+
+A blob is extracted only if it is at least `media.min_bytes` (4 KiB by default). Smaller ones stay in the payload. cetra names the type from the type your span declares. If there is none, it recognizes common formats from their first bytes: PNG, JPEG, GIF, WebP, PDF, WAV, MP3, OGG, FLAC, MP4 and WebM.
+
+## Send media
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* test */}
+```python
+import base64
+
+import cetra
+
+cetra.init()
+
+image = base64.b64encode(bytes(8192)).decode()
+
+with cetra.llm_span(
+    "describe-image",
+    provider="acme",
+    model="acme-vision-1",
+    input_messages=[
+        {
+            "role": "user",
+            "parts": [
+                {"type": "text", "content": "What is in this image?"},
+                {"type": "blob", "modality": "image", "mime_type": "image/png", "content": image},
+            ],
+        }
+    ],
+) as s:
+    s.set_output_messages([{"role": "assistant", "content": "An empty image."}])
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: no twin in the example harness; the call is the one on the Cost and tokens page with a blob part */}
+```ts
+import { withLlmSpan } from "@cetra-ai/sdk";
+
+withLlmSpan(
+  "describe-image",
+  {
+    provider: "acme",
+    model: "acme-vision-1",
+    inputMessages: [
+      {
+        role: "user",
+        parts: [
+          { type: "text", content: "What is in this image?" },
+          { type: "blob", modality: "image", mime_type: "image/png", content: "<BASE64_DATA>" },
+        ],
+      },
+    ],
+  },
+  (span) => {
+    span.setOutputMessages([{ role: "assistant", content: "An empty image." }]);
+  },
+);
+```
+
+  </TabItem>
+  <TabItem label="OpenTelemetry">
+
+Instrumentations that put images in the message attributes work without changes. cetra extracts the media when it reads the span.
+
+  </TabItem>
+</Tabs>
+
+## Where media is stored
+
+cetra writes each blob once, named by its SHA-256 hash, in the media area of your data directory, or in your S3 bucket if you use one. The same image sent twice is stored once. In the span, the blob is replaced by a `media://<hash>` reference. The UI and API serve it only to signed-in members and keys of the project.
+
+## In the UI
+
+The **Chat** tab of a span shows images, audio and PDFs from their references. In the raw **Input / Output** tab you see the `media://` reference. Select a media item to open it.
+
+## Size limits
+
+A blob larger than `media.max_bytes` (32 MiB by default) is not stored. cetra replaces it with a reference to `cetra:dropped`, with the reason `too_large` and the size, so you can see that something was there. The rest of the span is kept.
+
+Both bounds are settings of the server. See the [configuration reference](/docs/self-hosting/configuration-reference/). The request size limit of the OTLP endpoint also applies. See [OTLP endpoint](/docs/reference/otlp/).
+
+## Filter
+
+The `media_refs` column of `spans` lists the hashes of a span's media. Filter the spans list with `array_length(media_refs) > 0` to find spans that have media.

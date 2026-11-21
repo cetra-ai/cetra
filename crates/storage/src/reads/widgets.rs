@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
-use cetra_core::enums::ScoreTargetKind;
+use cetra_core::enums::{ScoreSource, ScoreTargetKind};
 use cetra_core::schema::{scores, spans, traces};
 use datafusion::arrow::datatypes::DataType;
 use datafusion::common::{NullHandling, ScalarValue, UnnestOptions};
@@ -186,6 +186,7 @@ const TRACES: SourceFields = SourceFields {
         traces::ENVIRONMENT,
         traces::RELEASE,
         traces::USER_ID,
+        traces::SESSION_ID,
         traces::TAGS,
         traces::MODELS,
     ],
@@ -670,8 +671,7 @@ async fn base(
                 references_environment,
             )
             .await?;
-            let mut predicate =
-                window
+            let mut predicate = window
                     .predicate(scores::CREATED_AT)
                     .and(col(scores::TARGET).in_list(
                         vec![
@@ -679,7 +679,9 @@ async fn base(
                             lit(ScoreTargetKind::Span.as_str()),
                         ],
                         false,
-                    ));
+                    ))
+                    // Issue occurrences never show as score columns or briefs (D-IC-18).
+                    .and(col(scores::SOURCE).not_eq(lit(ScoreSource::Issue.as_str())));
             if let Some(plan) = ids {
                 predicate = predicate.and(in_subquery(col(scores::TRACE_ID), Arc::new(plan)));
             }
@@ -1512,6 +1514,19 @@ mod tests {
             ok.breakdown = breakdown("name", limit);
             assert!(validate_shape(&ok).is_ok(), "{limit}");
         }
+        let mut session = query(WidgetSource::Traces, vec![measure(Agg::Count, None, None)]);
+        session.breakdown = breakdown("session_id", 5);
+        assert!(validate_shape(&session).is_ok());
+        let mut spans_session = query(WidgetSource::Spans, vec![measure(Agg::Count, None, None)]);
+        spans_session.breakdown = breakdown("session_id", 5);
+        match validate_shape(&spans_session) {
+            Err(WidgetError::Fields(errors)) => {
+                assert_eq!(errors.len(), 1, "{errors:?}");
+                assert_eq!(errors[0].path, "breakdown.field");
+                assert_eq!(errors[0].message, "not a breakdown field of this source");
+            }
+            other => panic!("expected field errors, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1732,7 +1747,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use cetra_core::enums::SpanKind;
+    use cetra_core::enums::{ScoreSource, SpanKind};
     use cetra_core::names::environment;
     use cetra_core::score::Score;
     use cetra_core::span::Span;
@@ -2130,6 +2145,20 @@ mod tests {
         request.include_eval = true;
         let data = answer(&ctx, request).await;
         assert_line(line(&data, 0, None, false), &[(0, 0.0008)]);
+    }
+
+    #[tokio::test]
+    async fn score_widgets_leave_out_issue_occurrences() {
+        let value = r#"{"data_type": "numeric", "value": 0.5}"#;
+        let mut occurrence = score_row(1, 0, value, "{}", 30);
+        occurrence.source = ScoreSource::Issue;
+        let api = score_row(2, 0, value, "{}", 30);
+        // The scores' trace has a span in the window, so the scores semi-join keeps it.
+        let spans = [span(0, 0, minute(30), None)];
+        let ctx = context_with(&spans, &[occurrence, api]);
+        let counted = build(WidgetSource::Scores, count_query(), None);
+        let rows = rows_of(&answer(&ctx, ask(&counted, hour(), Shape::Total)).await).to_vec();
+        assert_eq!(rows[0].values[0], Some(1.0));
     }
 
     #[tokio::test]
@@ -2983,6 +3012,36 @@ mod tests {
                     false,
                     vec![Some(1.0), Some(2.0)]
                 ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn breakdown_by_session_id_on_traces() {
+        let mut spans = Vec::new();
+        for (trace, session, cost) in [
+            (0u16, Some("s1"), 1.0),
+            (1, Some("s1"), 2.0),
+            (2, Some("s2"), 5.0),
+            (3, None, 9.0),
+        ] {
+            let mut span = span(trace, 0, minute(i64::from(trace) * 5 + 5), None);
+            span.session_id = session.map(str::to_owned);
+            span.cost_total = Some(cost);
+            spans.push(span);
+        }
+        let ctx = context_of(&spans);
+        let by_session = build(
+            WidgetSource::Traces,
+            vec![measure(Agg::Sum, Some("cost_total"), None)],
+            split("session_id", 5, false),
+        );
+        let data = answer(&ctx, ask(&by_session, hour(), Shape::Total)).await;
+        assert_eq!(
+            total_pairs(&data),
+            vec![
+                (Some("s2".to_owned()), false, vec![Some(5.0)]),
+                (Some("s1".to_owned()), false, vec![Some(3.0)]),
             ]
         );
     }

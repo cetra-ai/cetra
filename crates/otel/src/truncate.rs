@@ -358,7 +358,7 @@ fn marked(original: &str, cut_at: usize, marker: &str) -> String {
 pub(crate) fn truncate_columns(span: &mut Span, limit: usize) {
     let names = &mut span.truncated;
     cut_field(&mut span.name, "name", limit, names);
-    let optional: [(&str, &mut Option<String>); 15] = [
+    let optional: [(&str, &mut Option<String>); 16] = [
         ("status_message", &mut span.status_message),
         ("service_name", &mut span.service_name),
         ("session_id", &mut span.session_id),
@@ -368,6 +368,7 @@ pub(crate) fn truncate_columns(span: &mut Span, limit: usize) {
         ("provider", &mut span.provider),
         ("request_model", &mut span.request_model),
         ("response_model", &mut span.response_model),
+        ("prompt_name", &mut span.prompt_name),
         ("operation", &mut span.operation),
         ("request_params", &mut span.request_params),
         ("scope_name", &mut span.scope_name),
@@ -686,6 +687,7 @@ mod tests {
         span.provider = Some(text.clone());
         span.request_model = Some(text.clone());
         span.response_model = Some(text.clone());
+        span.prompt_name = Some(text.clone());
         span.operation = Some(text.clone());
         span.request_params = Some(text.clone());
         span.scope_name = Some(text.clone());
@@ -700,6 +702,7 @@ mod tests {
             &span.provider,
             &span.request_model,
             &span.response_model,
+            &span.prompt_name,
             &span.operation,
             &span.request_params,
             &span.scope_name,
@@ -714,6 +717,7 @@ mod tests {
             [
                 "environment",
                 "operation",
+                "prompt_name",
                 "provider",
                 "release",
                 "request_model",

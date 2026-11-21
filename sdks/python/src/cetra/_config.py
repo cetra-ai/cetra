@@ -26,8 +26,8 @@ ENV_GIT_COMMIT = "GIT_COMMIT"
 ENV_SOURCE_VERSION = "SOURCE_VERSION"
 
 _KEY_PREFIX = "sk-cetra-"
-# Reserved evaluation environment. cetra_core::names::environment::EVAL
-_RESERVED_ENVIRONMENT = "cetra-eval"
+# Reserved environments (the server's set is cetra_core::names::environment::RESERVED).
+_RESERVED_ENVIRONMENTS = frozenset({"cetra-eval", "cetra-playground", "cetra-assistant"})
 _DEFAULT_BASE_URL = "http://localhost:8080"
 _TRUE = frozenset({"true", "1", "yes", "on"})
 _FALSE = frozenset({"false", "0", "no", "off"})
@@ -224,7 +224,7 @@ def _resolve_environment(value: object, source: Mapping[str, str]) -> str | None
 def _check_environment(value: object, name: str) -> str:
     if not isinstance(value, str):
         raise ConfigError(f"{name}: must be a string")
-    if value == _RESERVED_ENVIRONMENT:
+    if value in _RESERVED_ENVIRONMENTS:
         raise ConfigError(f"{name}: is reserved")
     return value
 

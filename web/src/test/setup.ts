@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, configure } from "@testing-library/react";
 import { HttpNetworkFrame } from "msw/experimental";
 import { afterAll, afterEach, beforeAll, beforeEach } from "vitest";
+import { resetListAnchors } from "@/lib/list-anchor";
 import { dashboardHandlers, seedDashboards } from "../mocks/dashboards";
 import { server } from "../mocks/node";
 import { savedViewHandlers, seedSavedViews } from "../mocks/saved-views";
@@ -88,6 +89,7 @@ afterEach(() => {
   cleanup();
   localStorage.clear();
   sessionStorage.clear();
+  resetListAnchors();
   document.documentElement.className = "";
   document.documentElement.style.colorScheme = "";
   resetMatchMedia();

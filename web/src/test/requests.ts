@@ -30,3 +30,18 @@ export function recordRequests() {
     },
   };
 }
+
+/** Records the full URL of every request the page sends until `stop`. */
+export function recordUrls(): { urls: URL[]; stop: () => void } {
+  const urls: URL[] = [];
+  const onStart = ({ request }: { request: Request }) => {
+    urls.push(new URL(request.url));
+  };
+  server.events.on("request:start", onStart);
+  return {
+    urls,
+    stop() {
+      server.events.removeListener("request:start", onStart);
+    },
+  };
+}

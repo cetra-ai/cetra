@@ -18,7 +18,6 @@ use cetra_core::batch::spans_to_record_batch;
 use cetra_core::error::CoreError;
 use cetra_core::ids::{OrgId, ProjectId};
 use cetra_core::media::MediaBlob as CoreBlob;
-use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
 use cetra_otel::{
     DecodeError, ExportTraceServiceRequest, IngestContext, IngestLimits, Normalized, PriceTable,
     count_genai_log_records, decode_json, decode_logs_json, decode_logs_protobuf, decode_protobuf,
@@ -29,6 +28,7 @@ use cetra_storage::{MediaBlob, Storage};
 use futures::{StreamExt, stream};
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
+use crate::agent_context::AgentContextStore;
 use crate::config::{IngestConfig, MediaConfig};
 use crate::eval::pending::PendingTraces;
 use crate::http::AppState;
@@ -51,6 +51,7 @@ pub(crate) struct Ingest {
     max_spans_per_request: usize,
     limits: IngestLimits,
     commits: Arc<Commits>,
+    contexts: Arc<AgentContextStore>,
 }
 
 /// Budget held by one request from before its body is read until it is answered.
@@ -65,7 +66,7 @@ struct Commits {
 }
 
 /// One running commit. Dropping it wakes [`Ingest::wait_for_commits`] when it was the last.
-struct CommitGuard(Arc<Commits>);
+pub(crate) struct CommitGuard(Arc<Commits>);
 
 impl Commits {
     fn enter(self: &Arc<Self>) -> CommitGuard {
@@ -170,12 +171,18 @@ impl Ingest {
                 .unwrap_or(usize::MAX),
             limits: config.limits(media),
             commits: Arc::default(),
+            contexts: Arc::new(AgentContextStore::default()),
         }
     }
 
     /// The price tables (D-T-9). Callers pick the table of their project or org.
     pub(crate) fn prices(&self) -> &crate::prices::Prices {
         &self.prices
+    }
+
+    /// Coding-agent session contexts (D-CA-9).
+    pub(crate) fn contexts(&self) -> &Arc<AgentContextStore> {
+        &self.contexts
     }
 
     pub(crate) fn max_request_bytes(&self) -> usize {
@@ -359,6 +366,7 @@ impl Ingest {
         let prices: Arc<PriceTable> = self.prices.for_project(project.org_id, project.id);
         let ctx = self.context(project, retention_cap, now_ns);
         let max_spans = self.max_spans_per_request;
+        let contexts = self.contexts.project(project.id);
         let work = tokio::task::spawn_blocking(move || -> Result<_, IngestError> {
             let spans = request
                 .resource_spans
@@ -370,7 +378,13 @@ impl Ingest {
             if spans > max_spans {
                 return Err(IngestError::TooManySpans);
             }
-            let mut normalized = normalize(&request, &ctx, &prices);
+            let empty = cetra_otel::AgentContexts::default();
+            let guard = contexts.as_ref().map(|lock| {
+                lock.read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+            });
+            let agents = guard.as_deref().unwrap_or(&empty);
+            let mut normalized = normalize(&request, &ctx, &prices, agents);
             let rewritten = rewrite_reserved_environment(&mut normalized.spans);
             Ok((normalized, rewritten))
         });
@@ -388,10 +402,10 @@ impl Ingest {
     }
 
     /// Stores the media, then appends the spans (D-G-8, D-G-9), then counts the billable spans
-    /// (every span outside the reserved evaluation environment, D-I-31) and the request bytes
-    /// (D-G-30). Nothing is appended when a blob fails, and nothing is counted then. The
-    /// caller's reservation covers the spans until this returns. Then records the trace in the
-    /// trigger's pending map when its project has an online rule (D-I-8; memory only).
+    /// ([`billable_spans`]: every span outside a reserved environment, D-I-31, D-V-34) and the
+    /// request bytes (D-G-30). Nothing is appended when a blob fails, and nothing is counted
+    /// then. The caller's reservation covers the spans until this returns. Then records the trace
+    /// in the trigger's pending map when its project has an online rule (D-I-8; memory only).
     pub(crate) async fn commit(
         &self,
         storage: &Storage,
@@ -419,10 +433,7 @@ impl Ingest {
             stored += 1;
         }
         let accepted = spans.len();
-        let billable = spans
-            .iter()
-            .filter(|span| span.environment.as_deref() != Some(EVAL_ENVIRONMENT))
-            .count();
+        let billable = billable_spans(&spans);
         if !spans.is_empty() {
             let (batch, spans) = tokio::task::spawn_blocking(move || {
                 spans_to_record_batch(&spans).map(|batch| (batch, spans))
@@ -454,6 +465,12 @@ impl Ingest {
     /// Waits until no commit started by [`commit_in_task`] is running (D-G-38).
     pub(crate) async fn wait_for_commits(&self) {
         self.commits.idle().await;
+    }
+
+    /// Holds the commits guard until the returned guard drops, so shutdown waits for work that
+    /// the caller runs in its own task (D-G-38).
+    pub(crate) fn hold_commits(&self) -> CommitGuard {
+        self.commits.enter()
     }
 }
 
@@ -501,6 +518,20 @@ pub(crate) fn newest_span_starts(spans: &[cetra_core::span::Span]) -> HashMap<St
         }
     }
     newest
+}
+
+/// Spans that count as units (D173, D-V-23, D-V-34): every span outside a reserved environment.
+/// The one units rule; `Ingest::commit` counts with it.
+pub(crate) fn billable_spans(spans: &[cetra_core::span::Span]) -> usize {
+    spans
+        .iter()
+        .filter(|span| {
+            !span
+                .environment
+                .as_deref()
+                .is_some_and(cetra_core::names::environment::is_reserved)
+        })
+        .count()
 }
 
 /// Converts a normalized blob to the storage type, checking that its hash is 32 bytes.
@@ -615,6 +646,7 @@ mod tests {
     use cetra_core::enums::{CostSource, SpanKind};
     use cetra_core::ids::ProjectId;
     use cetra_core::media::MediaBlob as CoreBlob;
+    use cetra_core::names::environment::EVAL as EVAL_ENVIRONMENT;
     use cetra_otel::{
         ExportTraceServiceRequest, PriceRow, PriceScope, Rejections, builtin_price_rows,
         decode_json,
@@ -683,7 +715,7 @@ mod tests {
             retention_days: project.retention_days,
             limits: app.state.config.ingest.limits(&app.state.config.media),
         };
-        normalize(request, &ctx, prices)
+        normalize(request, &ctx, prices, &cetra_otel::AgentContexts::default())
     }
 
     /// The commit target of `project` at the app's clock, with no request bytes.
@@ -1282,6 +1314,7 @@ mod tests {
                     spans: Vec::new(),
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1306,6 +1339,25 @@ mod tests {
                 .await
                 .expect("one usage row for the day");
         assert_eq!(counted, (0, 7));
+    }
+
+    #[test]
+    fn billable_spans_skips_reserved_environments() {
+        let base = dataset_span(0);
+        let spans: Vec<cetra_core::span::Span> = [
+            None,
+            Some("production".to_owned()),
+            Some(EVAL_ENVIRONMENT.to_owned()),
+            Some(cetra_core::names::environment::PLAYGROUND.to_owned()),
+        ]
+        .into_iter()
+        .map(|environment| cetra_core::span::Span {
+            environment,
+            ..base.clone()
+        })
+        .collect();
+        assert_eq!(billable_spans(&spans), 2);
+        assert_eq!(billable_spans(&[]), 0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1347,6 +1399,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1403,6 +1456,7 @@ mod tests {
                     spans,
                     media: Vec::new(),
                     rejections: Rejections::default(),
+                    discarded: 0,
                 },
             )
         };

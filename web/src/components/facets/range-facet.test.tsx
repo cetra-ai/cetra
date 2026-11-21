@@ -1,7 +1,8 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
+import { facetsHandler } from "@/test/facets";
 import { renderApp } from "@/test/render";
 
 const TRACES = "/acme/support-bot/traces?range=15m";
@@ -20,20 +21,18 @@ const HISTOGRAM = {
 };
 
 /** Answers the facet of one field with a histogram (or none); other fields have no values. */
-function answerHistogram(field: string, histogram?: unknown) {
+function answerHistogram(field: string, histogram?: Schema<"FacetHistogram">) {
   server.use(
-    http.get("/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const kind = url.searchParams.get("field") === field ? "histogram" : "values";
-      return HttpResponse.json({
-        view: url.searchParams.get("view"),
-        field: url.searchParams.get("field"),
-        kind,
+    facetsHandler((ask): Schema<"Facet"> => {
+      if (ask.field !== field) {
+        return { kind: "values", total: 100, missing: 0, values: [], more: false };
+      }
+      return {
+        kind: "histogram",
         total: 100,
         missing: 0,
-        ...(kind === "histogram" && histogram !== undefined ? { histogram } : {}),
-        ...(kind === "values" ? { values: [], more: false } : {}),
-      });
+        ...(histogram !== undefined ? { histogram } : {}),
+      };
     }),
   );
 }

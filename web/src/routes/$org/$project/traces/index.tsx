@@ -6,6 +6,12 @@ import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { spanDetailQuery, traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
@@ -16,6 +22,7 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { countLabel, NewRowsPill, useNewRows } from "@/components/data-table/new-rows";
 import { traceListOptions, traceProbeOptions } from "@/components/data-table/use-infinite-list";
 import { useLiveTraces } from "@/components/data-table/use-live-traces";
 import {
@@ -58,6 +65,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
 import { formatDuration } from "@/lib/format";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import { getTraceMaximized, setTraceMaximized, useListLayout } from "@/lib/list-layout";
 import {
@@ -110,6 +124,9 @@ function TracesPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addIds, setAddIds] = useState<string[]>([]);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
   const applyView = useCallback(
     (next: Record<string, unknown>) => {
       void navigate({
@@ -147,15 +164,19 @@ function TracesPage() {
   const [facetsOpen, setFacetsOpen] = useFacetsOpen();
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
-  const [anchor, setAnchor] = useState(() => Date.now());
-  const seenRange = useRef(rangeKey);
-  useEffect(() => {
-    if (seenRange.current === rangeKey) {
-      return;
-    }
-    seenRange.current = rangeKey;
-    setAnchor(Date.now());
-  }, [rangeKey]);
+  const windowKey = anchorKey(org, project, "traces", {
+    rangeKey,
+    filter: search.filter,
+    search: search.search,
+    sort: search.sort ?? "start_time",
+    order: search.order ?? "desc",
+    eval: search.eval === 1,
+    exp: search.exp === 1,
+  });
+  const listAnchor = useListAnchor(windowKey, search.live === 1);
+  const anchor = listAnchor.anchor;
+  const windowId = `${windowKey}\n${anchor}`;
+  const [restoreAtMount] = useState(() => (listAnchor.reused ? listAnchor.scroll : undefined));
   const resolved = resolveRange(range, anchor);
   /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
   const facetScope: FacetScope = {
@@ -180,6 +201,8 @@ function TracesPage() {
   });
   const checkedIds = selection.key === selectionKey ? selection.ids : NO_TRACES;
   const addReason = addTracesReason(data.role, checkedIds.size);
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
   const listOptions = traceListOptions(org, project, {
     from: resolved.from,
     to: resolved.to,
@@ -195,6 +218,8 @@ function TracesPage() {
   const probe = traceProbeOptions(org, project);
   const list = useInfiniteQuery({
     ...listOptions,
+    ...LIST_CACHE,
+    placeholderData: keepSameProject(listOptions.queryKey),
     enabled: !hold,
     refetchInterval: (query) => {
       if (hold || !needsOnboarding) {
@@ -245,8 +270,10 @@ function TracesPage() {
     });
   }
   function changeRange(next: RangeState) {
-    seenRange.current = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-    setAnchor(Date.now());
+    const nextKey = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
+    if (nextKey === rangeKey) {
+      listAnchor.renew();
+    }
     void navigate({
       to: "/$org/$project/traces",
       params: { org, project },
@@ -261,9 +288,13 @@ function TracesPage() {
   const restoreAnchor = useMemo(() => anchorOf(listRestore), [listRestore]);
   const restoredHighlight = useRestoredHighlight(listRestore?.openedId);
   const lastAnchor = useRef<RowAnchor | undefined>(undefined);
-  const onScrollAnchor = useCallback((anchor: RowAnchor) => {
-    lastAnchor.current = anchor;
-  }, []);
+  const onScrollAnchor = useCallback(
+    (anchor: RowAnchor) => {
+      lastAnchor.current = anchor;
+      listAnchor.rememberScroll(anchor);
+    },
+    [listAnchor.rememberScroll],
+  );
   // The full-page link reads this when it is followed, so the list's position is current.
   function captureFullPageReturn(): ListReturn | undefined {
     if (search.trace === undefined) {
@@ -352,7 +383,8 @@ function TracesPage() {
 
   const problem = list.isError ? problemOf(list.error) : undefined;
   const filterError = problem?.code === "invalid_filter" ? problem : undefined;
-  const listEmpty = !hold && list.data !== undefined && rows.length === 0;
+  const listEmpty =
+    !hold && list.data !== undefined && !list.isPlaceholderData && rows.length === 0;
   const projectProbe = useQuery({ ...probe, enabled: listEmpty && needsOnboarding });
   const probeRows = projectProbe.data?.data.length;
   // A cached empty answer is not trusted while it refetches: a trace may have arrived since.
@@ -366,7 +398,7 @@ function TracesPage() {
   const liveOn = search.live === 1 && reason === undefined && !hold;
   const live = useLiveTraces({
     url:
-      liveOn && (list.isSuccess || list.isRefetchError)
+      liveOn && (list.isSuccess || list.isRefetchError) && !list.isPlaceholderData
         ? traceStreamUrl(projectRef(org, project), {
             filter: search.filter,
             search: search.search,
@@ -378,6 +410,41 @@ function TracesPage() {
     selectedId: search.trace,
     ready: !hold && list.data !== undefined && !filterError && !onboarding && !probing,
   });
+  // Traces that arrived since the anchor: asked once after a return to a remembered window.
+  const newRows = useNewRows(
+    traceListOptions(org, project, {
+      from: new Date(anchor).toISOString(),
+      to: new Date(listAnchor.lookedUpAt).toISOString(),
+      search: search.search,
+      filter: search.filter,
+      includeEval: search.eval === 1,
+      includeExperiments: search.exp === 1,
+      limit: NEW_ROWS_LIMIT,
+    }),
+    listAnchor.reused &&
+      range.kind === "preset" &&
+      !liveOn &&
+      !hold &&
+      list.isSuccess &&
+      !list.isPlaceholderData &&
+      !onboarding &&
+      !probing,
+  );
+  // A new window (a search change, refresh or the pill) starts at the top, where its rows show.
+  const seenWindow = useRef(windowId);
+  useLayoutEffect(() => {
+    if (seenWindow.current === windowId) {
+      return;
+    }
+    seenWindow.current = windowId;
+    const node = document.querySelector<HTMLElement>(
+      '[aria-label="Traces"] [data-scroll-container]',
+    );
+    if (node && node.scrollTop !== 0) {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    }
+  }, [windowId]);
   const highlighted = useMemo(
     () =>
       restoredHighlight.size === 0
@@ -445,7 +512,8 @@ function TracesPage() {
                 <ListToolbar
                   range={range}
                   onRange={changeRange}
-                  onRefresh={() => setAnchor(Date.now())}
+                  onRefresh={listAnchor.renew}
+                  updatedAt={anchor}
                   live={
                     <LiveToggle
                       pressed={liveOn}
@@ -453,9 +521,6 @@ function TracesPage() {
                       reason={reason}
                       status={live.status}
                       onPressedChange={(on) => {
-                        if (on) {
-                          setAnchor(Date.now());
-                        }
                         void navigate({
                           to: "/$org/$project/traces",
                           params: { org, project },
@@ -522,6 +587,7 @@ function TracesPage() {
                   }
                   presets={
                     <PresetChips
+                      hold={hold}
                       view="traces"
                       filter={search.filter ?? ""}
                       onFilter={(text) => {
@@ -556,6 +622,37 @@ function TracesPage() {
                           </Button>
                         </DisabledReason>
                       ) : null}
+                      {checkedIds.size > 0 ? (
+                        <DisabledReason reason={queueReason}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={queueReason !== undefined}
+                            onClick={() => {
+                              setQueueItems(
+                                [...checkedIds].map((traceId) => ({ trace_id: traceId })),
+                              );
+                              setQueueOpen(true);
+                            }}
+                          >
+                            {`Add ${checkedIds.size} to queue`}
+                          </Button>
+                        </DisabledReason>
+                      ) : null}
+                      <DisabledReason reason={matchingQueueReason}>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          disabled={matchingQueueReason !== undefined}
+                          onClick={() => {
+                            setMatchOpen(true);
+                          }}
+                        >
+                          Add matching to queue…
+                        </Button>
+                      </DisabledReason>
                       <DisabledReason
                         reason={canDelete ? undefined : "Only project admins can delete traces"}
                       >
@@ -596,6 +693,27 @@ function TracesPage() {
                     setSelection({ key: selectionKey, ids: NO_TRACES });
                   }}
                 />
+                <AddToQueueDialog
+                  open={queueOpen}
+                  onOpenChange={setQueueOpen}
+                  target="trace"
+                  items={queueItems}
+                  onAdded={() => {
+                    setSelection({ key: selectionKey, ids: NO_TRACES });
+                  }}
+                />
+                <AddMatchingDialog
+                  open={matchOpen}
+                  onOpenChange={setMatchOpen}
+                  target="trace"
+                  selection={{
+                    filter: search.filter,
+                    search: search.search,
+                    from: resolved.from,
+                    to: resolved.to,
+                    includeExperiments: search.exp === 1,
+                  }}
+                />
                 <div className="flex min-h-0 flex-1">
                   {facetsOpen && !hold && !onboarding ? (
                     <FacetPanel
@@ -627,7 +745,10 @@ function TracesPage() {
                       <div className="min-h-0 flex-1 overflow-auto">
                         <OnboardingPanel origin={window.location.origin} />
                       </div>
-                    ) : !hold && list.data && !probing ? (
+                    ) : !hold &&
+                      list.data &&
+                      !probing &&
+                      !(list.isPlaceholderData && rows.length === 0) ? (
                       <>
                         <TracesHistogram
                           org={org}
@@ -663,8 +784,8 @@ function TracesPage() {
                           onCheckedChange={(ids) => {
                             setSelection({ key: selectionKey, ids });
                           }}
-                          onScrollAnchor={onScrollAnchor}
-                          restoreAnchor={restoreAnchor}
+                          onScrollAnchor={list.isPlaceholderData ? undefined : onScrollAnchor}
+                          restoreAnchor={restoreAnchor ?? restoreAtMount}
                           onSelectionMove={(row) => {
                             void navigate({
                               to: "/$org/$project/traces",
@@ -673,7 +794,8 @@ function TracesPage() {
                               replace: true,
                             });
                           }}
-                          hasNextPage={list.hasNextPage}
+                          stale={list.isPlaceholderData}
+                          hasNextPage={list.hasNextPage && !list.isPlaceholderData}
                           isFetchingNextPage={list.isFetchingNextPage}
                           fetchNextPage={fetchNextPage}
                           sorting={{
@@ -693,14 +815,25 @@ function TracesPage() {
                           highlightedRowIds={highlighted}
                           notice={
                             live.pending > 0 ? (
-                              <Button
-                                type="button"
-                                size="xs"
-                                variant="secondary"
+                              <NewRowsPill
+                                label={countLabel(
+                                  live.pending,
+                                  live.overflowed,
+                                  "new trace",
+                                  "new traces",
+                                )}
                                 onClick={live.reveal}
-                              >
-                                {live.overflowed ? `${live.pending}+` : live.pending} new traces ↑
-                              </Button>
+                              />
+                            ) : newRows && newRows.count > 0 ? (
+                              <NewRowsPill
+                                label={countLabel(
+                                  newRows.count,
+                                  newRows.more,
+                                  "new trace",
+                                  "new traces",
+                                )}
+                                onClick={listAnchor.renew}
+                              />
                             ) : null
                           }
                           emptyState={

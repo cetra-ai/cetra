@@ -16,7 +16,8 @@ fmt-check:
 
 # Lint (warnings are errors)
 lint:
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    # `--all-targets` skips the storage `test = false` targets (benchmarks, S3 probes); name them.
+    cargo clippy --workspace --all-targets --all-features --test ingest_bench --test trace_bench --test s3_chaos --test s3_probe -- -D warnings
 
 # Run all Rust tests
 test:
@@ -129,9 +130,9 @@ fetch-corpus:
     echo "a9f240c4c77aa1378364f70d37e753c07ba284e247b019d700e1947a0e5da751  target/bench-corpus/oasst2-ready-messages.jsonl.gz.part" | sha256sum --check --strict -
     mv target/bench-corpus/oasst2-ready-messages.jsonl.gz.part target/bench-corpus/oasst2-ready-messages.jsonl.gz
 
-# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/soak.rs
+# Storage soak (D-R-11). Needs CETRA_SOAK_DIR and CETRA_SOAK_OUT; see crates/storage/tests/it/soak.rs
 soak:
-    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test soak -- --ignored --nocapture --exact soak
+    RUST_MIN_STACK=33554432 cargo test --release -p cetra-storage --all-features --test it -- --ignored --nocapture --exact soak::soak
 
 # Plots of a soak run's samples into <out>/plots
 soak-plot out:
@@ -296,8 +297,17 @@ check-py:
 check-ts: js-install
     pnpm --dir sdks/typescript run check
 
+# Documentation site checks: lint, script tests, types, content checks, build with link validation (D-W-13)
+check-docs: js-install
+    pnpm --dir website run check
+
+# Rewrite the docs' UI screenshots from the web UI on its mocks (D-W-12). Needs Chromium:
+# `pnpm --dir website exec playwright install chromium` once. Optional: shot names.
+docs-screenshots *names: js-install
+    cd website && node scripts/screenshots.mjs {{names}}
+
 # Every check (D79); must pass before every commit
-check: check-rust check-web check-py check-ts
+check: check-rust check-web check-py check-ts check-docs
 
 # Build the web, run the Rust e2e tests with the UI embedded, then the SDK suites against a real server (D-G-20, D-G-18)
 e2e: js-install
@@ -382,10 +392,73 @@ web-dev: js-install
 web-dev-server: js-install
     pnpm --dir web run dev:server
 
+# Documentation site dev server on http://localhost:4321
+docs-dev: js-install
+    pnpm --dir website run dev
+
+# Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (or a `wrangler login`); the
+# last line printed is `url=<deployed URL>`.
+# Build the site and deploy it to the `cetra-site` Worker: `main` is production, `pr-<number>` a Preview (D-W-3)
+docs-deploy branch: js-install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pnpm --dir website run build
+    case "{{branch}}" in
+      main) out="$(pnpm --dir website exec wrangler deploy)" ;;
+      pr-[0-9]*) out="$(pnpm --dir website exec wrangler preview --name "{{branch}}")" ;;
+      *) echo "branch must be main or pr-<number>, not {{branch}}" >&2; exit 1 ;;
+    esac
+    echo "$out"
+    if [ "{{branch}}" = main ]; then
+      url="$(grep -oE 'https://cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    else
+      url="$(grep -oE 'https://{{branch}}-cetra-site\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    fi
+    test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
+    echo "url=$url/"
+
+# Needs CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (or a `wrangler login`); the
+# last line printed is `url=<deployed URL>`.
+# Build the web UI on its mocks and deploy it to the `cetra-web-demo` Worker: `main` is production, `pr-<number>` a Preview (D-C-22)
+web-demo-deploy branch: js-install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{branch}}" in
+      main | pr-[0-9]*) ;;
+      *) echo "branch must be main or pr-<number>, not {{branch}}" >&2; exit 1 ;;
+    esac
+    pnpm --dir web run build:demo
+    test -f web/dist-demo/mockServiceWorker.js || { echo "the demo build has no mockServiceWorker.js" >&2; exit 1; }
+    if [ "{{branch}}" = main ]; then
+      out="$(pnpm --dir web exec wrangler deploy)"
+    else
+      out="$(pnpm --dir web exec wrangler preview --name "{{branch}}")"
+    fi
+    echo "$out"
+    if [ "{{branch}}" = main ]; then
+      url="$(grep -oE 'https://cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    else
+      url="$(grep -oE 'https://{{branch}}-cetra-web-demo\.[a-z0-9-]+\.workers\.dev' <<<"$out" | head -n1)"
+    fi
+    test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
+    echo "url=$url/"
+
+# Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first.
+# Root-relative links resolve in website/dist. The https://cetra.sh/ URLs (canonical links) are
+# skipped: starlight-links-validator checks the site's own pages during the build.
+docs-links: js-install
+    pnpm --dir website run build
+    lychee --no-progress --max-concurrency 8 --accept 200,206,429 --root-dir "$PWD/website/dist" --exclude '^http://localhost' --exclude '^https://cetra\.sh/' --exclude-path website/dist/docs/reference/api 'website/dist/**/*.html'
+
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
     pnpm --dir web run gen:api
+
+# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references
+docs-gen:
+    CETRA_DOCS_WRITE=1 cargo test -p cetra-cli cli_reference_is_up_to_date
+    CETRA_DOCS_WRITE=1 cargo test -p cetra-server sql_schema_reference_is_up_to_date
 
 # Regenerate fixtures/api responses and manifest
 api-examples:

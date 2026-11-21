@@ -14,7 +14,9 @@ import { ExperimentPanel } from "@/components/experiments/experiment-panel";
 import { CompareSelection, ExperimentsTable } from "@/components/experiments/experiments-table";
 import { ExperimentsTrend, type TrendRun } from "@/components/experiments/experiments-trend";
 import { useExperimentSummaries } from "@/components/experiments/use-experiment-summaries";
+import { FilterChips } from "@/components/filter-chips";
 import { TraceLayoutControls } from "@/components/layout-switcher";
+import { PageToolbar } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { Filmstrip, type FilmstripItem } from "@/components/trace/filmstrip";
 import { SplitPane } from "@/components/trace/split-pane";
@@ -193,7 +195,7 @@ function ExperimentsPage() {
     });
   }
 
-  /** Sets `?status=`; the active status is cleared by picking it again or "Total". */
+  /** Sets `?status=`; the active status is cleared by picking it again. */
   function setStatus(next: ExperimentStatus | undefined) {
     void navigate({
       to: "/$org/$project/experiments",
@@ -214,38 +216,17 @@ function ExperimentsPage() {
 
   const start = (
     <div className="flex h-full min-h-0 w-full flex-col">
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1">
-        <div className="flex flex-wrap items-center gap-1">
-          <Button
-            type="button"
-            size="xs"
-            variant={status === undefined ? "secondary" : "ghost"}
-            aria-pressed={status === undefined}
-            onClick={() => {
-              setStatus(undefined);
-            }}
-          >
-            {`Total ${rows.length}`}
-          </Button>
-          {STATUS_COUNTS.map((entry) => {
-            const count = rows.filter((row) => row.status === entry.status).length;
-            const active = status === entry.status;
-            return (
-              <Button
-                key={entry.status}
-                type="button"
-                size="xs"
-                variant={active ? "secondary" : "ghost"}
-                aria-pressed={active}
-                onClick={() => {
-                  setStatus(active ? undefined : entry.status);
-                }}
-              >
-                {`${entry.label} ${count}`}
-              </Button>
-            );
-          })}
-        </div>
+      <PageToolbar actions={<CompareSelection experiments={selectedRows} />}>
+        <FilterChips
+          label="Status"
+          chips={STATUS_COUNTS.map((entry) => ({
+            value: entry.status,
+            label: entry.label,
+            count: rows.filter((row) => row.status === entry.status).length,
+          }))}
+          active={status}
+          onSelect={setStatus}
+        />
         <Select
           value={dataset ?? ALL}
           onValueChange={(value) => {
@@ -258,7 +239,7 @@ function ExperimentsPage() {
             });
           }}
         >
-          <SelectTrigger aria-label="Dataset" className="w-fit min-w-48">
+          <SelectTrigger aria-label="Dataset" size="sm" className="w-fit min-w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -270,10 +251,7 @@ function ExperimentsPage() {
             ))}
           </SelectContent>
         </Select>
-        <div className="ml-auto">
-          <CompareSelection experiments={selectedRows} />
-        </div>
-      </div>
+      </PageToolbar>
       <div
         ref={bodyRef}
         data-scroll-container

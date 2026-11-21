@@ -2,6 +2,7 @@
 #![cfg(test)]
 
 pub(crate) mod hook_receiver;
+pub(crate) mod issues;
 pub(crate) mod mock_idp;
 pub(crate) mod mock_llm;
 pub(crate) mod mock_webhook;
@@ -46,21 +47,24 @@ use crate::auth::secret::{self, KeyKind, NewKey};
 use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
+    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
 use crate::meta::api_keys::{self, NewApiKey};
+use crate::meta::assistant::{insert_conversation, insert_message_raw, rename_conversation};
 use crate::meta::datasets::{self as store, DatasetFields, NewRevision, VersionChange};
 use crate::meta::members::add_org_member;
 use crate::meta::orgs::insert_org;
 use crate::meta::personal_tokens::{NewToken, insert_token};
 use crate::meta::projects::{ProjectRow, insert_project};
+use crate::meta::prompts::{self as prompt_store, NewPrompt, NewVersion, PromptType};
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::set_email_verified;
 use crate::meta::users::{self, NewUser, insert_user};
 use crate::meta::{MetaDb, MetaError};
+use crate::prompts::{check_config, parse_body};
 
 /// `2026-01-01T00:00:00Z`.
 const MANUAL_NOW_NS: i64 = 1_767_225_600_000_000_000;
@@ -362,6 +366,9 @@ impl TestApp {
         .await
         .expect("stored org tokens load");
         let eval = crate::eval::EvalQueue::new(config.eval.workers);
+        let issue_workers = Arc::new(tokio::sync::Semaphore::new(
+            usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
+        ));
         let org_sso = crate::ee::org_sso::OrgSso::new(
             cetra_eval::EgressPolicy {
                 allow_private_network: config.security.allow_private_network_egress,
@@ -391,6 +398,9 @@ impl TestApp {
             last_ingest: crate::ingest::last_ingest::LastIngest::default(),
             live: crate::live::LiveBus::new(crate::live::StreamTiming::TEST),
             widget_cache: crate::routes::dashboards::WidgetCache::default(),
+            issue_score_rules: crate::issues::triggers::ScoreRules::default(),
+            issue_workers,
+            issue_wake: tokio::sync::Notify::new(),
             usage: crate::usage::Usage::default(),
             alert_email_count: crate::alerts::quota::DailyEmailCount::default(),
             deletions: crate::deletion::Deletions::new(),
@@ -684,6 +694,146 @@ impl TestApp {
     }
 }
 
+/// The example assistant conversation of `fixtures/api/README.md` § Fixed identifiers.
+pub(crate) const EXAMPLE_CONVERSATION: &str = "01900000-0000-7000-8000-000000001a01";
+
+impl TestApp {
+    /// The example conversation of `fixtures/api/README.md` § Fixed identifiers: four messages
+    /// (a question, a tool call, its result, and an answer with a draft) of `ada@example.com` in
+    /// the example project. Every time is fixed, so the examples do not change between runs. Call
+    /// after `seed_examples`.
+    pub(crate) async fn seed_example_conversation(&self) {
+        const TITLE: &str = "Why did checkout errors spike?";
+        const SECOND_NS: i64 = 1_000_000_000;
+        // The tool result becomes a stub a day after its message (D-AS-12); the example is not stubbed.
+        const TOOL_STUB_AFTER: i64 = MANUAL_NOW_NS + 3 * SECOND_NS + 86_400_000_000_000;
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let id: Uuid = EXAMPLE_CONVERSATION.parse().unwrap();
+        // (role, parts, context, stub_after) in sequence order.
+        let messages: [(&str, &str, Option<&str>, Option<i64>); 4] = [
+            (
+                "user",
+                r#"[{"type":"text","content":"Why did checkout errors spike yesterday?"}]"#,
+                Some(r#"{"page":"traces","filter":"status = 'error'","range":"24h"}"#),
+                None,
+            ),
+            (
+                "assistant",
+                r#"[{"type":"tool_call","id":"call_1","name":"query_sql","arguments":{"query":"SELECT name, count(*) AS errors FROM traces WHERE status = 'error' GROUP BY name ORDER BY errors DESC LIMIT 5","from":"2026-01-01T00:00:00Z","to":"2026-01-02T00:00:00Z"}}]"#,
+                None,
+                None,
+            ),
+            (
+                "tool",
+                r#"[{"type":"tool_result","id":"call_1","name":"query_sql","ok":true,"result":{"columns":[{"name":"name","type":"VARCHAR"},{"name":"errors","type":"BIGINT"}],"rows":[{"name":"checkout","errors":3}]},"size_bytes":120,"rows":1,"stubbed":false}]"#,
+                None,
+                Some(TOOL_STUB_AFTER),
+            ),
+            (
+                "assistant",
+                r#"[{"type":"text","content":"Most errors come from the checkout trace (3 of them)."},{"type":"draft","id":"draft_1","kind":"filter","draft":{"view":"traces","filter":"name = 'checkout' AND status = 'error'","range":"24h"}}]"#,
+                None,
+                None,
+            ),
+        ];
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let user: String =
+                        sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::Db)?;
+                    let user: Uuid = user.parse().unwrap();
+                    insert_conversation(conn, id, project, user, MANUAL_NOW_NS).await?;
+                    rename_conversation(conn, project, user, id, TITLE).await?;
+                    for (seq, (role, parts, context, stub_after)) in (1_i64..).zip(messages) {
+                        let now = MANUAL_NOW_NS + seq * SECOND_NS;
+                        insert_message_raw(conn, id, seq, role, parts, context, stub_after, now)
+                            .await?;
+                    }
+                    sqlx::query(
+                        "UPDATE assistant_messages SET turn_trace_id = ? \
+                         WHERE conversation_id = ? AND seq = 4",
+                    )
+                    .bind("0af7651916cd43dd8448eb211c80319c")
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    sqlx::query(
+                        "UPDATE assistant_conversations \
+                         SET message_count = 4, last_active_at = ? WHERE id = ?",
+                    )
+                    .bind(MANUAL_NOW_NS + 4 * SECOND_NS)
+                    .bind(id.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+}
+
+impl TestApp {
+    /// The example org's assistant setting of `fixtures/api/README.md` § Fixed identifiers: on,
+    /// with the example connection `…0400` (an OpenAI connection in `acme`, inserted here since
+    /// the examples only hold it as a static file) and `gpt-4o`. Call after `seed_examples`.
+    pub(crate) async fn seed_example_assistant_settings(&self) {
+        const CONNECTION: &str = "01900000-0000-7000-8000-000000000400";
+        let connection: Uuid = CONNECTION.parse().unwrap();
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let org: String = sqlx::query_scalar("SELECT id FROM orgs WHERE slug = 'acme'")
+                        .fetch_one(&mut *conn)
+                        .await
+                        .map_err(MetaError::Db)?;
+                    let user: String =
+                        sqlx::query_scalar("SELECT id FROM users WHERE email = 'ada@example.com'")
+                            .fetch_one(&mut *conn)
+                            .await
+                            .map_err(MetaError::Db)?;
+                    // The sealed key is never opened by the examples, so its column is empty.
+                    sqlx::query(
+                        "INSERT INTO llm_connections \
+                         (id, org_id, name, adapter, secret_enc, api_key_hint, default_model, \
+                          created_at, updated_at) \
+                         VALUES (?, ?, 'OpenAI', 'openai', ?, 'WXYZ', 'gpt-5-mini', ?, ?)",
+                    )
+                    .bind(connection.to_string())
+                    .bind(&org)
+                    .bind(Vec::<u8>::new())
+                    .bind(MANUAL_NOW_NS)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    sqlx::query(
+                        "INSERT INTO org_assistant_settings \
+                         (org_id, enabled, connection_id, model, updated_by, updated_at) \
+                         VALUES (?, 1, ?, 'gpt-4o', ?, ?)",
+                    )
+                    .bind(&org)
+                    .bind(connection.to_string())
+                    .bind(&user)
+                    .bind(MANUAL_NOW_NS)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::Db)?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+}
+
 impl TestApp {
     /// The example dataset `faq` of `fixtures/api/README.md` § Fixed identifiers, written
     /// through the store into the example project. Call after `seed_examples`.
@@ -801,6 +951,103 @@ impl TestApp {
     }
 }
 
+/// The example prompt `support-reply` of `fixtures/api/README.md` § Fixed identifiers.
+pub(crate) const EXAMPLE_PROMPT: &str = "support-reply";
+
+/// A version as the API stores it: the template and config go through the same checks.
+fn example_version(
+    prompt_type: PromptType,
+    template: &serde_json::Value,
+    config: &serde_json::Value,
+    labels: &[&str],
+    commit_message: &str,
+) -> NewVersion {
+    let body = parse_body(prompt_type, template).unwrap_or_else(|errors| panic!("{errors:?}"));
+    let config = check_config(config).unwrap_or_else(|errors| panic!("{errors:?}"));
+    NewVersion {
+        template: serde_json::to_string(&body.to_json()).unwrap_or_else(|error| panic!("{error}")),
+        config,
+        commit_message: Some(commit_message.to_owned()),
+        labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+        actor: None,
+    }
+}
+
+impl TestApp {
+    /// The example prompts of `fixtures/api/README.md` § Fixed identifiers, written through the
+    /// store into the example project: `summarize`, then `support-reply` with two versions. The
+    /// writes are one second apart, from 2026-01-01T00:00:00Z. Call after `seed_examples`.
+    pub(crate) async fn seed_example_prompts(&self) {
+        const SUMMARIZE: &str = "01900000-0000-7000-8000-000000001002";
+        const SUPPORT_REPLY: &str = "01900000-0000-7000-8000-000000001001";
+        const FIRST: i64 = 1_767_225_600_000_000_000;
+        const SECOND: i64 = 1_000_000_000;
+        let project: ProjectId = EXAMPLE_PROJECT.parse().unwrap();
+        let summarize_id: Uuid = SUMMARIZE.parse().unwrap();
+        let support_id: Uuid = SUPPORT_REPLY.parse().unwrap();
+        let summarize_v1 = example_version(
+            PromptType::Text,
+            &serde_json::json!(
+                "Summarize this conversation in {{ max_words }} words:\n\n{{ transcript }}"
+            ),
+            &serde_json::json!({"model": "gpt-4o-mini", "params": {"temperature": 0.2}}),
+            &["production"],
+            "First version",
+        );
+        let support_v1 = example_version(
+            PromptType::Chat,
+            &serde_json::json!([
+                {"role": "system", "content": "You are a support agent for {{ product }}."},
+                {"type": "placeholder", "name": "history"},
+                {"role": "user", "content": "{{ question }}"}
+            ]),
+            &serde_json::json!({"model": "gpt-4o", "params": {"temperature": 0.3, "max_tokens": 512}}),
+            &["production"],
+            "First version",
+        );
+        let support_v2 = example_version(
+            PromptType::Chat,
+            &serde_json::json!([
+                {"role": "system", "content": "You are a friendly support agent for {{ product }}. Answer in {{ language }}."},
+                {"type": "placeholder", "name": "history"},
+                {"role": "user", "content": "{{ question }}"}
+            ]),
+            &serde_json::json!({"model": "gpt-4o", "params": {"temperature": 0.3, "max_tokens": 512}}),
+            &["staging"],
+            "Friendlier tone",
+        );
+        self.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let summarize = NewPrompt {
+                        id: summarize_id,
+                        name: "summarize".to_owned(),
+                        prompt_type: PromptType::Text,
+                        description: Some("Summarize a support conversation".to_owned()),
+                        tags: vec!["support".to_owned()],
+                    };
+                    prompt_store::create_prompt(conn, project, summarize, summarize_v1, FIRST)
+                        .await?;
+                    let support = NewPrompt {
+                        id: support_id,
+                        name: EXAMPLE_PROMPT.to_owned(),
+                        prompt_type: PromptType::Chat,
+                        description: None,
+                        tags: Vec::new(),
+                    };
+                    prompt_store::create_prompt(conn, project, support, support_v1, FIRST + SECOND)
+                        .await?;
+                    prompt_store::add_version(conn, support_id, support_v2, FIRST + 2 * SECOND)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+}
+
 /// The spans of `fixtures/api/dataset/spans.json`, as written.
 fn dataset_spans() -> Vec<Span> {
     let dataset = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/api/dataset");
@@ -893,6 +1140,7 @@ impl TestApp {
                     spans,
                     media: Vec::new(),
                     rejections: cetra_otel::Rejections::default(),
+                    discarded: 0,
                 },
             )
             .await
@@ -1032,6 +1280,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         // Most tests act as a cloud cell (D-P-50); a test of the default turns it off.
         entitlements: EntitlementsConfig {
@@ -1039,6 +1288,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
             ..EntitlementsConfig::default()
         },
         orgs: OrgsConfig::default(),
+        alerts: AlertsConfig::default(),
         demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
@@ -1585,9 +1835,11 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        alerts: AlertsConfig::default(),
         demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,
@@ -1632,6 +1884,7 @@ pub(crate) async fn put_score(app: &TestApp, project: ProjectId, score: TestScor
         rule_id: None,
         experiment_id: score.experiment_id,
         dataset_item_id: score.experiment_id.map(|_| Uuid::now_v7()),
+        queue_id: None,
         author_user_id: None,
         metadata: Default::default(),
         created_at: score.created_at,

@@ -7,7 +7,10 @@ use std::time::Duration;
 use crate::config::JudgeOutput;
 use crate::egress::{EgressClient, EgressPolicy};
 use crate::error::{EgressError, ErrorClass, JudgeError};
-use crate::judge::{Adapter, JudgeCall, JudgeConnection, RawAnswer, StructuredOutput, call};
+use crate::judge::{
+    Adapter, CompletionCall, JUDGEMENT_DESCRIPTION, JUDGEMENT_TOOL, JudgeConnection, RawAnswer,
+    StructuredOutput, answer_schema, call,
+};
 use crate::mock::{Mock, MockReply};
 use crate::secret::Secret;
 use serde_json::{Value, json};
@@ -38,16 +41,14 @@ fn connection(base: reqwest::Url, extra: Vec<(&str, &str)>) -> JudgeConnection {
     }
 }
 
-fn judge<'a>(
-    output: &'a JudgeOutput,
-    temperature: Option<f64>,
-    timeout: Duration,
-) -> JudgeCall<'a> {
-    JudgeCall {
+fn judge<'a>(schema: &'a Value, temperature: Option<f64>, timeout: Duration) -> CompletionCall<'a> {
+    CompletionCall {
         model: MODEL,
         prompt: PROMPT,
-        output,
-        include_reason: true,
+        schema,
+        schema_name: "judge_answer",
+        tool_name: JUDGEMENT_TOOL,
+        tool_description: JUDGEMENT_DESCRIPTION,
         temperature,
         max_output_tokens: 1024,
         timeout,
@@ -84,13 +85,21 @@ async fn request_body_with_and_without_temperature() {
     let http = client();
     mock.enqueue(ok(r#"{"value":1}"#));
     mock.enqueue(ok(r#"{"value":1}"#));
-    call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect("no temperature");
     call(
         &http,
         &conn,
-        &judge(&output, Some(0.2), Duration::from_secs(2)),
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect("no temperature");
+    call(
+        &http,
+        &conn,
+        &judge(
+            &answer_schema(&output, true),
+            Some(0.2),
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("temperature");
@@ -125,9 +134,13 @@ async fn returns_text_for_each_output_type() {
     ];
     for (output, content, kind) in cases {
         mock.enqueue(ok(content));
-        let reply = call(&http, &conn, &judge(output, None, Duration::from_secs(2)))
-            .await
-            .expect(kind);
+        let reply = call(
+            &http,
+            &conn,
+            &judge(&answer_schema(output, true), None, Duration::from_secs(2)),
+        )
+        .await
+        .expect(kind);
         assert_eq!(reply.output_text, content);
         assert_eq!(reply.answer, RawAnswer::Text(content.to_owned()));
         assert_eq!(reply.response_model.as_deref(), Some(MODEL));
@@ -176,9 +189,13 @@ async fn skips_thought_parts_and_concatenates_text() {
         }),
         delay: Duration::ZERO,
     });
-    let reply = call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect("text");
+    let reply = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect("text");
     assert_eq!(reply.output_text, r#"{"value":0.8}"#);
     assert!(!format!("{reply:?}").contains("SECRET-PAYLOAD"));
 
@@ -192,7 +209,12 @@ async fn skips_thought_parts_and_concatenates_text() {
         }),
         delay: Duration::ZERO,
     });
-    let err = call_err(&http, &conn, &judge(&output, None, Duration::from_secs(2))).await;
+    let err = call_err(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await;
     assert_eq!(err, JudgeError::EmptyAnswer);
     assert_hidden(&err);
 }
@@ -217,9 +239,13 @@ async fn function_call_args_are_the_answer() {
         }),
         delay: Duration::ZERO,
     });
-    let reply = call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect("function call");
+    let reply = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect("function call");
     let RawAnswer::Object(object) = &reply.answer else {
         panic!("object answer");
     };
@@ -238,7 +264,12 @@ async fn function_call_args_are_the_answer() {
         }),
         delay: Duration::ZERO,
     });
-    let err = call_err(&http, &conn, &judge(&output, None, Duration::from_secs(2))).await;
+    let err = call_err(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await;
     assert_eq!(err, JudgeError::NotJson);
     assert_hidden(&err);
 }
@@ -249,7 +280,8 @@ async fn prompt_block_truncation_and_a_missing_candidate() {
     let conn = connection(mock.origin(), Vec::new());
     let http = client();
     let output = numeric();
-    let request = judge(&output, None, Duration::from_secs(2));
+    let schema = answer_schema(&output, true);
+    let request = judge(&schema, None, Duration::from_secs(2));
 
     mock.enqueue(MockReply {
         status: 200,
@@ -364,9 +396,13 @@ async fn maps_usage_including_thoughts_and_cache() {
         }),
         delay: Duration::ZERO,
     });
-    let reply = call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect("usage");
+    let reply = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect("usage");
     assert_eq!(reply.usage.input, 10);
     assert_eq!(reply.usage.output, 6);
     assert_eq!(reply.usage.cache_read, 3);
@@ -384,9 +420,13 @@ async fn maps_usage_including_thoughts_and_cache() {
         }),
         delay: Duration::ZERO,
     });
-    let reply = call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect("bare usage");
+    let reply = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect("bare usage");
     assert_eq!(reply.usage.input, 1);
     assert_eq!(reply.usage.cache_read, 0);
     assert_eq!(reply.usage.reasoning, 0);
@@ -404,7 +444,8 @@ async fn an_exhausted_daily_quota_pauses_but_a_rate_limit_retries() {
     let conn = connection(mock.origin(), Vec::new());
     let http = client();
     let output = numeric();
-    let request = judge(&output, None, Duration::from_secs(2));
+    let schema = answer_schema(&output, true);
+    let request = judge(&schema, None, Duration::from_secs(2));
     for (body, class) in [
         (
             quota("GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
@@ -447,7 +488,8 @@ async fn classifies_provider_statuses() {
     let conn = connection(mock.origin(), Vec::new());
     let http = client();
     let output = numeric();
-    let request = judge(&output, None, Duration::from_secs(2));
+    let schema = answer_schema(&output, true);
+    let request = judge(&schema, None, Duration::from_secs(2));
     for (status, kind, class) in cases {
         mock.enqueue(MockReply {
             status,
@@ -488,7 +530,11 @@ async fn timeout_is_retryable() {
     let err = call(
         &http,
         &conn,
-        &judge(&output, None, Duration::from_millis(200)),
+        &judge(
+            &answer_schema(&output, true),
+            None,
+            Duration::from_millis(200),
+        ),
     )
     .await
     .expect_err("timeout");
@@ -509,9 +555,13 @@ async fn sends_the_key_in_the_header_and_not_the_query() {
         body: json!({"error": {"code": 500, "status": "INTERNAL", "message": "overloaded"}}),
         delay: Duration::ZERO,
     });
-    let err = call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect_err("status");
+    let err = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect_err("status");
     let request = &mock.requests()[0];
     assert_eq!(request.path, PATH);
     assert_eq!(request.query, None);
@@ -531,16 +581,19 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
     let mock = Mock::start().await;
     let http = client();
     let output = numeric();
+    let schema = answer_schema(&output, true);
     let conn = connection(mock.origin(), Vec::new());
     mock.enqueue(ok("{}"));
     let err = call(
         &http,
         &conn,
-        &JudgeCall {
+        &CompletionCall {
             model: "gemini/flash",
             prompt: PROMPT,
-            output: &output,
-            include_reason: true,
+            schema: &schema,
+            schema_name: "judge_answer",
+            tool_name: JUDGEMENT_TOOL,
+            tool_description: JUDGEMENT_DESCRIPTION,
             temperature: None,
             max_output_tokens: 1024,
             timeout: Duration::from_secs(2),
@@ -553,9 +606,13 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
     assert!(mock.requests().is_empty());
 
     let bad = connection(mock.origin(), vec![("bad name", "SECRET-PAYLOAD")]);
-    let err = call(&http, &bad, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect_err("header");
+    let err = call(
+        &http,
+        &bad,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect_err("header");
     assert_eq!(err, JudgeError::InvalidHeader);
     assert!(!err.to_string().contains("SECRET-PAYLOAD"));
     assert!(mock.requests().is_empty());
@@ -563,7 +620,11 @@ async fn rejects_a_bad_model_header_or_temperature_before_sending() {
     let err = call(
         &http,
         &conn,
-        &judge(&output, Some(f64::NAN), Duration::from_secs(2)),
+        &judge(
+            &answer_schema(&output, true),
+            Some(f64::NAN),
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect_err("temperature");
@@ -582,9 +643,13 @@ async fn response_over_4_mib_is_permanent() {
         body: Value::String("x".repeat(4 * 1024 * 1024 + 1)),
         delay: Duration::ZERO,
     });
-    let err = call(&http, &conn, &judge(&output, None, Duration::from_secs(5)))
-        .await
-        .expect_err("too large");
+    let err = call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(5)),
+    )
+    .await
+    .expect_err("too large");
     assert_eq!(
         err,
         JudgeError::Transport(EgressError::TooLarge {
@@ -595,7 +660,11 @@ async fn response_over_4_mib_is_permanent() {
     assert_eq!(err.to_string(), "response exceeds 4194304 bytes");
 }
 
-async fn call_err(http: &EgressClient, conn: &JudgeConnection, call: &JudgeCall<'_>) -> JudgeError {
+async fn call_err(
+    http: &EgressClient,
+    conn: &JudgeConnection,
+    call: &CompletionCall<'_>,
+) -> JudgeError {
     crate::judge::call(http, conn, call)
         .await
         .expect_err("provider error")
@@ -628,9 +697,13 @@ async fn extra_headers_cannot_override_the_content_type_or_the_auth_header() {
         body: json!({"error": {"message": "overloaded"}}),
         delay: Duration::ZERO,
     });
-    call(&http, &conn, &judge(&output, None, Duration::from_secs(2)))
-        .await
-        .expect_err("status");
+    call(
+        &http,
+        &conn,
+        &judge(&answer_schema(&output, true), None, Duration::from_secs(2)),
+    )
+    .await
+    .expect_err("status");
     let request = &mock.requests()[0];
     assert_eq!(request.header("content-type"), Some("application/json"));
     assert_eq!(

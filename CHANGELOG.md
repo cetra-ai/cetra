@@ -3,7 +3,7 @@
 All notable changes to cetra are listed here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/) (D-N-5). A release that needs action on upgrade starts
-with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
+with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/).
 
 ## [Unreleased]
 
@@ -29,12 +29,38 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   `/healthz`; the Helm chart already does.
 - `/healthz` now fails on a storage failure that a restart clears (a WAL, object fsync or catalog
   failure), so a liveness probe on it restarts the server.
+- Migration `0030` rebuilds `notification_deliveries` (an issue notification is a delivery without a rule event) and adds `issue_sources.last_notified_at`.
 
 ### Added
 
+- `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their
+  test sends to the org's verified members whatever `auth.signup` is (D-K-21). Unset, it keeps the
+  old rule: members only under open signup.
+- Alert rules on issues: the `issue_occurrences` metric counts the occurrences of one issue or of a source's issues in a window of 15 minutes or more (D-IC-20).
+- Issue notifications: an issue source can send its new and regressed issues to project channels, in one message per 10 minutes at most (D-IC-21).
+- Issues: "Add examples to dataset" copies an issue's newest occurrence traces into a dataset, and "Create alert" opens an alert rule for the issue (D-IC-22, D-IC-23).
+- Issues: "Send to queue" adds an issue's newest occurrences (traces, spans or sessions, by the queue's kind) to an annotation queue (D-IC-27 to D-IC-31).
+- MCP: the read-only `list_issues` tool lists a project's issues with their state and counts over the last 7 days (D-IC-24).
+- Issue sources for bad scores, user feedback and topics: LLM summaries and embeddings group them into issues, refreshed every 6 hours (D-IC-4, D-IC-8).
+- MCP tools `list_prompts` and `get_prompt` (D-V-39): coding agents read the project's prompts, their labels and a version's template, config and variables, with the same access and limits as the other MCP tools.
+- Prompts pages (D-V-32): the prompt list with search, label and tag filters, protected labels and a create dialog; the prompt page with the template editor (saving a version), versions with labels and line diffs, label history and per-version metrics; prompt links, facets and columns on traces and spans.
+- In-app assistant (D193, D-AS-1 to D-AS-31): a chat panel in each project (`Ctrl/Cmd+I`) that answers questions over traces, metrics, evaluations and settings with the organization's LLM connection, and drafts filters, SQL, dashboards, evaluators and online rules that you apply.
+- Organization setting Assistant (D-AS-3, D-AS-24): off until an admin picks a connection and a model; turning it on runs a tool-calling test.
+- Assistant API (D-AS-9, D-AS-10): conversations, turns streamed over SSE, feedback, and the org setting under `/api/v1/…/assistant`.
+- Annotation queues in the UI: create queues, add traces, spans or sessions from their pages and lists, and review them one at a time with Complete and next.
+- Add everything a trace, span or session filter matches to an annotation queue, up to 10 000 per call: `POST /annotation-queues/{id}/items/matching/preview` counts the matches and `POST /annotation-queues/{id}/items/matching` adds them.
+- Annotation queues on the server: queues of traces, spans or sessions with their score definitions and instructions, items added by id, a 5-minute lease with next, complete, skip and reopen, the GDPR and retention cascade, and the `max_annotation_queues` plan limit (Free: 1).
+- `Client.annotation_queues` (Python) and `client.annotationQueues` (TypeScript): create annotation queues and add traces, spans or sessions to them.
+- Scores carry an optional `queue_id`, the annotation queue they were written from, and `GET /scores` filters by it.
+- Playground API (D-V-20 to D-V-26, D-V-33 to D-V-37): POST /playground/runs streams a model run over SSE through the org's LLM connection, traces it into the reserved cetra-playground environment (not billed), with per-user and per-org limits; cetra-playground is reserved everywhere cetra-eval is.
+- Prompt links on spans and traces (D-V-15, D-V-16): `cetra.prompt.name`/`version` and Langfuse's prompt attributes fill `prompt_name`, `prompt_version` and the traces' `prompts` list (filter with `prompts @> ['name@version']`); `GET /prompts/{name}/metrics` gives per-version cost, latency, errors and scores (D-V-17). Spans are now normalized with `schema_version` 2.
+- `cetra agents setup` and `cetra agents remove` connect Claude Code, Codex, Gemini CLI and Copilot to cetra, with a hook that reports each session's repository, branch and person.
+- Claude Code, Codex CLI, Gemini CLI and GitHub Copilot spans are normalized: tool spans are named after their tool, tokens and cost are filled, and traces carry the agent, repository, branch and person.
 - Dashboard templates — Cost, Latency and Quality — in the New dashboard dialog; the Overview adds top users and top trace names by cost and drops its section headings (D-C-21).
 - A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
-- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `GET /facets` endpoint (D-C-13).
+- SDK prompts (D-V-14, D-V-15): get_prompt / getPrompt with a 60 s cache, stale-while-revalidate and a fallback, Prompt.compile, prompt links through context(prompt=…) / withContext({ prompt }), and client.prompts.
+- Prompt registry API (D191, D-V-2 to D-V-13): versioned text and chat prompts with plain {{var}} templates, labels with protected labels, label history, and a fetch with ETag at GET /prompts/{name}/resolve.
+- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `POST /facets` endpoint (D-C-13).
 - Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
 - Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
 - A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
@@ -100,9 +126,20 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
 
 - Evaluator version history: every change to an evaluator's config or output is kept, `GET /api/v1/projects/{project}/evaluators/{id}/versions` lists the versions, and the evaluator page has a History tab that diffs a version against the previous one.
 - Evaluators: `GET /evaluators/stats`; the evaluator list shows 7-day runs, errors, average cost, p50 and result columns (the score column is now "Output"), and the evaluator page a 7-day stats row and the experiments with its score (D-I-48).
+- Issues: error spans of production traces are grouped into issues you can resolve, ignore and merge, with occurrence counts and a filter on the trace list (D-IC-2).
+- Playground (D-V-20 to D-V-28, D-V-38): run prompt versions and recorded LLM spans against up to four models side by side, streamed, with cost and latency; save the result as a prompt version; recent runs.
+- A "Coding agents" dashboard template, and `session_id` as a breakdown of trace widgets.
 
 ### Changed
 
+- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens without a filter or search (D-C-24).
+- Traces, Spans, Sessions and Users come back from cache within 15 minutes, with the same rows and
+  scroll position; newer rows wait behind an "N new … ↑" pill, and a new filter or range keeps the
+  previous rows dimmed until the answer arrives.
+- The self-hosting guides moved from `docs/self-hosting/` to cetra.sh/docs/self-hosting/.
+- The SDK guides moved from the package READMEs to cetra.sh/docs/reference/python/ and
+  cetra.sh/docs/reference/typescript/; the READMEs keep install and the quick start.
+- The copyright holder in the MIT `LICENSE` files is sebastiencs, which is also named as the licensor of the Elastic License 2.0 directories (D190).
 - The top bar is a breadcrumb to the current page and its open item, shows whether spans are arriving, and lists firing alerts (D-C-20).
 - Dashboard charts use round axis ticks, at most 60 buckets, the error colour for errors and one colour per model; change badges show `new` or `×N` instead of huge percentages. The list toolbars' Eval and Experiments switches are now one "Include" menu (D-C-15).
 - The project sidebar groups its pages into Observe, Monitor, Evaluate and Explore, with live badges on Alerts, Online rules and Experiments, a Recent group, and the account menu, Docs link and version in its footer; `g` then a letter now reaches every project page (Spans moves to `g p`, Sessions to `g s`), and the sidebar starts collapsed below 1024 px (D-C-12).
@@ -138,6 +175,10 @@ with an `### Upgrade notes` section (docs/self-hosting/upgrade.md).
   login page links to (D-S-4, D-S-5, D-S-6).
 - Internal API: `POST /api/internal/v1/users/{revoke,disable,delete}` take `{subject, email}` and
   find a user who never signed in through the control plane by email (D-S-9).
+- The Alerts, Issues, Prompts, Playground, Evaluators, Online rules, Issue sources, Annotation
+  queues, Datasets and Experiments pages share one toolbar layout and table style. Experiments has
+  no Total chip and Evaluators no All button: select the selected chip again to clear the filter.
+- Item pages (new and edit forms, and the evaluator, issue, issue source, dataset and annotation queue pages) use the list pages' toolbar and left-aligned layout. The alert rule editor gets a back link.
 
 ### Fixed
 

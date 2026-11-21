@@ -1,0 +1,13 @@
+{
+  "view": "spans",
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-01-02T00:00:00Z",
+  "fields": [
+    { "field": "span_kind" },
+    { "field": "status" },
+    { "field": "name" },
+    { "field": "model" },
+    { "field": "duration_ms" },
+    { "field": "cost_total" }
+  ]
+}

@@ -2,7 +2,7 @@
 //! payloads since track R M7 (R7.3).
 //!
 //! Ingest rate, the flush drain and compaction throughput, on local disk or on
-//! S3 (`CETRA_TEST_S3_ENDPOINT`, as `tests/s3.rs` reads it). The spans are the
+//! S3 (`CETRA_TEST_S3_ENDPOINT`, as `tests/it/s3.rs` reads it). The spans are the
 //! traces of `common::payload`: real oasst2 text (`just fetch-corpus`), with the
 //! structure of the captured fixtures. Run by hand in `--release`:
 //!

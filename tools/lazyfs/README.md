@@ -47,7 +47,7 @@ mounts LazyFS on `W/mnt` over `W/root`, and unmounts on exit.
 - `every_hook_survives_lazyfs` (ignored by `cargo test`) runs every crash child of
   `crash_tests.rs` on the mount, one per point, and drops unsynced data after each child
   exits, before the group's checks.
-- `crash_recovery` (`crates/storage/tests/crash.rs`) runs 10 kill-and-check iterations on the
+- `crash::crash_recovery` (`crates/storage/tests/it/crash.rs`) runs 10 kill-and-check iterations on the
   mount, with a power loss after each kill. Its `acked.log` is `sync_data`'d per line, so
   what the parent expects survives the clear.
 

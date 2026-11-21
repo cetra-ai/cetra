@@ -21,9 +21,11 @@ import { StateBadge } from "@/components/alerts/state-badge";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { FilterChips } from "@/components/filter-chips";
 import { Forbidden } from "@/components/forbidden";
 import { FormError } from "@/components/form/form-error";
 import { TraceLayoutControls } from "@/components/layout-switcher";
+import { PageToolbar } from "@/components/page-toolbar";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { useProject } from "@/components/shell/project-context";
@@ -155,7 +157,7 @@ function AlertsPage() {
     (rule) => search.state === undefined || alertBucket(rule) === search.state,
   );
   const newRule = canManage ? (
-    <Button asChild>
+    <Button asChild size="sm">
       <Link to="/$org/$project/alerts/new" params={{ org, project }}>
         <Plus />
         New rule
@@ -163,7 +165,7 @@ function AlertsPage() {
     </Button>
   ) : (
     <DisabledReason reason={CANNOT_MANAGE}>
-      <Button disabled>
+      <Button disabled size="sm">
         <Plus />
         New rule
       </Button>
@@ -243,7 +245,25 @@ function AlertsPage() {
             }
             start={
               <div className="flex h-full min-h-0 w-full flex-col">
-                <div className="flex min-h-9 shrink-0 items-center gap-2 overflow-x-auto border-b px-3">
+                <PageToolbar actions={empty ? null : newRule}>
+                  {query.isPending || empty ? null : (
+                    <FilterChips
+                      label="Summary"
+                      chips={ALERT_BUCKETS.map((bucket) => ({
+                        value: bucket,
+                        label: BUCKET_LABEL[bucket],
+                        count: counts[bucket],
+                      }))}
+                      active={search.state}
+                      onSelect={(state) => {
+                        void navigate({
+                          to: "/$org/$project/alerts",
+                          params: { org, project },
+                          search: (previous) => ({ ...previous, state }),
+                        });
+                      }}
+                    />
+                  )}
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -260,23 +280,9 @@ function AlertsPage() {
                       more.
                     </TooltipContent>
                   </Tooltip>
-                  {query.isPending || empty ? null : (
-                    <StateStrip
-                      counts={counts}
-                      active={search.state}
-                      onSelect={(state) => {
-                        void navigate({
-                          to: "/$org/$project/alerts",
-                          params: { org, project },
-                          search: (previous) => ({ ...previous, state }),
-                        });
-                      }}
-                    />
-                  )}
-                  <div className="ml-auto flex shrink-0 items-center">{empty ? null : newRule}</div>
-                </div>
+                </PageToolbar>
                 <div ref={bodyRef} data-scroll-container className="min-h-0 flex-1 overflow-auto">
-                  <div className="flex flex-col gap-6 px-3 py-4">
+                  <div className="flex flex-col gap-6 px-3 py-3">
                     {query.isPending ? (
                       <>
                         <Skeleton className="h-8 w-full" />
@@ -346,6 +352,7 @@ function AlertsPage() {
                                       )}
                                     >
                                       <Link
+                                        from="/$org/$project/alerts/"
                                         to="/$org/$project/alerts"
                                         params={{ org, project }}
                                         search={(prev) => withRule(prev, rule.id)}
@@ -537,6 +544,7 @@ function RecentEvents({
                     <TableCell>
                       {rule ? (
                         <Link
+                          from="/$org/$project/alerts/"
                           to="/$org/$project/alerts"
                           params={{ org, project }}
                           search={(prev) => withRule(prev, rule.id)}
@@ -636,39 +644,6 @@ function sortByBucket(rules: readonly Schema<"AlertRule">[]): Schema<"AlertRule"
 /** Nanoseconds from an instant to now. */
 function elapsedNs(rfc3339: string): number {
   return (Date.now() - Date.parse(rfc3339)) * 1_000_000;
-}
-
-function StateStrip({
-  counts,
-  active,
-  onSelect,
-}: {
-  counts: Record<AlertBucket, number>;
-  active: AlertBucket | undefined;
-  onSelect: (state: AlertBucket | undefined) => void;
-}) {
-  return (
-    <section aria-label="Summary" className="flex flex-wrap items-center gap-2 text-body">
-      {ALERT_BUCKETS.map((bucket) => {
-        const selected = active === bucket;
-        return (
-          <button
-            key={bucket}
-            type="button"
-            aria-pressed={selected}
-            onClick={() => onSelect(selected ? undefined : bucket)}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 hover:bg-muted",
-              selected && "border-foreground/30 bg-muted font-medium",
-            )}
-          >
-            <span>{BUCKET_LABEL[bucket]}</span>{" "}
-            <span className="tabular-nums">{counts[bucket]}</span>
-          </button>
-        );
-      })}
-    </section>
-  );
 }
 
 /** Kind icon and name per channel, two shown, then "+N". Unknown ids read "Deleted channel". */

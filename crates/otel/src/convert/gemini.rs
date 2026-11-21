@@ -15,7 +15,6 @@ use crate::payload::parse_tool_arguments;
 ///
 /// [`ConvertError::NotAnArray`] when `value` is not an array.
 /// [`ConvertError::NotAMessage`] when an element has no string `role`.
-#[allow(dead_code)] // A later convention phase calls this.
 pub(crate) fn gemini_contents(value: &Json) -> Result<Vec<Message>, ConvertError> {
     let Json::Array(items) = value else {
         return Err(ConvertError::NotAnArray);
@@ -31,7 +30,6 @@ pub(crate) fn gemini_contents(value: &Json) -> Result<Vec<Message>, ConvertError
 ///
 /// A string, a part array, a part object, or a content object `{parts}` becomes
 /// a JSON array of canonical parts. Any other value is returned unchanged.
-#[allow(dead_code)] // A later convention phase calls this.
 pub(crate) fn gemini_system_instruction(value: &Json) -> Json {
     match value {
         Json::String(text) => parts_json(&[plain_text(text.clone())]),

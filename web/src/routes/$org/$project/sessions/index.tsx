@@ -1,10 +1,16 @@
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { createFileRoute, useLocation, useRouter } from "@tanstack/react-router";
 import { MessagesSquare } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { problemOf } from "@/api/problem";
 import { sessionListOptions } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddMatchingDialog } from "@/components/annotation-queues/add-matching-dialog";
+import {
+  AddToQueueDialog,
+  addToQueueReason,
+  type QueueItemTarget,
+} from "@/components/annotation-queues/add-to-queue-dialog";
 import { ColumnChooser } from "@/components/data-table/column-chooser";
 import {
   lockedColumnIds,
@@ -14,6 +20,8 @@ import {
   writeColumnChoice,
 } from "@/components/data-table/column-layout";
 import { DataTable } from "@/components/data-table/data-table";
+import { countLabel, NewRowsPill, useNewRows } from "@/components/data-table/new-rows";
+import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { CarriedNotice } from "@/components/facets/carried-notice";
 import {
@@ -36,8 +44,16 @@ import {
   sessionScoreNames,
 } from "@/components/session-columns";
 import { useProject } from "@/components/shell/project-context";
+import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { appendFilter } from "@/lib/dsl/dsl";
+import {
+  anchorKey,
+  keepSameProject,
+  LIST_CACHE,
+  NEW_ROWS_LIMIT,
+  useListAnchor,
+} from "@/lib/list-anchor";
 import { rangeOnly, writeListContext } from "@/lib/list-context";
 import {
   anchorOf,
@@ -66,13 +82,15 @@ const COLUMN_SORT: Record<string, Schema<"SessionSort">> = {
   cost: "cost_total",
 };
 
+const NO_SESSIONS: ReadonlySet<string> = new Set();
+
 export const Route = createFileRoute("/$org/$project/sessions/")({
   validateSearch: (search) => parseSessionsSearch(search),
   component: SessionsPage,
 });
 
 function SessionsPage() {
-  const { org, project } = useProject();
+  const { org, project, data } = useProject();
   const search = Route.useSearch();
   const navigate = Route.useNavigate();
   const router = useRouter();
@@ -114,21 +132,29 @@ function SessionsPage() {
   const listRestore = useLocation().state.listRestore;
   const restoreAnchor = useMemo(() => anchorOf(listRestore), [listRestore]);
   const restoredHighlight = useRestoredHighlight(listRestore?.openedId);
-  const lastAnchor = useRef<RowAnchor | undefined>(undefined);
-  const onScrollAnchor = useCallback((anchor: RowAnchor) => {
-    lastAnchor.current = anchor;
-  }, []);
   const range = rangeFromSearch(search);
   const rangeKey = range.kind === "preset" ? range.preset : `${range.from}\n${range.to}`;
-  const [anchor, setAnchor] = useState(() => Date.now());
-  const seenRange = useRef(rangeKey);
-  useEffect(() => {
-    if (seenRange.current === rangeKey) {
-      return;
-    }
-    seenRange.current = rangeKey;
-    setAnchor(Date.now());
-  }, [rangeKey]);
+  const windowKey = anchorKey(org, project, "sessions", {
+    rangeKey,
+    filter: search.filter,
+    search: undefined,
+    sort: search.sort ?? "start_time",
+    order: search.order ?? "desc",
+    eval: search.eval === 1,
+    exp: search.exp === 1,
+  });
+  const listAnchor = useListAnchor(windowKey, false);
+  const anchor = listAnchor.anchor;
+  const windowId = `${windowKey}\n${anchor}`;
+  const [restoreAtMount] = useState(() => (listAnchor.reused ? listAnchor.scroll : undefined));
+  const lastAnchor = useRef<RowAnchor | undefined>(undefined);
+  const onScrollAnchor = useCallback(
+    (scroll: RowAnchor) => {
+      lastAnchor.current = scroll;
+      listAnchor.rememberScroll(scroll);
+    },
+    [listAnchor.rememberScroll],
+  );
   const resolved = resolveRange(range, anchor);
   /** The list's window and flags: the facet panel, its presets and the filter bar fetch with it. */
   const facetScope: FacetScope = {
@@ -137,18 +163,50 @@ function SessionsPage() {
     includeEval: search.eval === 1,
     includeExperiments: search.exp === 1,
   };
+  // Checked sessions belong to the list they were checked in: a new filter, range or
+  // eval/experiment flag clears them.
+  const selectionKey = JSON.stringify([search.filter, rangeKey, search.eval, search.exp]);
+  const [selection, setSelection] = useState<{ key: string; ids: ReadonlySet<string> }>({
+    key: selectionKey,
+    ids: NO_SESSIONS,
+  });
+  const checkedIds = selection.key === selectionKey ? selection.ids : NO_SESSIONS;
+  const queueReason = addToQueueReason(data.role, checkedIds.size);
+  const matchingQueueReason = addToQueueReason(data.role, 0);
+  const [queueOpen, setQueueOpen] = useState(false);
+  const [queueItems, setQueueItems] = useState<readonly QueueItemTarget[]>([]);
+  const [matchOpen, setMatchOpen] = useState(false);
+  const listOptions = sessionListOptions(org, project, {
+    from: resolved.from,
+    to: resolved.to,
+    sort: search.sort,
+    order: search.order,
+    filter: search.filter,
+    includeEval: search.eval === 1,
+    includeExperiments: search.exp === 1,
+  });
   const list = useInfiniteQuery({
-    ...sessionListOptions(org, project, {
-      from: resolved.from,
-      to: resolved.to,
-      sort: search.sort,
-      order: search.order,
+    ...listOptions,
+    ...LIST_CACHE,
+    placeholderData: keepSameProject(listOptions.queryKey),
+    enabled: !hold,
+  });
+  // Sessions that arrived since the anchor: asked once after a return to a remembered window.
+  const newRows = useNewRows(
+    sessionListOptions(org, project, {
+      from: new Date(anchor).toISOString(),
+      to: new Date(listAnchor.lookedUpAt).toISOString(),
       filter: search.filter,
       includeEval: search.eval === 1,
       includeExperiments: search.exp === 1,
+      limit: NEW_ROWS_LIMIT,
     }),
-    enabled: !hold,
-  });
+    listAnchor.reused &&
+      range.kind === "preset" &&
+      !hold &&
+      list.isSuccess &&
+      !list.isPlaceholderData,
+  );
   const fetchNextPage = useCallback(() => {
     void list.fetchNextPage();
   }, [list.fetchNextPage]);
@@ -191,6 +249,22 @@ function SessionsPage() {
     throw list.error;
   }
 
+  // A new window (a filter change, refresh or the pill) starts at the top, where its rows show.
+  const seenWindow = useRef(windowId);
+  useLayoutEffect(() => {
+    if (seenWindow.current === windowId) {
+      return;
+    }
+    seenWindow.current = windowId;
+    const node = document.querySelector<HTMLElement>(
+      '[aria-label="Sessions"] [data-scroll-container]',
+    );
+    if (node && node.scrollTop !== 0) {
+      node.scrollTop = 0;
+      node.dispatchEvent(new Event("scroll"));
+    }
+  }, [windowId]);
+
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
       <TooltipProvider>
@@ -198,15 +272,18 @@ function SessionsPage() {
           idPrefix="sessions"
           range={range}
           onRange={(next) => {
-            seenRange.current = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
-            setAnchor(Date.now());
+            const nextKey = next.kind === "preset" ? next.preset : `${next.from}\n${next.to}`;
+            if (nextKey === rangeKey) {
+              listAnchor.renew();
+            }
             void navigate({
               to: "/$org/$project/sessions",
               params: { org, project },
               search: (prev) => withRange(prev, next),
             });
           }}
-          onRefresh={() => setAnchor(Date.now())}
+          onRefresh={listAnchor.renew}
+          updatedAt={anchor}
           evalOn={search.eval === 1}
           onEval={(on) => {
             void navigate({
@@ -257,6 +334,7 @@ function SessionsPage() {
           }
           presets={
             <PresetChips
+              hold={hold}
               view="sessions"
               filter={search.filter ?? ""}
               onFilter={(text) => {
@@ -271,7 +349,62 @@ function SessionsPage() {
           }
           columns={<ColumnChooser columns={specs} visible={visible} onVisible={onColumns} />}
           views={<SavedViewsMenu kind="sessions" search={search} onApply={applyView} />}
+          actions={
+            <>
+              {checkedIds.size > 0 ? (
+                <DisabledReason reason={queueReason}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={queueReason !== undefined}
+                    onClick={() => {
+                      setQueueItems(
+                        [...checkedIds].map((sessionId) => ({ session_id: sessionId })),
+                      );
+                      setQueueOpen(true);
+                    }}
+                  >
+                    {`Add ${checkedIds.size} to queue`}
+                  </Button>
+                </DisabledReason>
+              ) : null}
+              <DisabledReason reason={matchingQueueReason}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={matchingQueueReason !== undefined}
+                  onClick={() => {
+                    setMatchOpen(true);
+                  }}
+                >
+                  Add matching to queue…
+                </Button>
+              </DisabledReason>
+            </>
+          }
           loaded={list.data ? rows.length : undefined}
+        />
+        <AddToQueueDialog
+          open={queueOpen}
+          onOpenChange={setQueueOpen}
+          target="session"
+          items={queueItems}
+          onAdded={() => {
+            setSelection({ key: selectionKey, ids: NO_SESSIONS });
+          }}
+        />
+        <AddMatchingDialog
+          open={matchOpen}
+          onOpenChange={setMatchOpen}
+          target="session"
+          selection={{
+            filter: search.filter,
+            from: resolved.from,
+            to: resolved.to,
+            includeExperiments: search.exp === 1,
+          }}
         />
         <div className="flex min-h-0 flex-1">
           {facetsOpen && !hold ? (
@@ -294,7 +427,7 @@ function SessionsPage() {
                 <h2 className="text-body font-medium">{filterError.title}</h2>
                 <p className="text-body text-destructive">{filterMessage(filterError)}</p>
               </div>
-            ) : !hold && list.data ? (
+            ) : !hold && list.data && !(list.isPlaceholderData && rows.length === 0) ? (
               <>
                 <SessionsSummary sessions={rows} more={list.hasNextPage} />
                 <div className="border-b px-3 py-2">
@@ -308,9 +441,27 @@ function SessionsPage() {
                   columns={tableColumns}
                   rows={rows}
                   getRowId={(row) => row.session_id}
-                  onScrollAnchor={onScrollAnchor}
-                  restoreAnchor={restoreAnchor}
+                  checkedIds={checkedIds}
+                  onCheckedChange={(ids) => {
+                    setSelection({ key: selectionKey, ids });
+                  }}
+                  onScrollAnchor={list.isPlaceholderData ? undefined : onScrollAnchor}
+                  restoreAnchor={restoreAnchor ?? restoreAtMount}
                   highlightedRowIds={restoredHighlight}
+                  stale={list.isPlaceholderData}
+                  notice={
+                    newRows && newRows.count > 0 ? (
+                      <NewRowsPill
+                        label={countLabel(
+                          newRows.count,
+                          newRows.more,
+                          "session with new activity",
+                          "sessions with new activity",
+                        )}
+                        onClick={listAnchor.renew}
+                      />
+                    ) : null
+                  }
                   onActivate={(row) => {
                     const listReturn = listReturnFor(
                       "sessions",
@@ -327,7 +478,7 @@ function SessionsPage() {
                       state: (current) => ({ ...current, listReturn }),
                     });
                   }}
-                  hasNextPage={list.hasNextPage}
+                  hasNextPage={list.hasNextPage && !list.isPlaceholderData}
                   isFetchingNextPage={list.isFetchingNextPage}
                   fetchNextPage={fetchNextPage}
                   sorting={{

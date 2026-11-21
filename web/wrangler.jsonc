@@ -1,0 +1,17 @@
+// The web UI on its mocks as a Worker with static assets (D-C-22), like the docs site (D-W-3).
+// `just web-demo-deploy main` deploys production; `just web-demo-deploy pr-<number>` deploys a Preview.
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "cetra-web-demo",
+  "compatibility_date": "2026-11-01",
+  "assets": {
+    // `pnpm build:demo` writes it; never `dist/`, the build embedded in the binary.
+    "directory": "./dist-demo",
+    // The router owns every path: an unknown one serves index.html.
+    "not_found_handling": "single-page-application"
+  },
+  // Production is reached through its custom domain once one is attached; until then, workers.dev.
+  "workers_dev": true,
+  "preview_urls": true,
+  "previews": {}
+}

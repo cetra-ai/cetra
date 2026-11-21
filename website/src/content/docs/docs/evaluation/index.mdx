@@ -1,0 +1,48 @@
+---
+title: Evaluation
+description: Score traces by hand, from code or with LLM judges, and compare versions of your application on datasets.
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+Evaluation turns the traces cetra records into numbers you can filter, chart and compare. This page lists the five building blocks and tells you which one to use.
+
+## The building blocks
+
+- **Scores** are the values attached to a trace, a span or a session. Everything else on this page writes or reads scores.
+- **Evaluators** produce scores: a built-in check, an LLM judge or a webhook you run.
+- **Online rules** run an evaluator on live traces that match a filter.
+- **Datasets** are versioned sets of inputs, with an expected output when you have one.
+- **Experiments** run your application on a dataset, score each run and keep the results so you can compare them.
+
+## Which one to use
+
+| I want to … | Use |
+|---|---|
+| Grade every production trace automatically | An [online rule](/docs/evaluation/online-rules/) with an [evaluator](/docs/evaluation/evaluators/) |
+| Check a change before I ship it | An [experiment](/docs/evaluation/experiments/) on a [dataset](/docs/evaluation/datasets/) |
+| Collect thumbs up or down from my users | [Scores from the browser](/docs/evaluation/scores/#write-a-score-from-a-browser) |
+| Record a number from my own code | [A score from the SDK or the API](/docs/evaluation/scores/) |
+| Review traces by hand | [Human annotation](/docs/evaluation/annotation/) |
+| Review a list of traces, spans or sessions in turn | [Annotation queues](/docs/evaluation/annotation-queues/) |
+| Run a judge on one trace now | [A test run or a manual run](/docs/evaluation/evaluators/#test-a-judge-on-a-trace) |
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard
+    title="Scores"
+    description="Write, update and filter scores."
+    href="/docs/evaluation/scores/"
+  />
+  <LinkCard
+    title="Evaluators and LLM judges"
+    description="Checks, judges and webhooks."
+    href="/docs/evaluation/evaluators/"
+  />
+  <LinkCard
+    title="Experiments"
+    description="Compare versions of your application on a dataset."
+    href="/docs/evaluation/experiments/"
+  />
+</CardGrid>

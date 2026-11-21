@@ -42,6 +42,10 @@ pub mod attr {
     pub const METADATA_PREFIX: &str = crate::cetra_name!(".metadata.");
     /// `cetra.environment`. Spec 02 § Context fields, spec 10.
     pub const ENVIRONMENT: &str = crate::cetra_name!(".environment");
+    /// `cetra.prompt.name`. The registry prompt a span used (D-V-15).
+    pub const PROMPT_NAME: &str = crate::cetra_name!(".prompt.name");
+    /// `cetra.prompt.version`. The version of that prompt (D-V-15).
+    pub const PROMPT_VERSION: &str = crate::cetra_name!(".prompt.version");
     /// `cetra.release`. Spec 02 § Context fields.
     pub const RELEASE: &str = crate::cetra_name!(".release");
     /// `cetra.ttft_ns`. Spec 02 § Model, provider, usage.
@@ -77,6 +81,16 @@ pub mod metadata_key {
     /// `cetra.normalize_warning`, stored in `attributes`: a JSON array of warning codes,
     /// sorted and without duplicates. Spec 02 § Normalization rules.
     pub const NORMALIZE_WARNING: &str = crate::cetra_name!(".normalize_warning");
+    /// `cetra.playground.run_by`: the user who ran a playground run (D-V-22).
+    pub const PLAYGROUND_RUN_BY: &str = crate::cetra_name!(".playground.run_by");
+    /// `cetra.playground.source`: the prompt or span a playground run came from (D-V-22).
+    pub const PLAYGROUND_SOURCE: &str = crate::cetra_name!(".playground.source");
+    /// `cetra.assistant.user`: the user whose turn a trace records (D-AS-11).
+    pub const ASSISTANT_USER: &str = crate::cetra_name!(".assistant.user");
+    /// `cetra.assistant.conversation_id` (D-AS-11).
+    pub const ASSISTANT_CONVERSATION_ID: &str = crate::cetra_name!(".assistant.conversation_id");
+    /// `cetra.assistant.prompt_version`: the built-in system prompt's version (D-AS-13).
+    pub const ASSISTANT_PROMPT_VERSION: &str = crate::cetra_name!(".assistant.prompt_version");
 }
 
 /// Keys written into score metadata by evaluators.
@@ -105,8 +119,38 @@ pub mod environment {
     pub const EVAL: &str = crate::cetra_name!("-eval");
     /// What external data that claimed [`EVAL`] is rewritten to. Spec 06.
     pub const EVAL_EXTERNAL: &str = crate::cetra_name!("-eval-external");
+    /// Reserved for playground runs (D-V-22, D-V-33).
+    pub const PLAYGROUND: &str = crate::cetra_name!("-playground");
+    /// What external data that claimed [`PLAYGROUND`] is rewritten to (D-V-33).
+    pub const PLAYGROUND_EXTERNAL: &str = crate::cetra_name!("-playground-external");
+    /// Reserved for the in-app assistant's turns (D-AS-11).
+    pub const ASSISTANT: &str = crate::cetra_name!("-assistant");
+    /// What external data that claimed [`ASSISTANT`] is rewritten to (D-V-33).
+    pub const ASSISTANT_EXTERNAL: &str = crate::cetra_name!("-assistant-external");
+    /// Environments only the server writes. Their traces are hidden by default, excluded from
+    /// online rules, refused as evaluation targets, rewritten when received over OTLP, and not
+    /// billed (D-V-33, D-V-34). A new reserved environment is added here.
+    pub const RESERVED: &[&str] = &[EVAL, PLAYGROUND, ASSISTANT];
     /// Default environment for experiment runs. Spec 01 `environment`.
     pub const EXPERIMENT: &str = "experiment";
+
+    /// Whether `environment` is reserved (D-V-33).
+    #[must_use]
+    pub fn is_reserved(environment: &str) -> bool {
+        RESERVED.contains(&environment)
+    }
+
+    /// The name that external data claiming a reserved `environment` is rewritten to (D-V-33).
+    /// `None` when `environment` is not reserved.
+    #[must_use]
+    pub fn external_alias(environment: &str) -> Option<&'static str> {
+        match environment {
+            e if e == EVAL => Some(EVAL_EXTERNAL),
+            e if e == PLAYGROUND => Some(PLAYGROUND_EXTERNAL),
+            e if e == ASSISTANT => Some(ASSISTANT_EXTERNAL),
+            _ => None,
+        }
+    }
 }
 
 /// Media references stored in payloads.
@@ -149,6 +193,8 @@ mod tests {
             ("attr", "TAGS", attr::TAGS),
             ("attr", "METADATA_PREFIX", attr::METADATA_PREFIX),
             ("attr", "ENVIRONMENT", attr::ENVIRONMENT),
+            ("attr", "PROMPT_NAME", attr::PROMPT_NAME),
+            ("attr", "PROMPT_VERSION", attr::PROMPT_VERSION),
             ("attr", "RELEASE", attr::RELEASE),
             ("attr", "TTFT_NS", attr::TTFT_NS),
             ("attr", "COST_TOTAL", attr::COST_TOTAL),
@@ -192,6 +238,16 @@ mod tests {
                 metadata_key::NORMALIZE_WARNING,
             ),
             (
+                "metadata_key",
+                "PLAYGROUND_RUN_BY",
+                metadata_key::PLAYGROUND_RUN_BY,
+            ),
+            (
+                "metadata_key",
+                "PLAYGROUND_SOURCE",
+                metadata_key::PLAYGROUND_SOURCE,
+            ),
+            (
                 "score_metadata_key",
                 "JUDGE_TRACE_ID",
                 score_metadata_key::JUDGE_TRACE_ID,
@@ -223,6 +279,18 @@ mod tests {
             ),
             ("environment", "EVAL", environment::EVAL),
             ("environment", "EVAL_EXTERNAL", environment::EVAL_EXTERNAL),
+            ("environment", "PLAYGROUND", environment::PLAYGROUND),
+            (
+                "environment",
+                "PLAYGROUND_EXTERNAL",
+                environment::PLAYGROUND_EXTERNAL,
+            ),
+            ("environment", "ASSISTANT", environment::ASSISTANT),
+            (
+                "environment",
+                "ASSISTANT_EXTERNAL",
+                environment::ASSISTANT_EXTERNAL,
+            ),
             ("environment", "EXPERIMENT", environment::EXPERIMENT),
             ("media", "URI_SCHEME", media::URI_SCHEME),
             ("media", "DROPPED_URI", media::DROPPED_URI),
@@ -237,11 +305,70 @@ mod tests {
                 marker::TRUNCATED_MESSAGES_PREFIX,
             ),
             ("marker", "MAX_DEPTH", marker::MAX_DEPTH),
+            (
+                "metadata_key",
+                "ASSISTANT_USER",
+                metadata_key::ASSISTANT_USER,
+            ),
+            (
+                "metadata_key",
+                "ASSISTANT_CONVERSATION_ID",
+                metadata_key::ASSISTANT_CONVERSATION_ID,
+            ),
+            (
+                "metadata_key",
+                "ASSISTANT_PROMPT_VERSION",
+                metadata_key::ASSISTANT_PROMPT_VERSION,
+            ),
         ];
         rows.iter()
             .map(|(module, name, value)| format!("{module}::{name} = \"{value}\""))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn reserved_environments() {
+        assert!(environment::is_reserved(environment::EVAL));
+        assert!(environment::is_reserved("cetra-playground"));
+        assert!(environment::is_reserved("cetra-assistant"));
+        assert!(!environment::is_reserved("production"));
+        assert!(!environment::is_reserved("cetra-eval-external"));
+        assert!(!environment::is_reserved("cetra-playground-external"));
+        assert!(!environment::is_reserved("cetra-assistant-external"));
+        assert!(!environment::is_reserved(""));
+
+        assert_eq!(
+            environment::external_alias(environment::EVAL),
+            Some(environment::EVAL_EXTERNAL)
+        );
+        assert_eq!(
+            environment::external_alias(environment::PLAYGROUND),
+            Some(environment::PLAYGROUND_EXTERNAL)
+        );
+        assert_eq!(
+            environment::external_alias("cetra-assistant"),
+            Some("cetra-assistant-external")
+        );
+        assert_eq!(
+            environment::external_alias(environment::ASSISTANT),
+            Some(environment::ASSISTANT_EXTERNAL)
+        );
+        assert_eq!(environment::external_alias("production"), None);
+        assert_eq!(
+            environment::external_alias(environment::EVAL_EXTERNAL),
+            None
+        );
+        for reserved in environment::RESERVED {
+            assert!(
+                environment::is_reserved(reserved),
+                "{reserved} is not reserved"
+            );
+            assert!(
+                environment::external_alias(reserved).is_some(),
+                "{reserved} has no external alias"
+            );
+        }
     }
 
     #[test]
@@ -267,6 +394,8 @@ mod tests {
             attr::TAGS,
             attr::METADATA_PREFIX,
             attr::ENVIRONMENT,
+            attr::PROMPT_NAME,
+            attr::PROMPT_VERSION,
             attr::RELEASE,
             attr::TTFT_NS,
             attr::COST_TOTAL,
@@ -281,8 +410,17 @@ mod tests {
             metadata_key::EVAL_EVALUATOR_ID,
             metadata_key::NORMALIZE_ERROR,
             metadata_key::NORMALIZE_WARNING,
+            metadata_key::PLAYGROUND_RUN_BY,
+            metadata_key::PLAYGROUND_SOURCE,
             environment::EVAL,
             environment::EVAL_EXTERNAL,
+            environment::PLAYGROUND,
+            environment::PLAYGROUND_EXTERNAL,
+            environment::ASSISTANT,
+            environment::ASSISTANT_EXTERNAL,
+            metadata_key::ASSISTANT_USER,
+            metadata_key::ASSISTANT_CONVERSATION_ID,
+            metadata_key::ASSISTANT_PROMPT_VERSION,
             media::DROPPED_URI,
         ];
         for value in branded {
@@ -294,5 +432,69 @@ mod tests {
         assert!(marker::TRUNCATED_STRING_SUFFIX_PREFIX.contains(PRODUCT));
         assert!(marker::TRUNCATED_MESSAGES_PREFIX.contains(PRODUCT));
         assert!(marker::MAX_DEPTH.contains(PRODUCT));
+    }
+
+    /// A new attribute constant joins this list and the site's attribute page (D-W-7).
+    const ATTRIBUTES: &[&str] = &[
+        attr::SPAN_KIND,
+        attr::INPUT,
+        attr::INPUT_FORMAT,
+        attr::OUTPUT,
+        attr::OUTPUT_FORMAT,
+        attr::SESSION_ID,
+        attr::USER_ID,
+        attr::TAGS,
+        attr::METADATA_PREFIX,
+        attr::ENVIRONMENT,
+        attr::PROMPT_NAME,
+        attr::PROMPT_VERSION,
+        attr::RELEASE,
+        attr::TTFT_NS,
+        attr::COST_TOTAL,
+        attr::EXPERIMENT_ID,
+        attr::DATASET_ITEM_ID,
+        metadata_key::EXPERIMENT_ID,
+        metadata_key::DATASET_ITEM_ID,
+        metadata_key::EVAL_TARGET_TRACE_ID,
+        metadata_key::EVAL_TARGET_SPAN_ID,
+        metadata_key::EVAL_RULE_ID,
+        metadata_key::EVAL_EXPERIMENT_ID,
+        metadata_key::EVAL_EVALUATOR_ID,
+        metadata_key::NORMALIZE_ERROR,
+        metadata_key::NORMALIZE_WARNING,
+        metadata_key::PLAYGROUND_RUN_BY,
+        metadata_key::PLAYGROUND_SOURCE,
+        metadata_key::ASSISTANT_USER,
+        metadata_key::ASSISTANT_CONVERSATION_ID,
+        metadata_key::ASSISTANT_PROMPT_VERSION,
+    ];
+
+    #[test]
+    fn the_attribute_reference_names_every_cetra_attribute() {
+        let page = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../website/src/content/docs/docs/reference/attributes.md"
+        ));
+        // Every `cetra.`-prefixed attribute written in backticks on the page.
+        let documented: std::collections::BTreeSet<&str> = page
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .filter(|token| token.starts_with("cetra."))
+            .collect();
+        // A prefix constant is written with a `<key>` placeholder.
+        let expected: std::collections::BTreeSet<String> = ATTRIBUTES
+            .iter()
+            .map(|name| {
+                if name.ends_with('.') {
+                    format!("{name}<key>")
+                } else {
+                    (*name).to_owned()
+                }
+            })
+            .collect();
+        let expected: std::collections::BTreeSet<&str> =
+            expected.iter().map(String::as_str).collect();
+        assert_eq!(documented, expected);
     }
 }

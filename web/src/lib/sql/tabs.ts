@@ -1,4 +1,6 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { sqlTabDraft } from "@/lib/assistant/apply";
+import { subscribeDrafts, takeDraft } from "@/lib/assistant/handoff";
 import { DEFAULT_QUERY, isRecord, type SqlDraft } from "@/lib/sql/draft";
 import { STORAGE_PREFIX } from "@/product";
 
@@ -273,6 +275,17 @@ export function useSqlTabs(projectRef: string): SqlTabs {
     (view: { id: string; draft: SqlDraft }) => commit((s) => openViewTab(s, view)),
     [commit],
   );
+  // A SQL draft the assistant handed over opens in a new tab, here or on mount (D-AS-28).
+  useEffect(() => {
+    function takeSqlDraft() {
+      const draft = takeDraft(projectRef, "sql");
+      if (draft !== undefined) {
+        add(sqlTabDraft(draft));
+      }
+    }
+    takeSqlDraft();
+    return subscribeDrafts(projectRef, takeSqlDraft);
+  }, [projectRef, add]);
   return {
     state,
     activeTab: activeTabOf(state),

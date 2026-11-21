@@ -135,19 +135,19 @@ struct IdPath {
 }
 
 /// A rule as it would be stored: the request's values, or the stored ones merged with a PATCH.
-struct Draft {
-    name: String,
-    target: RuleTarget,
+pub(crate) struct RuleDraft {
+    pub(crate) name: String,
+    pub(crate) target: RuleTarget,
     /// Trimmed; `None` when blank.
-    filter: Option<String>,
-    mapping: BTreeMap<String, String>,
-    sample_rate: f64,
-    budget_usd: Option<f64>,
-    budget_period: Option<BudgetPeriod>,
-    enabled: bool,
+    pub(crate) filter: Option<String>,
+    pub(crate) mapping: BTreeMap<String, String>,
+    pub(crate) sample_rate: f64,
+    pub(crate) budget_usd: Option<f64>,
+    pub(crate) budget_period: Option<BudgetPeriod>,
+    pub(crate) enabled: bool,
 }
 
-impl Draft {
+impl RuleDraft {
     fn fields(&self) -> Result<RuleFields, ApiError> {
         Ok(RuleFields {
             name: self.name.clone(),
@@ -207,6 +207,16 @@ async fn list_online_rules(
     Extension(access): Extension<ProjectAccess>,
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<OnlineRulePage>, ApiError> {
+    Ok(error::Json(rule_page(&state, &access, params).await?))
+}
+
+/// One page of the project's online rules, each with its last 24 hours of jobs (`GET /online-rules`).
+/// Also served to the assistant's `list_online_rules` tool (AS M2).
+pub(crate) async fn rule_page(
+    state: &AppState,
+    access: &ProjectAccess,
+    params: PageParams,
+) -> Result<OnlineRulePage, ApiError> {
     let project = access.project.id;
     let now = state.clock.now_ns();
     let rows = store::list_rules(state.meta.reader(), project).await?;
@@ -221,7 +231,7 @@ async fn list_online_rules(
     let mut data = Vec::with_capacity(page.data.len());
     for row in &page.data {
         let jobs = counts.get(&row.id).copied().unwrap_or_default();
-        data.push(rule_json(&state, row, &jobs, now).await?);
+        data.push(rule_json(state, row, &jobs, now).await?);
     }
     let mut conn = state
         .meta
@@ -230,11 +240,11 @@ async fn list_online_rules(
         .await
         .map_err(MetaError::from)?;
     let org_enabled_rules = store::count_enabled_rules(&mut conn, access.project.org_id).await?;
-    Ok(error::Json(OnlineRulePage {
+    Ok(OnlineRulePage {
         data,
         next_cursor: page.next_cursor,
         org_enabled_rules,
-    }))
+    })
 }
 
 /// `GET /online-rules/stats`: the last 24 hours of every online rule of the project (D-I-50).
@@ -243,6 +253,15 @@ async fn get_online_rule_stats(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
 ) -> Result<error::Json<OnlineRuleStatsResponse>, ApiError> {
+    Ok(error::Json(rule_stats(&state, &access).await?))
+}
+
+/// The last 24 hours of every online rule of the project (D-I-50). Also served to the assistant's
+/// online rule tools (AS M2).
+pub(crate) async fn rule_stats(
+    state: &AppState,
+    access: &ProjectAccess,
+) -> Result<OnlineRuleStatsResponse, ApiError> {
     let deadline = Deadline::start();
     let project = access.project.id;
     let org = access.project.org_id;
@@ -253,10 +272,10 @@ async fn get_online_rule_stats(
     // Rules come in list order. Each rule's evaluator is read for its current output type.
     let rules = store::list_rules(state.meta.reader(), project).await?;
     if rules.is_empty() {
-        return Ok(error::Json(OnlineRuleStatsResponse {
+        return Ok(OnlineRuleStatsResponse {
             window,
             data: Vec::new(),
-        }));
+        });
     }
     let mut output_types: HashMap<Uuid, ScoreDataType> = HashMap::new();
     for row in evaluators::list_evaluators(state.meta.reader(), project).await? {
@@ -276,7 +295,7 @@ async fn get_online_rule_stats(
 
     let jobs = eval_jobs::rule_finished_hourly(state.meta.reader(), project, from, to).await?;
     let scores_ctx =
-        open_query_windowed(&state, org, project, Some(TimeWindow::new(from, to)?)).await?;
+        open_query_windowed(state, org, project, Some(TimeWindow::new(from, to)?)).await?;
     // At most `MAX_RESTRICT` ids per statement: the placeholders stay under the sandbox's operator
     // limit and the hourly rows (ids × 24) under its row limit, whatever the number of rules.
     let mut aggregates = HashMap::new();
@@ -335,7 +354,7 @@ async fn get_online_rule_stats(
             },
         });
     }
-    Ok(error::Json(OnlineRuleStatsResponse { window, data }))
+    Ok(OnlineRuleStatsResponse { window, data })
 }
 
 async fn get_online_rule(
@@ -343,6 +362,16 @@ async fn get_online_rule(
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<error::Json<OnlineRule>, ApiError> {
+    Ok(error::Json(rule_detail(&state, &access, id).await?))
+}
+
+/// One online rule (`GET /online-rules/{id}`). Also served to the assistant's `get_online_rule` tool
+/// (AS M2).
+pub(crate) async fn rule_detail(
+    state: &AppState,
+    access: &ProjectAccess,
+    id: Uuid,
+) -> Result<OnlineRule, ApiError> {
     let project = access.project.id;
     let now = state.clock.now_ns();
     let row = store::get_rule(state.meta.reader(), project, id)
@@ -350,7 +379,7 @@ async fn get_online_rule(
         .ok_or(ApiError::NotFound)?;
     let counts = eval_jobs::counts_since(state.meta.reader(), project, now - DAY_NS).await?;
     let jobs = counts.get(&id).copied().unwrap_or_default();
-    Ok(error::Json(rule_json(&state, &row, &jobs, now).await?))
+    rule_json(state, &row, &jobs, now).await
 }
 
 async fn create_online_rule(
@@ -363,7 +392,7 @@ async fn create_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
-    let draft = Draft {
+    let draft = RuleDraft {
         name: body.name.trim().to_owned(),
         target: body.target,
         filter: normalize_filter(body.filter),
@@ -730,11 +759,11 @@ async fn update_checked(
 /// Runs § Rule validation for `draft` against `evaluator` (the stored row, or `None` when the
 /// id names none). Every check runs and all errors come back together; the filter is checked
 /// last, by storage (check 3).
-async fn validate(
+pub(crate) async fn validate(
     state: &AppState,
     org: OrgId,
     project: ProjectId,
-    draft: &Draft,
+    draft: &RuleDraft,
     evaluator: Option<&EvaluatorRow>,
     now: i64,
 ) -> Result<(), ApiError> {
@@ -773,7 +802,7 @@ async fn validate(
 
 /// The checks that need no store (checks 1, 4–7, 11–13, 16). Returns the parsed mapping when it
 /// parses, so the rule checks that need it can run on it.
-fn check_fields(draft: &Draft, errors: &mut Vec<FieldError>) -> Option<VariableMapping> {
+fn check_fields(draft: &RuleDraft, errors: &mut Vec<FieldError>) -> Option<VariableMapping> {
     if !(1..=128).contains(&draft.name.chars().count()) {
         errors.push(field_error("name", "name must be 1 to 128 characters"));
     }
@@ -862,7 +891,7 @@ pub(crate) async fn judge_adapter(
 
 /// The rule a PATCH would store: the body's values over the stored ones. `filter: ""` clears
 /// the filter; `clear_budget` removes the budget.
-fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiError> {
+fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<RuleDraft, ApiError> {
     let target = RuleTarget::from_name(&stored.target).ok_or_else(|| corrupt("target"))?;
     let stored_mapping: BTreeMap<String, String> =
         serde_json::from_str(&stored.variable_mapping).map_err(|_| corrupt("variable_mapping"))?;
@@ -879,7 +908,7 @@ fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiEr
             body.budget_period.or(stored_period),
         )
     };
-    Ok(Draft {
+    Ok(RuleDraft {
         name: body
             .name
             .map_or_else(|| stored.name.clone(), |name| name.trim().to_owned()),
@@ -897,7 +926,7 @@ fn merge(stored: &RuleRow, body: UpdateOnlineRuleRequest) -> Result<Draft, ApiEr
 }
 
 /// The filter as stored: trimmed, and absent when blank.
-fn normalize_filter(text: Option<String>) -> Option<String> {
+pub(crate) fn normalize_filter(text: Option<String>) -> Option<String> {
     text.map(|text| text.trim().to_owned())
         .filter(|text| !text.is_empty())
 }
@@ -2608,6 +2637,7 @@ mod tests {
             rule_id: Some(rule),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
             author_user_id: None,
             metadata: Default::default(),
             created_at,
@@ -2806,6 +2836,7 @@ mod tests {
                     rule_id: Some(*rule),
                     experiment_id: None,
                     dataset_item_id: None,
+                    queue_id: None,
                     author_user_id: None,
                     metadata: Default::default(),
                     created_at: at,

@@ -35,8 +35,8 @@ use tokio::net::TcpStream;
 
 use crate::clock::Clock;
 use crate::config::{
-    AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig, InitConfig, LogConfig,
-    MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
+    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
 use crate::meta::MetaDb;
@@ -259,7 +259,12 @@ async fn check_case(app: &TestApp, seeded: &Seeded, case: &Case, prices: &PriceT
         retention_days: case.retention_days,
         limits: app.state.config.ingest.limits(&app.state.config.media),
     };
-    let mut want = normalize(&request, &ctx, prices);
+    let mut want = normalize(
+        &request,
+        &ctx,
+        prices,
+        &cetra_otel::AgentContexts::default(),
+    );
     rewrite_reserved_environment(&mut want.spans);
     want.spans.sort_by(|a, b| span_key(a).cmp(&span_key(b)));
     let expected = spans_to_record_batch(&want.spans)
@@ -457,9 +462,11 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
+        issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),
         orgs: OrgsConfig::default(),
+        alerts: AlertsConfig::default(),
         demo: DemoConfig::default(),
         encryption_key: None,
         license_key: None,

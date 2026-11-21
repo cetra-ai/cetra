@@ -1,0 +1,66 @@
+---
+title: Email (SMTP)
+description: Connect cetra to an SMTP server so it can send invitations, password resets, verification and alert emails.
+---
+
+cetra sends email through an SMTP server you provide. Without one, cetra still works, with the differences listed at the end of this page.
+
+## Configure SMTP
+
+Set two keys:
+
+| Key | Environment | Meaning |
+|---|---|---|
+| `smtp_url` | `CETRA_SMTP_URL` | Where and how to connect. |
+| `email_from` | `CETRA_EMAIL_FROM` | The sender, such as `"cetra <noreply@acme.com>"`. Required when `smtp_url` is set. |
+
+### URL forms
+
+| URL | Connection | Default port |
+|---|---|---|
+| `smtp://user:pass@host` | STARTTLS, required | 587 |
+| `smtps://user:pass@host` | TLS from the first byte | 465 |
+| `smtp://host?tls=none` | No encryption, for a local relay | 25 |
+
+You can give another port in the URL, such as `smtp://user:pass@host:2525`. If the username or password has special characters, write them percent-encoded: `@` becomes `%40`. The URL cannot have a path or a fragment.
+
+### Keep credentials out of the file
+
+The URL holds the password, so set it in the service's environment file, not in `cetra.toml`:
+
+```bash
+CETRA_SMTP_URL='smtps://<USERNAME>:<PASSWORD>@smtp.example.com'
+CETRA_EMAIL_FROM='cetra <noreply@example.com>'
+```
+
+Logs never contain the URL's password, the addresses or the contents of an email.
+
+### Providers
+
+Any provider with an SMTP relay works. Take the host, port and credentials from the provider's SMTP settings. For example, with a transactional email provider:
+
+```toml
+smtp_url = "smtp://apikey:<API_KEY>@smtp.provider.example:587"
+email_from = "cetra <noreply@example.com>"
+```
+
+Use a sender address on a domain you have verified with the provider.
+
+## What cetra sends
+
+| Email | When |
+|---|---|
+| Invitation | A member is invited. The link is valid for 7 days. |
+| Password reset | A member asks to reset their password. The link is valid for 1 hour and works once. |
+| Verification | A member signs up, when `auth.require_email_verification` is on. |
+| Alert | An alert rule fires or resolves, on a project with an email channel. See [Alerts](/docs/platform/alerts/). |
+| Test | An instance admin selects **Send test email** on the **Settings** tab of the admin area. |
+
+cetra sends these in the background, and retries a failed message up to three times. To check your settings, open **Admin** in the account menu at the bottom of the sidebar, go to the **Settings** tab and select **Send test email**. It sends a message to your own address. The button is disabled while SMTP is not configured.
+
+## Without SMTP
+
+- The UI shows each invitation link, so you can send it yourself.
+- Run `cetra admin reset-password --email <EMAIL>` to print a password reset link. Instance admins can also create a link in the UI: in the admin area, open the **Users** tab, open the actions menu of the account and select **Create reset link**.
+- Email channels for alerts are unavailable.
+- You cannot turn on `auth.require_email_verification`. The server refuses to start with it.

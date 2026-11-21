@@ -25,116 +25,209 @@ pub(crate) const GET_SCHEMA: &str = "get_schema";
 pub(crate) const PROJECT_ARG: &str =
     "Project id (UUID) or `org-slug/project-slug`, as `list_projects` returns them.";
 
+pub(crate) const LIST_PROJECTS_DESCRIPTION: &str = "Projects you can read, with your role in each. Call this first: every other tool takes a `project`.";
+pub(crate) const GET_SCHEMA_DESCRIPTION: &str = "The SQL views (traces, spans, sessions, scores), their columns with types and descriptions, and the functions the filter DSL and SQL accept.";
+pub(crate) const QUERY_SQL_DESCRIPTION: &str = "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation, playground and assistant traces (environment 'cetra-eval', 'cetra-playground' or 'cetra-assistant') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.";
+pub(crate) const LIST_SAVED_VIEWS_DESCRIPTION: &str = "Saved list views (kind traces, spans, sessions, users) and saved SQL queries (kind sql) you can see in the project: yours and the shared ones. A view's `state` holds its filter, search and range; a SQL query's holds `query` and `params`. Pass a traces view's name or id to search_traces as `view`.";
+pub(crate) const SEARCH_TRACES_DESCRIPTION: &str = "Traces whose start_time is in [from, to), newest first. `from` and `to` are required and at most 30 days apart. Narrow with `filter` (a SQL boolean expression over the traces view, e.g. status = 'error' AND cost_total > 0.1; get_schema lists the columns), `search` (text in span input, output, name or system instructions), or a saved traces `view` (name or id from list_saved_views): explicit filter, search, include_eval and include_experiments override the view's, and the view's range and sort are ignored. Evaluation and experiment traces are hidden unless include_eval / include_experiments. Long metadata and preview values are cut to 200 characters.";
+pub(crate) const GET_TRACE_DESCRIPTION: &str = "One trace: its summary and its spans as a flat pre-order tree (depth, detached, span). Inputs and outputs are left out unless include_payloads, which adds input and output previews cut to 200 characters; get_span returns a span's full input and output.";
+pub(crate) const GET_SPAN_DESCRIPTION: &str = "One span with every field: parsed input and output, system instructions, tool definitions, model, tokens, cost, attributes, events and links. Long metadata and attribute values are cut to 200 characters; when the span is larger than max_chars, its large fields are cut to fit.";
+
 /// Every tool, in the order `tools/list` returns them.
 pub(crate) fn tool_list() -> Vec<Tool> {
     vec![
         tool(
             LIST_PROJECTS,
             "List projects",
-            "Projects you can read, with your role in each. Call this first: every other tool takes a `project`.",
-            json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            LIST_PROJECTS_DESCRIPTION,
+            list_projects_schema(),
         ),
         tool(
             GET_SCHEMA,
             "Get the schema",
-            "The SQL views (traces, spans, sessions, scores), their columns with types and descriptions, and the functions the filter DSL and SQL accept.",
-            json!({
-                "type": "object",
-                "properties": {"project": {"type": "string", "description": PROJECT_ARG}},
-                "required": ["project"],
-                "additionalProperties": false
-            }),
+            GET_SCHEMA_DESCRIPTION,
+            get_schema_schema(),
         ),
         tool(
             super::sql::QUERY_SQL,
             "Run a SQL query",
-            "Run one read-only SQL query (SELECT, WITH, UNION, VALUES or EXPLAIN) over the views traces, spans, sessions and scores; get_schema lists their columns. `from` and `to` are required and at most 30 days apart: they bound start_time on spans and traces and created_at on scores, in every part of the query; sessions are built from the windowed traces. No rows are hidden: evaluation traces (environment 'cetra-eval') and experiment traces are included. Returns columns, rows, row_count, truncated and notes; string cells longer than 2000 characters are cut.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "description": PROJECT_ARG},
-                    "query": {"type": "string", "description": "The SQL statement. Use {name:Type} placeholders (Type: String, Int, Float, Bool, Timestamp) with `params` instead of inlining values."},
-                    "params": {"type": "object", "description": "Values of the {name:Type} placeholders, by name."},
-                    "from": {"type": "string", "description": "Window start, inclusive: an RFC 3339 timestamp, or epoch milliseconds as a string."},
-                    "to": {"type": "string", "description": "Window end, exclusive: an RFC 3339 timestamp, or epoch milliseconds as a string. At most 30 days after from."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Most rows to return."},
-                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later rows are left out beyond it."}
-                },
-                "required": ["project", "query", "from", "to"],
-                "additionalProperties": false
-            }),
+            QUERY_SQL_DESCRIPTION,
+            query_sql_schema(),
         ),
         tool(
             super::sql::LIST_SAVED_VIEWS,
             "List saved views",
-            "Saved list views (kind traces, spans, sessions, users) and saved SQL queries (kind sql) you can see in the project: yours and the shared ones. A view's `state` holds its filter, search and range; a SQL query's holds `query` and `params`. Pass a traces view's name or id to search_traces as `view`.",
+            LIST_SAVED_VIEWS_DESCRIPTION,
+            list_saved_views_schema(),
+        ),
+        tool(
+            super::prompts::LIST_PROMPTS,
+            "List prompts",
+            "Prompts of the project's registry, with their latest version and labels (production, staging, …).",
             json!({
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "description": PROJECT_ARG},
-                    "kind": {"type": "string", "enum": ["traces", "spans", "sessions", "users", "sql"], "description": "Only views of this kind."}
+                    "q": {"type": "string", "description": "A case-insensitive part of the prompt's name."},
+                    "label": {"type": "string", "description": "Only prompts that carry this label. `latest` keeps every prompt."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50, "description": "Most prompts to return."},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later prompts are left out beyond it."}
                 },
                 "required": ["project"],
+                "additionalProperties": false
+            }),
+        ),
+        tool(
+            super::prompts::GET_PROMPT,
+            "Get a prompt",
+            "One prompt version: its template ({{ name }} variables, chat messages and placeholders), config (model, params, tools) and labels. Defaults to the version labelled production; pass `label` or `version` for another.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string", "description": PROJECT_ARG},
+                    "name": {"type": "string", "description": "The prompt's name, as list_prompts returns it."},
+                    "label": {"type": "string", "description": "A label such as production or staging; `latest` is the latest version. Defaults to production."},
+                    "version": {"type": "integer", "minimum": 1, "description": "A version number. Give label or version, not both."}
+                },
+                "required": ["project", "name"],
                 "additionalProperties": false
             }),
         ),
         tool(
             super::traces::SEARCH_TRACES,
             "Search traces",
-            "Traces whose start_time is in [from, to), newest first. `from` and `to` are required and at most 30 days apart. Narrow with `filter` (a SQL boolean expression over the traces view, e.g. status = 'error' AND cost_total > 0.1; get_schema lists the columns), `search` (text in span input, output, name or system instructions), or a saved traces `view` (name or id from list_saved_views): explicit filter, search, include_eval and include_experiments override the view's, and the view's range and sort are ignored. Evaluation and experiment traces are hidden unless include_eval / include_experiments. Long metadata and preview values are cut to 200 characters.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "description": PROJECT_ARG},
-                    "from": {"type": "string", "description": "Window start, inclusive: an RFC 3339 timestamp, or epoch milliseconds as a string."},
-                    "to": {"type": "string", "description": "Window end, exclusive: an RFC 3339 timestamp, or epoch milliseconds as a string. At most 30 days after from."},
-                    "view": {"type": "string", "description": "A saved traces view: its id, or its exact name."},
-                    "filter": {"type": "string", "description": "Filter DSL: a SQL boolean expression over the traces view."},
-                    "search": {"type": "string", "description": "Full-text search in span input, output, name and system instructions."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most traces to return."},
-                    "include_eval": {"type": "boolean", "description": "Include evaluation traces (environment 'cetra-eval')."},
-                    "include_experiments": {"type": "boolean", "description": "Include experiment traces."},
-                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later traces are left out beyond it."}
-                },
-                "required": ["project", "from", "to"],
-                "additionalProperties": false
-            }),
+            SEARCH_TRACES_DESCRIPTION,
+            search_traces_schema(),
         ),
         tool(
             super::traces::GET_TRACE,
             "Get a trace",
-            "One trace: its summary and its spans as a flat pre-order tree (depth, detached, span). Inputs and outputs are left out unless include_payloads, which adds input and output previews cut to 200 characters; get_span returns a span's full input and output.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "project": {"type": "string", "description": PROJECT_ARG},
-                    "trace_id": {"type": "string", "description": "32 hex digits."},
-                    "around": {"type": "string", "description": "A time near the trace's start (RFC 3339, or epoch milliseconds as a string). Speeds up the lookup."},
-                    "include_payloads": {"type": "boolean", "default": false, "description": "Add input and output previews."},
-                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later spans are left out beyond it."}
-                },
-                "required": ["project", "trace_id"],
-                "additionalProperties": false
-            }),
+            GET_TRACE_DESCRIPTION,
+            get_trace_schema(),
         ),
         tool(
             super::traces::GET_SPAN,
             "Get a span",
-            "One span with every field: parsed input and output, system instructions, tool definitions, model, tokens, cost, attributes, events and links. Long metadata and attribute values are cut to 200 characters; when the span is larger than max_chars, its large fields are cut to fit.",
+            GET_SPAN_DESCRIPTION,
+            get_span_schema(),
+        ),
+        tool(
+            super::issues::LIST_ISSUES,
+            "List issues",
+            "Issues of a project (recurring errors and, from LLM sources, groups of similar traces), newest `last_seen` first, with their occurrence counts over the last 7 days. `state` is open (default), resolved, ignored or all (never merged issues). `source` is a source id (each issue's `source_id`). `url` opens the issue page.",
             json!({
                 "type": "object",
                 "properties": {
                     "project": {"type": "string", "description": PROJECT_ARG},
-                    "trace_id": {"type": "string", "description": "32 hex digits."},
-                    "span_id": {"type": "string", "description": "16 hex digits."},
-                    "around": {"type": "string", "description": "A time near the span's start (RFC 3339, or epoch milliseconds as a string). Speeds up the lookup."},
-                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; large fields are cut beyond it."}
+                    "state": {"type": "string", "enum": ["open", "resolved", "ignored", "all"], "default": "open", "description": "Only issues in this state."},
+                    "source": {"type": "string", "description": "Only issues of this source id."},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most issues to return."},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later issues are left out beyond it."}
                 },
-                "required": ["project", "trace_id", "span_id"],
+                "required": ["project"],
                 "additionalProperties": false
             }),
         ),
     ]
+}
+
+/// `list_projects`' input schema: no arguments.
+pub(crate) fn list_projects_schema() -> Value {
+    json!({"type": "object", "properties": {}, "additionalProperties": false})
+}
+
+/// `get_schema`'s input schema.
+pub(crate) fn get_schema_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"project": {"type": "string", "description": PROJECT_ARG}},
+        "required": ["project"],
+        "additionalProperties": false
+    })
+}
+
+/// `query_sql`'s input schema.
+pub(crate) fn query_sql_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": PROJECT_ARG},
+            "query": {"type": "string", "description": "The SQL statement. Use {name:Type} placeholders (Type: String, Int, Float, Bool, Timestamp) with `params` instead of inlining values."},
+            "params": {"type": "object", "description": "Values of the {name:Type} placeholders, by name."},
+            "from": {"type": "string", "description": "Window start, inclusive: an RFC 3339 timestamp, or epoch milliseconds as a string."},
+            "to": {"type": "string", "description": "Window end, exclusive: an RFC 3339 timestamp, or epoch milliseconds as a string. At most 30 days after from."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100, "description": "Most rows to return."},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later rows are left out beyond it."}
+        },
+        "required": ["project", "query", "from", "to"],
+        "additionalProperties": false
+    })
+}
+
+/// `list_saved_views`' input schema.
+pub(crate) fn list_saved_views_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": PROJECT_ARG},
+            "kind": {"type": "string", "enum": ["traces", "spans", "sessions", "users", "sql"], "description": "Only views of this kind."}
+        },
+        "required": ["project"],
+        "additionalProperties": false
+    })
+}
+
+/// `search_traces`' input schema.
+pub(crate) fn search_traces_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": PROJECT_ARG},
+            "from": {"type": "string", "description": "Window start, inclusive: an RFC 3339 timestamp, or epoch milliseconds as a string."},
+            "to": {"type": "string", "description": "Window end, exclusive: an RFC 3339 timestamp, or epoch milliseconds as a string. At most 30 days after from."},
+            "view": {"type": "string", "description": "A saved traces view: its id, or its exact name."},
+            "filter": {"type": "string", "description": "Filter DSL: a SQL boolean expression over the traces view."},
+            "search": {"type": "string", "description": "Full-text search in span input, output, name and system instructions."},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Most traces to return."},
+            "include_eval": {"type": "boolean", "description": "Include evaluation, playground and assistant traces (environment 'cetra-eval', 'cetra-playground' or 'cetra-assistant')."},
+            "include_experiments": {"type": "boolean", "description": "Include experiment traces."},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later traces are left out beyond it."}
+        },
+        "required": ["project", "from", "to"],
+        "additionalProperties": false
+    })
+}
+
+/// `get_trace`'s input schema.
+pub(crate) fn get_trace_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": PROJECT_ARG},
+            "trace_id": {"type": "string", "description": "32 hex digits."},
+            "around": {"type": "string", "description": "A time near the trace's start (RFC 3339, or epoch milliseconds as a string). Speeds up the lookup."},
+            "include_payloads": {"type": "boolean", "default": false, "description": "Add input and output previews."},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; later spans are left out beyond it."}
+        },
+        "required": ["project", "trace_id"],
+        "additionalProperties": false
+    })
+}
+
+/// `get_span`'s input schema.
+pub(crate) fn get_span_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "project": {"type": "string", "description": PROJECT_ARG},
+            "trace_id": {"type": "string", "description": "32 hex digits."},
+            "span_id": {"type": "string", "description": "16 hex digits."},
+            "around": {"type": "string", "description": "A time near the span's start (RFC 3339, or epoch milliseconds as a string). Speeds up the lookup."},
+            "max_chars": {"type": "integer", "minimum": 1000, "maximum": 100000, "default": 20000, "description": "Most characters in the result; large fields are cut beyond it."}
+        },
+        "required": ["project", "trace_id", "span_id"],
+        "additionalProperties": false
+    })
 }
 
 /// A read-only tool. `schema` is a JSON object; anything else becomes `{}`.

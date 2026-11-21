@@ -1,0 +1,81 @@
+---
+title: Deletion and retention
+description: Delete traces by user, ID or filter, drop a project or an org, set retention, and erase one person's data for GDPR.
+---
+
+You can delete data on request, and you can let cetra delete old data on a schedule. This page covers both, and what to do when a person asks you to erase their data.
+
+## What you can delete
+
+| What | How | Who |
+|---|---|---|
+| One end user's data | Enter the user ID | Project admins |
+| Specific traces | Up to 1,000 trace IDs | Project admins, or an API key with the `write` scope |
+| Traces matching a filter | A filter, a time range and an optional search, up to 100,000 traces | Project admins |
+| A project | Delete project, then type its slug | Org admins and owners |
+| An org | Delete org | Owners |
+
+In the UI:
+
+- **One end user:** open **Settings**, then **Data**, enter the user ID and select **Delete user data…**. The user's page has the same button.
+- **One trace:** select the trash icon in the trace header.
+- **Traces matching a filter:** set the filter, the search and the time range on the traces list, then select **Delete matching…**. The dialog counts the matching traces before you confirm.
+- **A project:** open the project's **Settings**, then **General**. **Delete project…** is in the danger zone at the bottom. You type the project's slug to confirm.
+- **An org:** open the org's settings, then **General**. **Delete organization…** is in the danger zone. You type the org's slug to confirm.
+
+Deleting by user and by filter needs a signed-in session or a personal access token with `read` and `write`. Deleting a project or an org needs a session. An API key can delete by trace ID only.
+
+Before you delete by filter, use the preview. In the UI, the **Delete matching…** dialog shows it. It tells you how many traces match and whether the count was capped. A filter that matches more than 100,000 traces is refused: narrow the time range.
+
+## What goes with a trace
+
+A deletion removes more than the spans:
+
+- the scores of the traces;
+- the evaluation traces that judged them, because they hold copies of the evaluated data;
+- dataset items copied from the traces, in every version, and the experiment items that refer to them;
+- [annotation queue](/docs/evaluation/annotation-queues/) items of the traces, spans and sessions;
+- queued evaluation jobs for the traces;
+- media stored for the project's traces, once nothing else uses it.
+
+A deletion by user covers the traces that have a span with that user ID, those traces' sessions' scores, and every score that carries the user ID.
+
+Alert events hold only aggregates, never trace content, and expire after 90 days.
+
+## Statuses and timing
+
+Each request has a status in the deletion history:
+
+| Status | Meaning |
+|---|---|
+| `resolving` | cetra is working out which traces the request covers. The data is still visible. |
+| `pending` | The data is hidden from every query. cetra is rewriting the files that hold it. |
+| `applied` | The data is gone from the live files. |
+| `failed` | cetra could not resolve the request. The history shows why, such as `too_many_traces`. |
+
+Normally the data is hidden within seconds. cetra erases it from the live files within `storage.deletion.max_delay`, which defaults to 24 hours (1 hour to 30 days). The old file versions stay in storage until garbage collection removes them, `storage.gc.grace` later, so the bytes are gone from storage after both. See the [configuration reference](/docs/self-hosting/configuration-reference/). Dropping a project or an org hides everything at once and follows the same bound for the bytes.
+
+Data ingested after you make the request is new data, and the request does not cover it.
+
+## Retention
+
+Each project has a retention in days, or "keep forever". Set it in the project's **Settings**, under **General**, in the **Data retention** card. cetra deletes whole days older than the retention, once an hour and when you save the setting. Lowering retention deletes older data right away.
+
+Retention is by day. Scores and evaluation traces are deleted by their own date, so they can outlive an old trace they refer to. Annotation queue items go with the day of their trace, span or session, so a queue's counts can drop.
+
+A plan can cap retention. When it does, cetra applies the shorter of the project's setting and the plan's limit. Retention is a core feature, and it needs `retention_management`, which an instance has unless the operator restricts the features. See [Plans and licence](/docs/platform/plans-and-licence/).
+
+## Backups
+
+Deleted data stays in a backup until the backup expires. Keep backups for 30 days or less. When you restore a backup, cetra can re-apply the deletions you made after it was taken. See [Backup and restore](/docs/self-hosting/backup/).
+
+## Erase one person's data (GDPR)
+
+1. Find the user ID your application records for that person.
+2. Open the project's **Settings**, then **Data**. You need to be a project admin.
+3. Enter the user ID, select **Delete user data…** and confirm by typing the ID again.
+4. Watch the deletion history until the request shows `applied`.
+5. Record the request in your own log, with its date and the time it reached `applied`.
+6. If you hold backups, delete them when they expire, or restore with the re-apply step above.
+
+If the person also appears in data you did not tag with their user ID, such as free text in prompts, a filter deletion with a search can find those traces. Use the preview first.

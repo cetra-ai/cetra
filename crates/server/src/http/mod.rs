@@ -103,11 +103,22 @@ pub(crate) struct AppInner {
     pub(crate) org_sso: crate::ee::org_sso::OrgSso,
     /// The Prometheus registry served on `metrics_addr` (N M3, D-N-28).
     pub(crate) telemetry: crate::telemetry::Telemetry,
+    /// The `score` and `feedback` issue sources' rules, read by each score write (D-IC-4).
+    pub(crate) issue_score_rules: crate::issues::triggers::ScoreRules,
+    /// The IC candidate worker slots (`issues.workers`, D-IC-12).
+    pub(crate) issue_workers: Arc<tokio::sync::Semaphore>,
+    /// Wakes the IC candidate loop: a candidate was queued, or a worker finished.
+    pub(crate) issue_wake: tokio::sync::Notify,
 }
 
 impl AppState {
     pub(crate) fn new(inner: AppInner) -> Self {
         Self(Arc::new(inner))
+    }
+
+    /// Wakes the IC candidate loop (D-IC-12).
+    pub(crate) fn issues_wake(&self) {
+        self.issue_wake.notify_one();
     }
 
     /// Drops the cached answers of `project` (D-M-11).
@@ -167,8 +178,8 @@ pub(crate) fn serve_router(state: AppState, routes: Vec<access::RouteDef>) -> Ro
     finish(state, routed, None)
 }
 
-/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`
-/// and nothing else (D-G-21, D-G-40).
+/// The OTLP/HTTP listener's router: the OTLP routes `/v1/traces`, `/v1/logs` and `/v1/metrics`,
+/// `/v1/agent-context` (D-CA-9), and nothing else (D-G-21, D-G-40).
 pub(crate) fn otlp_router(state: AppState) -> Router {
     serve_router(state, crate::routes::otlp::routes())
 }

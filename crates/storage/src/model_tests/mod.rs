@@ -142,7 +142,7 @@ fn remote_mode() -> bool {
 /// One S3-mode case against the bucket (R4.8), in a prefix of its own, with `REMOTE_PUT_SIZES`.
 /// The case's objects are deleted afterwards, whether the case passed or not. Its abandoned uploads
 /// (a failed abort, a lost create answer, a cancelled task) cannot be listed through `object_store`:
-/// the bucket's lifecycle rule removes them (`docs/self-hosting/s3.md`).
+/// the bucket's lifecycle rule removes them (`https://cetra.sh/docs/self-hosting/s3/`).
 fn run_case_s3_remote(ops: &[Op], seed: u64, pair: (P, P)) {
     let prefix = format!("model-{}-{seed:016x}", now_ms());
     let inner: Arc<dyn ObjectStore> = Arc::new(PrefixStore::new(
@@ -167,7 +167,7 @@ fn run_case_s3_remote(ops: &[Op], seed: u64, pair: (P, P)) {
 }
 
 /// The bucket of a`CETRA_MODEL_S3_REMOTE=1` run: `CETRA_TEST_S3_ENDPOINT` and
-/// `CETRA_TEST_S3_BUCKET`, with the region and addressing style `tests/s3.rs` reads, and the
+/// `CETRA_TEST_S3_BUCKET`, with the region and addressing style `tests/it/s3.rs` reads, and the
 /// `AWS_*` credentials from the environment.
 fn remote_bucket() -> AmazonS3 {
     let endpoint = std::env::var("CETRA_TEST_S3_ENDPOINT")

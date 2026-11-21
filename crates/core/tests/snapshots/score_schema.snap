@@ -82,6 +82,14 @@ expression: "schema_pretty::<Score>()"
       "$ref": "#/components/schemas/ProjectId",
       "description": "Partition key. Spec 01 `project_id`."
     },
+    "queue_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid",
+      "description": "Annotation queue the score was written from (D-AQ-6). Spec 01 `queue_id`."
+    },
     "reason": {
       "type": [
         "string",

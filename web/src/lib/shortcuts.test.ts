@@ -4,10 +4,12 @@ import {
   goDestination,
   goKeyOf,
   hexId,
+  isApplePlatform,
   isTypingTarget,
   matchesBinding,
   reduceShortcut,
   SHORTCUTS,
+  shortcutLabel,
 } from "@/lib/shortcuts";
 
 const plain = { metaKey: false, ctrlKey: false, altKey: false };
@@ -22,10 +24,33 @@ it("lists every shortcut the help dialog shows", () => {
     "t",
     "0",
     "⌘↵",
+    "⌘↵",
+    "⌘⇧↵",
     "g then a letter",
     "⌘K",
+    "⌘I",
     "?",
   ]);
+});
+
+it("opens the assistant on Ctrl+I or Cmd+I, also while typing", () => {
+  expect(reduceShortcut(null, { ...plain, key: "i", ctrlKey: true }, false)).toEqual({
+    chord: null,
+    action: "assistant",
+  });
+  expect(reduceShortcut(null, { ...plain, key: "i", metaKey: true }, false).action).toBe(
+    "assistant",
+  );
+  expect(reduceShortcut(null, { ...plain, key: "I", metaKey: true }, true).action).toBe(
+    "assistant",
+  );
+  expect(
+    reduceShortcut(null, { ...plain, key: "i", altKey: true, ctrlKey: true }, false).action,
+  ).toBe(null);
+  expect(
+    reduceShortcut(null, { ...plain, key: "I", ctrlKey: true, shiftKey: true }, false).action,
+  ).toBe(null);
+  expect(reduceShortcut(null, { ...plain, key: "i" }, false).action).toBe(null);
 });
 
 it("recognizes keys, chords, and modifiers", () => {
@@ -44,6 +69,10 @@ it("recognizes keys, chords, and modifiers", () => {
   expect(reduceShortcut("g", { ...plain, key: "e" }, false).action).toBe("go-evaluators");
   expect(reduceShortcut("g", { ...plain, key: "i" }, false).action).toBe("go-datasets");
   expect(reduceShortcut("g", { ...plain, key: "x" }, false).action).toBe("go-experiments");
+  expect(reduceShortcut("g", { ...plain, key: "y" }, false).action).toBe("go-issues");
+  expect(reduceShortcut("g", { ...plain, key: "m" }, false).action).toBe("go-prompts");
+  expect(reduceShortcut("g", { ...plain, key: "l" }, false).action).toBe("go-playground");
+  expect(reduceShortcut("g", { ...plain, key: "r" }, false).action).toBe("go-annotation-queues");
   expect(reduceShortcut("g", { ...plain, key: "d" }, false).action).toBe("go-dashboard");
   expect(reduceShortcut("g", { ...plain, key: "j" }, false)).toEqual({
     chord: null,
@@ -68,6 +97,11 @@ it("gives every project page its go letter and back again", () => {
   expect(goKeyOf("/$org/$project/spans")).toBe("p");
   expect(goKeyOf("/$org/$project/sessions")).toBe("s");
   expect(goKeyOf("/$org/$project/experiments")).toBe("x");
+  expect(goKeyOf("/$org/$project/issues")).toBe("y");
+  expect(goKeyOf("/$org/$project/issue-sources")).toBe("n");
+  expect(goKeyOf("/$org/$project/prompts")).toBe("m");
+  expect(goKeyOf("/$org/$project/annotation-queues")).toBe("r");
+  expect(goKeyOf("/$org/$project/playground")).toBe("l");
   expect(goKeyOf("/$org/$project/settings/general")).toBeUndefined();
   for (const letter of Object.keys(GO_TARGETS)) {
     const target = GO_TARGETS[letter as keyof typeof GO_TARGETS];
@@ -97,4 +131,38 @@ it("treats fields and the code editor as typing", () => {
   expect(isTypingTarget(document.body)).toBe(false);
   input.remove();
   editor.remove();
+});
+
+const MAC = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)";
+const IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)";
+const LINUX = "Mozilla/5.0 (X11; Linux x86_64)";
+const WINDOWS = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)";
+
+it("tells Apple platforms apart", () => {
+  expect(isApplePlatform(MAC)).toBe(true);
+  expect(isApplePlatform(IPHONE)).toBe(true);
+  expect(isApplePlatform(LINUX)).toBe(false);
+  expect(isApplePlatform(WINDOWS)).toBe(false);
+});
+
+it("keeps the Apple symbols on Apple platforms", () => {
+  for (const keys of ["⌘↵", "⌘⇧↵", "⌘K", "⌘I", "⇧⌥F"]) {
+    expect(shortcutLabel(keys, MAC)).toBe(keys);
+    expect(shortcutLabel(keys, IPHONE)).toBe(keys);
+  }
+});
+
+it("spells chords out on other platforms", () => {
+  expect(shortcutLabel("⌘↵", LINUX)).toBe("Ctrl+Enter");
+  expect(shortcutLabel("⌘⇧↵", WINDOWS)).toBe("Ctrl+Shift+Enter");
+  expect(shortcutLabel("⌘K", LINUX)).toBe("Ctrl+K");
+  expect(shortcutLabel("⌘I", WINDOWS)).toBe("Ctrl+I");
+  expect(shortcutLabel("⇧⌥F", LINUX)).toBe("Shift+Alt+F");
+  expect(shortcutLabel("⌘↵", navigator.userAgent)).toBe("Ctrl+Enter");
+});
+
+it("leaves keys without a modifier unchanged", () => {
+  for (const keys of ["/", "j / k, ↓ / ↑", "Enter", "g then a letter", "?"]) {
+    expect(shortcutLabel(keys, LINUX)).toBe(keys);
+  }
 });

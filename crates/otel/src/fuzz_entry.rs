@@ -38,7 +38,12 @@ fn prices() -> &'static PriceTable {
 /// Normalizes an accepted request, then converts its spans the way the server does before the
 /// WAL append. A span `normalize` accepts must convert (track R M3).
 fn normalize_and_convert(request: &ExportTraceServiceRequest) {
-    let normalized = normalize(request, &context(), prices());
+    let normalized = normalize(
+        request,
+        &context(),
+        prices(),
+        &crate::AgentContexts::default(),
+    );
     assert!(
         spans_to_record_batch(&normalized.spans).is_ok(),
         "every span normalize accepts converts to a record batch"
@@ -143,7 +148,12 @@ pub(crate) mod tests {
             .join("../../fixtures/otlp/genai/chat-cache-tokens/input.json");
         let bytes = std::fs::read(path).expect("read the fixture");
         let request = decode_json(&bytes).expect("the fixture decodes");
-        let normalized = normalize(&request, &context(), prices());
+        let normalized = normalize(
+            &request,
+            &context(),
+            prices(),
+            &crate::AgentContexts::default(),
+        );
         assert!(
             !normalized.spans.is_empty(),
             "the fixture has accepted spans"

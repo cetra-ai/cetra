@@ -9,9 +9,8 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
-use crate::alerts::deliver::send_one;
+use crate::alerts::deliver::{Outgoing, send_to_channel};
 use crate::alerts::message::{self, MessageKind, Notice};
-use crate::api::account::SignupPolicy;
 use crate::api::alerts::{
     AlertMetric, AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
     CreateChannelRequest, DeliveryStatus, NotificationChannel, UpdateChannelRequest,
@@ -19,6 +18,7 @@ use crate::api::alerts::{
 use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
+use crate::config::EmailRecipients;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -312,11 +312,11 @@ async fn test_channel(
             None,
         ),
     };
-    let sent = send_one(
+    let sent = send_to_channel(
         &state,
         project.org_id,
         &config,
-        &notice,
+        Outgoing::Alert(&notice),
         Uuid::now_v7(),
         now,
     );
@@ -501,13 +501,13 @@ fn planned_patch(
 }
 
 /// The verified member emails that the recipients of a `kind` channel must stay within, when
-/// open signup restricts them (D-K-19). `None` when any address is allowed.
+/// `alerts.email_recipients` is `members` (D-K-19, D-K-21). `None` when any address is allowed.
 async fn member_scope(
     state: &AppState,
     org_id: OrgId,
     kind: ChannelKind,
 ) -> Result<Option<Vec<String>>, ApiError> {
-    if kind != ChannelKind::Email || state.config.auth.signup != SignupPolicy::Open {
+    if kind != ChannelKind::Email || state.config.email_recipients() != EmailRecipients::Members {
         return Ok(None);
     }
     Ok(Some(
@@ -515,8 +515,8 @@ async fn member_scope(
     ))
 }
 
-/// Under open signup each recipient of an email config must be a verified member of the org
-/// (D-K-19). The error names the field, not the address.
+/// When the policy is `members`, each recipient of an email config must be a verified member of
+/// the org (D-K-19, D-K-21). The error names the field, not the address.
 fn check_members(config: &ChannelConfig, members: Option<&[String]>) -> Result<(), ApiError> {
     let (ChannelConfig::Email { recipients }, Some(members)) = (config, members) else {
         return Ok(());
@@ -614,6 +614,8 @@ mod tests {
     use crate::api::account::SignupPolicy;
     use crate::api::alerts::{AlertCondition, AlertMetric, AlertWindow, Comparator};
     use crate::auth::roles::OrgRole;
+    use crate::config::EmailRecipients;
+    use crate::meta::members::remove_org_member;
     use crate::test_support::hook_receiver::HookReceiver;
     use crate::test_support::{Seeded, TestApp, TestResponse, assert_logs_clean};
 
@@ -1012,6 +1014,8 @@ mod tests {
             target: None,
             score_name: None,
             aggregation: None,
+            issue_id: None,
+            source_id: None,
         };
         let rule = alerts::NewRule {
             project_id: seeded.project.id,
@@ -1407,6 +1411,97 @@ mod tests {
         let seeded = app.seed().await;
         let channel = create_ok(&app, &seeded, email_body("Mail", &["eve@example.com"])).await;
         assert_eq!(channel.recipients, vec!["eve@example.com".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn members_policy_limits_recipients_under_invite_only() {
+        let app = TestApp::with_mailer_config(|config| {
+            config.alerts.email_recipients = Some(EmailRecipients::Members);
+        })
+        .await;
+        let seeded = app.seed().await;
+        app.verify_email(seeded.user_id).await;
+        let path = channels(&seeded);
+        let not_members = pairs(&[(
+            "recipients",
+            "must be verified members of this organization",
+        )]);
+
+        let outsider = send(
+            &app,
+            Method::POST,
+            &path,
+            &seeded.cookie,
+            Some(email_body("Mail", &["eve@example.com"])),
+        )
+        .await;
+        assert_eq!(outsider.status, 400);
+        assert_eq!(problem_of(&outsider), not_members);
+
+        let created = create_ok(&app, &seeded, email_body("Mail", &["ada@example.com"])).await;
+        let refused = send(
+            &app,
+            Method::PATCH,
+            &format!("{path}/{}", created.id),
+            &seeded.cookie,
+            Some(json!({"recipients": ["eve@example.com"]})),
+        )
+        .await;
+        assert_eq!(refused.status, 400);
+        assert_eq!(problem_of(&refused), not_members);
+    }
+
+    #[tokio::test]
+    async fn any_policy_allows_any_recipient_under_open_signup() {
+        let app = TestApp::with_mailer_config(|config| {
+            config.auth.signup = SignupPolicy::Open;
+            config.alerts.email_recipients = Some(EmailRecipients::Any);
+        })
+        .await;
+        let seeded = app.seed().await;
+        let channel = create_ok(&app, &seeded, email_body("Mail", &["eve@example.com"])).await;
+        assert_eq!(channel.recipients, vec!["eve@example.com".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn members_policy_test_send_skips_a_recipient_who_left() {
+        let app = TestApp::with_mailer_config(|config| {
+            config.alerts.email_recipients = Some(EmailRecipients::Members);
+        })
+        .await;
+        let seeded = app.seed().await;
+        app.verify_email(seeded.user_id).await;
+        let ben = app
+            .add_member(&seeded, "ben@example.com", OrgRole::Member)
+            .await;
+        app.verify_email(ben.id).await;
+        let channel = create_ok(
+            &app,
+            &seeded,
+            email_body("Mail", &["ada@example.com", "ben@example.com"]),
+        )
+        .await;
+        // Ben leaves the org after the channel was saved: the stored channel is checked again.
+        let (org_id, ben_id) = (seeded.org_id, ben.id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { remove_org_member(conn, org_id, ben_id).await })
+            })
+            .await
+            .unwrap();
+
+        let result = test_send(&app, channel.id, &seeded, &seeded.cookie).await;
+        assert_eq!(result.status, 200);
+        assert_eq!(
+            result.json::<Value>(),
+            json!({
+                "ok": false,
+                "error": "1 recipient(s) skipped: not verified members of the organization",
+            })
+        );
+        let sent: Vec<String> = app.sent().into_iter().map(|mail| mail.to).collect();
+        assert_eq!(sent, ["ada@example.com"]);
     }
 
     #[tokio::test]

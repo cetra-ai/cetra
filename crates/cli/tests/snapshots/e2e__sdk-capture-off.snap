@@ -71,7 +71,7 @@ expression: protobuf
         "cetra"
       ],
       "ingest_time": "[redacted]",
-      "schema_version": 1
+      "schema_version": 2
     }
   ]
 }

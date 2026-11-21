@@ -4,7 +4,7 @@
 # With S3-compatible object storage (a local Garage) for Parquet files and media:
 #   cp .env.example .env                # and set the Garage keys and secrets in it
 #   docker compose -f compose.yaml -f compose.s3.yaml up -d
-# Docs: docs/self-hosting/docker-compose.md
+# Docs: https://cetra.sh/docs/self-hosting/docker-compose/
 name: cetra
 
 services:
@@ -22,7 +22,7 @@ services:
     env_file:
       - path: cetra.env
         required: false
-    # Prometheus metrics (docs/self-hosting/monitoring.md): set CETRA_METRICS_ADDR in cetra.env,
+    # Prometheus metrics (https://cetra.sh/docs/self-hosting/monitoring/): set CETRA_METRICS_ADDR in cetra.env,
     # for example 0.0.0.0:9464, and publish that port.
     volumes:
       - cetra-data:/data

@@ -27,6 +27,8 @@ expression: "serde_json::to_string_pretty(&full_span()).unwrap()"
   "provider": "openai",
   "request_model": "gpt-5-mini",
   "response_model": "gpt-5-mini-2026-11",
+  "prompt_name": "support-reply",
+  "prompt_version": 2,
   "operation": "chat",
   "input_tokens": 10,
   "output_tokens": 4,

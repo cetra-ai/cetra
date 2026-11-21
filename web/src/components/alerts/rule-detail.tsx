@@ -10,8 +10,10 @@ import {
   alertRulesQuery,
   channelsQuery,
 } from "@/api/queries-alerts";
+import { issueQuery, issueSourceQuery } from "@/api/queries-issues";
 import type { Schema } from "@/api/types";
 import { EventKindBadge } from "@/components/alerts/event-kind-badge";
+import { cutTitle } from "@/components/alerts/issue-scope-fields";
 import { RulePreview } from "@/components/alerts/rule-preview";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
@@ -34,6 +36,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { conditionSummary, formatAlertValue, formFromRule } from "@/lib/alerts";
+import { shortId } from "@/lib/format";
 import { canManageAlerts } from "@/lib/roles";
 
 const CANNOT_MANAGE = "Only project members and above can manage alerts";
@@ -160,6 +163,22 @@ export function RuleDetail({
       <dl className="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-body">
         <dt className="text-muted-foreground">Condition</dt>
         <dd>{conditionSummary(rule.condition)}</dd>
+        {rule.condition.issue_id !== undefined ? (
+          <>
+            <dt className="text-muted-foreground">Scope</dt>
+            <dd>
+              <IssueScopeLink issueId={rule.condition.issue_id} />
+            </dd>
+          </>
+        ) : null}
+        {rule.condition.source_id !== undefined ? (
+          <>
+            <dt className="text-muted-foreground">Scope</dt>
+            <dd>
+              <SourceScopeLink sourceId={rule.condition.source_id} />
+            </dd>
+          </>
+        ) : null}
         <dt className="text-muted-foreground">Filter</dt>
         <dd>
           {rule.condition.filter ? (
@@ -345,6 +364,36 @@ export function RuleDetail({
         }}
       />
     </div>
+  );
+}
+
+/** The issue of an issue rule: its title, or its short id while it loads or fails. */
+function IssueScopeLink({ issueId }: { issueId: string }) {
+  const { org, project } = useProject();
+  const issue = useQuery(issueQuery(org, project, issueId));
+  return (
+    <Link
+      to="/$org/$project/issues/$issueId"
+      params={{ org, project, issueId }}
+      className="underline underline-offset-4"
+    >
+      {issue.data ? cutTitle(issue.data.title) : shortId(issueId)}
+    </Link>
+  );
+}
+
+/** The source of a source rule: its name, or its short id while it loads or fails. */
+function SourceScopeLink({ sourceId }: { sourceId: string }) {
+  const { org, project } = useProject();
+  const source = useQuery(issueSourceQuery(org, project, sourceId));
+  return (
+    <Link
+      to="/$org/$project/issue-sources/$sourceId"
+      params={{ org, project, sourceId }}
+      className="underline underline-offset-4"
+    >
+      {source.data ? source.data.name : shortId(sourceId)}
+    </Link>
   );
 }
 

@@ -16,6 +16,15 @@ use cetra_server::api::account::{
 };
 use cetra_server::api::admin::{AdminLicense, AdminSettings, AdminUser, CreatedAdminUser};
 use cetra_server::api::alerts::{AlertEvent, AlertRule, NotificationChannel};
+use cetra_server::api::annotation_queues::{
+    AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem, CreateAnnotationQueue,
+    NextQueueItem, QueueMatchingAdded, QueueMatchingPreview, QueueMatchingRequest, SkipQueueItem,
+};
+use cetra_server::api::assistant::{
+    AssistantConversation, AssistantConversationDetail, AssistantFeedbackRequest,
+    AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
+    UpdateAssistantConversationRequest,
+};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -38,8 +47,12 @@ use cetra_server::api::experiments::{
     CreateExperimentResponse, Experiment, ExperimentComparison, ExperimentResults,
     ExperimentResultsRequest, ExperimentSummaries,
 };
-use cetra_server::api::facets::FacetsResponse;
+use cetra_server::api::facets::{FacetsRequest, FacetsResponse};
 use cetra_server::api::invites::{CreatedInvite, Invite, InvitePreview};
+use cetra_server::api::issues::{
+    CreateIssueSourceRequest, Issue, IssueEventPage, IssueOccurrences, IssuePage, IssueRefitPage,
+    IssueSource, IssueSourcePage, MergeIssueRequest, UpdateIssueRequest, UpdateIssueSourceRequest,
+};
 use cetra_server::api::keys::{ApiKey, CreatedApiKey, CreatedPersonalToken, PersonalToken};
 use cetra_server::api::members::{OrgMember, ProjectMember};
 use cetra_server::api::model_prices::{ModelPrice, ModelPriceInput, ModelPriceResolution};
@@ -50,6 +63,11 @@ use cetra_server::api::online_rules::{
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
+use cetra_server::api::playground::PlaygroundRunRequest;
+use cetra_server::api::prompts::{
+    CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
+    PromptSettings, PromptVersion, SetLabelRequest,
+};
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
 use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
@@ -414,6 +432,11 @@ fn static_files_match_their_types() {
     roundtrip::<SchemaResponse>("static/schema.json");
     roundtrip::<Page<SavedView>>("static/saved-views.json");
     roundtrip::<Page<DashboardSummary>>("static/dashboards.json");
+    roundtrip::<Page<AnnotationQueue>>("static/annotation-queues.json");
+    roundtrip::<AnnotationQueue>("static/annotation-queue.json");
+    roundtrip::<Page<AnnotationQueueItem>>("static/annotation-queue-items.json");
+    roundtrip::<AnnotationQueueItem>("static/annotation-queue-item.json");
+    roundtrip::<AddedQueueItems>("static/annotation-queue-items-added.json");
     roundtrip::<Dashboard>("static/dashboard.json");
     roundtrip::<Dashboard>("static/dashboard-overview.json");
     roundtrip::<Problem>("static/dashboard-stale.json");
@@ -448,6 +471,13 @@ fn static_files_match_their_types() {
     roundtrip::<OnlineRule>("static/online-rule.json");
     roundtrip::<OnlineRule>("static/online-rule-resumed.json");
     roundtrip::<OnlineRulePreview>("static/online-rule-preview.json");
+    roundtrip::<IssueSourcePage>("static/issue-sources.json");
+    roundtrip::<IssueSource>("static/issue-source.json");
+    roundtrip::<IssuePage>("static/issues.json");
+    roundtrip::<Issue>("static/issue.json");
+    roundtrip::<IssueOccurrences>("static/issue-occurrences.json");
+    roundtrip::<IssueEventPage>("static/issue-events.json");
+    roundtrip::<IssueRefitPage>("static/issue-refits.json");
     roundtrip::<Page<EvalJob>>("static/eval-jobs.json");
     roundtrip::<EvalJob>("static/eval-job.json");
     roundtrip::<EvalJob>("static/eval-job-queued.json");
@@ -466,17 +496,50 @@ fn static_files_match_their_types() {
 #[test]
 fn request_examples_match_their_types_and_the_openapi_document() {
     roundtrip::<ScoreBatch>("requests/score-batch.json");
+    roundtrip::<UpdateAssistantConversationRequest>("requests/assistant-conversation-rename.json");
+    roundtrip::<AssistantFeedbackRequest>("requests/assistant-feedback.json");
+    roundtrip::<AssistantTurnRequest>("requests/assistant-turn.json");
+    roundtrip::<PutAssistantSettings>("requests/assistant-settings.json");
     roundtrip::<FeedbackRequest>("requests/feedback.json");
     roundtrip::<CreateLlmConnectionRequest>("requests/llm-connection-create.json");
     roundtrip::<SqlQueryRequest>("requests/sql-query.json");
     roundtrip::<CreateEvaluatorRequest>("requests/evaluator-create.json");
     roundtrip::<CreateScoreDefinitionRequest>("requests/score-definition-create.json");
+    roundtrip::<CreateAnnotationQueue>("requests/annotation-queue-create.json");
+    roundtrip::<AddQueueItems>("requests/annotation-queue-items-add.json");
+    roundtrip::<NextQueueItem>("requests/annotation-queue-next.json");
+    roundtrip::<SkipQueueItem>("requests/annotation-queue-skip.json");
+    // `QueueMatchingRequest` holds a `TimeParam`, which has no `Serialize`, so it is only
+    // deserialized.
+    let matching_text =
+        fs::read_to_string(api_dir().join("requests/annotation-queue-matching.json"))
+            .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<QueueMatchingRequest>(&matching_text)
+        .unwrap_or_else(|error| panic!("requests/annotation-queue-matching.json: {error}"));
     roundtrip::<CreateDatasetRequest>("requests/dataset-create.json");
+    roundtrip::<CreatePromptRequest>("requests/prompt-create.json");
+    roundtrip::<CreateVersionRequest>("requests/prompt-version-create.json");
+    roundtrip::<SetLabelRequest>("requests/prompt-label-set.json");
+    roundtrip::<PromptSettings>("requests/prompt-settings.json");
     roundtrip::<AddItemsRequest>("requests/dataset-items-add.json");
     roundtrip::<ImportMapping>("requests/dataset-import-mapping.json");
     roundtrip::<FromTraceRequest>("requests/dataset-from-trace.json");
     roundtrip::<ExperimentResultsRequest>("requests/experiment-results.json");
     roundtrip::<CreateOnlineRuleRequest>("requests/online-rule-create.json");
+    roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create.json");
+    roundtrip::<CreateIssueSourceRequest>("requests/issue-source-create-topic.json");
+    roundtrip::<MergeIssueRequest>("requests/issue-merge.json");
+    // `UpdateIssueSourceRequest` has no `Serialize`, so it is only deserialized.
+    let issue_update_text = fs::read_to_string(api_dir().join("requests/issue-source-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateIssueSourceRequest>(&issue_update_text)
+        .unwrap_or_else(|error| panic!("requests/issue-source-update.json: {error}"));
+    // `UpdateIssueRequest` has no `Serialize`, so it is only deserialized.
+    let issue_patch_text = fs::read_to_string(api_dir().join("requests/issue-update.json"))
+        .unwrap_or_else(|error| panic!("{error}"));
+    serde_json::from_str::<UpdateIssueRequest>(&issue_patch_text)
+        .unwrap_or_else(|error| panic!("requests/issue-update.json: {error}"));
+    roundtrip::<PlaygroundRunRequest>("requests/playground-run.json");
     // `ModelPriceInput` has no `Serialize`, so it is only deserialized.
     let price_text = fs::read_to_string(api_dir().join("requests/model-price-create.json"))
         .unwrap_or_else(|error| panic!("{error}"));
@@ -511,6 +574,17 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         .unwrap_or_else(|error| panic!("{error}"));
     serde_json::from_str::<RunEvaluatorRequest>(&run_text)
         .unwrap_or_else(|error| panic!("requests/evaluator-run.json: {error}"));
+    // `FacetsRequest` has no `Serialize` (`TimeParam`), so it is only deserialized.
+    for file in [
+        "requests/facets-traces.json",
+        "requests/facets-spans.json",
+        "requests/facets-sessions.json",
+    ] {
+        let text =
+            fs::read_to_string(api_dir().join(file)).unwrap_or_else(|error| panic!("{error}"));
+        serde_json::from_str::<FacetsRequest>(&text)
+            .unwrap_or_else(|error| panic!("{file}: {error}"));
+    }
     let document = read_json::<Value>(&contract_document());
     let registry = jsonschema::Registry::new()
         .add(OPENAPI_URI, document.clone())
@@ -525,8 +599,23 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_evaluator", "requests/evaluator-create.json"),
         ("post_evaluator_test", "requests/evaluator-test.json"),
         ("post_evaluator_run", "requests/evaluator-run.json"),
+        ("post_playground_run", "requests/playground-run.json"),
         ("post_online_rule", "requests/online-rule-create.json"),
+        ("post_issue_source", "requests/issue-source-create.json"),
+        (
+            "post_issue_source",
+            "requests/issue-source-create-topic.json",
+        ),
+        ("patch_issue_source", "requests/issue-source-update.json"),
+        ("patch_issue", "requests/issue-update.json"),
+        ("post_issue_merge", "requests/issue-merge.json"),
         ("patch_online_rule", "requests/online-rule-update.json"),
+        (
+            "patch_assistant_conversation",
+            "requests/assistant-conversation-rename.json",
+        ),
+        ("put_org_assistant", "requests/assistant-settings.json"),
+        ("put_assistant_feedback", "requests/assistant-feedback.json"),
         (
             "post_online_rule_preview",
             "requests/online-rule-preview.json",
@@ -534,6 +623,30 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         (
             "post_score_definition",
             "requests/score-definition-create.json",
+        ),
+        (
+            "create_annotation_queue",
+            "requests/annotation-queue-create.json",
+        ),
+        (
+            "add_annotation_queue_items",
+            "requests/annotation-queue-items-add.json",
+        ),
+        (
+            "next_annotation_queue_item",
+            "requests/annotation-queue-next.json",
+        ),
+        (
+            "skip_annotation_queue_item",
+            "requests/annotation-queue-skip.json",
+        ),
+        (
+            "preview_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
+        ),
+        (
+            "add_annotation_queue_matching",
+            "requests/annotation-queue-matching.json",
         ),
         ("post_dataset", "requests/dataset-create.json"),
         ("post_dataset_items", "requests/dataset-items-add.json"),
@@ -558,6 +671,13 @@ fn request_examples_match_their_types_and_the_openapi_document() {
         ("post_backfill", "requests/backfill-create.json"),
         ("post_model_price", "requests/model-price-create.json"),
         ("post_backfill_estimate", "requests/backfill-estimate.json"),
+        ("post_prompt", "requests/prompt-create.json"),
+        ("post_prompt_version", "requests/prompt-version-create.json"),
+        ("put_prompt_label", "requests/prompt-label-set.json"),
+        ("put_prompt_settings", "requests/prompt-settings.json"),
+        ("post_facets", "requests/facets-traces.json"),
+        ("post_facets", "requests/facets-spans.json"),
+        ("post_facets", "requests/facets-sessions.json"),
     ];
     let mut failures = Vec::new();
     for (operation_id, file) in requests {
@@ -627,12 +747,18 @@ fn generated_files_roundtrip() {
             "post_api_key" => roundtrip::<CreatedApiKey>(&example.file),
             "list_personal_tokens" => roundtrip::<Page<PersonalToken>>(&example.file),
             "post_personal_token" => roundtrip::<CreatedPersonalToken>(&example.file),
-            "get_facets" => roundtrip::<FacetsResponse>(&example.file),
+            "post_facets" => roundtrip::<FacetsResponse>(&example.file),
             "run_sql" => roundtrip::<SqlQueryResult>(&example.file),
             "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "list_assistant_conversations" => {
+                roundtrip::<Page<AssistantConversation>>(&example.file);
+            }
+            "get_assistant_conversation" => roundtrip::<AssistantConversationDetail>(&example.file),
+            "get_org_assistant" => roundtrip::<AssistantSettings>(&example.file),
+            "get_project_assistant" => roundtrip::<AssistantStatus>(&example.file),
             "get_dashboard" | "list_dashboards" | "create_dashboard" | "update_dashboard"
             | "get_overview" | "save_overview" => {}
             "get_deletion" | "create_deletion" | "delete_project" | "delete_org" => {
@@ -680,11 +806,30 @@ fn generated_files_roundtrip() {
             "get_saved_view" => roundtrip::<SavedView>(&example.file),
             "list_score_definitions" => roundtrip::<Page<ScoreDefinition>>(&example.file),
             "post_score_definition" => roundtrip::<ScoreDefinition>(&example.file),
+            "list_annotation_queues" => roundtrip::<Page<AnnotationQueue>>(&example.file),
+            "get_annotation_queue" | "create_annotation_queue" => {
+                roundtrip::<AnnotationQueue>(&example.file);
+            }
+            "list_annotation_queue_items" => roundtrip::<Page<AnnotationQueueItem>>(&example.file),
+            "get_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
+            "add_annotation_queue_items" => roundtrip::<AddedQueueItems>(&example.file),
+            "add_annotation_queue_matching" => roundtrip::<QueueMatchingAdded>(&example.file),
+            "preview_annotation_queue_matching" => {
+                roundtrip::<QueueMatchingPreview>(&example.file);
+            }
+            "next_annotation_queue_item" => roundtrip::<AnnotationQueueItem>(&example.file),
             "list_models" => roundtrip::<Page<ModelPrice>>(&example.file),
             "list_org_model_prices" => roundtrip::<Page<ModelPrice>>(&example.file),
             "resolve_model_price" => roundtrip::<ModelPriceResolution>(&example.file),
             "post_model_price" => roundtrip::<ModelPrice>(&example.file),
             "list_online_rules" => roundtrip::<OnlineRulePage>(&example.file),
+            "list_issue_sources" => roundtrip::<IssueSourcePage>(&example.file),
+            "get_issue_source" => roundtrip::<IssueSource>(&example.file),
+            "list_issues" => roundtrip::<IssuePage>(&example.file),
+            "get_issue" => roundtrip::<Issue>(&example.file),
+            "get_issue_occurrences" => roundtrip::<IssueOccurrences>(&example.file),
+            "get_issue_events" => roundtrip::<IssueEventPage>(&example.file),
+            "list_issue_source_refits" => roundtrip::<IssueRefitPage>(&example.file),
             "get_online_rule_stats" => roundtrip::<OnlineRuleStatsResponse>(&example.file),
             "get_online_rule" | "post_online_rule" | "post_online_rule_resume" => {
                 roundtrip::<OnlineRule>(&example.file);
@@ -711,6 +856,18 @@ fn generated_files_roundtrip() {
             "post_dataset_items_from_traces" => roundtrip::<FromTracesResult>(&example.file),
             "list_dataset_version_changes" => roundtrip::<Page<ItemChange>>(&example.file),
             "list_experiment_trends" => roundtrip::<ExperimentTrends>(&example.file),
+            "list_prompts" => roundtrip::<Page<Prompt>>(&example.file),
+            "get_prompt" => roundtrip::<Prompt>(&example.file),
+            "get_prompt_resolve" | "get_prompt_version" | "post_prompt" | "post_prompt_version" => {
+                roundtrip::<PromptVersion>(&example.file);
+            }
+            "list_prompt_versions" => roundtrip::<Page<PromptVersion>>(&example.file),
+            "put_prompt_label" => roundtrip::<Prompt>(&example.file),
+            "list_prompt_label_events" => roundtrip::<Page<PromptLabelEvent>>(&example.file),
+            "get_prompt_metrics" => roundtrip::<PromptMetrics>(&example.file),
+            "get_prompt_settings" | "put_prompt_settings" => {
+                roundtrip::<PromptSettings>(&example.file);
+            }
             other => panic!("{other} has no round-trip"),
         }
     }

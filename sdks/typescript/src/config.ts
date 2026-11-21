@@ -23,8 +23,8 @@ const ENV_ENABLED = `${ENV_PREFIX}ENABLED`;
 const ENV_SERVICE_NAME = "OTEL_SERVICE_NAME";
 
 const KEY_PREFIX = "sk-cetra-";
-// Reserved evaluation environment. cetra_core::names::environment::EVAL
-const RESERVED_ENVIRONMENT = "cetra-eval";
+// Reserved environments (the server's set is cetra_core::names::environment::RESERVED).
+const RESERVED_ENVIRONMENTS = new Set(["cetra-eval", "cetra-playground", "cetra-assistant"]);
 const DEFAULT_BASE_URL = "http://localhost:8080";
 const TRUE_WORDS = new Set(["true", "1", "yes", "on"]);
 const FALSE_WORDS = new Set(["false", "0", "no", "off"]);
@@ -266,7 +266,7 @@ function checkEnvironment(value: unknown, name: string): string {
   if (typeof value !== "string") {
     throw new ConfigError(name, "must be a string");
   }
-  if (value === RESERVED_ENVIRONMENT) {
+  if (RESERVED_ENVIRONMENTS.has(value)) {
     throw new ConfigError(name, "is reserved");
   }
   return value;

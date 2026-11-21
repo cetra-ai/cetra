@@ -493,6 +493,21 @@ impl Default for EvalConfig {
     }
 }
 
+/// `[issues]` (track IC, D-IC-12).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct IssuesConfig {
+    /// Workers that summarize and embed issue candidates. They share each connection's limits
+    /// with judges. Default 4, 1 to 64.
+    pub workers: u32,
+}
+
+impl Default for IssuesConfig {
+    fn default() -> Self {
+        Self { workers: 4 }
+    }
+}
+
 /// `[security]` (spec 12, D166).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -547,6 +562,9 @@ pub struct EntitlementDefaults {
     pub max_projects: Option<u64>,
     pub max_alert_rules: Option<u64>,
     pub max_active_online_rules: Option<u64>,
+    pub max_active_issue_sources: Option<u64>,
+    /// Annotation queues per org (D-AQ-10).
+    pub max_annotation_queues: Option<u64>,
 }
 
 impl Default for EntitlementDefaults {
@@ -563,8 +581,29 @@ impl Default for EntitlementDefaults {
             max_projects: None,
             max_alert_rules: None,
             max_active_online_rules: None,
+            max_active_issue_sources: None,
+            max_annotation_queues: None,
         }
     }
+}
+
+/// Whom email alert channels may reach (D-K-21).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailRecipients {
+    /// Only verified, enabled members of the channel's org.
+    Members,
+    /// Any address.
+    Any,
+}
+
+/// `[alerts]` (D-K-21).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AlertsConfig {
+    /// Unset: [`EmailRecipients::Members`] under open signup, [`EmailRecipients::Any`] otherwise.
+    /// Read it through [`ServerConfig::email_recipients`].
+    pub email_recipients: Option<EmailRecipients>,
 }
 
 /// `[orgs]` (D-P-31).
@@ -673,6 +712,9 @@ pub struct ServerConfig {
     /// `[eval]` worker settings.
     #[serde(default)]
     pub eval: EvalConfig,
+    /// `[issues]` worker settings (track IC).
+    #[serde(default)]
+    pub issues: IssuesConfig,
     /// `[security]` settings.
     #[serde(default)]
     pub security: SecurityConfig,
@@ -682,6 +724,9 @@ pub struct ServerConfig {
     /// `[orgs]` settings (D-P-31).
     #[serde(default)]
     pub orgs: OrgsConfig,
+    /// `[alerts]` settings (D-K-21).
+    #[serde(default)]
+    pub alerts: AlertsConfig,
     /// `[demo]` settings: the demo org and the limits of its visitors (08 § Demo org, D187).
     #[serde(default)]
     pub demo: DemoConfig,
@@ -735,6 +780,17 @@ impl ServerConfig {
             delete_objects: !self.restore_mode,
             ..self.storage.clone()
         }
+    }
+
+    /// Whom email alert channels and their test sends may reach (D-K-21): `alerts.email_recipients`,
+    /// or when it is unset, members under open signup and any address otherwise.
+    pub fn email_recipients(&self) -> EmailRecipients {
+        self.alerts
+            .email_recipients
+            .unwrap_or(match self.auth.signup {
+                SignupPolicy::Open => EmailRecipients::Members,
+                SignupPolicy::InviteOnly | SignupPolicy::Disabled => EmailRecipients::Any,
+            })
     }
 }
 
@@ -1054,6 +1110,12 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid {
             key: "eval.workers",
             reason: "must be between 1 and 256",
+        });
+    }
+    if !(1..=64).contains(&config.issues.workers) {
+        return Err(ConfigError::Invalid {
+            key: "issues.workers",
+            reason: "must be between 1 and 64",
         });
     }
     Ok(())
@@ -1868,6 +1930,7 @@ fn merge_dict(into: &mut Dict, from: Dict) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::net::SocketAddr;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
@@ -1875,10 +1938,12 @@ mod tests {
     use bytesize::ByteSize;
     use cetra_core::ids::OrgId;
     use cetra_storage::config::{ObjectStoreUrl, WalSync};
+    use figment::error::{Actual, Kind};
 
     use super::{
-        ConfigError, DemoConfig, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
-        ServerConfig, SmtpUrl, Tls, issuer_problem, load_from, oidc_env_name,
+        ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
+        MediaConfig, OrgsConfig, Secret, ServerConfig, SmtpUrl, Tls, issuer_problem, load_from,
+        oidc_env_name,
     };
     use crate::api::account::SignupPolicy;
 
@@ -2283,6 +2348,40 @@ mod tests {
     }
 
     #[test]
+    fn issues_workers_default_is_four() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.issues.workers, 4);
+    }
+
+    #[test]
+    fn issues_workers_bounds_are_one_to_sixty_four() {
+        for workers in [1, 64] {
+            let toml = format!("[issues]\nworkers = {workers}\n");
+            let config = load_from(Some(toml.as_str()), &[]).unwrap();
+            assert_eq!(config.issues.workers, workers);
+        }
+        for toml in ["[issues]\nworkers = 0\n", "[issues]\nworkers = 65\n"] {
+            let error = load_from(Some(toml), &[]).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Invalid {
+                        key: "issues.workers",
+                        ..
+                    }
+                ),
+                "{toml}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn issues_workers_comes_from_the_environment() {
+        let config = load_from(None, &[("CETRA_ISSUES__WORKERS", "8")]).unwrap();
+        assert_eq!(config.issues.workers, 8);
+    }
+
+    #[test]
     fn encryption_key_comes_from_the_environment() {
         let config = load_from(None, &[("CETRA_ENCRYPTION_KEY", "abc")]).unwrap();
         assert_eq!(
@@ -2507,6 +2606,58 @@ mod tests {
         assert!(error.to_string().contains("allow_all"), "{error}");
     }
 
+    #[test]
+    fn alerts_default_follows_the_signup_policy() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.alerts, AlertsConfig::default());
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+
+        let config = load_from(None, &[("CETRA_AUTH_SIGNUP", "open")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+
+        let config = load_from(None, &[("CETRA_AUTH_SIGNUP", "disabled")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+    }
+
+    #[test]
+    fn alerts_email_recipients_members_under_invite_only() {
+        let config = load_from(Some("[alerts]\nemail_recipients = \"members\"\n"), &[]).unwrap();
+        assert_eq!(
+            config.alerts.email_recipients,
+            Some(EmailRecipients::Members)
+        );
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+    }
+
+    #[test]
+    fn alerts_email_recipients_any_under_open_signup() {
+        let config = load_from(
+            Some("[alerts]\nemail_recipients = \"any\"\n"),
+            &[("CETRA_AUTH_SIGNUP", "open")],
+        )
+        .unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Any);
+    }
+
+    #[test]
+    fn alerts_email_recipients_from_env() {
+        let config = load_from(None, &[("CETRA_ALERTS__EMAIL_RECIPIENTS", "members")]).unwrap();
+        assert_eq!(config.email_recipients(), EmailRecipients::Members);
+    }
+
+    #[test]
+    fn alerts_email_recipients_rejects_an_unknown_value() {
+        let error =
+            load_from(Some("[alerts]\nemail_recipients = \"everyone\"\n"), &[]).unwrap_err();
+        assert!(matches!(error, ConfigError::Figment(_)), "{error}");
+    }
+
+    #[test]
+    fn alerts_refuses_unknown_keys() {
+        let error = load_from(Some("[alerts]\nzz = 1\n"), &[]).unwrap_err();
+        assert!(matches!(error, ConfigError::Figment(_)), "{error}");
+    }
+
     const DEMO_ORG: &str = "0195f0a0-0000-7000-8000-000000000001";
 
     #[test]
@@ -2583,6 +2734,18 @@ mod tests {
         assert_eq!(defaults.max_projects, None);
         assert_eq!(defaults.max_alert_rules, None);
         assert_eq!(defaults.max_active_online_rules, None);
+        assert_eq!(defaults.max_active_issue_sources, None);
+        assert_eq!(defaults.max_annotation_queues, None);
+    }
+
+    #[test]
+    fn max_annotation_queues_from_env() {
+        let config = load_from(
+            None,
+            &[("CETRA_ENTITLEMENTS__DEFAULTS__MAX_ANNOTATION_QUEUES", "2")],
+        )
+        .unwrap();
+        assert_eq!(config.entitlements.defaults.max_annotation_queues, Some(2));
     }
 
     #[test]
@@ -3393,5 +3556,185 @@ link_existing_by_email = true
         assert_eq!(config.ingest.max_request_bytes, ByteSize::kib(1));
         assert_eq!(config.media.min_bytes, ByteSize::b(1));
         assert_eq!(config.media.max_bytes, ByteSize::gib(1));
+    }
+
+    /// The configuration reference page (D-W-7): its keys are exactly the keys the loader
+    /// accepts, and its Environment column is exactly `ALIASES`.
+    const REFERENCE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../website/src/content/docs/docs/self-hosting/configuration-reference.md"
+    ));
+
+    /// What a probe found at a table path.
+    enum Probe {
+        /// A table that refuses unknown fields, with the fields it accepts.
+        Table(Vec<String>),
+        /// A field that takes an array of tables.
+        ArrayOfTables,
+        /// Any other field.
+        Leaf,
+    }
+
+    /// The text between the first pair of backticks of a table cell.
+    fn backticked(cell: &str) -> Option<String> {
+        let (_, rest) = cell.split_once('`')?;
+        let (text, _) = rest.split_once('`')?;
+        Some(text.to_owned())
+    }
+
+    /// The keys of the page's tables, each with the name of its Environment cell if it has one.
+    fn documented() -> BTreeMap<String, Option<String>> {
+        let mut keys = BTreeMap::new();
+        for line in REFERENCE.lines().filter(|line| line.starts_with("| `")) {
+            let cells: Vec<&str> = line.split('|').collect();
+            let key = backticked(cells[1]).expect("a row starts with a backticked key");
+            let env = cells.get(2).and_then(|cell| backticked(cell));
+            assert!(
+                keys.insert(key.clone(), env).is_none(),
+                "{key} is listed twice"
+            );
+        }
+        keys
+    }
+
+    /// Loads a document that sets an unknown field in the table at `path` (`a.b[]` is an
+    /// element of the array of tables `a.b`) and says what the loader answered.
+    fn probe(path: &[String]) -> Probe {
+        let mut toml = String::new();
+        let mut dotted = Vec::new();
+        for (index, segment) in path.iter().enumerate() {
+            dotted.push(segment.trim_end_matches("[]"));
+            if segment.ends_with("[]") {
+                toml.push_str(&format!("[[{}]]\n", dotted.join(".")));
+            } else if index + 1 == path.len() {
+                toml.push_str(&format!("[{}]\n", dotted.join(".")));
+            }
+        }
+        toml.push_str("zz_probe = 1\n");
+        let name = path.join(".");
+        let error = match load_from(Some(&toml), &[]) {
+            Ok(_) => panic!("{name} accepts an unknown field: add `#[serde(deny_unknown_fields)]`"),
+            Err(ConfigError::Figment(error)) => error,
+            Err(_) => return Probe::Leaf,
+        };
+        let target: Vec<&str> = path
+            .iter()
+            .map(|segment| segment.trim_end_matches("[]"))
+            .collect();
+        for part in (*error).clone() {
+            let part_path: Vec<&str> = part
+                .path
+                .iter()
+                .map(String::as_str)
+                .filter(|segment| segment.parse::<usize>().is_err())
+                .collect();
+            // Figment's path for an unknown field ends with the field itself.
+            let owner = part_path.strip_suffix(&["zz_probe"]).unwrap_or(&part_path);
+            match &part.kind {
+                Kind::UnknownField(_, expected) if owner == target => {
+                    return Probe::Table(
+                        expected.iter().map(|field| (*field).to_owned()).collect(),
+                    );
+                }
+                Kind::InvalidType(Actual::Map, expected)
+                    if part_path == target && expected.contains("sequence") =>
+                {
+                    return Probe::ArrayOfTables;
+                }
+                _ => {}
+            }
+        }
+        Probe::Leaf
+    }
+
+    /// Every leaf key the loader accepts, found by walking the tables from the top.
+    fn accepted() -> BTreeSet<String> {
+        fn walk(path: &[String], keys: &mut BTreeSet<String>) {
+            let Probe::Table(fields) = probe(path) else {
+                panic!("{} is not a table", path.join("."));
+            };
+            for field in fields {
+                let mut child = path.to_vec();
+                child.push(field);
+                match probe(&child) {
+                    Probe::Table(_) => walk(&child, keys),
+                    Probe::ArrayOfTables => {
+                        if let Some(last) = child.last_mut() {
+                            last.push_str("[]");
+                        }
+                        if matches!(probe(&child), Probe::Table(_)) {
+                            walk(&child, keys);
+                        } else {
+                            // An array of scalars (a `Vec<String>`), not of tables.
+                            if let Some(last) = child.last_mut() {
+                                last.truncate(last.len() - 2);
+                            }
+                            keys.insert(child.join("."));
+                        }
+                    }
+                    Probe::Leaf => {
+                        keys.insert(child.join("."));
+                    }
+                }
+            }
+        }
+        let mut keys = BTreeSet::new();
+        // The top level is the one table without a header.
+        let top = match probe(&[]) {
+            Probe::Table(fields) => fields,
+            _ => panic!("the top level refuses no unknown field"),
+        };
+        for field in top {
+            let child = vec![field];
+            match probe(&child) {
+                Probe::Table(_) => walk(&child, &mut keys),
+                Probe::ArrayOfTables => walk(&[format!("{}[]", child[0])], &mut keys),
+                Probe::Leaf => {
+                    keys.insert(child[0].clone());
+                }
+            }
+        }
+        // The loader copies the top-level `data_dir` into `[storage]` and rejects this one.
+        keys.remove("storage.data_dir");
+        keys
+    }
+
+    #[test]
+    fn the_configuration_reference_matches_the_loader() {
+        let documented = documented();
+        let accepted = accepted();
+        let missing: Vec<_> = accepted
+            .iter()
+            .filter(|key| !documented.contains_key(*key))
+            .collect();
+        let unknown: Vec<_> = documented
+            .keys()
+            .filter(|key| !accepted.contains(*key))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "keys the loader accepts but the reference omits: {missing:?}"
+        );
+        assert!(
+            unknown.is_empty(),
+            "keys the reference lists but the loader refuses: {unknown:?}"
+        );
+        for (alias, key) in ALIASES {
+            assert_eq!(
+                documented.get(*key).and_then(Option::as_deref),
+                Some(*alias),
+                "{key} must list {alias} in the Environment column"
+            );
+        }
+        for (key, env) in &documented {
+            if let Some(env) = env {
+                assert!(
+                    ALIASES
+                        .iter()
+                        .any(|(alias, aliased)| alias == env && aliased == key),
+                    "{key}: {env} is not its alias in ALIASES"
+                );
+            }
+        }
     }
 }

@@ -7,9 +7,11 @@ contents of these directories, which are licensed under the Elastic License 2.0
 - web/src/ee/
 - tools/license/
 
+The licensor of those directories under the Elastic License 2.0 is sebastiencs.
+
 MIT License
 
-Copyright (c) 2026 the cetra authors
+Copyright (c) 2026 sebastiencs
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

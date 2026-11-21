@@ -9,6 +9,7 @@ pub(crate) mod dispatch;
 pub(crate) mod evaluator;
 pub(crate) mod execute;
 pub(crate) mod hourly;
+pub(crate) mod interactive;
 pub(crate) mod pending;
 pub(crate) mod retry;
 pub(crate) mod rule_check;
@@ -29,9 +30,11 @@ use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
 use crate::http::AppState;
+use crate::issues;
 use crate::meta::MetaError;
 use crate::meta::backfills;
 use crate::meta::eval_jobs;
+use crate::meta::issues::{close_open_refits, interrupt_candidates};
 
 /// Extra time `EvalTasks::shutdown` allows the loops after their drain, before it aborts them.
 const SHUTDOWN_MARGIN: Duration = Duration::from_secs(5);
@@ -202,13 +205,17 @@ impl EvalTiming {
 /// Returns [`MetaError`] when the write fails.
 pub(crate) async fn recover(state: &AppState) -> Result<(), MetaError> {
     let now = state.clock.now_ns();
-    let (requeued, failed, interrupted) = state
+    let (requeued, failed, interrupted, candidates, refits) = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 let (requeued, failed) = eval_jobs::recover(conn, now).await?;
                 let interrupted = backfills::fail_running(conn, now).await?;
-                Ok((requeued, failed, interrupted))
+                // Nothing of the last process still runs: every `running` candidate is
+                // interrupted and every open refit is closed (D-IC-12, A8).
+                let candidates = interrupt_candidates(conn, i64::MAX, now).await?;
+                let refits = close_open_refits(conn, now).await?;
+                Ok((requeued, failed, interrupted, candidates, refits))
             })
         })
         .await?;
@@ -219,6 +226,13 @@ pub(crate) async fn recover(state: &AppState) -> Result<(), MetaError> {
         tracing::info!(
             backfills = interrupted,
             "running backfills marked interrupted at startup"
+        );
+    }
+    if candidates > 0 || refits > 0 {
+        tracing::info!(
+            candidates,
+            refits,
+            "issue candidates and refits interrupted at startup"
         );
     }
     Ok(())
@@ -272,6 +286,14 @@ pub(crate) fn spawn(state: &AppState, timing: EvalTiming) -> EvalTasks {
             state.clone(),
             stop.clone(),
             timing.backfill_every,
+        )));
+        handles.push(tokio::spawn(issues::worker::run_workers(
+            state.clone(),
+            stop.clone(),
+        )));
+        handles.push(tokio::spawn(issues::refit::run_refits(
+            state.clone(),
+            stop.clone(),
         )));
     }
     handles.push(tokio::spawn(run_budget(
@@ -363,6 +385,13 @@ async fn run_janitor(state: AppState, mut stop: watch::Receiver<bool>, every: Du
             }
             Ok(_) => {}
             Err(error) => tracing::error!(error = %error, "eval janitor pass failed"),
+        }
+        match issues::worker::janitor_once(&state, now).await {
+            Ok(0) => {}
+            Ok(interrupted) => {
+                tracing::info!(interrupted, "issue candidates interrupted by the janitor");
+            }
+            Err(error) => tracing::error!(error = %error, "issue janitor pass failed"),
         }
     }
 }

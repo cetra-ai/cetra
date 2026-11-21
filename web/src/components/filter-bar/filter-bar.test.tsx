@@ -1,7 +1,9 @@
 import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
+import { facetsHandler } from "@/test/facets";
 import { renderApp } from "@/test/render";
 
 const FILTER = "status = 'error' AND model LIKE 'gpt%'";
@@ -132,22 +134,13 @@ it("parenthesizes an OR filter before appending from a row", async () => {
 /** `/facets` answers two values of `status`, filtered by `q` like the server does (D7). */
 function useStatusValues() {
   server.use(
-    http.get("*/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const q = url.searchParams.get("q");
+    facetsHandler((ask) => {
+      const q = ask.q;
       const values = [
         { value: "error", count: 4 },
         { value: "ok", count: 9 },
-      ].filter((item) => q === null || item.value.includes(q));
-      return HttpResponse.json({
-        view: "traces",
-        field: url.searchParams.get("field"),
-        kind: "values",
-        total: 13,
-        missing: 0,
-        values,
-        more: false,
-      });
+      ].filter((item) => q === undefined || item.value.includes(q));
+      return { kind: "values", total: 13, missing: 0, values, more: false };
     }),
   );
 }
@@ -289,20 +282,10 @@ it("ignores Enter while an input method is composing", async () => {
 
 it("never shows the values of the previous field after the field changes", async () => {
   server.use(
-    http.get("*/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const field = url.searchParams.get("field") ?? "";
+    facetsHandler((ask) => {
       const values =
-        field === "status" ? [{ value: "error", count: 4 }] : [{ value: "checkout", count: 2 }];
-      return HttpResponse.json({
-        view: "traces",
-        field,
-        kind: "values",
-        total: 6,
-        missing: 0,
-        values,
-        more: false,
-      });
+        ask.field === "status" ? [{ value: "error", count: 4 }] : [{ value: "checkout", count: 2 }];
+      return { kind: "values", total: 6, missing: 0, values, more: false };
     }),
   );
   const { user } = await renderApp("/acme/support-bot/traces?range=1h");
@@ -317,11 +300,19 @@ it("never shows the values of the previous field after the field changes", async
 });
 
 it("asks /facets once for a map key typed letter by letter", async () => {
-  const urls: string[] = [];
+  const fields: string[] = [];
   const onStart = ({ request }: { request: Request }) => {
-    const url = new URL(request.url);
-    if (url.searchParams.get("field")?.startsWith("metadata")) {
-      urls.push(url.searchParams.get("field") ?? "");
+    if (request.method === "POST" && new URL(request.url).pathname.endsWith("/facets")) {
+      void request
+        .clone()
+        .json()
+        .then((body: Schema<"FacetsRequest">) => {
+          for (const ask of body.fields) {
+            if (ask.field.startsWith("metadata")) {
+              fields.push(ask.field);
+            }
+          }
+        });
     }
   };
   server.events.on("request:start", onStart);
@@ -334,7 +325,7 @@ it("asks /facets once for a map key typed letter by letter", async () => {
     await user.click(await screen.findByRole("option", { name: "metadata" }));
     await user.type(screen.getByRole("textbox", { name: "Key" }), "env");
     await new Promise((resolve) => window.setTimeout(resolve, 300));
-    expect(urls.filter((field) => field === "metadata['env']")).toHaveLength(1);
+    expect(fields.filter((field) => field === "metadata['env']")).toHaveLength(1);
   } finally {
     server.events.removeListener("request:start", onStart);
   }

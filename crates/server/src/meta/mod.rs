@@ -9,8 +9,11 @@
 //! migration that does more than add is a format change (spec 04 § Format versions, D-R-34).
 #![cfg_attr(not(test), allow(dead_code))] // `cetra serve` opens this from P5 on
 
+pub(crate) mod agent_contexts;
 pub(crate) mod alerts;
+pub(crate) mod annotation_queues;
 pub(crate) mod api_keys;
+pub(crate) mod assistant;
 pub(crate) mod backfills;
 pub(crate) mod connections;
 pub(crate) mod dashboards;
@@ -24,6 +27,8 @@ pub(crate) mod experiments;
 pub(crate) mod identities;
 pub(crate) mod instance_settings;
 pub(crate) mod invites;
+pub(crate) mod issue_links;
+pub(crate) mod issues;
 pub(crate) mod members;
 pub(crate) mod model_prices;
 pub(crate) mod online_rules;
@@ -32,6 +37,7 @@ pub(crate) mod password_resets;
 pub(crate) mod pending_traces;
 pub(crate) mod personal_tokens;
 pub(crate) mod projects;
+pub(crate) mod prompts;
 pub(crate) mod rule_spend;
 pub(crate) mod saved_views;
 pub(crate) mod score_definitions;

@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use axum::extract::{Extension, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::routing::{delete, get, patch, post};
+use cetra_core::ids::OrgId;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -30,6 +31,7 @@ use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::connections::{self, ConnectionFields, ConnectionRow};
 use crate::meta::evaluators;
+use crate::meta::issues;
 use crate::meta::online_rules as rules;
 
 use super::orgs::page_named;
@@ -329,21 +331,30 @@ async fn update_llm_connection(
                     return Ok(None);
                 };
                 if !key_sent {
-                    return Ok(Some((row, Vec::new(), Vec::new())));
+                    return Ok(Some((row, Vec::new(), Vec::new(), Vec::new())));
                 }
-                // A new key clears the status and the connection's pauses (D-I-5, D-I-14).
+                // A new key clears the status and the connection's pauses, rules and issue
+                // sources alike (D-I-5, D-I-14).
                 connections::set_connection_status(conn, id, "ok", None, now).await?;
                 let resumed = rules::resume_connection_pauses(conn, id, now).await?;
+                let sources = issues::resume_connection_pauses(conn, id).await?;
                 let using = rules::rule_ids_of_connection(conn, id).await?;
-                Ok(Some((row, resumed, using)))
+                Ok(Some((row, resumed, using, sources)))
             })
         })
         .await?;
-    let Some((row, resumed, using)) = updated else {
+    let Some((row, resumed, using, sources)) = updated else {
         return Err(ApiError::NotFound);
     };
     state.connections.forget(id);
-    after_connection_write(&state, id, &using, &resumed, "connection key changed");
+    after_connection_write(
+        &state,
+        id,
+        &using,
+        &resumed,
+        &sources,
+        "connection key changed",
+    );
     tracing::info!(
         target: "audit",
         connection_id = %id,
@@ -376,7 +387,9 @@ async fn delete_llm_connection(
                 }
                 // An evaluator that uses the connection keeps it (D-I-19).
                 if evaluators::connection_in_use(conn, id).await? {
-                    return Err(MetaError::Conflict("connection is used by evaluators"));
+                    return Err(MetaError::Conflict(
+                        "connection is used by evaluators or issue sources",
+                    ));
                 }
                 connections::delete_connection(conn, org_id, id).await
             })
@@ -418,6 +431,17 @@ async fn test_connection(
     let row = connections::get_connection(state.meta.reader(), access.org.id, id)
         .await?
         .ok_or(ApiError::NotFound)?;
+    if let Some(embedding_model) = body
+        .embedding_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+    {
+        return test_embedding(&state, access.org.id, user.id, row, embedding_model)
+            .await
+            .map(error::Json);
+    }
     let explicit = body
         .model
         .as_deref()
@@ -513,16 +537,21 @@ async fn test_connection(
     // Best effort: the provider was called, so a failed status write must not
     // lose the test result.
     let status_write = if result.ok {
-        // One write sets `ok` and, on the default model, resumes the `'connection'` pauses
-        // (D-I-5, D-I-14).
-        let resume = explicit.is_none();
-        match recover_connection(&state, id, row.status != "ok", resume, now).await {
-            Ok(resumed) => {
-                after_connection_write(&state, id, &resumed, &resumed, "connection test");
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
+        // One write sets `ok` and, on the default model, resumes the `'connection'` rule and
+        // source pauses (D-I-5, D-I-14). A typed model proves the key only.
+        let default_model = explicit.is_none();
+        recover_connection(
+            &state,
+            id,
+            row.status != "ok",
+            default_model,
+            default_model,
+            now,
+        )
+        .await
+        .map(|(rules, sources)| {
+            after_connection_write(&state, id, &rules, &rules, &sources, "connection test");
+        })
     } else if pause_class && explicit.is_none() {
         // Only a pause on the connection's own default model marks it failing:
         // a 404 for a typed model name says nothing about the key.
@@ -557,8 +586,10 @@ async fn test_connection(
 }
 
 /// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
-/// write. Returns the resumed rules. `resume` is false for a test on a typed model: it proves
-/// the key works, but the pauses wait for a test on the default model (D-I-5).
+/// write: the rules' when `resume_rules`, the issue sources' when `resume_sources`. Returns the
+/// resumed rules and sources. A test on a typed chat model passes neither: it proves the key works,
+/// but the pauses wait for a test on the default model (D-I-5). An embedding test resumes the
+/// sources only.
 ///
 /// # Errors
 ///
@@ -567,9 +598,10 @@ async fn recover_connection(
     state: &AppState,
     id: Uuid,
     set_ok: bool,
-    resume: bool,
+    resume_rules: bool,
+    resume_sources: bool,
     now: i64,
-) -> Result<Vec<Uuid>, MetaError> {
+) -> Result<(Vec<Uuid>, Vec<Uuid>), MetaError> {
     state
         .meta
         .write(move |conn| {
@@ -577,23 +609,139 @@ async fn recover_connection(
                 if set_ok {
                     connections::set_connection_status(conn, id, "ok", None, now).await?;
                 }
-                if resume {
-                    rules::resume_connection_pauses(conn, id, now).await
+                let rules = if resume_rules {
+                    rules::resume_connection_pauses(conn, id, now).await?
                 } else {
-                    Ok(Vec::new())
-                }
+                    Vec::new()
+                };
+                let sources = if resume_sources {
+                    issues::resume_connection_pauses(conn, id).await?
+                } else {
+                    Vec::new()
+                };
+                Ok((rules, sources))
             })
         })
         .await
 }
 
+/// Embeds `"ping"` with `model` through the connection (D-IC-5) and answers whether it reached
+/// the provider. The call trace is discarded, as the judge's. An embedding test has no default
+/// model, so a failure never marks the connection `failing`; a success sets `ok` and resumes the
+/// issue sources paused for the connection.
+///
+/// # Errors
+///
+/// Returns [`ApiError`] when the connection cannot be decrypted or the status write cannot be
+/// answered; a failed provider call is an `ok: false` result, not an error.
+async fn test_embedding(
+    state: &AppState,
+    org_id: OrgId,
+    user_id: Uuid,
+    row: ConnectionRow,
+    model: String,
+) -> Result<LlmConnectionTestResult, ApiError> {
+    let id = row.id;
+    if row.adapter == LlmAdapter::Anthropic.as_str() {
+        return Ok(LlmConnectionTestResult {
+            ok: false,
+            model,
+            latency_ms: 0,
+            error: Some(LlmConnectionTestError {
+                class: TestErrorClass::Permanent,
+                message: "This provider has no embeddings API.".to_owned(),
+            }),
+        });
+    }
+    let connection = state
+        .connections
+        .get(&state.secrets, &row)
+        .map_err(internal)?;
+    let ingest = cetra_otel::IngestContext {
+        // A connection belongs to no project, and the call trace is discarded.
+        project_id: cetra_core::ids::ProjectId::from_uuid(Uuid::nil()),
+        ingest_time: state.clock.now_ns(),
+        retention_days: None,
+        limits: state.config.ingest.limits(&state.config.media),
+    };
+    let prices = state.ingest.prices().for_org(org_id);
+    let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
+    let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
+    let trace_id = cetra_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only
+    let started = std::time::Instant::now();
+    let run = state
+        .eval_runner
+        .embed(cetra_eval::EmbeddingInput {
+            connection: connection.as_ref(),
+            model: &model,
+            text: "ping",
+            dimensions: None,
+            timeout: std::time::Duration::from_secs(30),
+            trace: cetra_eval::CallTrace {
+                trace_id,
+                root_name: "cetra.issue.embed",
+                metadata: &[],
+                ingest: &ingest,
+                prices: &prices,
+            },
+        })
+        .await;
+    let latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let mut result = LlmConnectionTestResult {
+        ok: true,
+        model,
+        latency_ms,
+        error: None,
+    };
+    if let Err(error) = run.outcome {
+        result.ok = false;
+        result.error = Some(LlmConnectionTestError {
+            class: match error.class() {
+                cetra_eval::ErrorClass::Retryable => TestErrorClass::Retryable,
+                cetra_eval::ErrorClass::Pause => TestErrorClass::Pause,
+                cetra_eval::ErrorClass::Permanent => TestErrorClass::Permanent,
+            },
+            // The display quotes no payload (D160).
+            message: error.to_string(),
+        });
+    }
+    let now = state.clock.now_ns();
+    // Best effort, as the chat test: the provider was called, so a failed status write must not
+    // lose the result.
+    if result.ok {
+        let set_ok = row.status != "ok";
+        match recover_connection(state, id, set_ok, false, true, now).await {
+            Ok((rules, sources)) => {
+                after_connection_write(state, id, &rules, &rules, &sources, "embedding test");
+            }
+            Err(error) => tracing::warn!(
+                connection_id = %id,
+                error_kind = meta_error_kind(&error),
+                "could not store the connection status"
+            ),
+        }
+    }
+    tracing::info!(
+        target: "audit",
+        connection_id = %id,
+        org_id = %org_id,
+        user_id = %user_id,
+        ok = result.ok,
+        latency_ms,
+        "llm connection tested"
+    );
+    Ok(result)
+}
+
 /// After a connection write: the breakers of `reset` start over, each resumed rule is audited,
-/// and the dispatcher wakes when there is something to run (D-I-14).
+/// and the dispatcher wakes when there is something to run (D-I-14). The issue workers wake when
+/// a source was resumed.
 fn after_connection_write(
     state: &AppState,
     connection: Uuid,
     reset: &[Uuid],
     resumed: &[Uuid],
+    sources: &[Uuid],
     reason: &'static str,
 ) {
     for rule in reset {
@@ -610,6 +758,9 @@ fn after_connection_write(
     }
     if !reset.is_empty() {
         state.eval.wake();
+    }
+    if !sources.is_empty() {
+        state.issues_wake();
     }
 }
 
@@ -925,7 +1076,7 @@ mod tests {
     use crate::meta::members::add_org_member;
     use crate::meta::online_rules::{PAUSE_CONNECTION, PAUSE_ERRORS};
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::mock_llm::{MockLlm, Reply, completion};
+    use crate::test_support::mock_llm::{MockLlm, Reply, completion, embedding};
     use crate::test_support::{TestApp, TestResponse, capture_logs};
 
     fn cookie_pair(set_cookie: &HeaderValue) -> String {
@@ -1247,6 +1398,127 @@ mod tests {
             paused_reason_of(&app, by_errors).await.as_deref(),
             Some(PAUSE_ERRORS)
         );
+    }
+
+    /// An issue source of `seeded`'s project that uses `connection` for embeddings, paused by it.
+    /// Returns its id.
+    async fn embedding_source_paused(
+        app: &TestApp,
+        seeded: &crate::test_support::Seeded,
+        connection: Uuid,
+    ) -> Uuid {
+        let (project, now) = (seeded.project.id, app.state.clock.now_ns());
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    let id = Uuid::now_v7();
+                    issues::insert_source(
+                        conn,
+                        &issues::SourceRow {
+                            id,
+                            project_id: project,
+                            name: "embeddings".to_owned(),
+                            kind: issues::SourceKind::Score,
+                            filter: None,
+                            enabled: true,
+                            paused_reason: None,
+                            paused_at: None,
+                            created_by: None,
+                            created_at: now,
+                            updated_at: now,
+                            sample_rate: None,
+                            daily_cap: None,
+                            score_names: Vec::new(),
+                            feedback_sources: Vec::new(),
+                            chat_connection_id: None,
+                            chat_model: None,
+                            embed_connection_id: Some(connection),
+                            embed_model: Some("text-embedding-test".to_owned()),
+                            embed_dimension: None,
+                            floor: None,
+                            min_issue_size: None,
+                            budget_usd: None,
+                            budget_period: None,
+                            paused_detail: None,
+                            next_refit_at: None,
+                        },
+                    )
+                    .await?;
+                    issues::pause_sources_of_connection(conn, connection, Some("bad key"), now)
+                        .await?;
+                    Ok::<_, MetaError>(id)
+                })
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn source_paused_reason(app: &TestApp, id: Uuid) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT paused_reason FROM issue_sources WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_embedding_test_resumes_source_pauses() {
+        let mock = MockLlm::start_with_embeddings(Vec::new(), vec![embedding(&[0.6, 0.8])]).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &mock).await;
+        let source = embedding_source_paused(&app, &seeded, id).await;
+        assert_eq!(
+            source_paused_reason(&app, source).await.as_deref(),
+            Some("connection")
+        );
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result = response.json::<LlmConnectionTestResult>();
+        assert!(result.ok, "{:?}", result.error);
+        assert_eq!(result.model, "text-embedding-test");
+        assert_eq!(source_paused_reason(&app, source).await, None);
+    }
+
+    #[tokio::test]
+    async fn an_embedding_test_on_anthropic_is_refused_without_a_call() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Claude", "adapter": "anthropic", "api_key": "sk-ant-test-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result = response.json::<LlmConnectionTestResult>();
+        assert!(!result.ok);
+        let error = result.error.expect("a refused test carries its error");
+        assert!(matches!(error.class, TestErrorClass::Permanent));
+        assert_eq!(error.message, "This provider has no embeddings API.");
     }
 
     #[tokio::test]

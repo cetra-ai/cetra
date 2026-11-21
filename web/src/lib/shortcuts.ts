@@ -8,8 +8,13 @@ export const GO_TARGETS = {
   q: { id: "go-sql", to: "/$org/$project/sql" },
   e: { id: "go-evaluators", to: "/$org/$project/evaluators" },
   o: { id: "go-online-rules", to: "/$org/$project/online-rules" },
+  y: { id: "go-issues", to: "/$org/$project/issues" },
+  n: { id: "go-issue-sources", to: "/$org/$project/issue-sources" },
+  r: { id: "go-annotation-queues", to: "/$org/$project/annotation-queues" },
   i: { id: "go-datasets", to: "/$org/$project/datasets" },
   x: { id: "go-experiments", to: "/$org/$project/experiments" },
+  m: { id: "go-prompts", to: "/$org/$project/prompts" },
+  l: { id: "go-playground", to: "/$org/$project/playground" },
 } as const;
 
 type GoTarget = (typeof GO_TARGETS)[keyof typeof GO_TARGETS];
@@ -25,7 +30,8 @@ export type ShortcutId =
   | "fit"
   | "palette"
   | "help"
-  | GoTarget["id"];
+  | GoTarget["id"]
+  | "assistant";
 
 type Binding = { id: ShortcutId; key: string; mod?: boolean };
 
@@ -92,6 +98,18 @@ export const SHORTCUTS: readonly Shortcut[] = [
     bindings: [],
   },
   {
+    keys: "⌘↵",
+    description: "Complete and go to the next item",
+    scope: "Annotation queue",
+    bindings: [],
+  },
+  {
+    keys: "⌘⇧↵",
+    description: "Next item without completing",
+    scope: "Annotation queue",
+    bindings: [],
+  },
+  {
     keys: "g then a letter",
     description: "Go to a project page (the letters are in each sidebar tooltip)",
     scope: "project",
@@ -102,6 +120,12 @@ export const SHORTCUTS: readonly Shortcut[] = [
     description: "Command palette",
     scope: "anywhere",
     bindings: [{ id: "palette", key: "k", mod: true }],
+  },
+  {
+    keys: "⌘I",
+    description: "Open or close the assistant",
+    scope: "project",
+    bindings: [{ id: "assistant", key: "i", mod: true }],
   },
   {
     keys: "?",
@@ -120,6 +144,7 @@ export type KeyInfo = {
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
+  shiftKey?: boolean;
 };
 
 export function isElementShortcut(id: ShortcutId): boolean {
@@ -173,6 +198,12 @@ export function reduceShortcut(
   if (palette) {
     return { chord: null, action: "palette" };
   }
+  // Before the typing check: the assistant's composer is a textarea, and Ctrl/Cmd+I must still work there.
+  const assistant =
+    key.key.toLowerCase() === "i" && (key.metaKey || key.ctrlKey) && !key.altKey && !key.shiftKey;
+  if (assistant) {
+    return { chord: null, action: "assistant" };
+  }
   if (typing || key.metaKey || key.ctrlKey || key.altKey) {
     return { chord: null, action: null };
   }
@@ -223,4 +254,28 @@ export function dispatchShortcut(id: ShortcutId, event: KeyboardEvent): void {
   for (const handler of [...set]) {
     handler(event);
   }
+}
+
+/** Whether the browser runs on an Apple platform, where the shortcuts' modifier is ⌘. */
+export function isApplePlatform(userAgent: string): boolean {
+  return /Mac|iPhone|iPad/.test(userAgent);
+}
+
+/** How the other platforms spell the Apple key symbols. */
+const OTHER_PLATFORM_KEYS: Record<string, string> = {
+  "⌘": "Ctrl",
+  "⇧": "Shift",
+  "⌥": "Alt",
+  "↵": "Enter",
+};
+
+/**
+ * A shortcut as the user's platform spells it. `keys` is written the Apple way (`⌘⇧↵`); elsewhere
+ * a chord becomes `Ctrl+Shift+Enter`. Keys without a modifier (`g then a letter`) are unchanged.
+ */
+export function shortcutLabel(keys: string, userAgent: string): string {
+  if (isApplePlatform(userAgent) || !/[⌘⇧⌥]/.test(keys)) {
+    return keys;
+  }
+  return [...keys].map((key) => OTHER_PLATFORM_KEYS[key] ?? key).join("+");
 }

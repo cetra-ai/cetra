@@ -22,9 +22,10 @@ pub(crate) fn time_window(window: TimeWindow) -> Expr {
 
 /// Default list exclusions.
 ///
-/// The eval clause is omitted when the caller asked for eval rows or the
-/// filter already names `environment`. The experiment clause is omitted when
-/// the caller asked for experiment rows. `None` means both clauses are off.
+/// One clause per reserved environment ([`environment::RESERVED`]) is omitted
+/// when the caller asked for evaluation, playground and assistant rows (`include_eval`) or
+/// the filter already names `environment`. The experiment clause is omitted when
+/// the caller asked for experiment rows. `None` means every clause is off.
 ///
 /// The metadata lookup is planned from fixed text, so the key comes from
 /// [`metadata_key`] and is not interpolated from a caller.
@@ -41,11 +42,13 @@ pub(crate) fn exclusions(
 ) -> Result<Option<Expr>, RunError> {
     let mut clauses = Vec::new();
     if !(include_eval || filter_references_environment) {
-        clauses.push(binary_expr(
-            col(traces::ENVIRONMENT),
-            Operator::IsDistinctFrom,
-            lit(environment::EVAL),
-        ));
+        clauses.extend(environment::RESERVED.iter().map(|reserved| {
+            binary_expr(
+                col(traces::ENVIRONMENT),
+                Operator::IsDistinctFrom,
+                lit(*reserved),
+            )
+        }));
     }
     if !include_experiments {
         let key = metadata_key::EXPERIMENT_ID.replace('\'', "''");
@@ -60,9 +63,10 @@ pub(crate) fn exclusions(
     Ok(clauses.into_iter().reduce(Expr::and))
 }
 
-/// Exclusions that no request flag and no filter can turn off (D-I-9): evaluation traces and
-/// experiment traces. On `spans`, the test is on the span's trace, not on the span. `trace_ids`,
-/// when given, are the only traces the caller reads: the `spans` subquery is limited to them.
+/// Exclusions that no request flag and no filter can turn off (D-I-9): evaluation, playground and assistant
+/// traces (every reserved environment) and experiment traces. On `spans`, the test is on the
+/// span's trace, not on the span. `trace_ids`, when given, are the only traces the caller reads:
+/// the `spans` subquery is limited to them.
 ///
 /// # Errors
 ///

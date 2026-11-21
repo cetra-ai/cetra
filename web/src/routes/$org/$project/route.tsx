@@ -14,7 +14,10 @@ import { projectInit, projectQuery, traceDetailQuery } from "@/api/queries";
 import { datasetQuery } from "@/api/queries-datasets";
 import { evaluatorQuery } from "@/api/queries-evaluation";
 import { experimentQuery } from "@/api/queries-experiments";
+import { AssistantPanel } from "@/components/assistant/assistant-panel";
+import { AssistantWindow } from "@/components/assistant/assistant-window";
 import { openTraceId } from "@/components/command/recent-traces";
+import { useShortcut } from "@/components/command/use-shortcut";
 import { DashboardView } from "@/components/dashboard/dashboard-view";
 import { ScoreDefinitionsProvider } from "@/components/score-badge";
 import { isProjectSettingsPath } from "@/components/settings/settings-nav";
@@ -22,7 +25,11 @@ import { SettingsSidebar } from "@/components/settings/settings-sidebar";
 import { ProjectProvider, useProject } from "@/components/shell/project-context";
 import { ProjectSidebar } from "@/components/shell/project-sidebar";
 import { type RecentKind, rememberItem } from "@/components/shell/recent-items";
+import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { useNarrowViewport } from "@/hooks/use-narrow-viewport";
+import { setPanelOpen, togglePanel, usePanelOpen } from "@/lib/assistant/panel";
 import { rememberLastProject } from "@/lib/last-project";
+import { canUseAssistant } from "@/lib/roles";
 import type { DashboardSearch } from "@/lib/search/dashboard";
 
 export const Route = createFileRoute("/$org/$project")({
@@ -147,25 +154,62 @@ function ProjectLayout() {
   );
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const inSettings = isProjectSettingsPath(pathname, org, project);
+  const ref = projectRef(org, project);
+  const narrow = useNarrowViewport();
+  const panelOpen = usePanelOpen();
+  const canAssistant = canUseAssistant(data.role);
+  const shown = panelOpen && canAssistant;
+  // A window over the page on a wide window; a full-width sheet on a narrow one (D-AS-26).
+  const floating = shown && !narrow;
+  const sheet = shown && narrow;
 
   useEffect(() => {
     rememberLastProject(org, { slug: project, name: data.name });
   }, [org, project, data.name]);
 
+  useShortcut("assistant", () => {
+    if (canAssistant) {
+      togglePanel();
+    }
+  });
+
   return (
-    <ProjectProvider value={{ org, project, ref: projectRef(org, project), data }}>
+    <ProjectProvider value={{ org, project, ref, data }}>
       <ScoreDefinitionsProvider>
         <RememberOpenItem />
-        {inSettings ? (
-          <SettingsSidebar org={org} project={{ slug: project, name: data.name, role: data.role }}>
-            <Outlet />
-          </SettingsSidebar>
-        ) : (
-          <ProjectSidebar>
-            <Outlet />
-            <KeptDashboard />
-          </ProjectSidebar>
-        )}
+        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+          {inSettings ? (
+            <SettingsSidebar
+              org={org}
+              project={{ slug: project, name: data.name, role: data.role }}
+            >
+              <Outlet />
+            </SettingsSidebar>
+          ) : (
+            <ProjectSidebar>
+              <Outlet />
+              <KeptDashboard />
+            </ProjectSidebar>
+          )}
+        </div>
+        {sheet ? (
+          <Sheet
+            open
+            onOpenChange={(open) => {
+              setPanelOpen(open);
+            }}
+          >
+            <SheetContent side="right" showCloseButton={false} className="w-full sm:max-w-none">
+              <SheetTitle className="sr-only">Assistant</SheetTitle>
+              <AssistantPanel key={ref} layout="sheet" />
+            </SheetContent>
+          </Sheet>
+        ) : null}
+        {floating ? (
+          <AssistantWindow>
+            <AssistantPanel key={ref} layout="floating" />
+          </AssistantWindow>
+        ) : null}
       </ScoreDefinitionsProvider>
     </ProjectProvider>
   );

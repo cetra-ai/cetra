@@ -3,9 +3,16 @@ import type { Schema } from "@/api/types";
 import datasetItemDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/items/01900000-0000-7000-8000-000000000d02.json";
 import datasetVersionsDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01/versions.json";
 import datasetDocument from "../../../fixtures/api/responses/datasets/01900000-0000-7000-8000-000000000c01.json";
+import promptSettingsDocument from "../../../fixtures/api/responses/prompt-settings.json";
+import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
+import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
+import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
+import annotationQueueDocument from "../../../fixtures/api/static/annotation-queue.json";
+import annotationQueueItemDocument from "../../../fixtures/api/static/annotation-queue-item.json";
+import annotationQueueItemsAddedDocument from "../../../fixtures/api/static/annotation-queue-items-added.json";
 import apiKeyCreatedDocument from "../../../fixtures/api/static/api-key-created.json";
 import backfillDocument from "../../../fixtures/api/static/backfill.json";
 import backfillEstimateDocument from "../../../fixtures/api/static/backfill-estimate.json";
@@ -26,6 +33,8 @@ import evaluatorDocument from "../../../fixtures/api/static/evaluator.json";
 import evaluatorTestResultDocument from "../../../fixtures/api/static/evaluator-test-result.json";
 import experimentDocument from "../../../fixtures/api/static/experiment.json";
 import inviteCreatedDocument from "../../../fixtures/api/static/invite-created.json";
+import issueDocument from "../../../fixtures/api/static/issue.json";
+import issueSourceDocument from "../../../fixtures/api/static/issue-source.json";
 import llmConnectionDocument from "../../../fixtures/api/static/llm-connection.json";
 import llmConnectionTestDocument from "../../../fixtures/api/static/llm-connection-test.json";
 import meDocument from "../../../fixtures/api/static/me.json";
@@ -120,6 +129,12 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "post_llm_connection_test",
     method: "post",
     path: "/api/v1/orgs/{org}/llm-connections/{id}/test",
+  },
+  { operationId: "put_org_assistant", method: "put", path: "/api/v1/orgs/{org}/assistant" },
+  {
+    operationId: "post_org_assistant_test",
+    method: "post",
+    path: "/api/v1/orgs/{org}/assistant/test",
   },
   { operationId: "post_org_model_price", method: "post", path: "/api/v1/orgs/{org}/models" },
   {
@@ -272,6 +287,46 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/projects/{project}/online-rules/preview",
   },
   {
+    operationId: "post_issue_source",
+    method: "post",
+    path: "/api/v1/projects/{project}/issue-sources",
+  },
+  {
+    operationId: "patch_issue_source",
+    method: "patch",
+    path: "/api/v1/projects/{project}/issue-sources/{id}",
+  },
+  {
+    operationId: "post_issue_source_refit",
+    method: "post",
+    path: "/api/v1/projects/{project}/issue-sources/{id}/refit",
+  },
+  {
+    operationId: "delete_issue_source",
+    method: "delete",
+    path: "/api/v1/projects/{project}/issue-sources/{id}",
+  },
+  {
+    operationId: "patch_issue",
+    method: "patch",
+    path: "/api/v1/projects/{project}/issues/{id}",
+  },
+  {
+    operationId: "post_issue_merge",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/merge",
+  },
+  {
+    operationId: "post_issue_dataset_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/dataset-items",
+  },
+  {
+    operationId: "post_issue_queue_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/issues/{id}/queue-items",
+  },
+  {
     operationId: "post_online_rule_resume",
     method: "post",
     path: "/api/v1/projects/{project}/online-rules/{id}/resume",
@@ -378,6 +433,102 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/projects/{project}/experiments/{id}/finish",
   },
+  {
+    operationId: "put_prompt_settings",
+    method: "put",
+    path: "/api/v1/projects/{project}/prompt-settings",
+  },
+  { operationId: "post_prompt", method: "post", path: "/api/v1/projects/{project}/prompts" },
+  {
+    operationId: "patch_prompt",
+    method: "patch",
+    path: "/api/v1/projects/{project}/prompts/{prompt}",
+  },
+  {
+    operationId: "delete_prompt",
+    method: "delete",
+    path: "/api/v1/projects/{project}/prompts/{prompt}",
+  },
+  {
+    operationId: "put_prompt_label",
+    method: "put",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+  },
+  {
+    operationId: "delete_prompt_label",
+    method: "delete",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+  },
+  {
+    operationId: "post_prompt_version",
+    method: "post",
+    path: "/api/v1/projects/{project}/prompts/{prompt}/versions",
+  },
+  {
+    operationId: "create_annotation_queue",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues",
+  },
+  {
+    operationId: "update_annotation_queue",
+    method: "patch",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}",
+  },
+  {
+    operationId: "delete_annotation_queue",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}",
+  },
+  {
+    operationId: "add_annotation_queue_items",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items",
+  },
+  {
+    operationId: "remove_annotation_queue_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+  },
+  {
+    operationId: "next_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/next",
+  },
+  {
+    operationId: "lease_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+  },
+  {
+    operationId: "release_annotation_queue_item",
+    method: "delete",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+  },
+  {
+    operationId: "complete_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+  },
+  {
+    operationId: "skip_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+  },
+  {
+    operationId: "reopen_annotation_queue_item",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+  },
+  {
+    operationId: "preview_annotation_queue_matching",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+  },
+  {
+    operationId: "add_annotation_queue_matching",
+    method: "post",
+    path: "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+  },
 ];
 
 type Respond = (input: {
@@ -475,6 +626,23 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...llmConnectionDocument, ...named(body) }),
   delete_llm_connection: () => noContent(),
   post_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
+  put_org_assistant: ({ body }) => {
+    const enabled = body.enabled === true;
+    const connectionId = trimmed(body.connection_id);
+    if (enabled && connectionId === undefined) {
+      return problem(400, "bad_request", undefined, [
+        { field: "connection_id", message: "required when enabled" },
+      ]);
+    }
+    const model = trimmed(body.model);
+    return HttpResponse.json({
+      enabled,
+      ...(connectionId !== undefined ? { connection_id: connectionId } : {}),
+      ...(model !== undefined ? { model } : {}),
+      updated_at: new Date().toISOString(),
+    });
+  },
+  post_org_assistant_test: () => HttpResponse.json(llmConnectionTestDocument),
   post_org_model_price: ({ body }) =>
     HttpResponse.json({ ...orgModelPricesDocument.data[0], ...priced(body) }, { status: 201 }),
   patch_org_model_price: ({ body, params }) =>
@@ -698,6 +866,20 @@ const RESPONSES: Record<string, Respond> = {
   patch_online_rule: ({ body }) => HttpResponse.json({ ...onlineRuleDocument, ...named(body) }),
   delete_online_rule: () => noContent(),
   post_online_rule_preview: () => HttpResponse.json(onlineRulePreviewDocument),
+  post_issue_source: ({ body }) =>
+    HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }, { status: 201 }),
+  patch_issue_source: ({ body }) =>
+    HttpResponse.json({ ...issueSourceDocument, ...sourceOverrides(body) }),
+  post_issue_source_refit: ({ params }) =>
+    HttpResponse.json({ ...issueSourceDocument, id: params.id }, { status: 202 }),
+  delete_issue_source: () => noContent(),
+  patch_issue: ({ body, params }) =>
+    HttpResponse.json({ ...issueDocument, ...body, id: params.id }),
+  post_issue_merge: () => HttpResponse.json(issueDocument),
+  post_issue_dataset_items: () =>
+    HttpResponse.json(datasetItemsFromTracesDocument, { status: 201 }),
+  post_issue_queue_items: () =>
+    HttpResponse.json(annotationQueueItemsAddedDocument, { status: 201 }),
   post_online_rule_resume: ({ params }) =>
     HttpResponse.json({ ...onlineRuleResumedDocument, id: params.id }),
   post_backfill_estimate: () => HttpResponse.json(backfillEstimateDocument),
@@ -749,6 +931,48 @@ const RESPONSES: Record<string, Respond> = {
     }),
   post_experiment_finish: ({ params }) =>
     HttpResponse.json({ ...experimentDocument, id: params.id, status: "completed" }),
+  put_prompt_settings: () => HttpResponse.json(promptSettingsDocument),
+  post_prompt: ({ body }) =>
+    HttpResponse.json({ ...promptVersion1Document, ...named(body) }, { status: 201 }),
+  patch_prompt: ({ body }) => HttpResponse.json({ ...promptDocument, ...named(body) }),
+  delete_prompt: () => noContent(),
+  put_prompt_label: () => HttpResponse.json(promptDocument),
+  delete_prompt_label: () => noContent(),
+  post_prompt_version: () => HttpResponse.json(promptVersion2Document, { status: 201 }),
+  create_annotation_queue: ({ body }) =>
+    HttpResponse.json(
+      { ...annotationQueueDocument, name: trimmed(body.name) ?? annotationQueueDocument.name },
+      { status: 201 },
+    ),
+  update_annotation_queue: ({ body }) =>
+    HttpResponse.json({
+      ...annotationQueueDocument,
+      ...body,
+      version: annotationQueueDocument.version + 1,
+    }),
+  delete_annotation_queue: () => noContent(),
+  add_annotation_queue_items: ({ body }) =>
+    HttpResponse.json(
+      {
+        added: Array.isArray(body.items) ? body.items.length : 0,
+        existing: 0,
+        skipped: [],
+      },
+      { status: 201 },
+    ),
+  remove_annotation_queue_item: () => noContent(),
+  next_annotation_queue_item: () => HttpResponse.json(annotationQueueItemDocument),
+  lease_annotation_queue_item: () => HttpResponse.json(annotationQueueItemDocument),
+  release_annotation_queue_item: () => noContent(),
+  complete_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "completed" }),
+  skip_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "skipped" }),
+  reopen_annotation_queue_item: () =>
+    HttpResponse.json({ ...annotationQueueItemDocument, status: "pending" }),
+  preview_annotation_queue_matching: () => HttpResponse.json({ matched: 42, capped: false }),
+  add_annotation_queue_matching: () =>
+    HttpResponse.json({ added: 42, existing: 0, blocked: 0, capped: false }, { status: 201 }),
 };
 
 export const writeHandlers: HttpHandler[] = WRITE_OPERATIONS.map((operation) => {
@@ -772,6 +996,21 @@ function trimmed(value: unknown): string | undefined {
     return undefined;
   }
   return value.trim();
+}
+
+/** The source fixture's overrides: the body's name, kind, filter and enabled, when given. */
+function sourceOverrides(body: Record<string, unknown>): {
+  name?: string;
+  kind?: string;
+  filter?: string | null;
+  enabled?: boolean;
+} {
+  return {
+    ...named(body),
+    ...(typeof body.kind === "string" ? { kind: body.kind } : {}),
+    ...("filter" in body ? { filter: typeof body.filter === "string" ? body.filter : null } : {}),
+    ...(typeof body.enabled === "boolean" ? { enabled: body.enabled } : {}),
+  };
 }
 
 /** The connection fixture's overrides, with `name` from the body when it is a string. */

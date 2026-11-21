@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useFacetQuery } from "@/api/queries";
 import { liveScoreDefinitionsQuery } from "@/api/queries-evaluation";
+import { issueIdFromScoreName, issueScoreName, openIssuesQuery } from "@/api/queries-issues";
 import type { FacetScope } from "@/components/facets/facet-panel";
 import { useProject } from "@/components/shell/project-context";
 import {
@@ -23,17 +24,23 @@ import {
 } from "@/lib/facets";
 import { formatCost, formatDuration } from "@/lib/format";
 
-/** The preset chips of row 2 (D6). `scope` is the list's window and flags, as the facet panel's. */
+/**
+ * The preset chips of row 2 (D6). `scope` is the list's window and flags, as the facet panel's.
+ * While `hold` (the list waits for its default saved view), the p95s are not asked: the view may
+ * change the window, and asking with the panel's sections makes one facet request (D-C-24).
+ */
 export function PresetChips({
   view,
   filter,
   onFilter,
   scope,
+  hold = false,
 }: {
   view: FacetView;
   filter: string;
   onFilter: (text: string) => void;
   scope: FacetScope;
+  hold?: boolean;
 }) {
   return (
     <div className="flex shrink-0 flex-wrap items-center gap-1">
@@ -49,10 +56,12 @@ export function PresetChips({
             filter={filter}
             onFilter={onFilter}
             scope={scope}
+            hold={hold}
           />
         ),
       )}
       {view === "traces" ? <HasScorePreset filter={filter} onFilter={onFilter} /> : null}
+      {view === "traces" ? <HasIssuePreset filter={filter} onFilter={onFilter} /> : null}
     </div>
   );
 }
@@ -87,6 +96,7 @@ function BoundPreset({
   filter,
   onFilter,
   scope,
+  hold,
 }: {
   preset: PresetDef;
   p95Field: string;
@@ -94,17 +104,22 @@ function BoundPreset({
   filter: string;
   onFilter: (text: string) => void;
   scope: FacetScope;
+  hold: boolean;
 }) {
   const { org, project } = useProject();
-  const query = useFacetQuery(org, project, {
-    view,
-    field: p95Field,
-    from: scope.from,
-    to: scope.to,
-    includeEval: scope.includeEval,
-    includeExperiments: scope.includeExperiments,
-    limit: 1,
-  });
+  const query = useFacetQuery(
+    org,
+    project,
+    {
+      view,
+      field: p95Field,
+      from: scope.from,
+      to: scope.to,
+      includeEval: scope.includeEval,
+      includeExperiments: scope.includeExperiments,
+    },
+    { enabled: !hold },
+  );
   const p95 = query.data?.histogram?.p95;
   const bound = p95 === undefined ? undefined : roundP95(p95);
   const pressed = presetActive(filter, preset);
@@ -173,6 +188,11 @@ function toggleHasScore(filter: string, name: string): string {
     .reduce((joined, conjunct) => appendFilter(joined, conjunct.text), "");
 }
 
+/** The score definitions' names in the filter: issue names (D-IC-18) are not score definitions. */
+function hasScoreNames(active: Set<string>): string[] {
+  return [...active].filter((name) => issueIdFromScoreName(name) === undefined);
+}
+
 /** Has score: a menu of the project's live score definitions, one checked item per name (D6). */
 function HasScorePreset({
   filter,
@@ -187,7 +207,7 @@ function HasScorePreset({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Toggle size="sm" className="h-6 px-2" pressed={active.size > 0}>
+        <Toggle size="sm" className="h-6 px-2" pressed={hasScoreNames(active).length > 0}>
           Has score
         </Toggle>
       </DropdownMenuTrigger>
@@ -202,6 +222,46 @@ function HasScorePreset({
             onCheckedChange={() => onFilter(toggleHasScore(filter, definition.name))}
           >
             {definition.name}
+          </DropdownMenuCheckboxItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Has issue: a menu of the 20 most recent open issues, one checked item per issue (track IC). */
+function HasIssuePreset({
+  filter,
+  onFilter,
+}: {
+  filter: string;
+  onFilter: (text: string) => void;
+}) {
+  const { org, project } = useProject();
+  const issues = useQuery(openIssuesQuery(org, project));
+  const active = scoreNamesIn(filter);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Toggle
+          size="sm"
+          className="h-6 px-2"
+          pressed={[...active].some((name) => issueIdFromScoreName(name) !== undefined)}
+        >
+          Has issue
+        </Toggle>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start">
+        {issues.data?.data.length === 0 ? (
+          <DropdownMenuLabel>No open issues</DropdownMenuLabel>
+        ) : null}
+        {issues.data?.data.map((issue) => (
+          <DropdownMenuCheckboxItem
+            key={issue.id}
+            checked={active.has(issueScoreName(issue.id))}
+            onCheckedChange={() => onFilter(toggleHasScore(filter, issueScoreName(issue.id)))}
+          >
+            {issue.title}
           </DropdownMenuCheckboxItem>
         ))}
       </DropdownMenuContent>

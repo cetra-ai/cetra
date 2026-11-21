@@ -1,0 +1,192 @@
+---
+title: Issues
+description: Group production errors into issues that you can resolve, ignore and merge, and see how often they happen.
+---
+
+This page shows how to group production errors, bad scores, user feedback and topics into issues, and how to resolve, ignore and merge them.
+
+## What an issue is
+
+An issue is a recurring error in your production traces. An **issue source** reads the error spans of completed traces. Each distinct error becomes one issue. Each trace that contains the error is an **occurrence** of the issue.
+
+Every occurrence is written as a score named `issue:<issue id>`, with the source `issue`. Occurrences do not count as billable units. The trace list can filter on them, and the trace view shows an issue chip for each issue of the trace.
+
+A source only sees traces that complete after you create it. Older traces do not become issues.
+
+Sources of other kinds read bad scores, user feedback and new traces, and group them with an LLM. See [Grouping bad scores, feedback and topics](#grouping-bad-scores-feedback-and-topics).
+
+## Create an error source
+
+1. Open the project and select **Issue sources** under **Evaluate**.
+2. Select **New source**.
+3. Enter a **Name**. The name must be unique in the project.
+4. Keep **Kind** set to **Errors**.
+5. Optional: enter a **Filter** in the same syntax as the trace list filter, to limit the spans the source reads. cetra always adds `status = 'error'`, so the filter does not need it.
+6. Keep **Enabled** on, and select **Create source**.
+
+## How errors are grouped
+
+cetra gives each error span a fingerprint from four values:
+
+- the service name;
+- the span name;
+- the exception type;
+- the error message, after normalization.
+
+The exception type and the message come from the span's last `exception` event. When that event has no message, cetra uses the span's status message.
+
+Normalization replaces the parts of a message that change from one occurrence to the next, so the same error with different values is one issue:
+
+| Part of the message | Becomes |
+|---|---|
+| A URL | `<url:SCHEME://HOST>`, with the scheme and host only |
+| An email address | `<email>` |
+| A UUID | `<uuid>` |
+| An ISO 8601 date or timestamp | `<time>` |
+| An IPv4 or IPv6 address | `<ip>` |
+| A file path with two or more segments | `<path>` |
+| A hex string of 8 or more characters that has letters and digits | `<hex>` |
+| A quoted string of 3 or more characters | `<str>` |
+| A number | `<n>` |
+
+Then cetra collapses runs of whitespace and cuts the message at 512 characters.
+
+Known limits: a compressed IPv6 address such as `fe80::1` is not recognized, and a date such as `11/20/2026` becomes `<path>`. Normalization removes common shapes of personal data, but a message can still contain a name in plain words. Check the titles of the issues you share.
+
+The title of an issue is the exception type, or the span name when there is no exception type, followed by the normalized message. You can rename an issue.
+
+## States
+
+An issue is in one of four states:
+
+| State | Meaning |
+|---|---|
+| Open | Needs attention. New issues start here. |
+| Resolved | You fixed the problem. |
+| Ignored | You muted the issue. cetra keeps counting its occurrences. |
+| Merged | You merged it into another issue. |
+
+On the issue page, select **Resolve**, **Ignore** or **Reopen** to change the state.
+
+## Regression
+
+When an error of a resolved issue happens again, cetra reopens the issue, marks it **Regressed** and records a `regressed` event. cetra compares the start time of each trace with the time you resolved the issue. A trace that started before you resolved the issue does not reopen it, even when it finishes later.
+
+The **History** section of the issue page lists every change, with the person who made it.
+
+## Merge issues
+
+Merge an issue into another one when both describe the same problem.
+
+1. Open the issue and select **Merge into…**.
+2. Choose the issue to merge into. It must belong to the same source and must not be merged itself.
+3. Select **Merge**.
+
+The merged issue stops, and its occurrences count on the issue you merged into. Merging cannot be undone.
+
+## View traces
+
+Select **View traces** on an issue to open the trace list, filtered to the traces of that issue. The filter also includes the issues merged into it, up to eight issues in total. The page says when it leaves some out.
+
+To filter the trace list by issue, select **Has issue** in the filter bar and choose the issues.
+
+## Add examples to a dataset
+
+Copy the traces of an issue into a dataset to use them in an experiment or as regression examples.
+
+1. Open the issue and select **Add examples to dataset**. You need permission to manage datasets.
+2. In the dialog, choose a dataset, or enter a name to create one.
+3. Select **Add**.
+
+cetra takes the newest occurrences of the issue and of the issues merged into it, one trace each, up to 100, and adds them to the dataset as one new version. An item uses the span that raised the error when there is one, and the trace root otherwise. Each item carries the metadata key `cetra.issue_id`. The result lists the traces cetra could not copy. Through the API, `limit` takes 1 to 100. Read more about datasets in [Datasets](/docs/evaluation/datasets/).
+
+## Send to a queue
+
+Send the newest occurrences of an issue to an annotation queue, to review them there.
+
+1. Open the issue and select **Send to queue**. You need permission to manage annotation queues. Members and above have it.
+2. Choose a queue, or select **New queue…** to create one.
+3. Select **Add**.
+
+cetra takes the newest occurrences of the issue and of the issues merged into it, up to 100. What it adds depends on the kind of the queue:
+
+- A trace queue gets one item per trace.
+- A span queue gets the span of each occurrence. Error issues have a span for each occurrence. An occurrence without a span is listed as not added.
+- A session queue gets one item per session. An occurrence without a session is listed as not added.
+
+An item that is already in the queue is not added twice. A trace or session that a deletion is removing is skipped. The result says how many items were added, how many were already in the queue, and which occurrences were skipped. Through the API you can send up to 1,000 at a time. See the [API reference](/docs/reference/api/overview/). To review the items, see [Annotation queues](/docs/evaluation/annotation-queues/).
+
+## Create an alert
+
+1. Open the issue and select **Create alert**.
+2. The rule form opens with the metric **Issue occurrences**, the issue, a window of 1 hour, **Above** and a threshold of 0. Change what you need.
+3. Choose the channels and save the rule.
+
+An alert on an issue fires when its occurrences in the window pass the threshold. The window must be 15 minutes or more. See [Alerts](/docs/platform/alerts/#alert-on-an-issue).
+
+## Notifications
+
+An issue source can send its new and regressed issues to channels of the project. Choose the channels on the source, not on an alert rule.
+
+1. Open **Issue sources** under **Evaluate**, and select the source.
+2. Select **Edit**.
+3. In **Notifications**, check the channels to notify. The channels are the project's channels, under **Settings**, then **Channels**.
+4. Select **Save**.
+
+A new or regressed issue of the source is sent to each checked channel. A source sends at most one message per channel every 10 minutes, so messages from one source are about 9 to 10 minutes apart. Each message lists up to 20 issues, newest first. A webhook channel receives a JSON body with the type `issues.detected`, the source, the project, the listed issues with their titles, and the number of the rest. Email and Slack carry the same lines. Enabling a source, or giving it its first channel, starts from then, so you do not receive older issues.
+
+## Grouping bad scores, feedback and topics
+
+A source can also read bad scores, user feedback or new traces. cetra summarizes each candidate with a chat model, embeds the summary, and groups the candidates into issues. The summaries and embeddings run on your LLM connections, so they cost tokens.
+
+### Create the source
+
+1. Open **Issue sources** under **Evaluate**, and select **New source**.
+2. Enter a **Name**, and choose a **Kind**:
+   - **Bad scores** reads the scores of the score names you choose, and keeps those in the bad third of their range.
+   - **User feedback** reads the feedback scores of the score names you choose, from the feedback sources you choose.
+   - **Topics** reads new production traces.
+3. For bad scores and user feedback, select one or more **Score names**. The list shows your score definitions. For a name that has no definition, enter it in the field and select **Add score name**.
+4. For user feedback, select **End users**, **Human reviewers**, or both.
+5. Optional: enter a **Filter** over the traces view to limit the traces. An empty filter matches every trace.
+6. Choose a **Chat connection** and a **Chat model**, then an **Embedding connection** and an **Embedding model**.
+7. Set the **Sample rate (%)** and the **Daily cap**. Optional: select **Limit spend**, then enter an amount and a period.
+8. Optional: select **Advanced** to set the **Join floor** and the **Minimum issue size**.
+9. Select **Create source**.
+
+### How candidates are made
+
+- A bad score is a number or a category in the bad third of its score definition's range, in the definition's direction. A definition with no direction gives no bad scores.
+- A boolean score is bad at the value its definition's direction calls bad: `false` by default, or `true` when the direction is **Lower is better**. A boolean with no definition is bad when it is `false`.
+- A feedback candidate is a feedback score of a chosen name, from a chosen feedback source.
+- A topic candidate is a new production trace that matches the filter.
+
+The **Sample rate** is the share of matching items that become candidates. The **Daily cap** is the most candidates a UTC day admits, 500 by default. Matching items past the cap are skipped: they make no candidate, so cetra does not summarize or embed them.
+
+### Cost and budgets
+
+Each candidate gets one summary from your chat model and one embedding from your embedding model. Set **Limit spend** to stop the source at an amount per day or per month, in UTC. The source pauses at the limit, and it resumes when the period turns or when you raise the budget. A model with no price cannot have a budget. Add its price under **Settings › Model prices** first.
+
+If a connection fails, the source pauses, and its page shows the provider's error. Fix the connection under **Settings › LLM connections**. A successful connection test resumes the source.
+
+### Refits
+
+cetra groups the waiting candidates in a refit. The first refit runs an hour after you create the source, and then one runs every 6 hours. To group the candidates now, open the source page and select **Refit now**. A refit started less than 10 minutes ago blocks a new one. **Refit now** is unavailable while the source is disabled or paused.
+
+- A candidate joins the issue nearest to it when their similarity is at least the **Join floor**. The floor is 0.80 by default, and it can be from 0.5 to 0.99. A higher floor needs the candidates to be more alike.
+- Candidates that are alike enough to form a group of at least the **Minimum issue size** become a new issue, which cetra names with the chat model. The minimum is 5 by default, and it can be from 2 to 100.
+- A candidate that does not join an issue or form a group waits for the next refit. After seven days, a candidate that is still unassigned becomes an outlier.
+
+The source page lists each refit with its counts, its cost, and its error when it stopped early.
+
+### Embedding models
+
+The embedding connection and model are fixed when you create the source. To embed with another model, create a new source. Anthropic connections cannot embed, so choose a connection from another provider for the embedding model.
+
+## Plan limits
+
+The Free cloud plan allows one enabled issue source across your active projects. A disabled source does not count. Creating or enabling a second source on the Free plan fails with a message about the limit. Paid plans have no limit. See [Plans and licence](/docs/platform/plans-and-licence/).
+
+## Read issues from a coding agent
+
+The [MCP server](/docs/platform/mcp/) has a read-only `list_issues` tool. It lists the issues of a project with their state and their occurrences over the last 7 days.

@@ -1,0 +1,100 @@
+---
+title: OpenAI
+description: "Trace OpenAI calls with cetra: chat completions, the Responses API and embeddings, from Python and TypeScript."
+---
+
+import Backing from "../../../../components/Backing.astro";
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+cetra traces OpenAI chat completions, Responses API calls and embeddings, with their messages, tool calls, token counts and cost.
+
+<Backing fixtures={["openinference/openai-chat-tool", "openinference/openai-chat-stream", "openinference/openai-embeddings", "openinference/openai-responses-tool", "openllmetry/openai-chat-tool", "openllmetry/openai-chat-stream", "openllmetry/openai-embeddings", "genai/openai-v2-chat-tool", "genai/openai-v2-chat-stream", "genai/openai-v2-embeddings"]} tests={["sdks/python/tests/test_instrument.py::test_openai_end_to_end", "sdks/typescript/src/instrument.test.ts::openai helper"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" openai
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+```bash
+npm install @cetra-ai/sdk @arizeai/openinference-instrumentation-openai openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Turn on the instrumentation when you start cetra, then call OpenAI as usual. The spans nest under your own spans and carry the session, user, tags and metadata of the current context.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: needs cetra-sdk[openai] and an OpenAI key */}
+```python
+import cetra
+from openai import OpenAI
+
+cetra.init(instrument=["openai"])
+
+client = OpenAI()
+client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the weather in Paris?"}],
+)
+
+cetra.flush()
+```
+
+  </TabItem>
+  <TabItem label="TypeScript">
+
+{/* untested: the imports of the example below */}
+```ts
+import { init } from "@cetra-ai/sdk";
+import { openai } from "@cetra-ai/sdk/openai";
+import OpenAI from "openai";
+```
+
+{/* example:integration-openai */}
+```ts
+init({ apiKey: process.env.CETRA_API_KEY, instrument: [openai(OpenAI)] });
+```
+
+{/* untested: calls OpenAI */}
+```ts
+const client = new OpenAI();
+await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages: [{ role: "user", content: "What is the weather in Paris?" }],
+});
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat completion and each Responses API call is an `llm` span with the provider `openai`, the input and output as chat messages, and the tool definitions you passed.
+- A tool call in the answer shows as a tool call in the output messages. The tool result you send back shows in the next call's input.
+- Token counts include the cached input tokens when OpenAI reports them. cetra computes the cost from its price table.
+- Streamed answers record the time to first token with the OpenInference and OpenLLMetry instrumentations. The streamed fixture of the official OpenTelemetry instrumentation has no time to first token.
+- An embeddings call is an `embedding` span with the input token count and a cost.
+
+## Limits
+
+- The fixtures were captured with the OpenAI Python SDK 3.45.0 and these instrumentations: OpenInference 0.1.69, OpenLLMetry 0.62.4 and the official `opentelemetry-instrumentation-openai-v2` 2.4b0. Other versions are not covered.
+- Embedding vectors are not stored. Pass `capture_content=False` (Python) or `captureContent: false` to the helper and to `init` (TypeScript) to keep prompts and answers out of cetra.
+- If you use another instrumentation library, see [OpenInference](/docs/integrations/openinference/), [OpenLLMetry](/docs/integrations/openllmetry/) or [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

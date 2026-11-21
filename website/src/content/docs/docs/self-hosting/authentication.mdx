@@ -1,0 +1,133 @@
+---
+title: Authentication setup
+description: Set the sign-up policy, password login, GitHub, Google and OpenID Connect sign-in (Okta, Entra ID, Keycloak) for a self-hosted cetra.
+---
+
+This page shows how to choose who may sign in to your cetra instance and how, and how to connect GitHub, Google or your own identity provider.
+
+Set `public_url` to the address your members open, for example `https://cetra.example.com`. cetra builds every callback URL from it. See [Configuration](/docs/self-hosting/configuration/).
+
+## Sign-up policy
+
+| Setting | Environment | Default | Effect |
+|---|---|---|---|
+| `auth.signup` | `CETRA_AUTH_SIGNUP` | `invite_only` | `invite_only`: only invited emails can register. `open`: anyone can. `disabled`: no new accounts. |
+| `auth.signup_domains` | `CETRA_AUTH_SIGNUP_DOMAINS` | empty | With `open`, restrict sign-up to these email domains. |
+| `auth.disable_password` | `CETRA_AUTH_DISABLE_PASSWORD` | `false` | Refuse password sign-in and sign-up. Needs a configured provider. |
+| `auth.require_email_verification` | `CETRA_AUTH_REQUIRE_EMAIL_VERIFICATION` | `false` | New accounts must verify their email. Needs [SMTP](/docs/self-hosting/email/). |
+
+The first user to sign up, on the setup page the server prints at first start, becomes the instance admin. After that, the default `invite_only` keeps strangers out of an instance that is reachable from the internet.
+
+### Password login
+
+Passwords must be 10 to 128 characters and not in a list of common passwords. After 20 failed sign-ins for one email, cetra locks password sign-in for that email for 15 minutes. A password reset clears the lock.
+
+With `auth.disable_password`, members sign in through a provider only. Instance admins can still use a password at `/login?password=1`, so a broken provider does not lock you out.
+
+Without SMTP, run `cetra admin reset-password --email <EMAIL>` to print a reset link. See [Email](/docs/self-hosting/email/).
+
+## GitHub
+
+1. In GitHub, create an OAuth app.
+2. Set its callback URL to `<public_url>/api/auth/callback/github`.
+3. Copy the client ID and generate a client secret.
+4. Add them to the configuration:
+
+```toml
+[auth.github]
+client_id = "<CLIENT_ID>"
+client_secret = "<CLIENT_SECRET>"
+```
+
+To keep the secret out of the file, leave `client_secret` out and set `CETRA_AUTH__GITHUB__CLIENT_SECRET` in the service's environment file.
+
+cetra uses the primary verified email of the GitHub account. By default, a sign-in links to an existing account with the same email. Set `link_existing_by_email = false` to turn that off.
+
+## Google
+
+1. In the Google Cloud console, create an OAuth client of the web application type.
+2. Add `<public_url>/api/auth/callback/google` as an authorized redirect URI.
+3. Copy the client ID and secret.
+4. Add them to the configuration:
+
+```toml
+[auth.google]
+client_id = "<CLIENT_ID>"
+client_secret = "<CLIENT_SECRET>"
+allowed_domains = ["acme.com"]
+```
+
+The environment form of the secret is `CETRA_AUTH__GOOGLE__CLIENT_SECRET`. `allowed_domains` restricts sign-in to those email domains, and cetra also checks Google's `hd` claim.
+
+## Generic OpenID Connect
+
+Any provider that supports OpenID Connect with the authorization code flow works. Each provider is one `[[auth.oidc]]` table:
+
+```toml
+[[auth.oidc]]
+name = "okta"
+display_name = "Okta"
+issuer = "https://acme.okta.com"
+client_id = "<CLIENT_ID>"
+scopes = ["openid", "email", "profile"]
+allowed_domains = ["acme.com"]
+link_existing_by_email = false
+auto_provision = { org = "acme", role = "member" }
+```
+
+| Key | Meaning |
+|---|---|
+| `name` | The provider's ID, 1 to 32 characters of `a-z`, `0-9` and `-`. |
+| `display_name` | The text on the sign-in button. |
+| `issuer` | The issuer URL. It must be `https`, or `http` on a loopback host. |
+| `client_id`, `client_secret` | The OAuth client from your provider. |
+| `scopes` | Must include `openid`. The default is `openid`, `email` and `profile`. |
+| `allowed_domains` | Only these email domains can sign in. |
+| `link_existing_by_email` | Link a verified email to an existing account. Default `false`. |
+| `auto_provision` | The org (by slug) and the role (`admin`, `member` or `viewer`) a new user gets. It counts as an invitation, so it works with `invite_only`. |
+
+Set the client secret in the environment, not in the file. The variable is `CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET`, with the provider's `name` in upper case and `-` written `_`: `my-idp` becomes `MY_IDP`.
+
+For every provider, register the callback URL `<public_url>/api/auth/callback/oidc:<name>`. cetra signs members in with the authorization code flow and PKCE, and checks the ID token's signature, issuer, audience, expiry and nonce. The provider must report the email as verified. SAML is not supported.
+
+### Okta
+
+1. Create an OIDC web application in the Okta admin console.
+2. Set the sign-in redirect URI to `<public_url>/api/auth/callback/oidc:okta`.
+3. Copy the client ID and secret.
+4. The issuer is your Okta domain, such as `https://acme.okta.com`, or `https://acme.okta.com/oauth2/default` for the default authorization server. Use the issuer your provider's discovery document reports.
+
+### Microsoft Entra ID
+
+1. Register an application in your Entra tenant, as a web platform.
+2. Add the redirect URI `<public_url>/api/auth/callback/oidc:entra`.
+3. Create a client secret and copy the application (client) ID.
+4. The issuer is `https://login.microsoftonline.com/<TENANT_ID>/v2.0`.
+
+cetra refuses the multi-tenant issuers `common`, `organizations` and `consumers`. Use your tenant's ID.
+
+### Keycloak
+
+1. In your realm, create a client with client authentication on.
+2. Add the valid redirect URI `<public_url>/api/auth/callback/oidc:keycloak`.
+3. Copy the client ID and the secret from the client's credentials.
+4. The issuer is `https://<HOST>/realms/<REALM>`. Older Keycloak versions put `/auth` before `/realms`.
+
+The redirect URIs above assume `name = "entra"` and `name = "keycloak"`. They change with the `name` you choose.
+
+## Linking accounts
+
+When someone signs in through a provider with an email that already has an account, cetra links them only if the provider has `link_existing_by_email` on, reports the email as verified, and the account is not an instance admin. Linking ends the account's other sessions and revokes its personal access tokens. If cetra had not verified the email before, it also removes the account's password.
+
+## Require single sign-on
+
+To require a provider for some email domains, set `auth.enforce_sso_domains`. It needs a licence key that includes `sso_enforcement`. See [Plans and licence](/docs/platform/plans-and-licence/).
+
+A Teams add-on org can also set up its own provider and verified domains without server configuration. See [Single sign-on](/docs/platform/sso/).
+
+## Check the setup
+
+1. Restart cetra.
+2. Open the login page and look for the provider's button. With password login off, one provider and no org-level provider, the page sends you straight to the provider instead, except right after a sign-out or a failed sign-in.
+3. Sign in with a test account.
+4. If you are sent back to `/login?error=<code>`, the code says why. Common ones are `domain_not_allowed`, `email_not_verified` and `signup_closed`.

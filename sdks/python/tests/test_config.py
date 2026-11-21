@@ -396,6 +396,24 @@ def test_environment_rejects_the_reserved_value() -> None:
     assert "cetra-eval" not in str(env_error.value)
 
 
+def test_environment_rejects_the_playground_value() -> None:
+    with pytest.raises(ConfigError, match="environment: is reserved") as argument_error:
+        resolve_config(api_key=KEY, environment="cetra-playground", env={})
+    assert "cetra-playground" not in str(argument_error.value)
+    with pytest.raises(ConfigError, match=f"{ENV_ENVIRONMENT}: is reserved") as env_error:
+        resolve_config(api_key=KEY, env={ENV_ENVIRONMENT: "cetra-playground"})
+    assert "cetra-playground" not in str(env_error.value)
+
+
+def test_environment_rejects_the_assistant_value() -> None:
+    with pytest.raises(ConfigError, match="environment: is reserved") as argument_error:
+        resolve_config(api_key=KEY, environment="cetra-assistant", env={})
+    assert "cetra-assistant" not in str(argument_error.value)
+    with pytest.raises(ConfigError, match=f"{ENV_ENVIRONMENT}: is reserved") as env_error:
+        resolve_config(api_key=KEY, env={ENV_ENVIRONMENT: "cetra-assistant"})
+    assert "cetra-assistant" not in str(env_error.value)
+
+
 def test_release_falls_back_to_git_then_source() -> None:
     assert resolve_config(api_key=KEY, env={ENV_GIT_COMMIT: "abc"}).release == "abc"
     assert resolve_config(api_key=KEY, env={ENV_SOURCE_VERSION: "source"}).release == "source"

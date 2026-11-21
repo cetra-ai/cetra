@@ -1183,6 +1183,7 @@ mod tests {
             metadata: std::collections::BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         write(
             &app.state,
@@ -1744,6 +1745,7 @@ mod tests {
             metadata: std::collections::BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         let writer = |rule_id: Uuid| Writer::Evaluator {
             kind: EvaluatorKind::Check,
@@ -2235,6 +2237,7 @@ mod tests {
             metadata: std::collections::BTreeMap::new(),
             experiment_id: None,
             dataset_item_id: None,
+            queue_id: None,
         };
         write(
             &app.state,

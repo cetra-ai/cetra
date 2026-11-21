@@ -42,7 +42,8 @@ function isPassRate(condition: Condition): boolean {
   return condition.metric === "score" && condition.aggregation === "pass_rate";
 }
 
-/** Metric label: "Error rate", "Cost", "p95 latency" (+ " of LLM spans" for llm_span), "Score <name>" or "Pass rate of <name>". */
+/** Metric label: "Error rate", "Cost", "p95 latency" (+ " of LLM spans" for llm_span), "Score <name>",
+ *  "Pass rate of <name>" or "Issue occurrences". */
 export function metricLabel(condition: Condition): string {
   switch (condition.metric) {
     case "error_rate":
@@ -55,12 +56,14 @@ export function metricLabel(condition: Condition): string {
       return isPassRate(condition)
         ? `Pass rate of ${condition.score_name ?? ""}`
         : `Score ${condition.score_name ?? ""}`;
+    case "issue_occurrences":
+      return "Issue occurrences";
   }
 }
 
 /** A value in the metric's unit: error_rate and pass_rate as percent with 1 decimal ("12.5%"),
- *  cost as "$" with 2 decimals, latency as "820 ms" (0 decimals), score avg with 3 decimals.
- *  `undefined` → "—". */
+ *  cost as "$" with 2 decimals, latency as "820 ms" (0 decimals), score avg with 3 decimals,
+ *  issue occurrences as a whole count. `undefined` → "—". */
 export function formatAlertValue(condition: Condition, value: number | undefined): string {
   if (value === undefined) {
     return "—";
@@ -74,6 +77,8 @@ export function formatAlertValue(condition: Condition, value: number | undefined
       return `${Math.round(value)} ms`;
     case "score":
       return isPassRate(condition) ? `${(value * 100).toFixed(1)}%` : value.toFixed(3);
+    case "issue_occurrences":
+      return String(Math.round(value));
   }
 }
 
@@ -94,18 +99,25 @@ export type RuleFormValues = {
   window: Window;
   filter: string;
   comparator: Comparator;
-  /** Percent for error_rate and pass_rate, USD for cost, ms for latency, raw for score avg. */
+  /** Percent for error_rate and pass_rate, USD for cost, ms for latency, raw for score avg,
+   *  a count for issue_occurrences. */
   threshold: string;
   minCount: string;
   target: Schema<"LatencyTarget">;
   scoreName: string;
   aggregation: Aggregation;
+  /** issue_occurrences only: one issue (`issueId`) or every issue of one source (`sourceId`). */
+  issueScope: "issue" | "source";
+  issueId: string;
+  sourceId: string;
   channelIds: string[];
   enabled: boolean;
   /** Minutes, 5–10080. */
   cooldownMinutes: string;
   notifyWhileFiring: boolean;
 };
+
+export type IssueScope = RuleFormValues["issueScope"];
 
 export const DEFAULT_RULE_FORM: RuleFormValues = {
   name: "",
@@ -118,6 +130,9 @@ export const DEFAULT_RULE_FORM: RuleFormValues = {
   target: "trace",
   scoreName: "",
   aggregation: "avg",
+  issueScope: "issue",
+  issueId: "",
+  sourceId: "",
   channelIds: [],
   enabled: true,
   cooldownMinutes: "60",
@@ -140,6 +155,8 @@ export function thresholdUnit(metric: Metric, aggregation: Aggregation): string 
       return "ms";
     case "score":
       return thresholdInPercent(metric, aggregation) ? "%" : "";
+    case "issue_occurrences":
+      return "occurrences";
   }
 }
 
@@ -159,13 +176,17 @@ export function metricDefaults(
       return aggregation === "pass_rate"
         ? { threshold: "90", comparator: "lt", minCount: "10" }
         : { threshold: "0.5", comparator: "lt", minCount: "10" };
+    case "issue_occurrences":
+      return { threshold: "0", comparator: "gt", minCount: DEFAULT_RULE_FORM.minCount };
   }
 }
 
 /** Form values from a stored rule (edit). Percent thresholds are multiplied by 100 and printed
  *  with `String(Math.round(value * 1e6) / 1e6)`; `cooldownMinutes` is `String(Math.round(cooldown_s / 60))`.
  *  Fields the metric does not use take the defaults of DEFAULT_RULE_FORM (`target` "trace",
- *  `scoreName` "", `aggregation` "avg", `minCount` "20" for cost); `filter` is the stored filter or "". */
+ *  `scoreName` "", `aggregation` "avg", `minCount` "20" for cost and issue_occurrences); `filter` is
+ *  the stored filter or "". An issue_occurrences rule with `source_id` has the source scope, one
+ *  with `issue_id` (or neither) the issue scope. */
 export function formFromRule(rule: Schema<"AlertRule">): RuleFormValues {
   const condition = rule.condition;
   const aggregation = condition.aggregation ?? DEFAULT_RULE_FORM.aggregation;
@@ -180,12 +201,15 @@ export function formFromRule(rule: Schema<"AlertRule">): RuleFormValues {
     comparator: condition.comparator,
     threshold,
     minCount:
-      condition.metric === "cost"
+      condition.metric === "cost" || condition.metric === "issue_occurrences"
         ? DEFAULT_RULE_FORM.minCount
         : String(condition.min_count ?? DEFAULT_RULE_FORM.minCount),
     target: condition.target ?? DEFAULT_RULE_FORM.target,
     scoreName: condition.score_name ?? DEFAULT_RULE_FORM.scoreName,
     aggregation,
+    issueScope: condition.source_id !== undefined ? "source" : "issue",
+    issueId: condition.issue_id ?? DEFAULT_RULE_FORM.issueId,
+    sourceId: condition.source_id ?? DEFAULT_RULE_FORM.sourceId,
     channelIds: [...rule.channel_ids],
     enabled: rule.enabled,
     cooldownMinutes: String(Math.round(rule.cooldown_s / 60)),
@@ -208,10 +232,10 @@ function buildCondition(form: RuleFormValues, threshold: number, minCount: numbe
     threshold,
   };
   const filter = form.filter.trim();
-  if (filter) {
+  if (filter && form.metric !== "issue_occurrences") {
     condition.filter = filter;
   }
-  if (form.metric !== "cost") {
+  if (form.metric !== "cost" && form.metric !== "issue_occurrences") {
     condition.min_count = minCount;
   }
   if (form.metric === "latency_p95") {
@@ -221,13 +245,22 @@ function buildCondition(form: RuleFormValues, threshold: number, minCount: numbe
     condition.score_name = form.scoreName.trim();
     condition.aggregation = form.aggregation;
   }
+  if (form.metric === "issue_occurrences") {
+    if (form.issueScope === "issue") {
+      condition.issue_id = form.issueId.trim();
+    } else {
+      condition.source_id = form.sourceId.trim();
+    }
+  }
   return condition;
 }
 
 /** The condition to send, or field errors keyed like the server's (`condition.threshold`,
- *  `condition.min_count`, `condition.score_name`, `cooldown_s`). Only the fields of the metric are
- *  set: `min_count` not for cost, `target` only for latency, `score_name` and `aggregation` only for score.
- *  An empty filter is omitted. */
+ *  `condition.min_count`, `condition.score_name`, `condition.window`, `condition.issue_id`,
+ *  `condition.source_id`, `cooldown_s`). Only the fields of the metric are set: `min_count` not for
+ *  cost or issue_occurrences, `target` only for latency, `score_name` and `aggregation` only for
+ *  score, `issue_id` or `source_id` (by scope) only for issue_occurrences. An empty filter is
+ *  omitted; an issue_occurrences rule has no filter. */
 export function conditionFromForm(
   form: RuleFormValues,
 ):
@@ -242,7 +275,7 @@ export function conditionFromForm(
     errors["condition.threshold"] = "Enter a number.";
   } else if (percent && (number < 0 || number > 100)) {
     errors["condition.threshold"] = "Enter a percentage from 0 to 100.";
-  } else if (form.metric === "cost" && number < 0) {
+  } else if ((form.metric === "cost" || form.metric === "issue_occurrences") && number < 0) {
     errors["condition.threshold"] = "Enter 0 or more.";
   } else if (form.metric === "latency_p95" && number <= 0) {
     errors["condition.threshold"] = "Enter a duration above 0.";
@@ -251,7 +284,7 @@ export function conditionFromForm(
   }
 
   let minCount = 0;
-  if (form.metric !== "cost") {
+  if (form.metric !== "cost" && form.metric !== "issue_occurrences") {
     const text = form.minCount.trim();
     const parsed = Number(text);
     if (text !== "" && Number.isInteger(parsed) && parsed >= 1 && parsed <= 1_000_000) {
@@ -263,6 +296,18 @@ export function conditionFromForm(
 
   if (form.metric === "score" && form.scoreName.trim() === "") {
     errors["condition.score_name"] = "Enter a score name.";
+  }
+
+  if (form.metric === "issue_occurrences") {
+    if (form.window === "1m" || form.window === "5m") {
+      errors["condition.window"] = "Issue occurrences need a window of 15 minutes or more.";
+    }
+    if (form.issueScope === "issue" && form.issueId.trim() === "") {
+      errors["condition.issue_id"] = "Choose an issue.";
+    }
+    if (form.issueScope === "source" && form.sourceId.trim() === "") {
+      errors["condition.source_id"] = "Choose a source.";
+    }
   }
 
   let cooldownS = 3600;
@@ -294,17 +339,29 @@ export function previewCondition(form: RuleFormValues): Condition {
 
 /** The condition-related form fields of `a` and `b` differ, compared as strings after trimming.
  *  Metric, window, filter, comparator and threshold always count. minCount counts for every
- *  metric but cost. target counts only for latency_p95; scoreName and aggregation only for
- *  score. A field the metric does not use is ignored, so switching metric and back is not a
- *  change. Used to decide whether a PATCH sends `condition`. */
+ *  metric but cost and issue_occurrences. target counts only for latency_p95; scoreName and
+ *  aggregation only for score. For issue_occurrences the filter and minCount are ignored and the
+ *  scope counts (the scope, then the issue or source id of that scope). A field the metric does not
+ *  use is ignored, so switching metric and back is not a change. Used to decide whether a PATCH
+ *  sends `condition`. */
 export function conditionChanged(a: RuleFormValues, b: RuleFormValues): boolean {
   if (
     a.metric !== b.metric ||
     a.window !== b.window ||
-    a.filter.trim() !== b.filter.trim() ||
     a.comparator !== b.comparator ||
     a.threshold.trim() !== b.threshold.trim()
   ) {
+    return true;
+  }
+  if (a.metric === "issue_occurrences") {
+    if (a.issueScope !== b.issueScope) {
+      return true;
+    }
+    return a.issueScope === "issue"
+      ? a.issueId.trim() !== b.issueId.trim()
+      : a.sourceId.trim() !== b.sourceId.trim();
+  }
+  if (a.filter.trim() !== b.filter.trim()) {
     return true;
   }
   if (a.metric !== "cost" && a.minCount.trim() !== b.minCount.trim()) {
@@ -368,7 +425,8 @@ export function previewRows(
 
 /** The widget query that draws a rule's preview and trend (the trace error rate, cost, p95 latency
  *  or score average), with the divisor that turns its value into the condition's unit. Latency of
- *  llm spans has no preview: `undefined`. Score measures draw the average of the named score. */
+ *  llm spans and issue occurrences have no preview: `undefined`. Score measures draw the average of
+ *  the named score. */
 export function previewQuery(
   condition: Pick<RuleFormValues, "metric" | "target" | "scoreName">,
 ): { query: WidgetQuery; divisor: number } | undefined {
@@ -404,5 +462,7 @@ export function previewQuery(
         },
         divisor: 1,
       };
+    case "issue_occurrences":
+      return undefined;
   }
 }

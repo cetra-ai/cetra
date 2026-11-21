@@ -379,6 +379,19 @@ describe("facet config", () => {
     },
   );
 
+  it("adds a Prompts list facet to traces and a Prompt values facet to spans", () => {
+    expect(FACETS.traces.find((facet) => facet.id === "prompts")).toMatchObject({
+      field: { column: "prompts" },
+      label: "Prompts",
+      kind: "list",
+    });
+    expect(FACETS.spans.find((facet) => facet.id === "prompt_name")).toMatchObject({
+      field: { column: "prompt_name" },
+      label: "Prompt",
+      kind: "values",
+    });
+  });
+
   it("opens the default sections of each list", () => {
     expect(FACETS.traces.filter((facet) => facet.defaultOpen).map((facet) => facet.id)).toEqual([
       "status",

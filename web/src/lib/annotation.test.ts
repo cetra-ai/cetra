@@ -25,6 +25,7 @@ type Definition = Schema<"ScoreDefinition">;
 const TRACE_1 = "a1000000000000000000000000000001";
 const SPAN_4 = "b100000000000014";
 const SESSION = "sess-001";
+const QUEUE = "01950000-0000-7000-8000-000000000a01";
 
 /** The annotation test definition called `name`. */
 function definition(name: string): Definition {
@@ -272,6 +273,16 @@ describe("scoreItem", () => {
     const item = scoreItem(definition("helpfulness"), draft("0.1"), trace1, {});
     expect("score_id" in item).toBe(false);
     expect("source" in item).toBe(false);
+  });
+
+  it("sends the queue id when the context has one", () => {
+    const item = scoreItem(definition("helpfulness"), draft("0.1"), trace1, { queueId: QUEUE });
+    expect(item.queue_id).toBe(QUEUE);
+  });
+
+  it("leaves the queue id out without a queue", () => {
+    const item = scoreItem(definition("helpfulness"), draft("0.1"), trace1, {});
+    expect("queue_id" in item).toBe(false);
   });
 });
 

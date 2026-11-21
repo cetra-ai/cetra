@@ -23,7 +23,12 @@ async function main(): Promise<void> {
   applyPalette(readStoredPalette());
   applyDensity(readStoredDensity());
 
-  if (import.meta.env.DEV && import.meta.env.MODE !== "server") {
+  // The dev server mocks the API unless it proxies a real server; the `demo` build (D-C-22) always
+  // does. Both conditions are constants at build time, so the production build has no mocks.
+  if (
+    import.meta.env.MODE === "demo" ||
+    (import.meta.env.DEV && import.meta.env.MODE !== "server")
+  ) {
     const { isCommonAssetRequest } = await import("msw");
     const { HttpNetworkFrame } = await import("msw/experimental");
     const [{ worker }, { readMockMode }] = await Promise.all([
@@ -38,7 +43,7 @@ async function main(): Promise<void> {
       worker.use(...largeHandlers(createDataset({ seed: 1, now: Date.now(), traces: 5000 })));
     }
     await worker.start({
-      quiet: false,
+      quiet: import.meta.env.MODE === "demo",
       // The document request for `/` is not an API call. Warn on anything else
       // that the fixtures do not cover. Common assets stay quiet, as with "warn".
       onUnhandledFrame({ frame, defaults }) {
@@ -68,6 +73,14 @@ async function main(): Promise<void> {
       <QueryClientProvider client={queryClient}>
         <ThemeProvider>
           <RouterProvider router={router} />
+          {import.meta.env.MODE === "demo" ? (
+            <div
+              role="status"
+              className="pointer-events-none fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-full border bg-muted px-3 py-1 text-caption text-muted-foreground shadow-sm"
+            >
+              Demo, sample data
+            </div>
+          ) : null}
         </ThemeProvider>
       </QueryClientProvider>
     </StrictMode>,

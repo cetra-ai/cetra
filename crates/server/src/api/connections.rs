@@ -243,6 +243,10 @@ pub struct TestLlmConnectionRequest {
     /// Model to call. Default: the connection's `default_model`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Embedding model to test instead: the test embeds `"ping"` and does not ask for a
+    /// judgement. Not for an Anthropic connection, which has no embeddings API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
 }
 
 /// Why a connection test failed.

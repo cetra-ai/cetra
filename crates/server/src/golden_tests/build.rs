@@ -33,8 +33,11 @@ use crate::crypto::{self, Aad, SecretBox};
 use crate::ee::org_sso::store as sso;
 use crate::meta::{MetaDb, MetaError};
 use crate::meta::{
+    agent_contexts::{self, AgentContextRow},
     alerts::{self, Attempt, Evaluation, NewChannel, NewRule},
+    annotation_queues::{self, AddedByKind, NewItem, NewQueue, QueueCreate, Target},
     api_keys::{self, NewApiKey},
+    assistant::{self, AssistantSettingsRow, MessageRole, MessageStatus, NewMessage},
     backfills::{self, BackfillEnd, NewBackfill},
     connections::{self, ConnectionFields},
     dashboards::{self, NewDashboard},
@@ -44,14 +47,20 @@ use crate::meta::{
     eval_jobs::{self, Finish, JobUsage, NewJob},
     evaluators::{self, EvaluatorFields},
     experiments::{self, NewExperiment, NewResult},
-    identities, instance_settings, invites,
+    identities, instance_settings, invites, issue_links,
+    issues::{
+        self, CandidateRow, CandidateStatus, CandidateTarget, EventKind, EventRow, IssueRow,
+        IssueState, RefitRow, SourceKind, SourceRow,
+    },
     members::{self},
     model_prices,
     online_rules::{self, NewRule as NewOnlineRule, RuleFields},
     orgs, password_resets,
     pending_traces::{self, PendingRow},
     personal_tokens::{self, NewToken},
-    projects, rule_spend,
+    projects,
+    prompts::{self, NewPrompt, NewVersion, PromptType},
+    rule_spend,
     saved_views::{self, NewSavedView},
     score_definitions::{self, DefinitionCategory, DefinitionFields},
     users::{self, NewUser},
@@ -600,15 +609,20 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
         now,
     )
     .await?;
+    let mut accuracy_definition = None;
     for (kind, data_type) in [
         ("accuracy", ScoreDataType::Numeric),
         ("passed", ScoreDataType::Boolean),
         ("verdict", ScoreDataType::Categorical),
         ("notes", ScoreDataType::Text),
     ] {
+        let definition_id = Uuid::now_v7();
+        if kind == "accuracy" {
+            accuracy_definition = Some(definition_id);
+        }
         score_definitions::insert_definition(
             conn,
-            Uuid::now_v7(),
+            definition_id,
             p1.id,
             data_type,
             DefinitionFields {
@@ -1116,6 +1130,346 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     )
     .await?;
 
+    populate_workspace(
+        conn,
+        &Workspace {
+            now,
+            org: org.id,
+            project: p1.id,
+            owner: owner.id,
+            connection: conn_id,
+            channel: webhook_channel,
+            definition: accuracy_definition.expect("the accuracy definition is inserted"),
+        },
+    )
+    .await?;
+
+    Ok(())
+}
+
+/// The ids the later tracks' rows refer to.
+struct Workspace {
+    now: i64,
+    org: OrgId,
+    project: ProjectId,
+    owner: Uuid,
+    connection: Uuid,
+    channel: Uuid,
+    definition: Uuid,
+}
+
+/// Prompts, agent contexts, annotation queues, the assistant and issues, each in a state the
+/// startup tasks leave alone: assigned candidates, a finished refit, an assigned-source topic
+/// that is not due.
+async fn populate_workspace(conn: &mut SqliteConnection, w: &Workspace) -> Result<(), MetaError> {
+    let now = w.now;
+    let owner_email = "golden-owner@example.com";
+
+    // Prompts: one prompt with two versions, a label moved once (two label events), and the
+    // project's protected labels.
+    let prompt_id = Uuid::now_v7();
+    prompts::create_prompt(
+        conn,
+        w.project,
+        NewPrompt {
+            id: prompt_id,
+            name: "golden prompt".to_owned(),
+            prompt_type: PromptType::Text,
+            description: Some("golden".to_owned()),
+            tags: vec!["golden".to_owned()],
+        },
+        NewVersion {
+            template: r#""Answer {{question}}.""#.to_owned(),
+            config: "{}".to_owned(),
+            commit_message: Some("golden v1".to_owned()),
+            labels: vec!["production".to_owned()],
+            actor: Some(owner_email.to_owned()),
+        },
+        now,
+    )
+    .await?;
+    prompts::add_version(
+        conn,
+        prompt_id,
+        NewVersion {
+            template: r#""Answer {{question}} briefly.""#.to_owned(),
+            config: "{}".to_owned(),
+            commit_message: Some("golden v2".to_owned()),
+            labels: vec!["production".to_owned(), "staging".to_owned()],
+            actor: Some(owner_email.to_owned()),
+        },
+        now,
+    )
+    .await?;
+    prompts::set_protected_labels(
+        conn,
+        w.project,
+        &["production".to_owned()],
+        Some(owner_email),
+        now,
+    )
+    .await?;
+
+    // An agent context a coding-agent hook reported.
+    agent_contexts::upsert_context(
+        conn,
+        &AgentContextRow {
+            project_id: w.project,
+            agent: "golden-agent".to_owned(),
+            session_id: "golden-session".to_owned(),
+            repository: Some("golden/repo".to_owned()),
+            branch: Some("main".to_owned()),
+            user_id: Some(owner_email.to_owned()),
+            updated_at: now,
+        },
+    )
+    .await?;
+
+    // An annotation queue with one score definition and one pending trace item.
+    let queue = annotation_queues::insert_queue_tx(
+        conn,
+        w.project,
+        w.org,
+        NewQueue {
+            name: "golden queue".to_owned(),
+            description: Some("golden".to_owned()),
+            instructions: Some("Rate the answer.".to_owned()),
+            target: Target::Trace,
+            definition_ids: vec![w.definition],
+            created_by: Some(w.owner),
+        },
+        None,
+        now,
+    )
+    .await?;
+    let QueueCreate::Created(queue) = queue else {
+        panic!("the golden queue is created");
+    };
+    annotation_queues::insert_items_tx(
+        conn,
+        queue.id,
+        w.project,
+        &[NewItem {
+            trace_id: Some(trace_id(0x31).to_string()),
+            span_id: None,
+            session_id: None,
+            target_time: now,
+        }],
+        (AddedByKind::User, w.owner),
+        now,
+    )
+    .await?;
+
+    // The assistant: the org setting and one conversation with a question and an answer.
+    assistant::put_settings(
+        conn,
+        w.org,
+        &AssistantSettingsRow {
+            enabled: true,
+            connection_id: Some(w.connection),
+            model: Some("gpt-4o".to_owned()),
+            updated_by: Some(w.owner),
+            updated_at: now,
+        },
+    )
+    .await?;
+    let conversation = Uuid::now_v7();
+    assistant::insert_conversation(conn, conversation, w.project, w.owner, now).await?;
+    for (role, text) in [
+        (MessageRole::User, "golden question"),
+        (MessageRole::Assistant, "golden answer"),
+    ] {
+        assistant::append_message(
+            conn,
+            conversation,
+            NewMessage {
+                role,
+                parts: json!([{"type": "text", "text": text}]).to_string(),
+                context: None,
+                status: MessageStatus::Complete,
+                turn_trace_id: None,
+                stub_after: None,
+            },
+            now,
+        )
+        .await?;
+    }
+    assistant::set_title_if_empty(conn, conversation, "Golden conversation").await?;
+
+    // Issues: an error source with one open issue, its events and a digest, and a topic source
+    // with an assigned candidate, a day's spend and a finished refit.
+    let error_source = Uuid::now_v7();
+    let topic_source = Uuid::now_v7();
+    for (id, name, kind) in [
+        (error_source, "golden errors", SourceKind::Error),
+        (topic_source, "golden topics", SourceKind::Topic),
+    ] {
+        let llm = kind.is_llm();
+        issues::insert_source(
+            conn,
+            &SourceRow {
+                id,
+                project_id: w.project,
+                name: name.to_owned(),
+                kind,
+                filter: None,
+                enabled: true,
+                paused_reason: None,
+                paused_at: None,
+                created_by: Some(w.owner),
+                created_at: now,
+                updated_at: now,
+                sample_rate: llm.then_some(0.5),
+                daily_cap: llm.then_some(10),
+                score_names: Vec::new(),
+                feedback_sources: Vec::new(),
+                chat_connection_id: llm.then_some(w.connection),
+                chat_model: llm.then(|| "gpt-4o".to_owned()),
+                embed_connection_id: llm.then_some(w.connection),
+                embed_model: llm.then(|| "golden-embed".to_owned()),
+                embed_dimension: llm.then_some(2),
+                floor: llm.then_some(0.8),
+                min_issue_size: llm.then_some(3),
+                budget_usd: None,
+                budget_period: None,
+                paused_detail: None,
+                next_refit_at: None,
+            },
+        )
+        .await?;
+    }
+    let issue = |id: Uuid, source: Uuid, fingerprint: Option<&str>, title: &str| IssueRow {
+        id,
+        project_id: w.project,
+        source_id: source,
+        fingerprint: fingerprint.map(str::to_owned),
+        title: title.to_owned(),
+        description: None,
+        state: IssueState::Open,
+        regressed: false,
+        merged_into: None,
+        first_seen: now,
+        last_seen: now,
+        resolved_at: None,
+        resolved_by: None,
+        created_at: now,
+        updated_at: now,
+        centroid: None,
+        member_count: 0,
+    };
+    let error_issue = Uuid::now_v7();
+    issues::insert_issue(
+        conn,
+        &issue(
+            error_issue,
+            error_source,
+            Some("00112233445566778899aabbccddeeff"),
+            "Golden error",
+        ),
+    )
+    .await?;
+    let topic_issue = Uuid::now_v7();
+    issues::insert_issue(
+        conn,
+        &IssueRow {
+            centroid: Some(vec![0.5, 0.5]),
+            member_count: 1,
+            ..issue(topic_issue, topic_source, None, "Golden topic")
+        },
+    )
+    .await?;
+    for (issue_id, kind, actor) in [
+        (error_issue, EventKind::Created, None),
+        (error_issue, EventKind::Renamed, Some(w.owner)),
+    ] {
+        issues::insert_event(
+            conn,
+            &EventRow {
+                id: Uuid::now_v7(),
+                issue_id,
+                kind,
+                actor_user_id: actor,
+                from_value: None,
+                to_value: None,
+                at: now,
+            },
+        )
+        .await?;
+    }
+    issues::insert_candidate(
+        conn,
+        &CandidateRow {
+            id: Uuid::now_v7(),
+            project_id: w.project,
+            source_id: topic_source,
+            target: CandidateTarget::Trace,
+            trace_id: Some(trace_id(0x32)),
+            span_id: None,
+            session_id: None,
+            user_id: None,
+            trace_start: Some(now),
+            score_id: None,
+            dedup_key: format!("{topic_source}:{}", trace_id(0x32)),
+            status: CandidateStatus::Assigned,
+            attempts: 1,
+            claims: 1,
+            interruptions: 0,
+            load_retries: 0,
+            not_before: now,
+            error_class: None,
+            issue_id: Some(topic_issue),
+            summary: Some("golden summary".to_owned()),
+            summary_prompt_version: Some(1),
+            vector: Some(vec![0.5, 0.5]),
+            embed_model: Some("golden-embed".to_owned()),
+            dimension: Some(2),
+            call_trace_id: None,
+            cost_usd: 0.001,
+            created_at: now,
+            updated_at: now,
+        },
+    )
+    .await?;
+    issues::add_spend(conn, topic_source, now / DAY_NS * DAY_NS, 0.001).await?;
+    issues::insert_refit(
+        conn,
+        &RefitRow {
+            id: Uuid::now_v7(),
+            source_id: topic_source,
+            trigger: "manual",
+            started_at: now,
+            finished_at: Some(now),
+            pending: 1,
+            clusters: 1,
+            created: 1,
+            joined: 0,
+            outliers: 0,
+            cost_usd: 0.0,
+            error_class: None,
+        },
+    )
+    .await?;
+    issue_links::set_source_channels(conn, error_source, &[w.channel]).await?;
+    // The notification `issue_links::notify_source` writes, without its pending deliveries (the
+    // dispatcher would send them): one digest of the created issue.
+    let digest = issue_links::Digest {
+        items: vec![issue_links::DigestItem {
+            issue_id: error_issue,
+            kind: issue_links::DigestKind::Created,
+            title: "Golden error".to_owned(),
+        }],
+        more: 0,
+    };
+    sqlx::query(
+        "INSERT INTO issue_notifications (id, source_id, digest, created_at) VALUES (?, ?, ?, ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(error_source.to_string())
+    .bind(serde_json::to_string(&digest).expect("a digest serializes"))
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+
     Ok(())
 }
 
@@ -1141,5 +1495,7 @@ fn golden_condition() -> AlertCondition {
         target: None,
         score_name: None,
         aggregation: None,
+        issue_id: None,
+        source_id: None,
     }
 }

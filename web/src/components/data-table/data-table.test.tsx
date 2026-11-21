@@ -93,6 +93,33 @@ it("keeps fixed pixel widths when no column grows", () => {
   expect(header?.style.gridTemplateColumns).toBe("200px");
 });
 
+it("dims the rows and marks the grid busy while stale", () => {
+  const table = (stale: boolean) => (
+    <DataTable
+      tableId="stale-test"
+      ariaLabel="Stale"
+      columns={columns}
+      rows={ITEMS}
+      getRowId={(row) => row.id}
+      stale={stale}
+      onActivate={() => undefined}
+      hasNextPage={false}
+      isFetchingNextPage={false}
+      fetchNextPage={() => undefined}
+      emptyState={null}
+    />
+  );
+  const view = render(table(true));
+  const busy = screen.getByRole("grid", { name: "Stale" });
+  expect(busy).toHaveAttribute("aria-busy", "true");
+  expect(busy.querySelector("[data-scroll-container]")).toHaveClass("opacity-60");
+
+  view.rerender(table(false));
+  const idle = screen.getByRole("grid", { name: "Stale" });
+  expect(idle).not.toHaveAttribute("aria-busy");
+  expect(idle.querySelector("[data-scroll-container]")).not.toHaveClass("opacity-60");
+});
+
 function rowOf(text: string): HTMLElement {
   const row = screen.getByText(text).closest('[role="row"]');
   if (!(row instanceof HTMLElement)) {

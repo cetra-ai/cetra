@@ -278,8 +278,10 @@ fn every_table_has_a_golden_row() {
 }
 
 /// The bound on the total size of a golden server directory (SF7): it grows the repository by its
-/// size for every release.
-const GOLDEN_MAX_BYTES: u64 = 1 << 20;
+/// size for every release. Do not raise it without the coordinator. 2 MiB since the merge with
+/// tracks CA, V, AQ, AS and IC (coordinator): the schema's floor is one 4 KB page per B-tree
+/// (66 tables and 153 indexes, about 950 KB), and the backup was 1.15 MB at that merge.
+const GOLDEN_MAX_BYTES: u64 = 2 << 20;
 
 /// The payload of the probe connection that step 8 of `check_dir` seals with the golden key.
 const PROBE_SECRET: &[u8] = b"golden-probe-secret";

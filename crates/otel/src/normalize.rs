@@ -19,6 +19,7 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 use opentelemetry_proto::tonic::trace::v1::span::Link;
 use serde_json::{Map, Value as Json};
 
+use crate::agents::{self, AgentContexts};
 use crate::bag::AttrBag;
 use crate::context::fill;
 use crate::detect::detect;
@@ -36,7 +37,7 @@ const YEAR_2000_NS: i64 = 946_684_800_i64 * 1_000_000_000;
 const NANOS_PER_DAY: i64 = 86_400_i64 * 1_000_000_000;
 
 /// Core stores this on every span and does not expose it as a constant.
-const SCHEMA_VERSION: u16 = 1;
+const SCHEMA_VERSION: u16 = 2;
 
 /// Clock, project, and limits for one ingest request.
 ///
@@ -87,6 +88,8 @@ pub struct Normalized {
     pub media: Vec<MediaBlob>,
     /// Why the other spans were dropped.
     pub rejections: Rejections,
+    /// Spans dropped on purpose (Codex internals, D-CA-6); neither rejected nor stored.
+    pub discarded: u64,
 }
 
 /// Normalize one export request into spans, media, and rejections.
@@ -94,10 +97,15 @@ pub fn normalize(
     request: &ExportTraceServiceRequest,
     ctx: &IngestContext,
     prices: &crate::cost::PriceTable,
+    agents: &AgentContexts,
 ) -> Normalized {
-    let batch = Batch { ctx, prices };
+    let batch = Batch {
+        ctx,
+        prices,
+        agents,
+    };
     let mut spans = Vec::new();
-    let mut rejections = Rejections::default();
+    let mut tally = Tally::default();
     let mut media = crate::media::MediaSink::new(&ctx.limits);
     for resource_spans in &request.resource_spans {
         let resource = encode_resource(resource_spans.resource.as_ref());
@@ -110,7 +118,7 @@ pub fn normalize(
                     &resource,
                     scope_name.clone(),
                     scope_version.clone(),
-                    &mut rejections,
+                    &mut tally,
                     &mut media,
                 ) {
                     spans.push(built);
@@ -121,8 +129,16 @@ pub fn normalize(
     Normalized {
         spans,
         media: media.into_media(),
-        rejections,
+        rejections: tally.rejections,
+        discarded: tally.discarded,
     }
+}
+
+/// What `accept_span` drops: rejected spans (counted by reason) and discarded spans (D-CA-6).
+#[derive(Default)]
+struct Tally {
+    rejections: Rejections,
+    discarded: u64,
 }
 
 struct EncodedResource<'a> {
@@ -178,6 +194,7 @@ fn non_empty(text: &str) -> Option<String> {
 struct Batch<'a> {
     ctx: &'a IngestContext,
     prices: &'a crate::cost::PriceTable,
+    agents: &'a AgentContexts,
 }
 
 fn accept_span(
@@ -186,34 +203,45 @@ fn accept_span(
     resource: &EncodedResource<'_>,
     scope_name: Option<String>,
     scope_version: Option<String>,
-    rejections: &mut Rejections,
+    tally: &mut Tally,
     media: &mut crate::media::MediaSink<'_>,
 ) -> Option<Span> {
     media.clear_refs();
+    let agent = agents::detect_agent(
+        resource.service_name.as_deref(),
+        scope_name.as_deref(),
+        &span.name,
+        &span.attributes,
+    );
+    // Before the validity checks, so an internal span is never counted as rejected.
+    if agents::discarded(agent, &span.name, &span.attributes) {
+        tally.discarded += 1;
+        return None;
+    }
     let trace_id = match TraceId::from_slice(&span.trace_id) {
         Ok(id) => id,
         Err(_) => {
-            rejections.record(RejectReason::InvalidTraceId);
+            tally.rejections.record(RejectReason::InvalidTraceId);
             return None;
         }
     };
     let span_id = match SpanId::from_slice(&span.span_id) {
         Ok(id) => id,
         Err(_) => {
-            rejections.record(RejectReason::InvalidSpanId);
+            tally.rejections.record(RejectReason::InvalidSpanId);
             return None;
         }
     };
     let Ok(start_time) = i64::try_from(span.start_time_unix_nano) else {
-        rejections.record(RejectReason::TimestampOverflow);
+        tally.rejections.record(RejectReason::TimestampOverflow);
         return None;
     };
     let Ok(end_time) = i64::try_from(span.end_time_unix_nano) else {
-        rejections.record(RejectReason::TimestampOverflow);
+        tally.rejections.record(RejectReason::TimestampOverflow);
         return None;
     };
     if start_out_of_range(start_time, batch.ctx) {
-        rejections.record(RejectReason::StartTimeOutOfRange);
+        tally.rejections.record(RejectReason::StartTimeOutOfRange);
         return None;
     }
 
@@ -225,15 +253,25 @@ fn accept_span(
     let mut bag = AttrBag::new(&span.attributes, &mut warnings);
     crate::conventions::apply_status(&mut bag, &mut status, &mut status_message);
     let conventions = detect(&bag, &span.events);
-    let span_kind = span_kind(&mut bag);
+    let span_kind = match agents::kind(agent, &span.name) {
+        Some(kind) => kind,
+        None => span_kind(&mut bag),
+    };
     let mut fields = fill(&mut bag, &resource.view, &mut warnings);
-    let counted = usage(
-        &mut bag,
-        span_kind,
-        fields.provider.as_deref(),
-        &mut warnings,
-    );
-    let ttft_ns = ttft(&mut bag, &span.events, start_time, &mut warnings);
+    agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);
+    let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
+        Some(counted) => counted,
+        None => usage(
+            &mut bag,
+            span_kind,
+            fields.provider.as_deref(),
+            &mut warnings,
+        ),
+    };
+    let ttft_ns = match ttft(&mut bag, &span.events, start_time, &mut warnings) {
+        Some(nanos) => Some(nanos),
+        None => agents::ttft(agent, &mut bag, &mut warnings),
+    };
     let priced = crate::cost::apply(
         &mut bag,
         &crate::cost::Charge {
@@ -260,6 +298,14 @@ fn accept_span(
         crate::conventions::READERS,
         crate::conventions::REGISTRIES,
     );
+    agents::payload(
+        agent,
+        &span.name,
+        &mut bag,
+        &span.events,
+        &mut assembled,
+        &mut warnings,
+    );
     crate::media::extract_io(&mut assembled.io, media);
     let media_refs = media.media_refs();
     crate::truncate::truncate_payloads(
@@ -268,6 +314,7 @@ fn accept_span(
         &mut truncated,
     );
     let normalize_error = payload::error_attribute(&assembled.io.errors);
+    let finish_inputs = agents::finish_inputs(agent, &bag);
     let mut attributes = bag.into_attributes(&mut warnings, &mut truncated);
     let events = encode_events(
         &span.events,
@@ -305,6 +352,8 @@ fn accept_span(
         provider: fields.provider,
         request_model: fields.request_model,
         response_model: fields.response_model,
+        prompt_name: fields.prompt_name,
+        prompt_version: fields.prompt_version,
         operation: fields.operation,
         input_tokens: counted.input_tokens,
         output_tokens: counted.output_tokens,
@@ -339,6 +388,7 @@ fn accept_span(
         schema_version: SCHEMA_VERSION,
     };
     payload::write(&mut built, assembled.io);
+    agents::finish(agent, &span.name, span_kind, &finish_inputs, &mut built);
     crate::truncate::truncate_columns(&mut built, batch.ctx.limits.max_attribute_bytes);
     Some(built)
 }
@@ -525,6 +575,7 @@ mod tests {
             &ExportTraceServiceRequest::default(),
             &context(),
             &no_prices(),
+            &AgentContexts::default(),
         );
         assert!(normalized.spans.is_empty());
         assert!(normalized.media.is_empty());
@@ -551,7 +602,12 @@ mod tests {
                 ..ResourceSpans::default()
             }],
         };
-        let normalized = normalize(&with_scope, &context(), &no_prices());
+        let normalized = normalize(
+            &with_scope,
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert!(normalized.spans.is_empty());
         assert_eq!(normalized.rejections.total(), 0);
     }
@@ -625,7 +681,12 @@ mod tests {
                 ..ResourceSpans::default()
             }],
         };
-        let normalized = normalize(&request, &context(), &no_prices());
+        let normalized = normalize(
+            &request,
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert_eq!(normalized.spans.len(), 2);
         assert_eq!(
             normalized.spans[0].resource_attributes,
@@ -662,7 +723,7 @@ mod tests {
                 .attributes
                 .get(metadata_key::NORMALIZE_WARNING)
         );
-        assert_eq!(normalized.spans[0].schema_version, 1);
+        assert_eq!(normalized.spans[0].schema_version, 2);
         assert_eq!(normalized.spans[0].span_kind, SpanKind::Span);
         assert!(normalized.spans[0].conventions.is_empty());
     }
@@ -672,7 +733,12 @@ mod tests {
         let mut span = span_at(1_767_225_590_000_000_000, 1_767_225_591_000_000_000);
         span.trace_id = vec![1, 2, 3];
         span.span_id = vec![0; 8];
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert!(normalized.spans.is_empty());
         assert_eq!(normalized.rejections.total(), 1);
         assert_eq!(normalized.rejections.count(RejectReason::InvalidTraceId), 1);
@@ -692,7 +758,12 @@ mod tests {
             message: String::new(),
             code: 9,
         });
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         let span = &normalized.spans[0];
         assert_eq!(span.events.len(), 1);
         assert_eq!(span.events[0].time, start as i64);
@@ -722,7 +793,12 @@ mod tests {
             span_id: vec![0x66; 8],
             ..Link::default()
         });
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         let span = &normalized.spans[0];
         assert_eq!(span.parent_span_id, None);
         assert_eq!(span.links.len(), 1);
@@ -737,7 +813,12 @@ mod tests {
             string_attribute("ai.model.id", "gpt"),
             string_attribute("gen_ai.request.model", "gpt"),
         ];
-        let normalized = normalize(&request_of(vec![span]), &context(), &no_prices());
+        let normalized = normalize(
+            &request_of(vec![span]),
+            &context(),
+            &no_prices(),
+            &AgentContexts::default(),
+        );
         assert_eq!(
             normalized.spans[0].conventions,
             vec![Convention::Genai, Convention::Vercel]

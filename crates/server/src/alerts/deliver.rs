@@ -10,12 +10,14 @@ use reqwest::header::{HeaderName, HeaderValue};
 use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config};
-use crate::alerts::message::{self, MessageKind, Notice};
-use crate::api::account::SignupPolicy;
-use crate::email::MailError;
+use crate::alerts::message::{self, IssuesNotice, MessageKind, Notice};
+use crate::config::EmailRecipients;
+use crate::email::{Email, MailError};
 use crate::http::AppState;
 use crate::meta::MetaError;
-use crate::meta::alerts::{Attempt, DueDelivery, due_deliveries, finish_delivery, prune};
+use crate::meta::alerts::{
+    Attempt, DueBody, DueDelivery, DueIssues, EventRow, due_deliveries, finish_delivery, prune,
+};
 use crate::meta::members::verified_member_emails;
 
 /// Deliveries sent at once (D-K-7).
@@ -67,20 +69,31 @@ fn retryable(message: &str) -> SendError {
     }
 }
 
-/// Sends `notice` once to the channel `config` of org `org_id`. `delivery_id` goes into
+/// What one send carries: a rule event's message or an issue notification's.
+#[derive(Clone, Copy)]
+pub(crate) enum Outgoing<'a> {
+    Alert(&'a Notice),
+    Issues(&'a IssuesNotice),
+}
+
+/// Sends `outgoing` once to the channel `config` of org `org_id`. `delivery_id` goes into
 /// `X-Cetra-Delivery`.
-pub(crate) async fn send_one(
+pub(crate) async fn send_to_channel(
     state: &AppState,
     org_id: OrgId,
     config: &ChannelConfig,
-    notice: &Notice,
+    outgoing: Outgoing<'_>,
     delivery_id: Uuid,
     now: i64,
 ) -> Result<(), SendError> {
     match config {
         ChannelConfig::Slack { url } => {
             // A `Value` always serializes.
-            let body = serde_json::to_vec(&message::slack_body(notice)).unwrap_or_default();
+            let value = match outgoing {
+                Outgoing::Alert(notice) => message::slack_body(notice),
+                Outgoing::Issues(notice) => message::issues_slack_body(notice),
+            };
+            let body = serde_json::to_vec(&value).unwrap_or_default();
             let headers = vec![(
                 HeaderName::from_static("content-type"),
                 HeaderValue::from_static("application/json"),
@@ -92,7 +105,10 @@ pub(crate) async fn send_one(
             secret,
             headers,
         } => {
-            let body = message::webhook_body(notice);
+            let body = match outgoing {
+                Outgoing::Alert(notice) => message::webhook_body(notice),
+                Outgoing::Issues(notice) => message::issues_webhook_body(notice),
+            };
             let signature = sign_payload(&Secret::new(secret.clone()), now / 1_000_000_000, &body)
                 .ok_or_else(|| permanent("could not sign the payload"))?;
             let mut extra = vec![
@@ -117,7 +133,11 @@ pub(crate) async fn send_one(
             post(state, url, extra, body).await
         }
         ChannelConfig::Email { recipients } => {
-            send_email(state, org_id, recipients, notice, now).await
+            let email = match outgoing {
+                Outgoing::Alert(notice) => message::email(notice),
+                Outgoing::Issues(notice) => message::issues_email(notice),
+            };
+            send_email(state, org_id, recipients, &email, now).await
         }
     }
 }
@@ -178,20 +198,20 @@ fn egress_error(error: &EgressError) -> SendError {
 /// One email to each recipient, in order. SMTP connection, TLS and authentication failures
 /// are retryable (an admin may fix the credentials within the retry span, D-K-7).
 ///
-/// Under open signup only verified members of the org get mail (D-K-19): the other recipients
-/// are skipped, and the delivery then fails with a count. Every message counts against the
-/// org's daily cap, reserved just before its send.
+/// When `alerts.email_recipients` is `members`, only verified members of the org get mail (D-K-19,
+/// D-K-21): the other recipients are skipped, and the delivery then fails with a count. Every
+/// message counts against the org's daily cap, reserved just before its send.
 async fn send_email(
     state: &AppState,
     org_id: OrgId,
     recipients: &[String],
-    notice: &Notice,
+    email: &Email,
     now: i64,
 ) -> Result<(), SendError> {
     let Some(mailer) = state.mailer.as_ref() else {
         return Err(permanent("email is not configured"));
     };
-    let (sendable, skipped) = if state.config.auth.signup == SignupPolicy::Open {
+    let (sendable, skipped) = if state.config.email_recipients() == EmailRecipients::Members {
         let members = verified_member_emails(state.meta.reader(), org_id)
             .await
             .map_err(|_| retryable("could not read the org members"))?;
@@ -210,7 +230,6 @@ async fn send_email(
     // Each message reserves one unit of the daily cap just before it is sent, so a retry counts
     // only the messages it attempts: recipients a failed send never reached are not counted twice
     // (D-K-19).
-    let email = message::email(notice);
     let mut capped = false;
     let sent = tokio::time::timeout(SEND_TIMEOUT, async {
         for recipient in &sendable {
@@ -218,7 +237,7 @@ async fn send_email(
                 capped = true;
                 break;
             }
-            mailer.send_now(recipient, &email).await?;
+            mailer.send_now(recipient, email).await?;
         }
         Ok::<(), MailError>(())
     })
@@ -254,8 +273,20 @@ pub(crate) struct DeliverReport {
 ///
 /// Returns [`MetaError`] only when the due deliveries cannot be read.
 pub(crate) async fn deliver_once(state: &AppState, now: i64) -> Result<DeliverReport, MetaError> {
-    let dues = due_deliveries(state.meta.reader(), now, BATCH).await?;
-    let outcomes = futures::stream::iter(dues)
+    let batch = due_deliveries(state.meta.reader(), now, BATCH).await?;
+    // A row that cannot be decoded is failed, so it is not read again at every tick.
+    for id in batch.unreadable {
+        let failed = Attempt::Failed {
+            error: "the delivery row could not be decoded".to_owned(),
+        };
+        state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move { finish_delivery(conn, id, failed, now).await })
+            })
+            .await?;
+    }
+    let outcomes = futures::stream::iter(batch.deliveries)
         .map(|due| async move { deliver_one(state, &due, now).await })
         .buffer_unordered(CONCURRENCY)
         .collect::<Vec<_>>()
@@ -330,8 +361,32 @@ async fn attempt_of(state: &AppState, due: &DueDelivery, now: i64) -> Attempt {
             error: "the channel config could not be read".to_owned(),
         };
     };
-    let notice = notice_of(state, due);
-    let result = Box::pin(send_one(state, due.org_id, &config, &notice, due.id, now)).await;
+    let result = match &due.body {
+        DueBody::Rule(event) => {
+            let notice = notice_of(state, due, event);
+            Box::pin(send_to_channel(
+                state,
+                due.org_id,
+                &config,
+                Outgoing::Alert(&notice),
+                due.id,
+                now,
+            ))
+            .await
+        }
+        DueBody::Issues(issues) => {
+            let notice = issues_notice_of(state, due, issues);
+            Box::pin(send_to_channel(
+                state,
+                due.org_id,
+                &config,
+                Outgoing::Issues(&notice),
+                due.id,
+                now,
+            ))
+            .await
+        }
+    };
     state
         .telemetry
         .alert_delivered(due.channel_kind, result.is_ok());
@@ -347,9 +402,8 @@ async fn attempt_of(state: &AppState, due: &DueDelivery, now: i64) -> Attempt {
     }
 }
 
-/// The message of a due delivery, built from its event snapshot.
-fn notice_of(state: &AppState, due: &DueDelivery) -> Notice {
-    let event = &due.event;
+/// The message of a due rule delivery, built from its event snapshot.
+fn notice_of(state: &AppState, due: &DueDelivery, event: &EventRow) -> Notice {
     let kind = match event.kind {
         crate::api::alerts::AlertEventKind::Fired => MessageKind::Fired,
         crate::api::alerts::AlertEventKind::Resolved => MessageKind::Resolved,
@@ -385,24 +439,54 @@ fn notice_of(state: &AppState, due: &DueDelivery) -> Notice {
     }
 }
 
-/// Deletes events older than 90 days and finished deliveries older than 30 days (D-K-10).
+/// The message of a due issue delivery: the digest's items, each with its issue page URL.
+fn issues_notice_of(state: &AppState, due: &DueDelivery, issues: &DueIssues) -> IssuesNotice {
+    let public_url = &state.config.public_url;
+    IssuesNotice {
+        notification_id: issues.notification_id,
+        source_id: issues.source_id,
+        source_name: issues.source_name.clone(),
+        project_id: due.project_id,
+        project_name: due.project_name.clone(),
+        items: issues.digest.items.clone(),
+        more: issues.digest.more,
+        occurred_at: issues.created_at,
+        issues_url: message::issues_url(
+            public_url,
+            &due.org_slug,
+            &due.project_slug,
+            issues.source_id,
+        ),
+        issue_urls: issues
+            .digest
+            .items
+            .iter()
+            .map(|item| {
+                message::issue_url(public_url, &due.org_slug, &due.project_slug, item.issue_id)
+            })
+            .collect(),
+    }
+}
+
+/// Deletes events and issue notifications older than 90 days and finished deliveries older than
+/// 30 days (D-K-10, D-IC-21). Returns `(events, notifications, deliveries)` deleted.
 ///
 /// # Errors
 ///
 /// Returns [`MetaError`] when the delete fails.
-pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<(u64, u64), MetaError> {
+pub(crate) async fn prune_once(state: &AppState, now: i64) -> Result<(u64, u64, u64), MetaError> {
     let events_before = now.saturating_sub(EVENT_RETENTION_NS);
     let deliveries_before = now.saturating_sub(DELIVERY_RETENTION_NS);
-    let (events, deliveries) = state
+    let (events, notifications, deliveries) = state
         .meta
         .write(move |conn| {
             Box::pin(async move { prune(conn, events_before, deliveries_before).await })
         })
         .await?;
-    if events > 0 || deliveries > 0 {
-        tracing::info!(events, deliveries, "alert history pruned");
+    if events > 0 || notifications > 0 || deliveries > 0 {
+        tracing::info!(events, notifications, deliveries, "alert history pruned");
     }
-    Ok((events, deliveries))
+    Ok((events, notifications, deliveries))
 }
 
 #[cfg(test)]

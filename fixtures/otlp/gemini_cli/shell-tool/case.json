@@ -1,0 +1,17 @@
+{
+  "description": "Gemini CLI 0.68.0 in -p mode: a model-routing call, then one run_shell_command tool call; traces with prompts.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "@google/gemini-cli",
+    "instrumentation_version": "0.68.0",
+    "language": "typescript",
+    "libraries": {
+      "@google/gemini-cli": "0.68.0"
+    },
+    "captured_at": "2026-11-20T10:29:59Z"
+  },
+  "spec_refs": [
+    "02 § Coding agents"
+  ],
+  "notes": "check-capture ignores the values of gen_ai.input.messages, gen_ai.system_instructions and gen_ai.output.messages: they carry the date, paths and measured timings."
+}

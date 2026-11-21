@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { SHORTCUTS } from "@/lib/shortcuts";
+import { SHORTCUTS, shortcutLabel } from "@/lib/shortcuts";
 import { renderApp } from "@/test/render";
 
 const TRACE = "a1000000000000000000000000000001";
@@ -11,10 +11,10 @@ async function openPalette(user: Awaited<ReturnType<typeof renderApp>>["user"]) 
   return screen.findByRole("dialog", { name: /Command palette/ });
 }
 
-it("opens the palette with ⌘K", async () => {
+it("opens the palette with Ctrl/Cmd+K and shows the platform's key", async () => {
   const { user } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
-  expect(screen.getByText("⌘K")).toBeInTheDocument();
+  expect(screen.getByText("Ctrl+K")).toBeInTheDocument();
   const dialog = await openPalette(user);
   expect(within(dialog).getByRole("combobox")).toBeInTheDocument();
 });
@@ -23,8 +23,10 @@ it("navigates to a project by name", async () => {
   const { router, user } = await renderApp("/acme/support-bot/traces");
   await screen.findByRole("grid", { name: "Traces" });
   const dialog = await openPalette(user);
+  // "Playground" is also a page of the project, so pick the project's own row.
   await user.type(within(dialog).getByRole("combobox"), "Playground");
-  await user.keyboard("{Enter}");
+  const projects = within(dialog).getByRole("group", { name: "Projects" });
+  await user.click(within(projects).getByRole("option", { name: /Playground/ }));
   await waitFor(() => {
     expect(router.state.location.pathname).toBe("/acme/playground/traces");
   });
@@ -76,7 +78,9 @@ it("opens the shortcut help for every shortcut", async () => {
   await user.keyboard("?");
   const dialog = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
   for (const row of SHORTCUTS) {
-    expect(within(dialog).getByText(row.keys)).toBeInTheDocument();
+    expect(
+      within(dialog).getAllByText(shortcutLabel(row.keys, navigator.userAgent)).length,
+    ).toBeGreaterThan(0);
     expect(within(dialog).getByText(row.description)).toBeInTheDocument();
   }
 });

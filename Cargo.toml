@@ -54,6 +54,11 @@ cetra-capture = { path = "tools/capture" }
 # `datafusion` crate; this is the crate that defines it. Keep default features
 # off so the compression codecs DataFusion's own pin excludes stay out.
 datafusion-datasource = { version = "55.2", default-features = false }
+# The `*_expressions` features are the SQL console's function set: it offers every built-in
+# scalar and nested function except a deny-list (spec 05, D-A2-2), so dropping one removes
+# functions users can call. `recursive_protection` guards planning against stack overflow.
+# `datafusion` and `datafusion-common` turn on the default features of `arrow` and `parquet`
+# themselves, so trimming those pins below saves no build time.
 datafusion = { version = "55.2", default-features = false, features = [
     "nested_expressions",
     "crypto_expressions",
@@ -209,6 +214,8 @@ rand = "0.10.3"
 dirs = "7.0.0"
 # CLI credentials file (P17). Figment still uses toml 0.8.
 toml = "1.2.1"
+# `cetra agents setup` edits `~/.codex/config.toml` in place, keeping comments and key order (track CA, D-CA-10).
+toml_edit = { version = "0.25.15", default-features = false, features = ["parse", "display"] }
 # CLI login and logout (P17), judges and webhooks (D166). rustls, no native-tls and no system proxy.
 # `openidconnect` uses this pin.
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls", "json"] }

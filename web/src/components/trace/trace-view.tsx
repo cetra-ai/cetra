@@ -1,5 +1,5 @@
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useRouterState } from "@tanstack/react-router";
+import { Link, useRouterState } from "@tanstack/react-router";
 import { cn } from "cn";
 import { ArrowLeft } from "lucide-react";
 import { type ReactNode, useEffect, useRef, useState } from "react";
@@ -7,6 +7,7 @@ import { problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { traceDetailQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
+import { AddToQueueButton } from "@/components/annotation-queues/add-to-queue-dialog";
 import { useShortcut } from "@/components/command/use-shortcut";
 import { AddToDatasetButton } from "@/components/datasets/add-to-dataset-dialog";
 import { useProject } from "@/components/shell/project-context";
@@ -269,6 +270,25 @@ export function TraceView({
               spanId={selectedRow ? selected : undefined}
               selectedIsRoot={selectedIsRoot}
             />
+            {selectedRow?.span.span_kind === "llm" ? (
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  to="/$org/$project/playground"
+                  params={{ org, project }}
+                  search={{ trace: loaded.trace.trace_id, span: selectedRow.span.span_id }}
+                >
+                  Open in playground
+                </Link>
+              </Button>
+            ) : null}
+            {selectedRow !== undefined && !selectedIsRoot ? (
+              <AddToQueueButton
+                target="span"
+                items={[{ trace_id: loaded.trace.trace_id, span_id: selectedRow.span.span_id }]}
+              />
+            ) : (
+              <AddToQueueButton target="trace" items={[{ trace_id: loaded.trace.trace_id }]} />
+            )}
           </>
         }
       />

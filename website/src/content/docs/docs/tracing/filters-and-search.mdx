@@ -1,0 +1,65 @@
+---
+title: Filters and search
+description: Narrow the trace, span, session and user lists with facets, the filter bar, full-text search and saved views.
+---
+
+Use the filter bar to keep only the rows you care about, and the search box to find text in inputs and outputs.
+
+## Facets and presets
+
+The **Filters** button opens a sidebar with one section per field: for example status, name, model, environment, tags, prompt, user and session. A badge on the button counts the conditions in the filter. The sidebar stays open or closed as you left it.
+
+- A field with a few values lists them with counts. Tick a value to filter on it, or use its exclude button to filter it out. Search the values with **Search values**.
+- Metadata and attributes list their keys. Search them with **Search keys**, then pick a key to filter on its value.
+- A numeric field, such as duration or cost, shows a histogram. Select a range on it, or type a min and a max and select **Apply**.
+- **Search filters** at the top narrows the list of sections.
+
+Next to the button, preset chips switch common filters on and off: **Errors**, **Slow** and **Expensive**. **Slow** and **Expensive** keep the rows above the p95 of duration or cost in the time range. The traces list adds **Has score**, a menu of your score definitions. The spans list adds **LLM**.
+
+On the users list, the sidebar and the filter work on the traces of those users, and its note says "Counts are traces".
+
+When you move to another list, cetra carries over the filters that list also has, and shows "Filters kept from" the first list with a **Clear** button.
+
+## The filter bar
+
+The filter bar is above each list. It holds one text: a condition written in the [filter language](/docs/reference/filter-language/), the same as the text after `WHERE` in SQL. A simple condition such as `status = 'error'` becomes a chip that you can edit or remove.
+
+- **+ Filter** adds a chip. Pick a field, an operator and a value. For an `IN` condition, type each value and press Enter.
+- **Edit as text** turns the bar into a text editor. Press `f` on a list to do the same. The editor completes column names and, for many fields, values from your data.
+
+If the filter is wrong, the bar underlines the problem and shows the message. cetra never applies a broken filter.
+
+Here are a few filters:
+
+| Filter | Finds |
+|---|---|
+| `status = 'error'` | Traces with at least one error. |
+| `cost_total > 0.10 AND tags @> ['beta']` | Costly traces that carry the tag `beta`. |
+| `metadata['customer'] = 'acme' AND duration_ms > 5000` | Slow traces for one customer. |
+| `score('hallucination') >= 0.5` | Traces whose latest `hallucination` score is high. |
+
+Each list reads one view: `traces`, `spans` or `sessions`. The users list filters the `traces` view. A filter can use the columns of that view. See the [SQL schema](/docs/reference/sql-schema/).
+
+Lists hide evaluation traces and experiment traces. A filter that names `environment` shows evaluation traces. The **Include** menu in the toolbar shows or hides them: tick **Evaluation traces** or **Experiment traces**.
+
+## Time range
+
+Every list has a time range. Pick a preset, or enter your own start and end. You can also type a duration, such as `2h`. A duration that matches a preset (15m, 1h, 6h, 24h, 7d or 30d) selects that preset. Any other duration becomes an absolute range that ends now. The filter applies inside the range. The **Live** switch of the traces list needs a preset.
+
+## Search
+
+The search box finds text in the `input`, `output` and `name` of spans, and in their system instructions. It ignores case. You type the text as it is: cetra escapes the characters that would act as wildcards. On the trace list, a trace matches when any of its spans matches.
+
+Search reads the stored payloads, so it needs a time range. Keep the range short for the fastest results. For a pattern, use `ILIKE` in the filter bar, for example `input ILIKE '%refund%'` on the spans list.
+
+## Saved views
+
+Everything on a list page is in its URL: the range, filter, search, sort and columns. A saved view stores that state under a name.
+
+The view menu is a button next to the page title in the top bar. It shows the name of the current view, or **Default view**. It is on the traces, spans, sessions and users lists.
+
+Select **Save as…** to store the current state under a name. Tick **Share with project** to let the project's members use it, and **Make my default** to apply it when you open the list with no other settings. On a view you own, the menu also has **Save**, **Rename…**, **Delete**, **Set as my default** and **Unset default**. A dot on the button shows unsaved changes, and **Discard changes** reloads the saved state.
+
+## Click to filter
+
+Hover a value in a list, for example a model name, and select the + that appears to add it to the filter. Right-click the value for a menu: filter on it, exclude it, copy it, or open its session or user. Selecting a point on a dashboard chart opens the trace list filtered to that period.

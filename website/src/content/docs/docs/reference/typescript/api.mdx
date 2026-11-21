@@ -1,0 +1,884 @@
+---
+title: API (TypeScript)
+description: Every export of the cetra TypeScript SDK and its subpath entry points, with signatures.
+---
+
+Use this page to look up the signature of every export. There is one section per entry point, and each entry links to the guide section that explains it.
+
+## `@cetra-ai/sdk`
+
+### `AddedQueueItems`
+
+{/* untested: signature */}
+```ts
+interface AddedQueueItems {
+  readonly added: number;
+  readonly existing: number;
+  readonly skipped: readonly SkippedQueueItem[];
+}
+```
+
+The answer of `client.annotationQueues.addItems()`. A target already in the queue counts as `existing`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `AiTelemetry`
+
+{/* untested: signature */}
+```ts
+interface AiTelemetry {
+  isEnabled: boolean;
+  tracer?: Tracer;
+  functionId?: string;
+  metadata?: Record<string, AttributeValue>;
+}
+```
+
+What `aiTelemetry()` returns: the value to pass as `experimental_telemetry`. See [Vercel AI SDK](/docs/reference/typescript/opentelemetry/#vercel-ai-sdk).
+
+### `AiTelemetryOptions`
+
+{/* untested: signature */}
+```ts
+interface AiTelemetryOptions {
+  sessionId?: string;
+  userId?: string;
+  tags?: readonly string[];
+  metadata?: Readonly<Record<string, string | number | boolean>>;
+  functionId?: string;
+}
+```
+
+The options of `aiTelemetry()`. See [Vercel AI SDK](/docs/reference/typescript/opentelemetry/#vercel-ai-sdk).
+
+### `AnnotationQueue`
+
+{/* untested: signature */}
+```ts
+interface AnnotationQueue {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly instructions: string | undefined;
+  readonly target: QueueTarget;
+  readonly definitionIds: readonly string[];
+  readonly version: number;
+  readonly createdBy: string | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly counts: QueueCounts;
+}
+```
+
+A queue as the server returns it, with its item counts by status. Pass its `version` to `update()`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueueItem`
+
+{/* untested: signature */}
+```ts
+interface AnnotationQueueItem {
+  readonly id: string;
+  readonly queueId: string;
+  readonly traceId: string | undefined;
+  readonly spanId: string | undefined;
+  readonly sessionId: string | undefined;
+  readonly targetTime: string;
+  readonly status: QueueItemStatus;
+  readonly skipReason: string | undefined;
+  readonly leasedByUserId: string | undefined;
+  readonly leaseExpiresAt: string | undefined;
+  readonly doneByUserId: string | undefined;
+  readonly doneAt: string | undefined;
+  readonly addedBy: "user" | "pat" | "key";
+  readonly addedById: string;
+  readonly createdAt: string;
+}
+```
+
+One target of a queue, as `client.annotationQueues.items()` returns it. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `AnnotationQueues`
+
+{/* untested: signature */}
+```ts
+class AnnotationQueues {
+  list(): Promise<AnnotationQueue[]>;
+  get(queueId: string): Promise<AnnotationQueue>;
+  create(name: string, options: { target: QueueTarget; definitionIds: readonly string[]; description?: string; instructions?: string }): Promise<AnnotationQueue>;
+  update(queueId: string, options: { version: number; name?: string; description?: string; instructions?: string; definitionIds?: readonly string[] }): Promise<AnnotationQueue>;
+  delete(queueId: string): Promise<void>;
+  addItems(queueId: string, targets: QueueTargets): Promise<AddedQueueItems>;
+  items(queueId: string, options?: { status?: QueueItemStatus }): Promise<AnnotationQueueItem[]>;
+}
+```
+
+The annotation queue operations of `client.annotationQueues`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `ApiError`
+
+{/* untested: signature */}
+```ts
+class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly detail: string | undefined;
+  readonly errors: readonly { field: string; message: string }[];
+}
+```
+
+Rejects the calls of `Client` and `evaluate` when the API answers with an error. `errors` holds the field errors of a refused dataset item. See [Errors](/docs/reference/typescript/scores-datasets-experiments/#errors).
+
+### `CetraOptions`
+
+{/* untested: signature */}
+```ts
+interface CetraOptions {
+  apiKey?: string;
+  baseUrl?: string;
+  environment?: string;
+  release?: string;
+  captureContent?: boolean;
+  sampleRate?: number;
+  mask?: (value: unknown) => unknown;
+  useGlobalProvider?: boolean;
+  exportFilter?: (span: ReadableSpan) => boolean;
+  instrument?: readonly Instrumentation[];
+  enabled?: boolean;
+}
+```
+
+The options of `init()`. See [Configuration](/docs/reference/typescript/#configuration).
+
+### `ChatEntry`
+
+{/* untested: signature */}
+```ts
+type ChatEntry = ChatMessage | { type: "placeholder"; name: string };
+```
+
+One entry of a chat template: a message whose text may hold `{{ name }}` variables, or a placeholder that `compile()` replaces with the messages it is given.
+
+### `ChatMessage`
+
+{/* untested: signature */}
+```ts
+interface ChatMessage {
+  role: string;
+  content: string;
+}
+```
+
+A chat message: its role and its text. A placeholder is filled with a list of these, and `compile()` of a chat prompt returns a list of them.
+
+### `Client`
+
+{/* untested: signature */}
+```ts
+class Client {
+  constructor(options?: ClientOptions);
+  readonly datasets: Datasets;
+  readonly annotationQueues: AnnotationQueues;
+  readonly prompts: Prompts;
+}
+```
+
+The REST client for datasets, prompts, experiments and annotation queues. It reads the key and the base URL the way `init()` does and throws `ConfigError` without a key. `prompts` holds the prompt operations: `get`, `list`, `create`, `createVersion` and `setLabel`. See [Datasets and experiments](/docs/reference/typescript/scores-datasets-experiments/#datasets-and-experiments).
+
+### `ClientOptions`
+
+{/* untested: signature */}
+```ts
+interface ClientOptions {
+  apiKey?: string;
+  baseUrl?: string;
+  // plus the `fetch` and `sleep` injection points used by tests
+}
+```
+
+The options of `new Client()`. See [Datasets and experiments](/docs/reference/typescript/scores-datasets-experiments/#datasets-and-experiments).
+
+### `ConfigError`
+
+{/* untested: signature */}
+```ts
+class ConfigError extends Error {
+  readonly option: string;
+}
+```
+
+Thrown for a missing or invalid configuration value. The message names the option, never its value. See [Configuration](/docs/reference/typescript/#configuration).
+
+### `ContextOptions`
+
+{/* untested: signature */}
+```ts
+interface ContextOptions {
+  sessionId?: string;
+  userId?: string;
+  tags?: readonly string[];
+  metadata?: Readonly<Record<string, unknown>>;
+  propagate?: boolean;
+  prompt?: Prompt;
+}
+```
+
+The options of `withContext()`. `prompt` stamps the prompt's name and version on every span inside the block. See [Context and baggage](/docs/reference/typescript/context/#context-and-baggage).
+
+### `Dataset`
+
+{/* untested: signature */}
+```ts
+class Dataset {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly version: number;
+  readonly items: readonly DatasetItem[];
+  addItems(items: readonly NewDatasetItem[]): Promise<Dataset>;
+}
+```
+
+A dataset at one version, with its items. `addItems` sends the items in batches of 1,000 and resolves to the dataset at its latest version. See [Datasets](/docs/reference/typescript/scores-datasets-experiments/#datasets).
+
+### `DatasetInfo`
+
+{/* untested: signature */}
+```ts
+interface DatasetInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly currentVersion: number;
+  readonly itemCount: number;
+}
+```
+
+One entry of `client.datasets.list()`: a dataset without its items. See [Datasets](/docs/reference/typescript/scores-datasets-experiments/#datasets).
+
+### `DatasetItem`
+
+{/* untested: signature */}
+```ts
+interface DatasetItem {
+  readonly id: string;
+  readonly input: unknown;
+  readonly expectedOutput: unknown;
+  readonly metadata: Readonly<Record<string, unknown>>;
+  readonly version: number;
+  readonly sourceTraceId: string | undefined;
+  readonly sourceSpanId: string | undefined;
+}
+```
+
+One item of a dataset version, as the server returns it. See [Datasets](/docs/reference/typescript/scores-datasets-experiments/#datasets).
+
+### `Datasets`
+
+{/* untested: signature */}
+```ts
+class Datasets {
+  create(name: string, options?: { description?: string; inputSchema?: object; expectedSchema?: object }): Promise<Dataset>;
+  get(nameOrId: string, options?: { version?: number }): Promise<Dataset>;
+  list(): Promise<DatasetInfo[]>;
+  delete(nameOrId: string): Promise<void>;
+}
+```
+
+The dataset operations of `client.datasets`. See [Datasets](/docs/reference/typescript/scores-datasets-experiments/#datasets).
+
+### `EvaluateOptions`
+
+{/* untested: signature */}
+```ts
+interface EvaluateOptions {
+  dataset: string | Dataset;
+  task: (input: unknown, item: DatasetItem) => unknown;
+  scorers?: readonly Scorer[];
+  experimentName?: string;
+  description?: string;
+  metadata?: Readonly<Record<string, unknown>>;
+  datasetVersion?: number;
+  concurrency?: number;
+  repetitions?: number;
+  client?: Client;
+}
+```
+
+The options of `evaluate()`. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `ExperimentResult`
+
+{/* untested: signature */}
+```ts
+class ExperimentResult {
+  readonly experimentId: string;
+  readonly experimentName: string;
+  readonly datasetId: string;
+  readonly datasetVersion: number;
+  readonly runs: readonly Run[];
+  readonly scorerErrors: Readonly<Record<string, number>>;
+  readonly errorCount: number;
+  summary(): string;
+  assertMin(name: string, threshold: number): void;
+}
+```
+
+What `evaluate()` resolves to: one `Run` per item and repetition, in item order. `assertMin` throws when a scorer's mean is below the threshold, which gates CI. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `getPrompt`
+
+{/* untested: signature */}
+```ts
+function getPrompt(name: string, options?: GetPromptOptions): Promise<Prompt>;
+```
+
+The prompt `name` at its label (default `production`) or at a `version`. It is cached in the process: a version never expires, and a label is fresh for `cacheTtlS` seconds (60 by default), then served stale while one refresh runs. A failed fetch falls back to the stale prompt, then to `fallback`, then rejects with `PromptNotAvailable`. Before `init()`, or with the SDK disabled, it behaves like a failed fetch. Bad arguments reject with `TypeError`.
+
+### `GetPromptOptions`
+
+{/* untested: signature */}
+```ts
+interface GetPromptOptions {
+  label?: string;
+  version?: number;
+  fallback?: string | readonly ChatMessage[];
+  cacheTtlS?: number;
+}
+```
+
+The options of `getPrompt()`. Pass a `label` or a `version`, not both. The `fallback` is a text template or a list of chat messages, used when no prompt can be fetched and no stale one is cached. `cacheTtlS: 0` turns the label cache off.
+
+### `Instrumentation`
+
+{/* untested: signature */}
+```ts
+interface Instrumentation {
+  setTracerProvider(provider: TracerProvider): void;
+  enable(): void;
+  disable(): void;
+}
+```
+
+What `init({ instrument })` accepts: the shape the OpenInference instrumentations have. See [Instrumentation](/docs/reference/typescript/opentelemetry/#instrumentation-openai-anthropic-langchain).
+
+### `LlmSpanHandle`
+
+{/* untested: signature */}
+```ts
+interface LlmSpanHandle extends SpanHandle {
+  setInputMessages(messages: readonly unknown[]): void;
+  setOutputMessages(messages: readonly unknown[]): void;
+  setResponseModel(model: string): void;
+  setUsage(usage: Usage): void;
+  setCost(totalUsd: number): void;
+  recordFirstToken(): void;
+}
+```
+
+The handle `withLlmSpan` passes to its body. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `LlmSpanOptions`
+
+{/* untested: signature */}
+```ts
+interface LlmSpanOptions {
+  provider: string;
+  model: string;
+  inputMessages?: readonly unknown[];
+  systemInstructions?: string | readonly unknown[];
+  params?: Readonly<Record<string, unknown>>;
+  metadata?: Readonly<Record<string, unknown>>;
+}
+```
+
+The options of `withLlmSpan()`. `provider` and `model` are required non-empty strings. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `NewDatasetItem`
+
+{/* untested: signature */}
+```ts
+interface NewDatasetItem {
+  input: unknown;
+  expectedOutput?: unknown;
+  metadata?: Readonly<Record<string, unknown>>;
+}
+```
+
+An item to add with `addItems()`. Any other key throws a `TypeError`. See [Datasets](/docs/reference/typescript/scores-datasets-experiments/#datasets).
+
+### `ObserveOptions`
+
+{/* untested: signature */}
+```ts
+interface ObserveOptions {
+  name?: string;
+  kind?: SpanKind;
+  captureInput?: boolean;
+  captureOutput?: boolean;
+  reduceOutput?: (items: unknown[]) => unknown;
+}
+```
+
+The options of `observe()`. See [Wrapper rules](/docs/reference/typescript/tracing/#wrapper-rules).
+
+### `Prompt`
+
+{/* untested: signature */}
+```ts
+class Prompt {
+  readonly name: string;
+  readonly type: "text" | "chat";
+  readonly template: string | readonly ChatEntry[];
+  readonly version: number | undefined; // undefined for a fallback
+  readonly config: Readonly<Record<string, unknown>>;
+  readonly labels: readonly string[];
+  readonly variables: readonly string[];
+  readonly placeholders: readonly string[];
+  readonly isFallback: boolean;
+  compile(values?: PromptValues): string | readonly ChatMessage[];
+}
+```
+
+A prompt returned by `getPrompt()`. `compile()` renders its template: a text prompt gives a string, a chat prompt a list of messages. It records `cetra.prompt.name` and `cetra.prompt.version` on the active span when that span records.
+
+### `PromptCompileError`
+
+{/* untested: signature */}
+```ts
+class PromptCompileError extends Error {
+  readonly kind: "invalid" | "missing_variable" | "missing_placeholder";
+  readonly variable: string | undefined;
+  readonly reason: string | undefined;
+  readonly line: number | undefined;
+  readonly column: number | undefined;
+  readonly prompt: string | undefined;
+}
+```
+
+Thrown by `compile()` for a variable or placeholder that has no value, and by `getPrompt()` for an invalid fallback template. The message names the prompt and the variable, never the template or the values.
+
+### `PromptNotAvailable`
+
+{/* untested: signature */}
+```ts
+class PromptNotAvailable extends Error {
+  readonly prompt: string;
+  readonly reason: string;
+}
+```
+
+Thrown by `getPrompt()` when no prompt can be fetched and the call gave no fallback. `reason` is `not found`, `status <n>`, `network`, `invalid response` or `sdk disabled`.
+
+### `Prompts`
+
+{/* untested: signature */}
+```ts
+class Prompts {
+  get(name: string, options?: { label?: string; version?: number }): Promise<Prompt>;
+  list(): Promise<string[]>;
+  create(input: { name: string; type: "text" | "chat"; template: string | readonly ChatEntry[]; config?: Record<string, unknown>; labels?: readonly string[]; commitMessage?: string; description?: string; tags?: readonly string[] }): Promise<Prompt>;
+  createVersion(name: string, input: { template: string | readonly ChatEntry[]; config?: Record<string, unknown>; labels?: readonly string[]; commitMessage?: string }): Promise<Prompt>;
+  setLabel(name: string, label: string, version: number): Promise<void>;
+}
+```
+
+The prompt operations of `client.prompts`. They are not cached, and they reject with `ApiError` on failure.
+
+### `PromptValues`
+
+{/* untested: signature */}
+```ts
+type PromptValues = Readonly<Record<string, string | number | boolean | readonly ChatMessage[]>>;
+```
+
+The values of `Prompt.compile()`. A string, number or boolean fills `{{ name }}` (a boolean is `true` or `false`, and `1.0` is `1`); a list of messages fills a placeholder. A value of any other type throws `TypeError`.
+### `QueueCounts`
+
+{/* untested: signature */}
+```ts
+interface QueueCounts {
+  readonly pending: number;
+  readonly completed: number;
+  readonly skipped: number;
+}
+```
+
+The item counts of an annotation queue, by status. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueItemStatus`
+
+{/* untested: signature */}
+```ts
+type QueueItemStatus = "pending" | "completed" | "skipped";
+```
+
+The status of a queue item, and the filter of `items()`. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueTarget`
+
+{/* untested: signature */}
+```ts
+type QueueTarget = "trace" | "span" | "session";
+```
+
+What the items of a queue are. It is fixed when the queue is created. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `QueueTargets`
+
+{/* untested: signature */}
+```ts
+type QueueTargets =
+  | { readonly traceIds: readonly string[] }
+  | { readonly spans: readonly (readonly [string, string])[] }
+  | { readonly sessionIds: readonly string[] };
+```
+
+What `addItems()` adds: exactly one of the three keys. A span is a `[traceId, spanId]` pair. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `Run`
+
+{/* untested: signature */}
+```ts
+interface Run {
+  readonly datasetItemId: string;
+  readonly repetition: number;
+  readonly input: unknown;
+  readonly expectedOutput: unknown;
+  readonly output: unknown;
+  readonly error: string | undefined;
+  readonly traceId: string | undefined;
+  readonly latencyNs: number;
+  readonly scores: Readonly<Record<string, Score>>;
+}
+```
+
+The outcome of the task on one item and one repetition, with the scores it received. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `Score`
+
+{/* untested: signature */}
+```ts
+interface Score {
+  value: boolean | number | string;
+  reason?: string;
+  dataType?: "numeric" | "boolean" | "categorical" | "text";
+  metadata?: Readonly<Record<string, unknown>>;
+}
+```
+
+What a scorer returns when it has a reason or metadata to add to the value. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `ScoreOptions`
+
+{/* untested: signature */}
+```ts
+interface ScoreOptions {
+  name: string;
+  value: boolean | number | string;
+  traceId?: string;
+  spanId?: string;
+  sessionId?: string;
+  reason?: string;
+  dataType?: "numeric" | "boolean" | "categorical" | "text";
+  metadata?: Readonly<Record<string, unknown>>;
+  userId?: string;
+  scoreId?: string;
+}
+```
+
+The options of `score()`. See [Scores](/docs/reference/typescript/scores-datasets-experiments/#scores).
+
+### `Scorer`
+
+{/* untested: signature */}
+```ts
+type Scorer = (args: ScorerArgs) => boolean | number | string | Score | undefined | null | Promise<boolean | number | string | Score | undefined | null>;
+```
+
+A function that scores one run. Its name is the name of the score. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `ScorerArgs`
+
+{/* untested: signature */}
+```ts
+interface ScorerArgs {
+  input: unknown;
+  output: unknown;
+  expected: unknown;
+  metadata: Readonly<Record<string, unknown>>;
+  traceId: string | undefined;
+  item: DatasetItem;
+}
+```
+
+The one object a scorer receives. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `SkippedQueueItem`
+
+{/* untested: signature */}
+```ts
+interface SkippedQueueItem {
+  readonly index: number;
+  readonly message: string;
+}
+```
+
+A target that `addItems()` did not add. `index` is its position in the list you passed. See [Annotation queues](/docs/reference/typescript/scores-datasets-experiments/#annotation-queues).
+
+### `SpanHandle`
+
+{/* untested: signature */}
+```ts
+interface SpanHandle {
+  readonly traceId: string | undefined;
+  readonly spanId: string | undefined;
+  setInput(value: unknown): void;
+  setOutput(value: unknown): void;
+  setMetadata(values: Readonly<Record<string, unknown>>): void;
+}
+```
+
+The handle `withSpan` passes to its body. Every method is a no-op after the span ended. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `SpanKind`
+
+{/* untested: signature */}
+```ts
+type SpanKind =
+  | "llm" | "embedding" | "tool" | "agent" | "chain"
+  | "retriever" | "reranker" | "guardrail" | "evaluator" | "span";
+```
+
+The kinds a span can have. An invalid kind throws a `TypeError`. See [Wrapper rules](/docs/reference/typescript/tracing/#wrapper-rules).
+
+### `SpanOptions`
+
+{/* untested: signature */}
+```ts
+interface SpanOptions {
+  kind?: SpanKind;
+  input?: unknown;
+  metadata?: Readonly<Record<string, unknown>>;
+}
+```
+
+The options of `withSpan()`. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `Usage`
+
+{/* untested: signature */}
+```ts
+interface Usage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  reasoningTokens?: number;
+}
+```
+
+The token counts `setUsage` records. Only safe integers are kept. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `VERSION`
+
+{/* untested: signature */}
+```ts
+const VERSION: string;
+```
+
+The version of the package. See [Install](/docs/reference/typescript/#install).
+
+### `aiTelemetry`
+
+{/* untested: signature */}
+```ts
+function aiTelemetry(options?: AiTelemetryOptions): AiTelemetry;
+```
+
+Returns the telemetry settings for the Vercel AI SDK: a tracer from the cetra provider plus your context values as metadata. See [Vercel AI SDK](/docs/reference/typescript/opentelemetry/#vercel-ai-sdk).
+
+### `currentSpanId`
+
+{/* untested: signature */}
+```ts
+function currentSpanId(): string | undefined;
+```
+
+The id of the running span, or `undefined` outside a span. See [Scores](/docs/reference/typescript/scores-datasets-experiments/#scores).
+
+### `currentTraceId`
+
+{/* untested: signature */}
+```ts
+function currentTraceId(): string | undefined;
+```
+
+The id of the running trace, or `undefined` outside a span. See [Scores](/docs/reference/typescript/scores-datasets-experiments/#scores).
+
+### `evaluate`
+
+{/* untested: signature */}
+```ts
+function evaluate(options: EvaluateOptions): Promise<ExperimentResult>;
+```
+
+Runs your task on every item of a dataset version, scores each run and stores the results on the server. It needs `init()` first. See [Experiments](/docs/reference/typescript/scores-datasets-experiments/#experiments).
+
+### `flush`
+
+{/* untested: signature */}
+```ts
+function flush(): Promise<void>;
+```
+
+Resolves when the pending spans and scores are exported. Call it at the end of every serverless invocation. See [Edge runtimes and serverless](/docs/reference/typescript/runtimes/#edge-runtimes-and-serverless).
+
+### `init`
+
+{/* untested: signature */}
+```ts
+function init(options?: CetraOptions): void;
+```
+
+Starts the SDK. It is called once per process; later calls are ignored. See [Configuration](/docs/reference/typescript/#configuration).
+
+### `observe`
+
+{/* untested: signature */}
+```ts
+function observe<A extends unknown[], R>(fn: (...args: A) => R, options?: ObserveOptions): (...args: A) => R;
+```
+
+Wraps a function so that each call is one span. See [Wrapper rules](/docs/reference/typescript/tracing/#wrapper-rules).
+
+### `score`
+
+{/* untested: signature */}
+```ts
+function score(options: ScoreOptions): string | undefined;
+```
+
+Queues a score for a trace, a span or a session and returns its id, or `undefined` when nothing was queued. See [Scores](/docs/reference/typescript/scores-datasets-experiments/#scores).
+
+### `shutdown`
+
+{/* untested: signature */}
+```ts
+function shutdown(): Promise<void>;
+```
+
+Flushes, then stops the SDK. See [Edge runtimes and serverless](/docs/reference/typescript/runtimes/#edge-runtimes-and-serverless).
+
+### `spanProcessor`
+
+{/* untested: signature */}
+```ts
+function spanProcessor(): SpanProcessor | undefined;
+```
+
+Returns the span processor of the SDK, for apps that build their own OpenTelemetry pipeline. See [Existing OpenTelemetry setups](/docs/reference/typescript/opentelemetry/#existing-opentelemetry-setups).
+
+### `tracerProvider`
+
+{/* untested: signature */}
+```ts
+function tracerProvider(): TracerProvider;
+```
+
+Returns the tracer provider in use. See [Existing OpenTelemetry setups](/docs/reference/typescript/opentelemetry/#existing-opentelemetry-setups).
+
+### `uuid7`
+
+{/* untested: signature */}
+```ts
+function uuid7(): string;
+```
+
+Returns a new UUIDv7, the kind of id `score()` mints. See [Scores](/docs/reference/typescript/scores-datasets-experiments/#scores).
+
+### `withContext`
+
+{/* untested: signature */}
+```ts
+function withContext<T>(options: ContextOptions, fn: () => T): T;
+```
+
+Runs `fn` with a session, user, tags and metadata stamped on every span started inside it. See [Context and baggage](/docs/reference/typescript/context/#context-and-baggage).
+
+### `withLlmSpan`
+
+{/* untested: signature */}
+```ts
+function withLlmSpan<T>(name: string, options: LlmSpanOptions, fn: (span: LlmSpanHandle) => T): T;
+```
+
+Runs `fn` inside a span that carries the GenAI attributes of a chat call. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+### `withSpan`
+
+{/* untested: signature */}
+```ts
+function withSpan<T>(name: string, fn: (span: SpanHandle) => T): T;
+function withSpan<T>(name: string, options: SpanOptions, fn: (span: SpanHandle) => T): T;
+```
+
+Runs `fn` inside a span. The return value of `fn` is never recorded; the handle's setters write the span's payloads. See [Manual spans and withLlmSpan](/docs/reference/typescript/tracing/#manual-spans-and-withllmspan).
+
+## `@cetra-ai/sdk/openai`
+
+### `openai`
+
+{/* untested: signature */}
+```ts
+function openai(module: typeof OpenAI, options?: { captureContent?: boolean }): Instrumentation;
+```
+
+Builds the OpenInference instrumentation for OpenAI and patches the module by hand. Pass the result to `init({ instrument: [...] }`). See [Instrumentation](/docs/reference/typescript/opentelemetry/#instrumentation-openai-anthropic-langchain).
+
+## `@cetra-ai/sdk/anthropic`
+
+### `anthropic`
+
+{/* untested: signature */}
+```ts
+function anthropic(module: typeof Anthropic, options?: { captureContent?: boolean }): Instrumentation;
+```
+
+Builds the OpenInference instrumentation for Anthropic and patches the module by hand. Pass the result to `init({ instrument: [...] }`). See [Instrumentation](/docs/reference/typescript/opentelemetry/#instrumentation-openai-anthropic-langchain).
+
+## `@cetra-ai/sdk/langchain`
+
+### `langchain`
+
+{/* untested: signature */}
+```ts
+function langchain(module: typeof CallbackManagerModule, options?: { captureContent?: boolean }): Instrumentation;
+```
+
+Builds the OpenInference instrumentation for LangChain and patches the module by hand. Pass the result to `init({ instrument: [...] }`). See [Instrumentation](/docs/reference/typescript/opentelemetry/#instrumentation-openai-anthropic-langchain).
+
+## `@cetra-ai/sdk/browser`
+
+### `FeedbackOptions`
+
+{/* untested: signature */}
+```ts
+interface FeedbackOptions {
+  baseUrl: string;
+  publicKey: string;
+  traceId: string;
+  spanId?: string;
+  name?: string;
+  value: number | boolean | string;
+  comment?: string;
+}
+```
+
+The options of `feedback()`. See [Browser feedback](/docs/reference/typescript/runtimes/#browser-feedback).
+
+### `feedback`
+
+{/* untested: signature */}
+```ts
+function feedback(options: FeedbackOptions): Promise<{ ok: boolean }>;
+```
+
+Posts one end-user feedback score with a public key. It never throws and never retries: `ok` is false for invalid input or a failed request. See [Browser feedback](/docs/reference/typescript/runtimes/#browser-feedback).

@@ -79,6 +79,16 @@ export function canManageAlerts(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 
+/** Mirrors `ProjectPerm::ManageQueues`: project members and above create, edit and fill queues (D-AQ-11). */
+export function canManageQueues(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::Review`: project members and above review queue items (D-AQ-11). The web session user is never an API key. */
+export function canReview(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
 /** Members and above create, edit and delete custom dashboards (spec 09 § Dashboards). */
 export function canManageDashboards(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
@@ -86,6 +96,21 @@ export function canManageDashboards(role: OrgRole | undefined): boolean {
 
 /** Mirrors `ProjectPerm::ManageDatasets`: project members and above write datasets and experiments (D-J-5). */
 export function canManageDatasets(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::ManagePrompts`: members and above create and label prompts (D-V-13). */
+export function canManagePrompts(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::RunPlayground`: members and above run the playground (D-V-26). */
+export function canRunPlayground(role: OrgRole | undefined): boolean {
+  return atLeast(role, "member");
+}
+
+/** Mirrors `ProjectPerm::UseAssistant`: members and above, with a session (D-AS-4). */
+export function canUseAssistant(role: OrgRole | undefined): boolean {
   return atLeast(role, "member");
 }
 

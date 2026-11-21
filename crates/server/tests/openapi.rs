@@ -283,6 +283,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("post", "/api/v1/scores", "create_key_scores"),
     ("post", "/api/public/feedback", "post_feedback"),
+    ("post", "/v1/agent-context", "post_agent_context"),
     ("get", "/api/v1/projects/{project}/schema", "get_schema"),
     (
         "get",
@@ -308,6 +309,91 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "delete",
         "/api/v1/projects/{project}/saved-views/{id}",
         "delete_saved_view",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues",
+        "list_annotation_queues",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues",
+        "create_annotation_queue",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "get_annotation_queue",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "update_annotation_queue",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}",
+        "delete_annotation_queue",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "list_annotation_queue_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items",
+        "add_annotation_queue_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching/preview",
+        "preview_annotation_queue_matching",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/matching",
+        "add_annotation_queue_matching",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "get_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}",
+        "remove_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/next",
+        "next_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "lease_annotation_queue_item",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/lease",
+        "release_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/complete",
+        "complete_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/skip",
+        "skip_annotation_queue_item",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/annotation-queues/{id}/items/{item_id}/reopen",
+        "reopen_annotation_queue_item",
     ),
     (
         "get",
@@ -415,7 +501,54 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/alert-events",
         "list_project_alert_events",
     ),
-    ("get", "/api/v1/projects/{project}/facets", "get_facets"),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "list_assistant_conversations",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations",
+        "post_assistant_conversation",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "get_assistant_conversation",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "patch_assistant_conversation",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/assistant/conversations/{id}",
+        "delete_assistant_conversation",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/messages/{seq}/feedback",
+        "put_assistant_feedback",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/assistant/conversations/{id}/turns",
+        "post_assistant_turn",
+    ),
+    ("get", "/api/v1/orgs/{org}/assistant", "get_org_assistant"),
+    ("put", "/api/v1/orgs/{org}/assistant", "put_org_assistant"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/assistant/test",
+        "post_org_assistant_test",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/assistant",
+        "get_project_assistant",
+    ),
+    ("post", "/api/v1/projects/{project}/facets", "post_facets"),
     (
         "get",
         "/api/v1/projects/{project}/media/{sha256}",
@@ -500,6 +633,73 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "get_online_rule_stats",
     ),
     (
+        "get",
+        "/api/v1/projects/{project}/issue-sources",
+        "list_issue_sources",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issue-sources",
+        "post_issue_source",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "get_issue_source",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "patch_issue_source",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issue-sources/{id}/refit",
+        "post_issue_source_refit",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issue-sources/{id}/refits",
+        "list_issue_source_refits",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/issue-sources/{id}",
+        "delete_issue_source",
+    ),
+    ("get", "/api/v1/projects/{project}/issues", "list_issues"),
+    ("get", "/api/v1/projects/{project}/issues/{id}", "get_issue"),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/occurrences",
+        "get_issue_occurrences",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/issues/{id}/events",
+        "get_issue_events",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/issues/{id}",
+        "patch_issue",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/merge",
+        "post_issue_merge",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/dataset-items",
+        "post_issue_dataset_items",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/issues/{id}/queue-items",
+        "post_issue_queue_items",
+    ),
+    (
         "post",
         "/api/v1/projects/{project}/online-rules",
         "post_online_rule",
@@ -543,6 +743,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "post",
         "/api/v1/projects/{project}/evaluators/{id}/run",
         "post_evaluator_run",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/playground/runs",
+        "post_playground_run",
     ),
     (
         "get",
@@ -750,6 +955,73 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/models/{id}",
         "delete_model_price",
     ),
+    ("get", "/api/v1/projects/{project}/prompts", "list_prompts"),
+    ("post", "/api/v1/projects/{project}/prompts", "post_prompt"),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "get_prompt",
+    ),
+    (
+        "patch",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "patch_prompt",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}",
+        "delete_prompt",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/resolve",
+        "get_prompt_resolve",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "list_prompt_versions",
+    ),
+    (
+        "post",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions",
+        "post_prompt_version",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/versions/{version}",
+        "get_prompt_version",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "put_prompt_label",
+    ),
+    (
+        "delete",
+        "/api/v1/projects/{project}/prompts/{prompt}/labels/{label}",
+        "delete_prompt_label",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/label-events",
+        "list_prompt_label_events",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompts/{prompt}/metrics",
+        "get_prompt_metrics",
+    ),
+    (
+        "get",
+        "/api/v1/projects/{project}/prompt-settings",
+        "get_prompt_settings",
+    ),
+    (
+        "put",
+        "/api/v1/projects/{project}/prompt-settings",
+        "put_prompt_settings",
+    ),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -783,7 +1055,6 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_dashboards",
     "get_dashboard",
     "get_overview",
-    "get_facets",
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
@@ -792,6 +1063,11 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_score_definitions",
     "list_datasets",
     "list_dataset_versions",
+    "list_prompts",
+    "get_prompt_resolve",
+    "list_prompt_versions",
+    "list_prompt_label_events",
+    "get_prompt_metrics",
     "list_dataset_items",
     "list_dataset_version_changes",
     "list_experiment_trends",
@@ -802,6 +1078,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "resolve_model_price",
     "list_org_model_prices",
     "list_online_rules",
+    "list_issue_sources",
     "post_online_rule_preview",
     "post_backfill_estimate",
     "list_eval_jobs",
@@ -819,12 +1096,15 @@ const READ_OPERATIONS: &[&str] = &[
     "list_users",
     "get_user",
     "list_scores",
-    "get_facets",
     "get_experiment_results",
     "compare_experiments",
     "get_evaluator_stats",
     "get_online_rule_stats",
     "get_experiment_summaries",
+    "list_issues",
+    "get_issue",
+    "get_issue_occurrences",
+    "get_prompt_metrics",
 ];
 
 const TAGS: &[&str] = &[
@@ -839,18 +1119,24 @@ const TAGS: &[&str] = &[
     "users",
     "scores",
     "evaluation",
+    "playground",
     "score_definitions",
     "datasets",
+    "prompts",
     "experiments",
     "model_prices",
     "schema",
     "saved_views",
     "dashboards",
+    "annotation_queues",
     "sql",
     "media",
     "internal",
     "deletions",
     "alerts",
+    "issues",
+    "assistant",
+    "ingest",
 ];
 
 const METHODS: &[&str] = &[
@@ -914,6 +1200,7 @@ fn document_lint() {
             *id,
             "create_key_scores"
                 | "post_feedback"
+                | "post_agent_context"
                 | "post_internal_org"
                 | "delete_internal_org"
                 | "list_internal_usage"
@@ -980,6 +1267,18 @@ fn document_lint() {
                 | "delete_org_sso_domain"
                 | "delete_org"
                 | "delete_project"
+                | "patch_issue"
+                | "post_issue_merge"
+                | "list_assistant_conversations"
+                | "post_assistant_conversation"
+                | "get_assistant_conversation"
+                | "patch_assistant_conversation"
+                | "delete_assistant_conversation"
+                | "put_assistant_feedback"
+                | "post_assistant_turn"
+                | "put_org_assistant"
+                | "post_org_assistant_test"
+                | "get_project_assistant"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1051,6 +1350,10 @@ fn document_lint() {
             || *id == "test_channel"
             || *id == "get_alert_rule"
             || *id == "delete_alert_rule"
+            || *id == "patch_assistant_conversation"
+            || *id == "put_assistant_feedback"
+            || *id == "put_org_assistant"
+            || *id == "post_org_assistant_test"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
@@ -1085,6 +1388,8 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_feedback" {
             expected_errors.extend(["400", "401", "402", "403", "404", "413", "429"]);
+        } else if *id == "post_agent_context" {
+            expected_errors.extend(["400", "401", "402", "403", "413"]);
         } else if *id == "get_media" {
             expected_errors.extend(["401", "403", "404", "416", "429"]);
         } else if *id == "post_llm_connection"
@@ -1105,7 +1410,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
-        } else if *id == "run_sql" || *id == "query_widget" {
+        } else if *id == "run_sql" || *id == "query_widget" || *id == "post_facets" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
@@ -1124,15 +1429,37 @@ fn document_lint() {
             || *id == "delete_org_model_price"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_evaluator" || *id == "delete_score_definition" {
+        } else if *id == "get_evaluator"
+            || *id == "delete_score_definition"
+            || *id == "get_prompt_version"
+            || *id == "delete_prompt_label"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_playground_run" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
+        } else if *id == "post_assistant_turn" {
+            // The stream answers 503 when a dependency is down; the test collects 4xx codes only.
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
         } else if *id == "post_evaluator_test" {
             // The test only collects 4xx codes; the operation also declares 503.
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_online_rule" || *id == "patch_online_rule" || *id == "post_backfill"
+        } else if *id == "post_online_rule"
+            || *id == "patch_online_rule"
+            || *id == "post_backfill"
+            || *id == "post_issue_source"
+            || *id == "patch_issue_source"
+            || *id == "patch_issue"
+            || *id == "post_issue_merge"
+            || *id == "post_issue_dataset_items"
+            || *id == "post_issue_source_refit"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "get_online_rule"
+            || *id == "get_issue_source"
+            || *id == "delete_issue_source"
+            || *id == "get_issue_events"
+            || *id == "list_issue_source_refits"
             || *id == "list_backfills"
             || *id == "delete_online_rule"
             || *id == "post_online_rule_resume"
@@ -1140,9 +1467,18 @@ fn document_lint() {
             || *id == "post_evaluator_run"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
-        } else if *id == "post_dataset" || *id == "patch_dataset" || *id == "post_dataset_items" {
+        } else if *id == "post_dataset"
+            || *id == "patch_dataset"
+            || *id == "post_dataset_items"
+            || *id == "post_prompt"
+            || *id == "post_prompt_version"
+            || *id == "put_prompt_label"
+        {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "429"]);
-        } else if *id == "patch_dataset_item" {
+        } else if *id == "patch_dataset_item"
+            || *id == "patch_prompt"
+            || *id == "put_prompt_settings"
+        {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "delete_dataset_item" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
@@ -1156,8 +1492,38 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "413", "429"]);
         } else if *id == "post_dataset_import" {
             expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
-        } else if *id == "get_dataset_export" {
+        } else if *id == "get_dataset_export"
+            || *id == "list_annotation_queues"
+            || *id == "get_annotation_queue"
+            || *id == "delete_annotation_queue"
+            || *id == "list_annotation_queue_items"
+            || *id == "get_annotation_queue_item"
+            || *id == "remove_annotation_queue_item"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_issue_queue_items" {
+            // The test only collects 4xx codes; the operation also declares 503. No 413, 415: the body is small.
+            expected_errors.extend(["400", "401", "403", "404", "422", "429"]);
+        } else if *id == "add_annotation_queue_items" {
+            // The test only collects 4xx codes; the add and preview operations also declare 503.
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
+        } else if *id == "preview_annotation_queue_matching" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
+        } else if *id == "add_annotation_queue_matching" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
+        } else if *id == "next_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "413", "415", "429"]);
+        } else if *id == "skip_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
+        } else if *id == "lease_annotation_queue_item"
+            || *id == "complete_annotation_queue_item"
+            || *id == "reopen_annotation_queue_item"
+        {
+            expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "release_annotation_queue_item" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "create_annotation_queue" || *id == "update_annotation_queue" {
+            expected_errors.extend(["400", "401", "403", "404", "409", "413", "415", "429"]);
         } else if *id == "post_experiment_finish" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_experiment" {
@@ -1250,6 +1616,7 @@ fn document_lint() {
         ("PersonalTokenPage", "PersonalToken"),
         ("SavedViewPage", "SavedView"),
         ("DashboardPage", "DashboardSummary"),
+        ("AssistantConversationPage", "AssistantConversation"),
         ("LlmConnectionPage", "LlmConnection"),
         ("DeletionPage", "Deletion"),
         ("EvaluatorPage", "Evaluator"),
@@ -1258,12 +1625,17 @@ fn document_lint() {
         ("DatasetPage", "Dataset"),
         ("DatasetVersionPage", "DatasetVersion"),
         ("DatasetItemPage", "DatasetItem"),
+        ("PromptPage", "Prompt"),
+        ("PromptVersionPage", "PromptVersion"),
+        ("PromptLabelEventPage", "PromptLabelEvent"),
         ("ExperimentPage", "Experiment"),
         ("ModelPricePage", "ModelPrice"),
         ("ChannelPage", "NotificationChannel"),
         ("AlertRulePage", "AlertRule"),
         ("AlertEventPage", "AlertEvent"),
         ("OnlineRulePage", "OnlineRule"),
+        ("IssueSourcePage", "IssueSource"),
+        ("IssuePage", "Issue"),
         ("EvalJobPage", "EvalJob"),
         ("BackfillPage", "Backfill"),
     ];
@@ -1419,7 +1791,6 @@ fn check_property_names(schema: &Value, owner: &str) {
 
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
-        "get_facets",
         "get_session",
         "get_user",
         "list_sessions",
@@ -1428,7 +1799,7 @@ fn assert_exclusions(document: &Value) {
         "list_users",
         "stream_traces",
     ];
-    const TEXT: &str = "Evaluation traces (`environment = cetra-eval`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
+    const TEXT: &str = "Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set.";
     let mut found = BTreeSet::new();
     let Some(paths) = document["paths"].as_object() else {
         panic!("paths");
@@ -1486,12 +1857,17 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
     // `null` is a value here, not an absent field: a PATCH clears retention with it
     // (`api/openapi.rs` NULL_IS_A_VALUE).
     const NULL_IS_A_VALUE: &[(&str, &[&str])] = &[
+        ("AssistantFeedbackRequest", &["feedback"]),
         ("CreateProjectRequest", &["retention_days"]),
         ("UpdateProjectRequest", &["retention_days"]),
         (
             "UpdateDatasetRequest",
             &["description", "input_schema", "expected_schema"],
         ),
+        ("UpdateIssueSourceRequest", &["filter"]),
+        ("UpdateIssueRequest", &["description"]),
+        ("AgentContextBody", &["repository", "branch", "user"]),
+        ("UpdatePromptRequest", &["description"]),
     ];
     let allowed_names: HashSet<&str> = D65
         .iter()
@@ -1534,6 +1910,9 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "PersonalTokenPage",
         "SavedViewPage",
         "DashboardPage",
+        "AssistantConversationPage",
+        "AnnotationQueuePage",
+        "AnnotationQueueItemPage",
         "LlmConnectionPage",
         "DeletionPage",
         "EvaluatorPage",
@@ -1543,12 +1922,17 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "DatasetVersionPage",
         "DatasetItemPage",
         "ItemChangePage",
+        "PromptPage",
+        "PromptVersionPage",
+        "PromptLabelEventPage",
         "ExperimentPage",
         "ModelPricePage",
         "ChannelPage",
         "AlertRulePage",
         "AlertEventPage",
         "OnlineRulePage",
+        "IssueSourcePage",
+        "IssuePage",
         "EvalJobPage",
         "BackfillPage",
         "InternalUsagePage",

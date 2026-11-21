@@ -1,5 +1,25 @@
 [
   {
+    "operation_id": "add_annotation_queue_items",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-items-added.json"
+  },
+  {
+    "operation_id": "add_annotation_queue_matching",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-matching-added.json"
+  },
+  {
     "operation_id": "compare_experiments",
     "path_params": {},
     "query": {
@@ -8,6 +28,14 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/experiment-comparison.json"
+  },
+  {
+    "operation_id": "create_annotation_queue",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
   },
   {
     "operation_id": "create_dashboard",
@@ -88,6 +116,37 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/alert-rule.json"
+  },
+  {
+    "operation_id": "get_annotation_queue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue.json"
+  },
+  {
+    "operation_id": "get_annotation_queue_item",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01",
+      "item_id": "01900000-0000-7000-8000-000000000a11"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-item.json"
+  },
+  {
+    "operation_id": "get_assistant_conversation",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations/01900000-0000-7000-8000-000000001a01.json"
   },
   {
     "operation_id": "get_auth_config",
@@ -197,204 +256,6 @@
     "file": "static/experiment-summaries.json"
   },
   {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "tags",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-tags.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "user_id",
-      "view": "sessions"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-sessions-user_id.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "model",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-model.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "name",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-name.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "span_kind",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-span_kind.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "status",
-      "view": "spans"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-spans-status.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "cost_total",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-cost_total.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "duration_ms",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-duration_ms.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "environment",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-environment.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "metadata",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-metadata.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "models",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-models.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "name",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-name.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "status",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-status.json"
-  },
-  {
-    "operation_id": "get_facets",
-    "path_params": {},
-    "query": {
-      "field": "tags",
-      "view": "traces"
-    },
-    "status": 200,
-    "content_type": "application/json",
-    "file": "responses/facets-traces-tags.json"
-  },
-  {
     "operation_id": "get_invite_preview",
     "path_params": {
       "token": "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0EXA"
@@ -403,6 +264,46 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/invite-preview.json"
+  },
+  {
+    "operation_id": "get_issue",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue.json"
+  },
+  {
+    "operation_id": "get_issue_events",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-events.json"
+  },
+  {
+    "operation_id": "get_issue_occurrences",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-occurrences.json"
+  },
+  {
+    "operation_id": "get_issue_source",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c00"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-source.json"
   },
   {
     "operation_id": "get_llm_connection",
@@ -472,6 +373,16 @@
     "file": "static/org.json"
   },
   {
+    "operation_id": "get_org_assistant",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/org-assistant.json"
+  },
+  {
     "operation_id": "get_org_entitlements",
     "path_params": {
       "org": "acme"
@@ -516,6 +427,89 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/project.json"
+  },
+  {
+    "operation_id": "get_project_assistant",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/project-assistant.json"
+  },
+  {
+    "operation_id": "get_prompt",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply.json"
+  },
+  {
+    "operation_id": "get_prompt_metrics",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "from": "2026-01-01T00:00:00Z",
+      "to": "2026-01-02T00:00:00Z"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/metrics.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {
+      "label": "staging"
+    },
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve-staging.json"
+  },
+  {
+    "operation_id": "get_prompt_resolve",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/resolve.json"
+  },
+  {
+    "operation_id": "get_prompt_settings",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompt-settings.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "1"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "get_prompt_version",
+    "path_params": {
+      "prompt": "support-reply",
+      "version": "2"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
   },
   {
     "operation_id": "get_saved_view",
@@ -860,12 +854,38 @@
     "file": "static/alert-rules.json"
   },
   {
+    "operation_id": "list_annotation_queue_items",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-items.json"
+  },
+  {
+    "operation_id": "list_annotation_queues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queues.json"
+  },
+  {
     "operation_id": "list_api_keys",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/api-keys.json"
+  },
+  {
+    "operation_id": "list_assistant_conversations",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/assistant-conversations.json"
   },
   {
     "operation_id": "list_backfills",
@@ -1015,6 +1035,32 @@
     "file": "static/experiments.json"
   },
   {
+    "operation_id": "list_issue_source_refits",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000001c20"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-refits.json"
+  },
+  {
+    "operation_id": "list_issue_sources",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issue-sources.json"
+  },
+  {
+    "operation_id": "list_issues",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/issues.json"
+  },
+  {
     "operation_id": "list_llm_connections",
     "path_params": {
       "org": "acme"
@@ -1123,6 +1169,34 @@
     "file": "static/projects.json"
   },
   {
+    "operation_id": "list_prompt_label_events",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/label-events.json"
+  },
+  {
+    "operation_id": "list_prompt_versions",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions.json"
+  },
+  {
+    "operation_id": "list_prompts",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts.json"
+  },
+  {
     "operation_id": "list_saved_views",
     "path_params": {},
     "query": {},
@@ -1207,6 +1281,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "responses/users.json"
+  },
+  {
+    "operation_id": "next_annotation_queue_item",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-item.json"
   },
   {
     "operation_id": "patch_dataset_items",
@@ -1349,6 +1433,30 @@
     "file": "static/experiment-created.json"
   },
   {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-sessions.json"
+  },
+  {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-spans.json"
+  },
+  {
+    "operation_id": "post_facets",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/facets-traces.json"
+  },
+  {
     "operation_id": "post_llm_connection",
     "path_params": {
       "org": "acme"
@@ -1430,6 +1538,24 @@
     "file": "static/personal-token-created.json"
   },
   {
+    "operation_id": "post_prompt",
+    "path_params": {},
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/1.json"
+  },
+  {
+    "operation_id": "post_prompt_version",
+    "path_params": {
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply/versions/2.json"
+  },
+  {
     "operation_id": "post_score_definition",
     "path_params": {},
     "query": {},
@@ -1454,12 +1580,41 @@
     "file": "static/signup-response.json"
   },
   {
+    "operation_id": "preview_annotation_queue_matching",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/annotation-queue-matching-preview.json"
+  },
+  {
     "operation_id": "preview_deletion",
     "path_params": {},
     "query": {},
     "status": 200,
     "content_type": "application/json",
     "file": "static/deletion-preview.json"
+  },
+  {
+    "operation_id": "put_prompt_label",
+    "path_params": {
+      "label": "staging",
+      "prompt": "support-reply"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompts/support-reply.json"
+  },
+  {
+    "operation_id": "put_prompt_settings",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "responses/prompt-settings.json"
   },
   {
     "operation_id": "query_widget",

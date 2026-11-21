@@ -100,6 +100,8 @@ export interface DataTableProps<Row extends RowData> {
   highlightedRowIds?: ReadonlySet<string>;
   /** Floating control drawn over the top of the scrollport, for the live pill. */
   notice?: ReactNode;
+  /** The rows are the previous window's, shown while the new one loads: dimmed and busy. */
+  stale?: boolean;
   /** Marks a row, e.g. `"error"` draws a red edge. A selected row keeps its selected style. */
   rowTone?: (row: Row) => "error" | undefined;
   /** Receives the new order of the column ids after a column is dragged to a new place. */
@@ -138,6 +140,7 @@ export function DataTable<Row extends RowData>({
   emptyState,
   highlightedRowIds,
   notice,
+  stale,
   rowTone,
   onReorder,
   lockedColumnIds = NO_LOCKED,
@@ -586,6 +589,7 @@ export function DataTable<Row extends RowData>({
   return (
     <div
       role="grid"
+      aria-busy={stale ? true : undefined}
       aria-label={ariaLabel}
       aria-rowcount={rows.length + 1 + (isFetchingNextPage ? 1 : 0)}
       aria-colcount={columns.length + (selectable ? 1 : 0)}
@@ -726,7 +730,10 @@ export function DataTable<Row extends RowData>({
       <div
         ref={scrollRef}
         data-scroll-container
-        className="relative min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]"
+        className={cn(
+          "relative min-h-0 flex-1 overflow-auto transition-opacity [scrollbar-gutter:stable]",
+          stale && "opacity-60",
+        )}
         onScroll={(event) => {
           if (headerRef.current) {
             headerRef.current.scrollLeft = event.currentTarget.scrollLeft;

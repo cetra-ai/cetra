@@ -1,0 +1,82 @@
+---
+title: Integrations
+description: "The frameworks, providers and instrumentation libraries cetra works with, how each is connected and what it is tested against."
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components";
+
+Use this page to find how to connect your framework, provider or instrumentation library to cetra.
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [OpenAI](/docs/integrations/openai/) | ✓ | ✓ | `instrument=["openai"]` or `openai(OpenAI)` | captured |
+| [Anthropic](/docs/integrations/anthropic/) | ✓ | ✓ | `instrument=["anthropic"]` or `anthropic(Anthropic)` | captured |
+| [Google Gen AI](/docs/integrations/google-genai/) | ✓ | — | `instrument=["google-genai"]` | captured |
+| [Amazon Bedrock](/docs/integrations/bedrock/) | ✓ | — | `instrument=["bedrock"]` | SDK test |
+| [LiteLLM](/docs/integrations/litellm/) | ✓ | — | `instrument=["litellm"]` | SDK test |
+| [LangChain and LangGraph](/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [LlamaIndex](/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
+| [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
+| [OpenAI Agents SDK](/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [CrewAI](/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
+| [DSPy](/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
+| [Google ADK](/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
+| [OpenInference](/docs/integrations/openinference/) | ✓ | ✓ | point its exporter at cetra | captured |
+| [OpenLLMetry (Traceloop)](/docs/integrations/openllmetry/) | ✓ | ✓ | point its exporter at cetra | captured |
+| [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | ✓ | ✓ | the official `opentelemetry-instrumentation-*` packages | captured |
+| [From Langfuse](/docs/integrations/from-langfuse/) | ✓ | — | keep the Langfuse SDK, export its spans to cetra | captured |
+| [From Laminar](/docs/integrations/from-laminar/) | ✓ | — | keep the Laminar SDK, export its spans to cetra | captured |
+| [Claude Code](/docs/integrations/claude-code/) | — | — | `cetra agents setup claude-code` | captured |
+| [Codex CLI](/docs/integrations/codex/) | — | — | `cetra agents setup codex` | captured |
+| [Gemini CLI](/docs/integrations/gemini-cli/) | — | — | `cetra agents setup gemini-cli` | captured |
+| [GitHub Copilot](/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
+
+"Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans for it. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/).
+
+## Coding agents
+
+<CardGrid>
+  <LinkCard title="Claude Code" description="Prompts, model calls and tools, with the Claude Agent SDK." href="/docs/integrations/claude-code/" />
+  <LinkCard title="Codex CLI" description="Turns and tool calls from codex exec." href="/docs/integrations/codex/" />
+  <LinkCard title="Gemini CLI" description="Model calls and tool batches." href="/docs/integrations/gemini-cli/" />
+  <LinkCard title="GitHub Copilot" description="Copilot CLI and VS Code Copilot Chat." href="/docs/integrations/copilot/" />
+</CardGrid>
+
+## Providers
+
+<CardGrid>
+  <LinkCard title="OpenAI" description="Chat, Responses API and embeddings." href="/docs/integrations/openai/" />
+  <LinkCard title="Anthropic" description="Messages, streaming, thinking and cache tokens." href="/docs/integrations/anthropic/" />
+  <LinkCard title="Google Gen AI" description="Gemini through the Google Gen AI SDK." href="/docs/integrations/google-genai/" />
+  <LinkCard title="Amazon Bedrock" description="Bedrock calls from Python." href="/docs/integrations/bedrock/" />
+  <LinkCard title="LiteLLM" description="LiteLLM calls from Python." href="/docs/integrations/litellm/" />
+</CardGrid>
+
+## Frameworks
+
+<CardGrid>
+  <LinkCard title="LangChain and LangGraph" description="Chains, agents, models and tools." href="/docs/integrations/langchain/" />
+  <LinkCard title="LlamaIndex" description="LlamaIndex from Python." href="/docs/integrations/llama-index/" />
+  <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
+  <LinkCard title="OpenAI Agents SDK" description="Agent runs and function tools." href="/docs/integrations/openai-agents/" />
+  <LinkCard title="CrewAI" description="CrewAI from Python." href="/docs/integrations/crewai/" />
+  <LinkCard title="DSPy" description="DSPy from Python." href="/docs/integrations/dspy/" />
+  <LinkCard title="Google ADK" description="Agent Development Kit runs." href="/docs/integrations/google-adk/" />
+</CardGrid>
+
+## Instrumentation libraries
+
+<CardGrid>
+  <LinkCard title="OpenInference" description="Arize's instrumentation, with any exporter." href="/docs/integrations/openinference/" />
+  <LinkCard title="OpenLLMetry" description="Traceloop's instrumentation and SDK." href="/docs/integrations/openllmetry/" />
+  <LinkCard title="OpenTelemetry GenAI" description="The official GenAI instrumentation packages." href="/docs/integrations/opentelemetry-genai/" />
+</CardGrid>
+
+## Migrating
+
+<CardGrid>
+  <LinkCard title="From Langfuse" description="Keep the Langfuse SDK and send its spans to cetra." href="/docs/integrations/from-langfuse/" />
+  <LinkCard title="From Laminar" description="Keep the Laminar SDK and send its spans to cetra." href="/docs/integrations/from-laminar/" />
+</CardGrid>
+
+Anything else that speaks OpenTelemetry works through [Send OpenTelemetry](/docs/get-started/opentelemetry/).

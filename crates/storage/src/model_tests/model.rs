@@ -123,6 +123,7 @@ pub(super) struct ExpectedTrace {
     pub(super) environment: Option<String>,
     pub(super) tags: Vec<String>,
     pub(super) models: Vec<String>,
+    pub(super) prompts: Vec<String>,
     pub(super) span_count: i64,
     pub(super) error_count: i64,
     pub(super) llm_count: i64,
@@ -508,6 +509,13 @@ impl ProjectModel {
                     .or_else(|| row.request_model.clone())
             })
             .collect();
+        let prompts: BTreeSet<String> = rows
+            .iter()
+            .filter_map(|(_, row)| match (&row.prompt_name, row.prompt_version) {
+                (Some(name), Some(version)) => Some(format!("{name}@{version}")),
+                _ => None,
+            })
+            .collect();
         ExpectedTrace {
             trace_id: hex(trace_id(trace).as_bytes()),
             start_time: rows
@@ -529,6 +537,7 @@ impl ProjectModel {
             environment: shape.environment,
             tags: tags.into_iter().collect(),
             models: models.into_iter().collect(),
+            prompts: prompts.into_iter().collect(),
             span_count: count(rows.len()),
             error_count: count(
                 rows.iter()

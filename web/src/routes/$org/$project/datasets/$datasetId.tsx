@@ -20,6 +20,12 @@ import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { EvaluateSnippet } from "@/components/experiments/evaluate-snippet";
 import { CompareSelection, ExperimentsTable } from "@/components/experiments/experiments-table";
+import {
+  ITEM_TITLE_CLASS,
+  PageToolbar,
+  PageToolbarSummary,
+  PageToolbarTitle,
+} from "@/components/page-toolbar";
 import { RelativeTime } from "@/components/relative-time";
 import { useProject } from "@/components/shell/project-context";
 import { TopBarCrumb } from "@/components/shell/top-bar-slot";
@@ -174,31 +180,85 @@ function DatasetPage() {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-1 flex-col">
-      <header className="flex min-h-9 flex-wrap items-center gap-2 border-b px-3 py-1.5">
-        <nav aria-label="Dataset" className="flex min-w-0 items-center gap-1.5">
-          <BackLink
-            fallback={
-              <Link
-                to="/$org/$project/datasets"
-                params={{ org, project }}
-                search={{ q: undefined, dataset: dataset.id }}
-                aria-label="Back to datasets"
-                className={BACK_LINK_CLASS}
+      <PageToolbar
+        actions={
+          <>
+            <Select value={pickerValue} onValueChange={chooseVersion}>
+              <SelectTrigger aria-label="Version" size="sm" className="w-fit text-body">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={LATEST}>{`Latest (v${latest})`}</SelectItem>
+                {loadedVersions
+                  .filter((version) => version.version !== latest)
+                  .map((version) => (
+                    <SelectItem key={version.version} value={String(version.version)}>
+                      {`v${version.version} — ${version.description}`}
+                    </SelectItem>
+                  ))}
+                {unloadedVersion !== undefined ? (
+                  <SelectItem value={String(unloadedVersion)}>{`v${unloadedVersion}`}</SelectItem>
+                ) : null}
+                {versions.hasNextPage ? (
+                  <SelectItem value={LOAD_MORE}>Load more versions…</SelectItem>
+                ) : null}
+              </SelectContent>
+            </Select>
+            <RunExperimentDialog datasetId={datasetId} datasetName={dataset.name} />
+            <DisabledReason reason={editReason}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={editReason !== undefined}
+                onClick={() => {
+                  setImporting(true);
+                }}
               >
-                <ChevronLeft aria-hidden="true" className="size-3.5" />
-                Datasets
-              </Link>
-            }
-          />
-          <span aria-hidden="true" className="text-muted-foreground/60">
-            /
-          </span>
-          <h2 className="truncate text-ui font-medium">{dataset.name}</h2>
+                Import
+              </Button>
+            </DisabledReason>
+            <ExportMenu datasetId={datasetId} version={shown} />
+            <DisabledReason reason={editReason}>
+              <Button
+                type="button"
+                size="sm"
+                disabled={editReason !== undefined}
+                onClick={() => {
+                  setAdding(true);
+                }}
+              >
+                Add item
+              </Button>
+            </DisabledReason>
+          </>
+        }
+      >
+        <PageToolbarTitle
+          back={
+            <BackLink
+              fallback={
+                <Link
+                  to="/$org/$project/datasets"
+                  params={{ org, project }}
+                  search={{ q: undefined, dataset: dataset.id }}
+                  aria-label="Back to datasets"
+                  className={BACK_LINK_CLASS}
+                >
+                  <ChevronLeft aria-hidden="true" className="size-3.5" />
+                  Datasets
+                </Link>
+              }
+            />
+          }
+          label="Dataset"
+        >
+          <h2 className={ITEM_TITLE_CLASS}>{dataset.name}</h2>
           <TopBarCrumb>
             <span className="max-w-64 truncate text-body font-medium">{dataset.name}</span>
           </TopBarCrumb>
-        </nav>
-        <div className="flex flex-wrap items-center gap-1.5">
+        </PageToolbarTitle>
+        <PageToolbarSummary>
           <MetricChip icon={Rows3} label="Items">
             {dataset.item_count}
           </MetricChip>
@@ -211,58 +271,8 @@ function DatasetPage() {
           <MetricChip icon={Clock} label="Updated">
             <RelativeTime value={dataset.updated_at} />
           </MetricChip>
-        </div>
-        <div className="ml-auto flex flex-wrap items-center gap-1.5">
-          <Select value={pickerValue} onValueChange={chooseVersion}>
-            <SelectTrigger aria-label="Version" size="sm" className="w-fit text-body">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={LATEST}>{`Latest (v${latest})`}</SelectItem>
-              {loadedVersions
-                .filter((version) => version.version !== latest)
-                .map((version) => (
-                  <SelectItem key={version.version} value={String(version.version)}>
-                    {`v${version.version} — ${version.description}`}
-                  </SelectItem>
-                ))}
-              {unloadedVersion !== undefined ? (
-                <SelectItem value={String(unloadedVersion)}>{`v${unloadedVersion}`}</SelectItem>
-              ) : null}
-              {versions.hasNextPage ? (
-                <SelectItem value={LOAD_MORE}>Load more versions…</SelectItem>
-              ) : null}
-            </SelectContent>
-          </Select>
-          <RunExperimentDialog datasetId={datasetId} datasetName={dataset.name} />
-          <DisabledReason reason={editReason}>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={editReason !== undefined}
-              onClick={() => {
-                setImporting(true);
-              }}
-            >
-              Import
-            </Button>
-          </DisabledReason>
-          <ExportMenu datasetId={datasetId} version={shown} />
-          <DisabledReason reason={editReason}>
-            <Button
-              type="button"
-              size="sm"
-              disabled={editReason !== undefined}
-              onClick={() => {
-                setAdding(true);
-              }}
-            >
-              Add item
-            </Button>
-          </DisabledReason>
-        </div>
-      </header>
+        </PageToolbarSummary>
+      </PageToolbar>
 
       {dataset.description ? (
         <p className="px-3 pt-2 text-body text-muted-foreground">{dataset.description}</p>

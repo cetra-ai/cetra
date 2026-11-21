@@ -5,8 +5,10 @@
 //! default exclusions). `references_environment` stays false: the sessions
 //! view has no environment column. Spec 05 says the same.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
+use arrow::array::{Array, AsArray};
 use arrow::compute::concat_batches;
 use arrow::record_batch::RecordBatch;
 use cetra_core::schema::{spans, traces};
@@ -16,12 +18,14 @@ use datafusion::functions_aggregate::expr_fn::{max, sum};
 use datafusion::functions_window::expr_fn::row_number;
 use datafusion::logical_expr::{Expr, ExprFunctionExt, col, lit, when};
 use datafusion::prelude::DataFrame;
+use futures::StreamExt;
 
 use super::cursor::{after, assemble, decode, order_by};
+use super::deletions::utf8;
 use super::{ListScope, MAX_PAGE, Page, SortOrder, present, scoped_traces};
 use crate::filter::{Filter, FilterView};
 use crate::query_error::{RunError, classify};
-use crate::views::{QueryContext, sessions_from_traces};
+use crate::views::{QueryContext, TimeWindow, sessions_from_traces};
 
 const LIST: &str = "sessions";
 const TRACE_COUNT: &str = "trace_count";
@@ -266,6 +270,47 @@ pub(crate) async fn session_rows(
         frame = filter.apply(frame, ctx).await.map_err(classify)?;
     }
     Ok(frame)
+}
+
+/// The distinct session ids the sessions list selects for `filter` over `window` (see
+/// [`session_rows`]), at most `limit`. Which ids come back when more match is unspecified.
+/// Null session ids are left out.
+pub(crate) async fn filtered_session_ids(
+    ctx: &QueryContext,
+    filter: Option<Filter>,
+    window: TimeWindow,
+    include_experiments: bool,
+    limit: usize,
+) -> Result<Vec<String>, RunError> {
+    let scope = ListScope {
+        window: Some(window),
+        include_eval: false,
+        include_experiments,
+    };
+    let frame = session_rows(ctx, scope, filter)
+        .await?
+        .select(vec![col(traces::SESSION_ID)])
+        .map_err(classify)?;
+    let mut stream = frame
+        .execute_stream()
+        .await
+        .map_err(|error| ctx.fail(error))?;
+    let mut found = BTreeSet::new();
+    'read: while let Some(batch) = stream.next().await {
+        let batch = batch.map_err(|error| ctx.fail(error))?;
+        let sessions = utf8(batch.column(0))?;
+        let sessions = sessions.as_string::<i32>();
+        for row in 0..sessions.len() {
+            if sessions.is_null(row) {
+                continue;
+            }
+            found.insert(sessions.value(row).to_owned());
+            if found.len() >= limit {
+                break 'read;
+            }
+        }
+    }
+    Ok(found.into_iter().collect())
 }
 
 async fn list(ctx: &QueryContext, request: &SessionListRequest<'_>) -> Result<Page, RunError> {

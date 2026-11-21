@@ -295,6 +295,22 @@ describe("environment and release", () => {
     );
   });
 
+  it("rejects the playground environment without echoing it", () => {
+    const text = message({ apiKey: KEY, environment: "cetra-playground" });
+    expect(text).toBe("environment: is reserved");
+    expect(message({ apiKey: KEY }, { CETRA_ENVIRONMENT: "cetra-playground" })).toBe(
+      "CETRA_ENVIRONMENT: is reserved",
+    );
+  });
+
+  it("rejects the assistant environment without echoing it", () => {
+    const text = message({ apiKey: KEY, environment: "cetra-assistant" });
+    expect(text).toBe("environment: is reserved");
+    expect(message({ apiKey: KEY }, { CETRA_ENVIRONMENT: "cetra-assistant" })).toBe(
+      "CETRA_ENVIRONMENT: is reserved",
+    );
+  });
+
   it("uses the release argument, then CETRA_RELEASE, and ignores git env vars", () => {
     expect(
       resolve(

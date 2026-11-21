@@ -11,8 +11,13 @@
       "sdks/typescript/**",
       "tools/capture/ts/**",
       "tools/packaging/**",
+      "website/**",
       "!**/dist",
       "!**/node_modules",
+      "!website/dist",
+      "!website/.astro",
+      "!website/src/generated",
+      "!website/**/*.md",
       "!web/src/api/schema.gen.ts",
       "!web/src/routeTree.gen.ts",
       "!web/msw/mockServiceWorker.js"

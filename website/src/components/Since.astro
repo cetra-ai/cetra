@@ -1,0 +1,34 @@
+---
+// D-W-9: "Since x.y.z" for a released feature, "Unreleased" until then.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { latestRelease } from "../../scripts/latest-release.mjs";
+
+interface Props {
+  v: string;
+}
+const { v } = Astro.props;
+// `astro build` runs in website/, so the changelog is one level up.
+const latest = latestRelease(readFileSync(join(process.cwd(), "..", "CHANGELOG.md"), "utf8"));
+const cmp = (a: string, b: string) => {
+  const [x, y] = [a, b].map((s) => s.split(".").map(Number));
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return 0;
+};
+const released = latest !== null && cmp(v, latest) <= 0;
+---
+
+<span class="since" data-released={released}>{released ? `Since ${v}` : "Unreleased"}</span>
+
+<style>
+  .since {
+    font-size: 0.75rem;
+    padding: 0.1rem 0.4rem;
+    border-radius: 0.25rem;
+    border: 1px solid var(--sl-color-gray-5);
+  }
+  .since[data-released="false"] {
+    border-color: var(--sl-color-accent);
+    color: var(--sl-color-accent);
+  }
+</style>

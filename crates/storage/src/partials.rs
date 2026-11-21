@@ -57,12 +57,13 @@ enum Column {
     TotalTokens,
     CostTotal,
     Models,
+    Prompts,
     LastIngestTime,
     PartialCount,
 }
 
 impl Column {
-    const ALL: [Self; 29] = [
+    const ALL: [Self; 30] = [
         Self::ProjectId,
         Self::TraceId,
         Self::StartTime,
@@ -90,6 +91,7 @@ impl Column {
         Self::TotalTokens,
         Self::CostTotal,
         Self::Models,
+        Self::Prompts,
         Self::LastIngestTime,
         Self::PartialCount,
     ];
@@ -123,6 +125,7 @@ impl Column {
             Self::TotalTokens => traces::TOTAL_TOKENS,
             Self::CostTotal => traces::COST_TOTAL,
             Self::Models => traces::MODELS,
+            Self::Prompts => traces::PROMPTS,
             Self::LastIngestTime => traces::LAST_INGEST_TIME,
             Self::PartialCount => traces::PARTIAL_COUNT,
         }
@@ -456,7 +459,7 @@ impl TraceAcc {
             }
             Column::StartTime => min_i64(self.slot(column), &val),
             Column::EndTime | Column::LastIngestTime => max_i64(self.slot(column), &val),
-            Column::Tags | Column::Models => str_set(self.slot(column), val),
+            Column::Tags | Column::Models | Column::Prompts => str_set(self.slot(column), val),
             Column::Metadata => str_map(self.slot(column), val, ctx),
             Column::SpanCount
             | Column::ErrorCount
@@ -702,7 +705,7 @@ impl TraceMerger {
             let fresh = !traces.contains_key(&trace);
             let acc = traces.entry(trace).or_insert_with(TraceAcc::new);
             if fresh {
-                // The 29 accumulator slots live on the heap behind `TraceAcc`'s
+                // The 30 accumulator slots live on the heap behind `TraceAcc`'s
                 // Vec, so `size_of::<TraceAcc>()` alone misses most of the
                 // allocation that the query memory pool has to account for.
                 *size +=
@@ -820,6 +823,8 @@ const SPAN_COLUMNS: &[&str] = &[
     spans::METADATA,
     spans::REQUEST_MODEL,
     spans::RESPONSE_MODEL,
+    spans::PROMPT_NAME,
+    spans::PROMPT_VERSION,
     spans::INPUT_PREVIEW,
     spans::OUTPUT_PREVIEW,
     spans::INPUT_TOKENS,
@@ -927,6 +932,23 @@ fn append_span(
     };
     if let Some(model) = model {
         acc.update(Column::Models, Val::StrList(vec![model]), &ctx);
+    }
+    // Prompts: `name@version` only when both are set. A name-only span (a fallback
+    // prompt, D-V-14) contributes nothing here.
+    let prompt_name = match value(readers, spans::PROMPT_NAME, row)? {
+        Val::Str(name) => Some(name),
+        _ => None,
+    };
+    let prompt_version = match value(readers, spans::PROMPT_VERSION, row)? {
+        Val::I64(version) => Some(version),
+        _ => None,
+    };
+    if let (Some(name), Some(version)) = (prompt_name, prompt_version) {
+        acc.update(
+            Column::Prompts,
+            Val::StrList(vec![format!("{name}@{version}")]),
+            &ctx,
+        );
     }
     // Counts and derived times.
     acc.update(Column::SpanCount, Val::I64(1), &ctx);
@@ -1183,6 +1205,8 @@ mod tests {
             provider: None,
             request_model: None,
             response_model: None,
+            prompt_name: None,
+            prompt_version: None,
             operation: None,
             input_tokens: None,
             output_tokens: None,
@@ -1536,7 +1560,7 @@ mod tests {
         assert_batches_equal(&sort_by_trace_id(&partials), &sort_by_trace_id(&oracle));
     }
 
-    /// The 29 accumulator slots are on the heap behind `TraceAcc`'s Vec, so
+    /// The 30 accumulator slots are on the heap behind `TraceAcc`'s Vec, so
     /// `size()` must account for them or the query memory pool under-reports.
     #[test]
     fn size_accounts_for_every_accumulator_slot() {
@@ -1642,6 +1666,40 @@ mod tests {
             .unwrap()
             .as_primitive::<arrow::datatypes::Int64Type>();
         assert_eq!(column.value(0), 1);
+    }
+
+    /// D-V-15: `prompts` is the distinct union of `name@version` over the spans of
+    /// a trace, across partials. A name-only span adds nothing.
+    #[test]
+    fn prompts_are_a_distinct_union() {
+        let trace = trace_id(1);
+        let mut first = base_span(trace, span_id(1), 10);
+        first.prompt_name = Some("a".to_owned());
+        first.prompt_version = Some(1);
+        let mut second = base_span(trace, span_id(2), 20);
+        second.parent_span_id = Some(span_id(1));
+        second.prompt_name = Some("a".to_owned());
+        second.prompt_version = Some(1);
+        let mut third = base_span(trace, span_id(3), 30);
+        third.parent_span_id = Some(span_id(1));
+        third.prompt_name = Some("b".to_owned());
+        third.prompt_version = Some(2);
+        let mut name_only = base_span(trace, span_id(4), 40);
+        name_only.parent_span_id = Some(span_id(1));
+        name_only.prompt_name = Some("c".to_owned());
+        let partials = partial_batches(&[vec![first, second], vec![third, name_only]]);
+        let merged = merge_all(&partials);
+        let list = merged
+            .column_by_name(traces::PROMPTS)
+            .unwrap()
+            .as_list::<i32>();
+        let values = list.value(0);
+        let names: Vec<&str> = values
+            .as_string::<i32>()
+            .iter()
+            .map(|value| value.unwrap_or_default())
+            .collect();
+        assert_eq!(names, vec!["a@1", "b@2"]);
     }
 
     #[test]
@@ -1849,7 +1907,7 @@ mod tests {
         #[test]
         fn column_subsets_match_the_full_merge(
             bytes in prop::collection::vec(any::<u8>(), 64..512),
-            picks in prop::collection::vec(0usize..29, 0..12),
+            picks in prop::collection::vec(0..Column::ALL.len(), 0..12),
         ) {
             let generated = generate(&bytes, true);
             let partials = partial_batches(&generated.groups);

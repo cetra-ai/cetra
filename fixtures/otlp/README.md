@@ -14,7 +14,7 @@ fixtures/otlp/
     expected.json
 ```
 
-Group directories are `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `cetra` (spans from our own SDKs), and `edge` (cross-cutting edge cases). In `cetra`, cases named `sdk-<scenario>` are the canonical output of both SDKs for one scenario (spec 10 § Testing). Their `input.json` is in the canonical form described there; the SDK test suites compare against it, so change one only together with both SDKs. Create a group directory only when it contains a case. Case directory names are kebab-case and name the scenario.
+Group directories are `genai`, `openinference`, `openllmetry`, `vercel`, `langfuse`, `laminar`, `google_adk`, `claude_code`, `codex`, `gemini_cli` (coding agents, track CA), `cetra` (spans from our own SDKs), and `edge` (cross-cutting edge cases). In `cetra`, cases named `sdk-<scenario>` are the canonical output of both SDKs for one scenario (spec 10 § Testing). Their `input.json` is in the canonical form described there; the SDK test suites compare against it, so change one only together with both SDKs. Create a group directory only when it contains a case. Case directory names are kebab-case and name the scenario.
 
 A hand-written case directory contains exactly three files: `case.json`, `input.json`, and `expected.json`. A captured case may omit `expected.json` until bless mode writes it (D118). No other file is allowed in a case directory. The validation test allows only `README.md` and `prices.json` beside the group directories, and it rejects a group name outside the list above.
 
@@ -68,10 +68,11 @@ A captured case may be committed before this file exists. The golden test skips 
 
 - `spans` lists every span the normalizer must accept, in `cetra_core::Span` JSON (D60, D64). Timestamps are RFC 3339 with 9 fractional digits and a `Z` suffix. Optional and empty fields are omitted. Spans are sorted by `(trace_id, start_time, span_id)`. When a span has normalization warnings, `attributes` includes `cetra.normalize_warning`: a JSON array of warning codes, sorted, without duplicates (spec 02 rule 18).
 - `media` lists every blob the normalizer must extract. The bytes are not stored, only their identity: `{"sha256": "<64 lowercase hex>", "mime_type": "image/png", "size_bytes": 70}`. Sorted by `sha256`. Every entry is referenced by some span's `media_refs`, and every `media_refs` entry appears here.
-- `rejected_spans` is the number of input spans the normalizer must reject (spec 02 § Normalization rules). It equals the number of input spans minus `spans.len()`.
+- `rejected_spans` is the number of input spans the normalizer must reject (spec 02 § Normalization rules).
+- `discarded` is the number of input spans the normalizer drops on purpose (spec 02 § Coding agents, D-CA-6). It is optional and omitted when it is 0. Discarded spans are neither stored nor rejected. Without `discarded`, `spans.len() + rejected_spans + discarded` equals the number of input spans.
 - Each span's `project_id` and `ingest_time` equal the case context (defaults or overrides).
 - A span with `input` also has `input_format`, and the same pairing holds for `output`. When `input_format` is `messages`, `input` parses as canonical messages.
-- Every expected `(trace_id, span_id)` occurs in `input.json`.
+- Every expected `(trace_id, span_id)` occurs in `input.json`, except in group `codex`. Codex's kept spans are re-linked to ids made from the turn id (D-CA-6), so their expected ids are not in `input.json`.
 
 ## Comparison
 

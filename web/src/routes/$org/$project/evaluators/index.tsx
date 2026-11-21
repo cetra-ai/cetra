@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { Gauge, Loader2 } from "lucide-react";
+import { Gauge, Loader2, Plus } from "lucide-react";
 import { useEffect, useMemo } from "react";
 import { $api } from "@/api/client";
 import { evaluatorStatsQuery, useEvaluatorPages } from "@/api/queries-evaluation";
@@ -18,7 +18,9 @@ import {
   statsById,
 } from "@/components/evaluators/stats-cells";
 import { TemplateGallery } from "@/components/evaluators/template-gallery";
+import { FilterChips } from "@/components/filter-chips";
 import { ruleStatusLabel } from "@/components/online-rules/rule-form";
+import { PageToolbar, PageToolbarSummary } from "@/components/page-toolbar";
 import { useProject } from "@/components/shell/project-context";
 import { TimeText } from "@/components/time-text";
 import { Button } from "@/components/ui/button";
@@ -42,8 +44,7 @@ type KindFilter = Schema<"EvaluatorKind">;
 const KINDS: readonly KindFilter[] = ["llm_judge", "check", "webhook"];
 const QUERY_MAX = 128;
 
-const KIND_FILTERS: { value: KindFilter | undefined; label: string }[] = [
-  { value: undefined, label: "All" },
+const KIND_FILTERS: { value: KindFilter; label: string }[] = [
   { value: "llm_judge", label: "LLM judge" },
   { value: "check", label: "Check" },
   { value: "webhook", label: "Webhook" },
@@ -179,72 +180,69 @@ function EvaluatorsPage() {
     void navigate({ search: {}, replace: true });
   }
 
-  return (
-    <div className="mx-auto flex w-full max-w-[1600px] flex-1 flex-col gap-6 overflow-auto px-4 py-6">
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-baseline gap-3">
-          {query.isPending ? null : (
-            <span className="text-body text-muted-foreground">
-              {rows.length === 1 ? "1 evaluator" : `${rows.length} evaluators`}
-            </span>
-          )}
-        </div>
-        <DisabledReason reason={canManage ? undefined : "Only members can create evaluators"}>
-          {canManage ? (
-            <Button asChild>
-              <Link to="/$org/$project/evaluators/new" params={{ org, project }} state={backState}>
-                New evaluator
-              </Link>
-            </Button>
-          ) : (
-            <Button disabled>New evaluator</Button>
-          )}
-        </DisabledReason>
-      </div>
-      {canManage ? <TemplateGallery org={org} project={project} /> : null}
-      {query.isPending ? (
-        <>
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-          <Skeleton className="h-8 w-full" />
-        </>
-      ) : rows.length === 0 ? (
-        <EmptyState
-          icon={Gauge}
-          title="No evaluators yet"
-          description="Create one from a template to score traces with an LLM judge, a check or a webhook."
-        />
+  const newEvaluator = (
+    <DisabledReason reason={canManage ? undefined : "Only members can create evaluators"}>
+      {canManage ? (
+        <Button asChild size="sm">
+          <Link to="/$org/$project/evaluators/new" params={{ org, project }} state={backState}>
+            <Plus />
+            New evaluator
+          </Link>
+        </Button>
       ) : (
-        <>
-          <div className="flex flex-wrap items-center gap-3">
+        <Button disabled size="sm">
+          <Plus />
+          New evaluator
+        </Button>
+      )}
+    </DisabledReason>
+  );
+
+  return (
+    <div className="flex h-full min-h-0 w-full flex-col">
+      <PageToolbar actions={newEvaluator}>
+        {query.isPending || rows.length === 0 ? null : (
+          <>
             <Input
               type="search"
               aria-label="Search evaluators"
               placeholder="Search evaluators"
-              className="w-64"
+              className="h-7 w-56 text-body"
               value={q}
               maxLength={QUERY_MAX}
               onChange={(event) => updateSearch({ q: event.target.value || undefined })}
             />
-            <fieldset aria-label="Kind" className="flex flex-wrap gap-1 border-0 p-0">
-              {KIND_FILTERS.map((filter) => {
-                const pressed = filter.value === kind;
-                return (
-                  <Button
-                    key={filter.label}
-                    type="button"
-                    size="sm"
-                    variant={pressed ? "default" : "outline"}
-                    aria-pressed={pressed}
-                    onClick={() => updateSearch({ kind: filter.value })}
-                  >
-                    {filter.label}
-                  </Button>
-                );
-              })}
-            </fieldset>
-          </div>
-          {visible.length === 0 ? (
+            <FilterChips
+              label="Kind"
+              chips={KIND_FILTERS.map((filter) => ({
+                ...filter,
+                count: rows.filter((row) => row.kind === filter.value).length,
+              }))}
+              active={kind}
+              onSelect={(value) => updateSearch({ kind: value })}
+            />
+            <PageToolbarSummary>
+              {rows.length === 1 ? "1 evaluator" : `${rows.length} evaluators`}
+            </PageToolbarSummary>
+          </>
+        )}
+      </PageToolbar>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <div className="flex flex-col gap-4 px-3 py-3">
+          {canManage ? <TemplateGallery org={org} project={project} /> : null}
+          {query.isPending ? (
+            <>
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </>
+          ) : rows.length === 0 ? (
+            <EmptyState
+              icon={Gauge}
+              title="No evaluators yet"
+              description="Create one from a template to score traces with an LLM judge, a check or a webhook."
+            />
+          ) : visible.length === 0 ? (
             <div className="flex flex-col items-start gap-3 rounded-md border p-6">
               <p className="text-body">No evaluators match</p>
               {filtering ? (
@@ -352,22 +350,22 @@ function EvaluatorsPage() {
               </TableBody>
             </Table>
           )}
-        </>
-      )}
-      {query.hasNextPage ? (
-        <Button
-          type="button"
-          variant="outline"
-          className="w-fit"
-          disabled={query.isFetchingNextPage}
-          onClick={() => {
-            void query.fetchNextPage();
-          }}
-        >
-          {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
-          Load more
-        </Button>
-      ) : null}
+          {query.hasNextPage ? (
+            <Button
+              type="button"
+              variant="outline"
+              className="w-fit"
+              disabled={query.isFetchingNextPage}
+              onClick={() => {
+                void query.fetchNextPage();
+              }}
+            >
+              {query.isFetchingNextPage ? <Loader2 className="animate-spin" /> : null}
+              Load more
+            </Button>
+          ) : null}
+        </div>
+      </div>
     </div>
   );
 }

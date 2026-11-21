@@ -81,7 +81,12 @@ mod tests {
             limits: IngestLimits::default(),
         };
         let prices = PriceTable::new(Vec::new()).expect("empty price table");
-        let normalized = normalize(&request, &ctx, &prices);
+        let normalized = normalize(
+            &request,
+            &ctx,
+            &prices,
+            &cetra_otel::AgentContexts::default(),
+        );
         assert_eq!(normalized.rejections.total(), 4);
         normalized.rejections
     }

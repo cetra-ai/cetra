@@ -167,6 +167,8 @@ fn batch_rows(batch: u8) -> arrow::array::RecordBatch {
                 provider: None,
                 request_model: None,
                 response_model: None,
+                prompt_name: None,
+                prompt_version: None,
                 operation: None,
                 input_tokens: None,
                 output_tokens: None,
@@ -1130,7 +1132,7 @@ async fn every_hook_survives_lazyfs() {
 }
 
 /// LazyFS's power loss (R2.12): writes `lazyfs::clear-cache` to `fifo` and waits, at most 30 s,
-/// for one line on `done`. The copy in `tests/crash.rs` does the same; integration tests cannot
+/// for one line on `done`. The copy in `tests/it/crash.rs` does the same; integration tests cannot
 /// reach this module.
 fn lazyfs_clear_cache(fifo: &Path, done: &Path) {
     let (fifo, done) = (fifo.to_owned(), done.to_owned());

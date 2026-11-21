@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vitest";
+import { WIDGET_QUERY_PATH } from "@/api/dashboards";
 import { createAppQueryClient, retryQuery } from "./client";
+
+it("a successful mutation marks the list and widget queries stale", async () => {
+  const client = createAppQueryClient();
+  const listKey = ["get", "/api/v1/projects/{project}/traces", {}];
+  const widgetKey = ["post", WIDGET_QUERY_PATH, {}];
+  const otherKey = ["get", "/api/v1/projects/{project}/datasets", {}];
+  client.setQueryData(listKey, { data: [], next_cursor: null });
+  client.setQueryData(widgetKey, { data: [] });
+  client.setQueryData(otherKey, { data: [] });
+  await client
+    .getMutationCache()
+    .build(client, { mutationFn: async () => 1 })
+    .execute(undefined);
+  expect(client.getQueryState(listKey)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(widgetKey)?.isInvalidated).toBe(true);
+  expect(client.getQueryState(otherKey)?.isInvalidated).toBe(false);
+  client.clear();
+});
 
 describe("retryQuery", () => {
   it("retries twice, and never retries a 4xx problem", () => {

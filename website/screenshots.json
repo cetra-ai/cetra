@@ -1,0 +1,97 @@
+[
+  { "name": "trace-list", "path": "/acme/support-bot/traces", "waitFor": "100 loaded" },
+  {
+    "name": "trace-view",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "waitAfter": "Input / Output"
+  },
+  { "name": "sessions", "path": "/acme/support-bot/sessions?range=30d", "waitFor": "100 loaded" },
+  { "name": "users", "path": "/acme/support-bot/users", "waitFor": "Top by cost" },
+  { "name": "dashboard", "path": "/acme/support-bot/dashboard", "waitFor": "Tokens by type" },
+  {
+    "name": "sql-console",
+    "path": "/acme/support-bot/sql",
+    "waitFor": "Run",
+    "actions": [
+      {
+        "click": ".cm-content",
+        "type": "SELECT span_kind, count(*) AS spans, min(start_time) AS first_start\nFROM spans\nGROUP BY span_kind\nORDER BY span_kind"
+      },
+      { "click": "button:has-text('Run')" }
+    ],
+    "waitAfter": " rows · "
+  },
+  {
+    "name": "evaluators",
+    "path": "/acme/support-bot/evaluators",
+    "waitFor": "Answer is JSON",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "online-rules",
+    "path": "/acme/support-bot/online-rules",
+    "waitFor": "Relevance on answers",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  { "name": "datasets", "path": "/acme/support-bot/datasets", "waitFor": "api-rate-limits" },
+  { "name": "experiments", "path": "/acme/support-bot/experiments", "waitFor": "nightly-12" },
+  {
+    "name": "alerts",
+    "path": "/acme/support-bot/alerts",
+    "waitFor": "High error rate",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "prompts",
+    "path": "/acme/support-bot/prompts",
+    "waitFor": "support-reply",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "prompt",
+    "path": "/acme/support-bot/prompts/support-reply",
+    "waitFor": "Friendlier tone",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "playground",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
+    "waitFor": "Run all",
+    "now": "2026-01-01T11:00:00Z",
+    "actions": [{ "click": "button:has-text('Run all')" }],
+    "waitAfter": "Open trace"
+  },
+  {
+    "name": "annotation-queues",
+    "path": "/acme/support-bot/annotation-queues",
+    "waitFor": "Relevance review",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "annotation-queue-review",
+    "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
+    "waitFor": "Complete and next",
+    "now": "2026-01-01T11:00:00Z"
+  },
+  {
+    "name": "assistant-panel",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "actions": [
+      { "click": "button[aria-label=\"Assistant\"]" },
+      {
+        "click": "textarea[aria-label=\"Message the assistant\"]",
+        "type": "Which traces failed in the last day?"
+      },
+      { "click": "button[aria-label=\"Send\"]" }
+    ],
+    "waitAfter": "Open in traces"
+  },
+  {
+    "name": "assistant-setting",
+    "path": "/acme/settings/assistant",
+    "waitFor": "Turn on the assistant"
+  }
+]

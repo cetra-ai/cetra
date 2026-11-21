@@ -215,6 +215,8 @@ stored_enum! {
         Check,
         /// An evaluator webhook.
         Webhook,
+        /// An issue occurrence written by an issue source (D-IC-11).
+        Issue,
     }
 }
 
