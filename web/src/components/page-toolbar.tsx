@@ -26,3 +26,31 @@ export function PageToolbarSummary({ children }: { children: ReactNode }) {
     </div>
   );
 }
+
+/** The class of an item page's name in its toolbar (D-C-26). */
+export const ITEM_TITLE_CLASS = "min-w-0 truncate text-ui font-medium";
+
+/**
+ * An item page's title in its toolbar (D-C-26): the back link, a slash, then the item's name,
+ * given as an `h2` with `ITEM_TITLE_CLASS`.
+ */
+export function PageToolbarTitle({
+  back,
+  label,
+  children,
+}: {
+  back: ReactNode;
+  /** The nav's accessible name, such as "Evaluator". Not "Breadcrumb": the top bar's nav has that name. */
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <nav aria-label={label} className="flex min-w-0 shrink items-center gap-1.5">
+      {back}
+      <span aria-hidden="true" className="text-muted-foreground/60">
+        /
+      </span>
+      {children}
+    </nav>
+  );
+}
