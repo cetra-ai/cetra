@@ -11,6 +11,7 @@ import type { Schema } from "@/api/types";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { DisabledReason } from "@/components/disabled-reason";
 import { FormError } from "@/components/form/form-error";
+import { PageToolbar } from "@/components/page-toolbar";
 import { isPlaceholder, MessageEditor } from "@/components/playground/message-editor";
 import { RecentRuns, RUNS_PATH } from "@/components/playground/recent-runs";
 import {
@@ -835,63 +836,71 @@ function PlaygroundWorkspace({
 
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: the page-wide run shortcut listens on the page
-    <div className="flex h-full min-h-0 flex-col gap-3 p-3" onKeyDown={onShortcut}>
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="flex h-full min-h-0 flex-col" onKeyDown={onShortcut}>
+      <PageToolbar
+        actions={
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setRecentOpen(true);
+              }}
+            >
+              <History aria-hidden="true" />
+              Recent runs
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              disabled={draft.columns.length >= COLUMN_LIMIT}
+              onClick={addColumn}
+            >
+              <Plus aria-hidden="true" />
+              Add model
+            </Button>
+            <DisabledReason reason={canManage ? undefined : PROMPT_EDIT_REASON}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!canManage}
+                onClick={() => {
+                  setSaveOpen(true);
+                }}
+              >
+                Save as new version…
+              </Button>
+            </DisabledReason>
+            {running ? (
+              <Button type="button" variant="outline" size="sm" onClick={stopAll}>
+                <Square aria-hidden="true" />
+                Stop all
+              </Button>
+            ) : (
+              <DisabledReason reason={runReason}>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={runReason !== undefined}
+                  title={`Run every model (${shortcut})`}
+                  onClick={runAll}
+                >
+                  <Play aria-hidden="true" />
+                  Run all
+                </Button>
+              </DisabledReason>
+            )}
+          </>
+        }
+      >
         {sourceText(draft.source) === undefined ? null : (
           <p className="text-caption text-muted-foreground">{sourceText(draft.source)}</p>
         )}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => {
-              setRecentOpen(true);
-            }}
-          >
-            <History aria-hidden="true" />
-            Recent runs
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            disabled={draft.columns.length >= COLUMN_LIMIT}
-            onClick={addColumn}
-          >
-            <Plus aria-hidden="true" />
-            Add model
-          </Button>
-          <DisabledReason reason={canManage ? undefined : PROMPT_EDIT_REASON}>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!canManage}
-              onClick={() => {
-                setSaveOpen(true);
-              }}
-            >
-              Save as new version…
-            </Button>
-          </DisabledReason>
-          {running ? (
-            <Button type="button" variant="outline" onClick={stopAll}>
-              <Square aria-hidden="true" />
-              Stop all
-            </Button>
-          ) : (
-            <DisabledReason reason={runReason}>
-              <Button
-                type="button"
-                disabled={runReason !== undefined}
-                title={`Run every model (${shortcut})`}
-                onClick={runAll}
-              >
-                <Play aria-hidden="true" />
-                Run all
-              </Button>
-            </DisabledReason>
-          )}
-        </div>
-      </div>
+      </PageToolbar>
+      <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
       <FormError message={formError} />
       {cut ? (
         <p className="border-b bg-muted px-3 py-1 text-caption">
@@ -944,6 +953,7 @@ function PlaygroundWorkspace({
           </div>
         </ResizablePanel>
       </ResizablePanelGroup>
+      </div>
       <SaveDialog
         open={saveOpen}
         onOpenChange={setSaveOpen}
