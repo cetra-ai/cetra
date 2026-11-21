@@ -1,0 +1,177 @@
+---
+import { formatStars, starsOnce } from "../lib/github-stars.mjs";
+import { MARKETING_ROUTES } from "../routes.mjs";
+import { CLOUD, GITHUB_REPO, GITHUB_URL, NAV } from "../site";
+import Button from "./Button.astro";
+import Logo from "./Logo.astro";
+
+const items = NAV.filter((i) => !i.route || MARKETING_ROUTES.includes(i.route));
+const stars = await starsOnce(GITHUB_REPO);
+const githubLabel = stars === null ? "cetra on GitHub" : `cetra on GitHub, ${stars} stars`;
+---
+<header class="site-header">
+  <div class="container header-inner">
+    <Logo />
+    <nav aria-label="Main">
+      <ul class="nav-list">
+        {
+          items.map((item) => (
+            <li>
+              <a href={item.href}>{item.label}</a>
+            </li>
+          ))
+        }
+      </ul>
+    </nav>
+    <div class="actions">
+      <a class="gh" href={GITHUB_URL} rel="noopener" aria-label={githubLabel}>
+        <svg class="gh-mark" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z" />
+        </svg>
+        <span>GitHub</span>
+        {stars !== null && <span class="stars">{formatStars(stars)}</span>}
+      </a>
+      <a class="login" href={CLOUD.login}>Log in</a>
+      <Button href={CLOUD.demo} external srHint="(needs a free account)">Try the demo</Button>
+      <details class="menu">
+        <summary aria-label="Menu">
+          <span class="bar"></span>
+          <span class="bar"></span>
+          <span class="bar"></span>
+        </summary>
+        <ul class="menu-panel">
+          {
+            items.map((item) => (
+              <li>
+                <a href={item.href}>{item.label}</a>
+              </li>
+            ))
+          }
+          <li>
+            <a href={CLOUD.login}>Log in</a>
+          </li>
+          <li>
+            <a href={GITHUB_URL} rel="noopener">GitHub</a>
+          </li>
+        </ul>
+      </details>
+    </div>
+  </div>
+</header>
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: color-mix(in srgb, var(--c-ink) 85%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+  }
+  .header-inner {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    height: 64px;
+    gap: var(--space-6);
+    position: relative;
+  }
+  .nav-list {
+    display: flex;
+    gap: var(--space-5);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .nav-list a {
+    color: var(--fg-muted);
+    text-decoration: none;
+    font-size: var(--text-sm);
+  }
+  .nav-list a:hover {
+    color: var(--fg);
+  }
+  .actions {
+    display: flex;
+    gap: var(--space-3);
+    align-items: center;
+  }
+  .gh {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--fg-muted);
+    text-decoration: none;
+    font-size: var(--text-sm);
+  }
+  .gh:hover {
+    color: var(--fg);
+  }
+  .stars {
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 0 0.45rem;
+  }
+  .login {
+    color: var(--fg-muted);
+    text-decoration: none;
+    font-size: var(--text-sm);
+  }
+  .login:hover {
+    color: var(--fg);
+  }
+  .menu {
+    display: none;
+  }
+  .menu summary {
+    list-style: none;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 0.4rem;
+  }
+  .menu summary::-webkit-details-marker {
+    display: none;
+  }
+  .bar {
+    display: block;
+    width: 18px;
+    height: 2px;
+    background: var(--fg);
+    border-radius: 1px;
+  }
+  .menu-panel {
+    position: absolute;
+    right: max(16px, env(safe-area-inset-right, 0px));
+    top: 64px;
+    z-index: 30;
+    min-width: 220px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--space-4);
+    list-style: none;
+    margin: 0;
+    display: grid;
+    gap: var(--space-3);
+  }
+  .menu-panel a {
+    color: var(--fg);
+    text-decoration: none;
+    font-size: var(--text-sm);
+  }
+  @media (max-width: 859px) {
+    .nav-list,
+    .login {
+      display: none;
+    }
+    .header-inner {
+      grid-template-columns: 1fr auto;
+    }
+    .menu {
+      display: block;
+    }
+  }
+</style>

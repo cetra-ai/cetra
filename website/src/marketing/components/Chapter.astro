@@ -1,0 +1,106 @@
+---
+interface Props {
+  eyebrow?: string;
+  title: string;
+  lede: string;
+  features?: string[];
+  id?: string;
+}
+const { eyebrow, title, lede, features, id } = Astro.props;
+---
+<div class="chapter">
+  <div class="text">
+    <div class="head">
+      {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+      <h2 id={id}>{title}</h2>
+    </div>
+    <div class="body">
+      <p class="lede">{lede}</p>
+      {features && features.length > 0 && (
+        <ul class="features">
+          {features.map((feature) => (
+            <li>{feature}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  </div>
+  <div class="visual">
+    <slot />
+  </div>
+</div>
+<style>
+  .chapter {
+    display: grid;
+    gap: var(--space-7);
+  }
+  .text {
+    display: grid;
+    gap: var(--space-5);
+  }
+  @media (min-width: 960px) {
+    .text {
+      grid-template-columns: 1fr 1fr;
+      gap: var(--space-7);
+      align-items: start;
+    }
+  }
+  h2 {
+    font-size: var(--text-2xl);
+    margin-top: var(--space-3);
+  }
+  .lede {
+    color: var(--fg-muted);
+  }
+  .features {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-5) 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-5);
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .features li {
+    position: relative;
+    padding-left: var(--space-4);
+  }
+  .features li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.55em;
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+  }
+  @media (max-width: 720px) {
+    .features {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .visual {
+    margin-top: var(--space-7);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+    position: relative;
+  }
+  @media (max-width: 720px) {
+    .visual {
+      overflow-x: auto;
+    }
+  }
+  .visual::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 30%;
+    background: linear-gradient(to bottom, transparent, var(--band-bg));
+    pointer-events: none;
+  }
+</style>

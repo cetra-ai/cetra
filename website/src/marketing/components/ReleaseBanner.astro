@@ -1,0 +1,22 @@
+---
+import { RELEASED } from "../site";
+---
+{
+  !RELEASED && (
+    <div class="release-banner" role="note">
+      <div class="container">
+        cetra is in development and not released yet. <a href="/docs/">Read the docs</a>
+      </div>
+    </div>
+  )
+}
+<style>
+  .release-banner {
+    background: var(--c-teal-deep);
+    color: var(--fg);
+    font-size: var(--text-xs);
+    text-align: center;
+    padding-block: var(--space-2);
+    border-bottom: 1px solid var(--line);
+  }
+</style>

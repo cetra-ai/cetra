@@ -1,0 +1,166 @@
+---
+interface Props {
+  commands: readonly { label: string; command: string }[];
+  note?: string;
+  noteHref?: string;
+  /** Unique per page. */
+  id: string;
+}
+const { commands, note, noteHref, id } = Astro.props;
+---
+<div class="copy" data-copy>
+  {commands.length > 1 && (
+    <div class="tabs" role="tablist">
+      {commands.map((c, i) => (
+        <button
+          type="button"
+          role="tab"
+          id={`${id}-tab-${i}`}
+          aria-controls={`${id}-panel-${i}`}
+          aria-selected={i === 0 ? "true" : "false"}
+          tabindex={i === 0 ? 0 : -1}
+        >
+          {c.label}
+        </button>
+      ))}
+    </div>
+  )}
+  {commands.map((c, i) => (
+    <div
+      class="panel"
+      role={commands.length > 1 ? "tabpanel" : undefined}
+      id={`${id}-panel-${i}`}
+      aria-labelledby={commands.length > 1 ? `${id}-tab-${i}` : undefined}
+      hidden={i !== 0}
+    >
+      <pre><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{c.command}</span></code></pre>
+      <button type="button" class="copy-btn" aria-label="Copy command" data-copy-target={`${id}-panel-${i}`}>Copy</button>
+    </div>
+  ))}
+  {note && <p class="note">{noteHref ? <a href={noteHref}>{note}</a> : note}</p>}
+</div>
+<style>
+  .copy {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--c-ink-2);
+  }
+  .tabs {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-2);
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs button {
+    font: inherit;
+    font-size: var(--text-xs);
+    background: none;
+    border: 0;
+    color: var(--fg-muted);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] {
+    background: var(--surface-2);
+    color: var(--fg);
+  }
+  .panel {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+  .panel[hidden] {
+    display: none;
+  }
+  pre {
+    margin: 0;
+    overflow-x: auto;
+    flex: 1;
+    font-size: var(--text-sm);
+    color: var(--c-paper);
+  }
+  .prompt {
+    color: var(--c-teal-light);
+    user-select: none;
+  }
+  .copy-btn {
+    font: inherit;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--fg);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 0.35rem 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .copy-btn:hover {
+    border-color: var(--fg-muted);
+  }
+  .note {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    padding: 0 var(--space-4) var(--space-3);
+  }
+</style>
+<script>
+  function selectTab(tabs: HTMLButtonElement[], panels: HTMLElement[], index: number) {
+    tabs.forEach((tab, i) => {
+      tab.setAttribute("aria-selected", String(i === index));
+      tab.tabIndex = i === index ? 0 : -1;
+    });
+    panels.forEach((panel, i) => {
+      panel.hidden = i !== index;
+    });
+  }
+
+  function wireTabs(root: HTMLElement) {
+    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>('[role="tab"]'));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>('[role="tabpanel"]'));
+    if (tabs.length === 0) return;
+    tabs.forEach((tab, i) => {
+      tab.addEventListener("click", () => selectTab(tabs, panels, i));
+      tab.addEventListener("keydown", (event) => {
+        let next: number | null = null;
+        if (event.key === "ArrowRight") next = (i + 1) % tabs.length;
+        else if (event.key === "ArrowLeft") next = (i - 1 + tabs.length) % tabs.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = tabs.length - 1;
+        if (next === null) return;
+        event.preventDefault();
+        selectTab(tabs, panels, next);
+        tabs[next].focus();
+      });
+    });
+  }
+
+  async function copyCommand(button: HTMLButtonElement) {
+    const target = document.getElementById(button.dataset.copyTarget ?? "");
+    const cmd = target?.querySelector<HTMLElement>(".cmd");
+    const text = cmd?.textContent ?? "";
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      setLabel(button, "Copied");
+      window.setTimeout(() => setLabel(button, "Copy"), 1500);
+    } catch {
+      setLabel(button, "Press Ctrl+C");
+      if (cmd) window.getSelection()?.selectAllChildren(cmd);
+    }
+  }
+
+  // The label is both the text and the accessible name, so a screen reader hears the new state.
+  function setLabel(button: HTMLButtonElement, label: string) {
+    button.textContent = label;
+    button.setAttribute("aria-label", label === "Copy" ? "Copy command" : label);
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-copy]").forEach(wireTabs);
+  document.querySelectorAll<HTMLButtonElement>(".copy-btn").forEach((button) => {
+    button.addEventListener("click", () => copyCommand(button));
+  });
+</script>
