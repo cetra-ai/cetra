@@ -179,7 +179,7 @@ DeviceGrant = {
 - **Name and command.** `@cetra-ai/cli` on npm, next to `@cetra-ai/sdk`. Its bin is `cetra-cli`, so it never clashes with the Rust `cetra` binary on PATH. Users run it through `npx @cetra-ai/cli@latest …`.
 - **Where it lives.** `node-cli/`, a new package in the pnpm workspace. It is TypeScript compiled to one ESM bundle and needs Node `>=22.12`, the TypeScript SDK's floor.
 - **Release.** It ships from the same release workflow as `@cetra-ai/sdk` (PR #207), at the workspace version, with npm provenance, and `just versions-check` covers it.
-- **Dependencies.** Only Node built-ins: `fetch`, `node:util` `parseArgs`, `node:readline`, `node:child_process` and `node:fs`. The one exception is `smol-toml` 1.9.1 (latest on 2026-11-21), which reads and writes the shared credentials file. The plan re-checks the version.
+- **Dependencies.** Only Node built-ins: `fetch`, `node:util` `parseArgs`, `node:readline`, `node:child_process` and `node:fs`. The one exception is `smol-toml` 1.9.1 (latest on 2026-11-21, BSD-3-Clause, no dependencies), which reads and writes the shared credentials file. It is a devDependency, inlined into the bundle by tsdown, so `npx` installs nothing else. Tests run with vitest, as in the TypeScript SDK.
 - **Output.** Human text goes to stderr and `--json` output to stdout, so an agent can run any command.
 
 **Commands:**
@@ -200,7 +200,7 @@ cetra-cli login [--url <URL>] [--no-browser]
    - The browser opens with `open` on macOS and `xdg-open` on Linux, if present.
    - `--project` preselects that project on the approval page (`&project=org/slug` is added to the URL). The user still approves.
    - On the cloud the first answers come from `app.cetra.sh` (§ Cloud routing).
-3. **Save the PAT** in the credentials file the Rust CLI already uses, `<config dir>/cetra/credentials.toml`, mode 0600 (D-AO-17). It is saved under the grant's `server` and replaces the token saved for that server. Afterwards the Rust `cetra query` and `cetra traces` work too.
+3. **Save the PAT** in the credentials file the Rust CLI already uses, `<config dir>/cetra/credentials.toml`, mode 0600 (D-AO-17). It is saved under the URL the CLI talks to (the normalized `--url`, or the cell after a `moved`), as the Rust `cetra login` does, and replaces the token saved there. Afterwards the Rust `cetra query` and `cetra traces` work too. `.env`'s `CETRA_BASE_URL` is the grant's `server` (the server's public URL), which is what the SDK should use.
 4. **Write the env file** (`--env-file`, default `<dir>/.env`, where `--dir` defaults to the current directory). Init sets two variables, the SDK's own (spec 10):
 
    ```
@@ -254,6 +254,8 @@ Skill install failures are warnings, not errors: the setup works without the ski
 {"server": "https://eu1.cetra.sh", "org": "acme", "project": "demo", "project_id": "…"}
 ```
 
+`server` is the URL the CLI talked to, the same key as in the credentials file.
+
 It holds no secret, so it may be committed. That lets a teammate run `query` with their own login, and later inits keep the same server. `query` looks for the file in the current directory and its parents, up to the git work tree's top level. The Rust CLI does not read it.
 
 ### Local server (M3)
@@ -261,7 +263,7 @@ It holds no secret, so it may be committed. That lets a teammate run `query` wit
 When the URL is loopback (the default for a self-hosted trial is `http://localhost:8080`) and nothing answers, init offers to start a server on this machine, in this order:
 
 1. **The `cetra` binary**, if it is on PATH: "No cetra server at http://localhost:8080. Start one with `cetra serve`? [Y/n]".
-   - **Data directory.** It is `<data dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS. Init writes `cetra.toml` there, with `data_dir`, `listen` and `public_url`.
+   - **Data directory.** It is `<data dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS. Init writes `cetra.toml` there (below).
    - **Start.** `cetra serve --config <that dir>/cetra.toml` runs as a detached child (`spawn` with `detached: true`, then `unref`). Its output goes to `server.log` in the data directory, and its PID to `server.pid`.
    - **Last lines.** Init prints how to stop it (`kill <pid>`) and how to start it again.
 2. **Docker**, if `docker version` answers: "Start one with Docker? [Y/n]".
@@ -271,19 +273,24 @@ When the URL is loopback (the default for a self-hosted trial is `http://localho
 
 **First-start values.** In both cases they go in the child's environment, never in a file:
 - `CETRA_INIT_ADMIN_EMAIL`, asked for at the prompt; `--yes` uses `admin@localhost`;
-- a generated 24-character `CETRA_INIT_ADMIN_PASSWORD`;
+- a generated 24-character `CETRA_INIT_ADMIN_PASSWORD` (letters and digits);
 - `CETRA_INIT_ORG=local`;
-- `CETRA_INIT_PROJECT`, the base name of `<dir>` made into a slug, else `default`;
-- a generated `CETRA_INIT_SECRET_KEY`.
+- `CETRA_INIT_PROJECT`, the base name of `<dir>`, else `default`. The server derives the slugs; the CLI reads them back from the API, never computes them.
 
-They apply on a first start only (spec 12). Init waits up to 30 s for `/readyz`.
+No `CETRA_INIT_SECRET_KEY`: the server would give that key `ingest, read, write`, and D-AO-6 wants an ingest-only key. The variables apply on a first start only (spec 12). Init waits up to 30 s for `/readyz`.
 
-**Sign in without a browser.** On a first start init knows the password and the key:
-- It signs in with `POST /api/auth/login`, creates the `read` PAT with that session (`POST /api/v1/me/tokens`), then signs out.
-- The device flow is skipped, and the key is the generated `CETRA_INIT_SECRET_KEY`.
-- Init prints the admin email and password once, with the UI's URL.
+**The local config.** `cetra.toml` sets `data_dir`, `public_url = "http://localhost:<port>"`, and `http_addr`, `otlp_http_addr` and `grpc_addr` on `127.0.0.1` (the server's defaults listen on every interface).
 
-When the data was already there, init only starts the server and then runs the device flow as on any server.
+**Sign in without a browser.** On a first start init knows the password. With `Origin: <public_url>` on every session call:
+1. `POST /api/auth/login` gives the session cookie;
+2. `GET /api/auth/me` and `GET /api/v1/orgs/{org}/projects` give the org and project slugs and the project id;
+3. `POST /api/v1/me/tokens` creates the `read` PAT, with `expires_at` 90 days ahead, named `CLI init on <host>`;
+4. `POST /api/v1/projects/{project}/api-keys` creates the `ingest` secret key with the same name;
+5. `POST /api/auth/logout`.
+
+Init prints the admin email and password once, with the UI's URL. When the data was already there, init only starts the server and then runs the device flow as on any server.
+
+**Docker before the first release.** The image `ghcr.io/cetra-ai/cetra` stays private until the first public release, so the Docker path fails to pull until then; init then says so and prints the install steps.
 
 ### Skill install (M3)
 
@@ -345,7 +352,8 @@ Its body is short (about 150 lines) and **routes**:
 
 - **`llms.txt`, `llms-full.txt`, `llms-small.txt`**: already served by `starlight-llms-txt` 0.12.0 (D-W-19), the latest version on 2026-11-21. No change.
 - **Markdown pages and the "Copy page" button**:
-  - After `astro build`, `website/scripts/md-pages.mjs` writes `dist/docs/<page>/index.md` for every page with the M2 converter, so `https://cetra.sh/docs/<page>/index.md` serves the Markdown. Generated pages (the API reference from `starlight-openapi`) have no MDX source and get no `.md` copy.
+  - After `astro build`, `website/scripts/md-pages.mjs` writes `dist/docs/<page>/index.md` for every page with the M2 converter, so `https://cetra.sh/docs/<page>/index.md` serves the Markdown. A `_headers` rule serves those files as `text/plain`, so a browser shows them. Generated pages (the API reference from `starlight-openapi`) have no MDX source and get no `.md` copy; the title actions are hidden there.
+  - The converter learns multi-line `<LinkCard … />` tags, which three pages use.
   - A `PageTitle` override adds two small actions next to the title: "Copy page", which fetches that `.md` and copies it, and "View as Markdown".
   - `llms.txt` stays with `starlight-llms-txt` (D-W-19).
   - `starlight-page-actions` is rejected: its transform cannot be changed, so its `.md` pages would keep our sample markers and lose the tab labels.
@@ -359,7 +367,8 @@ Its body is short (about 150 lines) and **routes**:
     | `search_docs` | `query` (1–200 chars), `limit?` (1–20, default 8) | `[{title, url, snippet}]`, best first |
     | `get_page` | `url` (a `https://cetra.sh/docs/…` URL or a `/docs/…` path) | the page's Markdown (its `.md` asset), capped at 100 000 characters with a note when cut |
 
-  - **Search** is MiniSearch 7.2.0 over the `.md` pages: title, headings and body, with prefix and fuzzy matching. A build script writes the index as a static asset, `/mcp-index.json`, which the script loads once per isolate.
+  - **Search** is MiniSearch 7.2.0 over the `.md` pages: title, headings and body, with prefix and fuzzy matching. A build script writes the index as a static asset, `/mcp-index.json`, which the script loads once per isolate. The snippet is the page's description, stored in the index.
+  - **Runtime.** No `nodejs_compat`; `zod` 4.6.7 is an explicit dependency; one server and transport per request (stateless). Wrangler bundles the entry itself.
   - **Logging.** No query or page is logged, in line with D-W-10's "no data leaves the page" spirit. Cloudflare's own request metrics are all we keep.
   - **Tests.** `node --test` covers the tools against a built index (unknown page, cut page, empty query). `just check-docs` builds the index.
 - **Docs pages** (M3 and M4):
