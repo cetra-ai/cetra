@@ -31,9 +31,12 @@ pub struct Config {
     /// Columns, besides the first sort-key column, that get a key filter. Names absent from the
     /// schema, or of an unsupported type, are ignored. Default `["user_id", "session_id"]`.
     pub key_filter_columns: Vec<String>,
-    /// Suffix read length when no hot-tail length hint is given. Default 64 KiB; a longer hot
-    /// tail costs one more read.
+    /// Suffix read length when no tail length hint is given. Default 1 MiB, which holds the
+    /// metadata section and the hot tail of most files; a longer tail costs one more read.
     pub open_default_suffix: u64,
+    /// Largest metadata section an open reads with the hot tail. Default 4 MiB. A larger one is
+    /// read column by column, as queries need it, which costs a wave of requests the first time.
+    pub open_metadata_max: u64,
     /// Threads the writer compresses and indexes payload frames on. Default: the number of
     /// cores. The file is the same for any value; 1 writes on the calling thread only.
     pub write_threads: usize,
@@ -66,7 +69,8 @@ impl Default for Config {
             payload_min_avg: 256,
             own_store_columns: vec!["input_preview".into(), "output_preview".into()],
             key_filter_columns: vec!["user_id".into(), "session_id".into()],
-            open_default_suffix: 64 * 1024,
+            open_default_suffix: 1024 * 1024,
+            open_metadata_max: 4 * 1024 * 1024,
         }
     }
 }

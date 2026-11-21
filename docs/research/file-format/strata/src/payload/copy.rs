@@ -78,11 +78,13 @@ fn shifted(offset: u64, shift: i64) -> Result<u64> {
         })
 }
 
-/// Copies the stores of `copy` into `out`, then writes each column's refs pages and header.
+/// Copies the frames and index pages of `copy`'s stores into `out` and writes each column's
+/// refs pages there; the stores and headers go to `meta`, with offsets relative to it.
 pub(crate) async fn copy_stores(
     copy: &MergeCopy<'_>,
     codec: &mut SegmentCodec,
     out: &mut Out,
+    meta: &mut Out,
 ) -> Result<Vec<CopiedColumn>> {
     let mut copied = Vec::new();
     for columns in &copy.stores {
@@ -162,7 +164,7 @@ pub(crate) async fn copy_stores(
         }
         let mut body = Out(Vec::new());
         store.encode(&mut body)?;
-        let store_seg = encode_segment(Kind::PayloadStore, &body.0, Codec::Zstd, codec, out)?;
+        let store_seg = encode_segment(Kind::PayloadStore, &body.0, Codec::Zstd, codec, meta)?;
 
         let n_rows = u32::try_from(copy.sources.len()).map_err(|_| StrataError::TooManyRows {
             rows: copy.sources.len() as u64,
@@ -214,8 +216,13 @@ pub(crate) async fn copy_stores(
             let (ref_pages, ref_bytes) = write_refs(&rows, codec, out)?;
             let mut header_body = Out(Vec::new());
             encode_header(n_rows, &ref_pages, &mut header_body)?;
-            let header =
-                encode_segment(Kind::PayloadHeader, &header_body.0, Codec::Zstd, codec, out)?;
+            let header = encode_segment(
+                Kind::PayloadHeader,
+                &header_body.0,
+                Codec::Zstd,
+                codec,
+                meta,
+            )?;
             let shared = |v: u64| if c == 0 { v } else { 0 };
             copied.push(CopiedColumn {
                 column,

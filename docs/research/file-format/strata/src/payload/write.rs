@@ -178,6 +178,7 @@ pub(crate) fn write_payload_columns(
     threads: usize,
     codec: &mut SegmentCodec,
     out: &mut Out,
+    meta: &mut Out,
 ) -> Result<(SegmentRef, Vec<(SegmentRef, PayloadStats)>)> {
     let mut values: Vec<Vec<Option<&[u8]>>> = Vec::with_capacity(columns.len());
     for parts in columns {
@@ -259,7 +260,7 @@ pub(crate) fn write_payload_columns(
     for refs in &chunk_refs {
         check_chunk_refs(*refs)?;
     }
-    let (store_seg, store_stats) = store.write(level, threads, codec, out)?;
+    let (store_seg, store_stats) = store.write(level, threads, codec, out, meta)?;
 
     let n_rows_u32 = u32::try_from(n_rows).map_err(|_| StrataError::TooManyRows {
         rows: n_rows as u64,
@@ -269,7 +270,7 @@ pub(crate) fn write_payload_columns(
         let (ref_pages, ref_bytes) = write_refs(column_rows, codec, out)?;
         let mut body = Out(Vec::new());
         encode_header(n_rows_u32, &ref_pages, &mut body)?;
-        let header_seg = encode_segment(Kind::PayloadHeader, &body.0, Codec::Zstd, codec, out)?;
+        let header_seg = encode_segment(Kind::PayloadHeader, &body.0, Codec::Zstd, codec, meta)?;
         // The store counts once, in the first column.
         let shared = |v: u64| if c == 0 { v } else { 0 };
         let stats = PayloadStats {

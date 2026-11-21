@@ -134,11 +134,15 @@ What these add:
 ### S1. File layout
 
 ```
-0          "STRA" · u16 version = 0 · u16 flags = 0                 (8 B)
-8          segment*
-hot_offset hot tail
-end − 64   postscript (64 B)
+0           "STRA" · u16 version = 0 · u16 flags = 0                 (8 B)
+8           data segment*: narrow chunks, payload frames, refs pages, gram index pages
+meta_offset metadata segment*: block-table pages, dictionaries, chunk dictionaries,
+            key filters, payload stores, payload headers
+hot_offset  hot tail
+end − 64    postscript (64 B)
 ```
+
+The metadata segments lie together before the hot tail, so an open reads them with it (§ Open). The writer keeps them in a buffer of their own while it writes the data, then appends them and makes their references absolute. Until then every column's metadata sat next to its data, and a cold lookup spent a wave of about 55 requests per file on it (`real-data.md` § Cold lookups).
 
 **Segment** (a#9). A 16-byte header, then the stored bytes:
 
@@ -149,7 +153,7 @@ bytes[stored_len]
 
 - Every reference to a segment stores its offset (the header's offset) and its length (`16 + stored_len`), so the reader fetches the header and the body in one range.
 - `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 9 for payload frames in v1 (3 in v0 and v2; see § S4 in v2).
-- The writer stores a segment raw when zstd does not make it smaller (a#12). A narrow chunk, which every scan decompresses, is stored raw unless zstd saves at least 30% (15% in v1), to spare scans the decompression of chunks that zstd barely shrinks. With 2,048-row chunks, it grew `light`'s files from 168 to 177 MiB.
+- The writer stores a segment raw when zstd does not make it smaller (a#12). A narrow chunk, which every scan decompresses, is stored raw unless zstd saves at least 30% (15% in v1), to spare scans the decompression of chunks that zstd barely shrinks. With 2,048-row chunks, it grew `light`'s files from 168 to 177 MiB. A 10% bar was measured again later and dropped (`real-data.md` § Narrow chunks).
 
 | `kind` | Content |
 |---|---|
@@ -174,7 +178,7 @@ bytes[stored_len]
 6. Key filter index: `u32 n` · `n × (u32 column_id · u64 offset · u32 len)`, pointing to the kind 9 segments of the other filtered columns (S5).
 7. Block-table page index. For each narrow column, the list of its block-table pages, each entry `u32 first_row · u64 offset · u32 len` (16 B). The directory record points into this section.
 
-Only these sections go into the hot tail. Block-table pages, dictionaries, filters and payload headers are separate segments, fetched on demand and cached by `StrataFile`. The hot tail size is about:
+Only these sections go into the hot tail. Block-table pages, dictionaries, filters and payload headers are separate segments in the metadata section, decoded on demand and cached by `StrataFile`. The hot tail size is about:
 
 `n_columns × 64 B` (directory) `+ n_sort_key_chunks × 56 B` (section 3) `+ 1.13 B × distinct sort keys` (section 4) `+ n_columns × ceil(n_chunks / 64) × 16 B` (section 7).
 
@@ -188,17 +192,19 @@ The writer reports it in `FileSummary::hot_len`.
 
 ```
 u64 hot_offset · u32 hot_len · u32 checksum32(hot tail) · u64 row_count · u32 n_columns (directory records)
-u16 version (= header version) · u16 flags (= header flags) · u32 sort_key_column · [u8; 24] zero · "STRA"
+u16 version (= header version) · u16 flags (= header flags) · u32 sort_key_column · u64 meta_offset · [u8; 16] zero · "STRA"
 ```
 
-Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 4 + 24 + 4 = 64. `sort_key_column` is the index of the first sort-key column, or `u32::MAX` for none. The reader checks:
+Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 4 + 8 + 16 + 4 = 64. `sort_key_column` is the index of the first sort-key column, or `u32::MAX` for none. `meta_offset` is the start of the metadata section. The reader checks:
 - `hot_offset + hot_len + 64 == file length`;
+- `8 ≤ meta_offset ≤ hot_offset`;
 - the version and flags equal the header's.
 
 **Open.**
-- `StrataFile::open(store, path, hot_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n: u64 = hint + 64`, or 64 KiB with no hint (256 KiB in v0; the hot tails measured 12–110 KiB). All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
+- `StrataFile::open(store, path, tail_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n` is the hint, or `Config::open_default_suffix` (1 MiB) with no hint. The tail is the metadata section, the hot tail and the postscript; `FileSummary::tail_len` and `StrataFile::tail_len` give its length, for a catalog to keep as the hint. All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
 - `GetRange::Suffix` saturates at the object length, and the `GetResult` reports the object size, so no HEAD request is needed.
-- If the hot tail is longer than what was read, one more ranged read fetches the rest.
+- The open reads from `meta_offset` when the metadata section is at most `Config::open_metadata_max` (4 MiB), else from `hot_offset`. If that start lies before what the suffix read, one more ranged read fetches the rest.
+- A kept metadata section serves every later read of its segments, with no request: a query on a freshly opened file needs no metadata wave, and a lookup takes the path of a file whose metadata is cached. A larger section is read column by column, as queries need it, as before.
 
 ### S2. Column directory
 

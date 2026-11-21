@@ -13,7 +13,7 @@ use arrow::row::{OwnedRow, RowConverter, SortField};
 use crate::config::Config;
 use crate::error::{Result, StrataError};
 use crate::format::{
-    MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, MAX_ROWS, Out, VERSION, checksum32,
+    Cursor, MAX_CHUNK_ROWS, MAX_DICT_VALUES, MAX_PAGE_ENTRIES, MAX_ROWS, Out, VERSION, checksum32,
 };
 use crate::hot::{
     DirectoryRecord, HotTail, Layer, MapKey, MapLayout, PageRef, Postscript, write_file_header,
@@ -178,6 +178,9 @@ pub struct FileSummary {
     pub bytes: u64,
     /// Length of the hot tail in bytes.
     pub hot_len: u32,
+    /// Length of the tail: the metadata section, the hot tail and the postscript. It is the
+    /// hint that lets [`StrataFile::open`](crate::StrataFile::open) read the tail at once.
+    pub tail_len: u64,
     /// One summary per column, in schema order.
     pub columns: Vec<ColumnSummary>,
 }
@@ -416,6 +419,9 @@ where
 {
     let mut out = Out(Vec::new());
     write_file_header(&mut out);
+    // The metadata segments, written apart and placed after the data, before the hot tail
+    // (`Postscript::meta_offset`). Their references are relative to `meta` until then.
+    let mut meta = Out(Vec::new());
     let mut codec = SegmentCodec::new(config.zstd_level)?;
 
     let mut directory = Vec::with_capacity(schema.fields().len());
@@ -433,7 +439,7 @@ where
     let mut payloads_written = false;
     if let Some(copy) = copy {
         payloads_written = true;
-        for c in payload::copy_stores(copy, &mut codec, &mut out).await? {
+        for c in payload::copy_stores(copy, &mut codec, &mut out, &mut meta).await? {
             payloads.insert(c.column, (c.store, c.header, c.stats, c.null_count));
         }
     }
@@ -491,6 +497,7 @@ where
                     config.write_threads,
                     &mut codec,
                     &mut out,
+                    &mut meta,
                 )?;
                 for ((i, parts), (header, stats)) in store.iter().zip(written) {
                     let nulls = parts.iter().map(|a| a.null_count() as u64).sum();
@@ -568,8 +575,9 @@ where
             None
         };
         let filter = filter_values.as_deref().map(filter_body);
-        let (record, summary, entries) =
-            write_narrow(config, &array, column_id, &mut codec, &mut out, &mut pages)?;
+        let (record, summary, entries) = write_narrow(
+            config, &array, column_id, &mut codec, &mut out, &mut meta, &mut pages,
+        )?;
         let mut filter_bytes = 0u64;
         if is_sort_key {
             sort_key_filter = filter.unwrap_or_default();
@@ -577,7 +585,7 @@ where
         } else if let Some(filter) = filter {
             let postings = chunk_postings(config, array.as_ref(), &entries)?;
             let body = key_index_body(&filter, postings.as_ref())?;
-            let seg = encode_segment(Kind::KeyFilter, &body, Codec::Zstd, &mut codec, &mut out)?;
+            let seg = encode_segment(Kind::KeyFilter, &body, Codec::Zstd, &mut codec, &mut meta)?;
             filter_bytes = u64::from(seg.len);
             key_filters.push((column_id, seg));
         }
@@ -612,8 +620,9 @@ where
             .zip(&shredded.residual_hits)
         {
             let child_id = next_column_id(&directory)?;
-            let (mut record, part, _) =
-                write_narrow(config, child, child_id, &mut codec, &mut out, &mut pages)?;
+            let (mut record, part, _) = write_narrow(
+                config, child, child_id, &mut codec, &mut out, &mut meta, &mut pages,
+            )?;
             record.layer = Layer::MapChild;
             record.parent = map;
             add_part(&mut summaries, summary, &part);
@@ -631,6 +640,7 @@ where
             residual_id,
             &mut codec,
             &mut out,
+            &mut meta,
             &mut pages,
         )?;
         record.layer = Layer::Residual;
@@ -645,6 +655,22 @@ where
     }
 
     let n_columns = next_column_id(&directory)?;
+    // The metadata section, then the references into it made absolute.
+    let meta_offset = out.len() as u64;
+    out.bytes(&meta.0);
+    for record in &mut directory {
+        place_metadata(record, meta_offset)?;
+    }
+    for (_, segment) in &mut key_filters {
+        segment.offset = at_meta(segment.offset, meta_offset)?;
+    }
+    let mut placed_pages = Out(Vec::with_capacity(pages.len()));
+    let mut cursor = Cursor::new(&pages.0, 0);
+    while cursor.remaining() > 0 {
+        let mut page = PageRef::decode(&mut cursor)?;
+        page.offset = at_meta(page.offset, meta_offset)?;
+        page.encode(&mut placed_pages);
+    }
     let hot_start = out.len();
     let hot = HotTail {
         schema: Arc::clone(schema),
@@ -653,7 +679,7 @@ where
         sort_key_filter,
         maps: layouts,
         key_filters,
-        pages: pages.0,
+        pages: placed_pages.0,
     };
     hot.encode(&mut out)?;
     let hot_len = u32::try_from(out.len() - hot_start).map_err(|_| StrataError::Unsupported {
@@ -675,6 +701,7 @@ where
         version: VERSION,
         flags: 0,
         sort_key_column,
+        meta_offset,
     };
     postscript.encode(&mut out);
 
@@ -682,13 +709,45 @@ where
         rows,
         bytes: out.len() as u64,
         hot_len,
+        tail_len: out.len() as u64 - meta_offset,
         columns: summaries,
     };
     Ok((out.0, summary))
 }
 
-/// Writes a narrow column: its dictionary, its chunk dictionary, its chunks and its
-/// block-table pages, in that order. The record has `layer = Narrow` and `parent = u32::MAX`; a caller that stores the
+/// The absolute offset of `relative`, an offset in the metadata section that starts at
+/// `meta_offset`.
+fn at_meta(relative: u64, meta_offset: u64) -> Result<u64> {
+    relative
+        .checked_add(meta_offset)
+        .ok_or_else(|| StrataError::Unsupported {
+            what: "a file of more than 2^64 bytes".to_string(),
+        })
+}
+
+/// Makes the metadata references of `record` absolute: a payload column's store and header, a
+/// narrow column's dictionary and chunk dictionary when its flags say it has them.
+fn place_metadata(record: &mut DirectoryRecord, meta_offset: u64) -> Result<()> {
+    match record.layer {
+        Layer::Payload => {
+            record.dict_offset = at_meta(record.dict_offset, meta_offset)?;
+            record.payload_offset = at_meta(record.payload_offset, meta_offset)?;
+        }
+        Layer::MapParent => {}
+        Layer::Narrow | Layer::MapChild | Layer::Residual => {
+            if record.flags & 1 != 0 {
+                record.dict_offset = at_meta(record.dict_offset, meta_offset)?;
+            }
+            if record.flags & FLAG_CHUNK_DICT != 0 {
+                record.payload_offset = at_meta(record.payload_offset, meta_offset)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Writes a narrow column: its chunks to `out`, and its dictionary, chunk dictionary and
+/// block-table pages to `meta`, with offsets relative to `meta`. The record has `layer = Narrow` and `parent = u32::MAX`; a caller that stores the
 /// column as a map child or residual sets both. The summary's name is empty, for the caller
 /// to set.
 fn write_narrow(
@@ -697,6 +756,7 @@ fn write_narrow(
     column_id: u32,
     codec: &mut SegmentCodec,
     out: &mut Out,
+    meta: &mut Out,
     pages: &mut Out,
 ) -> Result<(DirectoryRecord, ColumnSummary, Vec<BlockEntry>)> {
     let dict = for_column(array.as_ref(), config);
@@ -704,7 +764,7 @@ fn write_narrow(
         Some(dict) => {
             let mut body = Out(Vec::new());
             dict.encode(&mut body)?;
-            let seg = encode_segment(Kind::Dictionary, &body.0, Codec::Zstd, codec, out)?;
+            let seg = encode_segment(Kind::Dictionary, &body.0, Codec::Zstd, codec, meta)?;
             (seg.offset, seg.len)
         }
         None => (0, 0),
@@ -750,7 +810,7 @@ fn write_narrow(
     let chunk_dict = chunk_dictionary(&encoded, config.zstd_level)?;
     let (chunk_dict_offset, chunk_dict_len, mut packed) = match chunk_dict {
         Some((raw, packed)) => {
-            let seg = write_segment(Kind::ChunkDictionary, Codec::Raw, raw.len(), &raw, out)?;
+            let seg = write_segment(Kind::ChunkDictionary, Codec::Raw, raw.len(), &raw, meta)?;
             bytes += u64::from(seg.len);
             (seg.offset, seg.len, packed)
         }
@@ -808,7 +868,7 @@ fn write_narrow(
         for entry in page {
             entry.encode(&mut body);
         }
-        let seg = encode_segment(Kind::BlockTablePage, &body.0, Codec::Raw, codec, out)?;
+        let seg = encode_segment(Kind::BlockTablePage, &body.0, Codec::Raw, codec, meta)?;
         let first_row = page.first().map_or(0, |entry| entry.first_row);
         PageRef {
             first_row,
@@ -1336,9 +1396,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after float dictionaries, chunk dictionaries and trained own stores. A change to
-    /// this value means the output changed.
-    const GOLDEN: u64 = 0x223d_e5fd_73fc_641d;
+    /// Recorded after the metadata section moved before the hot tail. A change to this value
+    /// means the output changed.
+    const GOLDEN: u64 = 0xa6a1_e620_9675_b523;
 
     #[test]
     fn golden_output_hash() {

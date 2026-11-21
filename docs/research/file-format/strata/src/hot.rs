@@ -12,8 +12,8 @@ use arrow::ipc::writer::StreamWriter;
 
 use crate::error::{Result, StrataError};
 use crate::format::{
-    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HOT_SECTIONS, MAX_PROMOTED_KEY_LEN,
-    MAX_PROMOTED_KEYS, Out, PAGE_REF_LEN, VERSION, read_ipc_stream,
+    BLOCK_ENTRY_LEN, Cursor, DIRECTORY_RECORD_LEN, FILE_MAGIC, HEADER_LEN, HOT_SECTIONS,
+    MAX_PROMOTED_KEY_LEN, MAX_PROMOTED_KEYS, Out, PAGE_REF_LEN, VERSION, read_ipc_stream,
 };
 use crate::segment::SegmentRef;
 
@@ -43,10 +43,14 @@ pub struct Postscript {
     pub flags: u16,
     /// Index of the first sort-key column, or `u32::MAX` for none.
     pub sort_key_column: u32,
+    /// Absolute offset of the metadata section: the block-table pages, dictionaries, chunk
+    /// dictionaries, key filters, payload stores and payload headers, which lie together
+    /// between it and the hot tail, so that an open can read them with the hot tail.
+    pub meta_offset: u64,
 }
 
 impl Postscript {
-    /// Writes exactly 64 bytes: the fields in order, 24 zero bytes and the file magic.
+    /// Writes exactly 64 bytes: the fields in order, 16 zero bytes and the file magic.
     pub fn encode(&self, out: &mut Out) {
         out.u64(self.hot_offset);
         out.u32(self.hot_len);
@@ -56,7 +60,8 @@ impl Postscript {
         out.u16(self.version);
         out.u16(self.flags);
         out.u32(self.sort_key_column);
-        out.bytes(&[0u8; 24]);
+        out.u64(self.meta_offset);
+        out.bytes(&[0u8; 16]);
         out.bytes(FILE_MAGIC);
     }
 
@@ -71,7 +76,8 @@ impl Postscript {
         let version = c.u16("postscript")?;
         let flags = c.u16("postscript")?;
         let sort_key_column = c.u32("postscript")?;
-        if c.bytes(24, "postscript")?.iter().any(|b| *b != 0) {
+        let meta_offset = c.u64("postscript")?;
+        if c.bytes(16, "postscript")?.iter().any(|b| *b != 0) {
             return Err(StrataError::Corrupt {
                 what: "postscript reserved",
                 offset: c.position(),
@@ -95,6 +101,12 @@ impl Postscript {
                 offset,
             });
         }
+        if meta_offset < HEADER_LEN || meta_offset > hot_offset {
+            return Err(StrataError::Corrupt {
+                what: "metadata offset",
+                offset,
+            });
+        }
         Ok(Self {
             hot_offset,
             hot_len,
@@ -104,6 +116,7 @@ impl Postscript {
             version,
             flags,
             sort_key_column,
+            meta_offset,
         })
     }
 }
@@ -626,6 +639,7 @@ mod tests {
             version: VERSION,
             flags: 0,
             sort_key_column: 7,
+            meta_offset: 1000,
         };
         let mut out = Out(Vec::new());
         ps.encode(&mut out);
@@ -645,6 +659,7 @@ mod tests {
             version: VERSION,
             flags: 0,
             sort_key_column: u32::MAX,
+            meta_offset: 8,
         };
         let mut out = Out(Vec::new());
         base.encode(&mut out);
@@ -663,8 +678,41 @@ mod tests {
         assert!(Postscript::decode(&bad_magic, 0).is_err());
 
         let mut bad_reserved = good;
-        bad_reserved[40] = 1;
+        bad_reserved[50] = 1;
         assert!(Postscript::decode(&bad_reserved, 0).is_err());
+    }
+
+    #[test]
+    fn postscript_rejects_a_metadata_offset_outside_the_header_and_the_hot_tail() {
+        let encode = |meta_offset: u64| {
+            let mut out = Out(Vec::new());
+            Postscript {
+                hot_offset: 100,
+                hot_len: 0,
+                hot_checksum: 0,
+                row_count: 0,
+                n_columns: 0,
+                version: VERSION,
+                flags: 0,
+                sort_key_column: u32::MAX,
+                meta_offset,
+            }
+            .encode(&mut out);
+            let bytes: [u8; 64] = out.0.try_into().unwrap();
+            Postscript::decode(&bytes, 0)
+        };
+        for ok in [8, 50, 100] {
+            assert_eq!(encode(ok).unwrap().meta_offset, ok);
+        }
+        for bad in [0, 7, 101] {
+            assert!(matches!(
+                encode(bad),
+                Err(StrataError::Corrupt {
+                    what: "metadata offset",
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
@@ -678,15 +726,16 @@ mod tests {
             version: VERSION,
             flags: 0,
             sort_key_column: 3,
+            meta_offset: 8,
         };
         let mut out = Out(Vec::new());
         ps.encode(&mut out);
         let good: [u8; 64] = out.0.clone().try_into().unwrap();
         assert_eq!(Postscript::decode(&good, 0).unwrap(), ps);
 
-        // The 24 reserved bytes are at 36..60.
+        // The 16 reserved bytes are at 44..60, after the metadata offset at 36..44.
         let mut first_reserved = good;
-        first_reserved[36] = 1;
+        first_reserved[44] = 1;
         assert!(Postscript::decode(&first_reserved, 0).is_err());
         let mut last_reserved = good;
         last_reserved[59] = 1;

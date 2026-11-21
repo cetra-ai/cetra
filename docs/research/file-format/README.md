@@ -584,6 +584,8 @@ Two gaps remain:
 
 - **ClickHouse with Langfuse's schema:** on our data, ClickHouse takes 1.6–5× Strata's space on agent and chat data (the same on FineWeb). Strata is 1.5–6× faster on trace views, filters and rollups, and on phrase and newest-first searches (FineWeb: 9–12× on the newest matches); ClickHouse's text index wins rare-word searches (3–5 ms against 17–74), its sorted `events_core` an hourly histogram (12 against 79 ms), and it leads full payload scans with Vortex.
 
+- **Cold lookups on S3:** the metadata segments now lie together before the hot tail, and the open reads them with it. A cold trace lookup on simulated S3 takes one wave less and half the requests: 135–151 ms against 156–173 before on five datasets, 145 against 208 on FineWeb. It now beats the best Parquet by 9–20%, except on wildchat (179 against 170), whose tail is just over the open's 1 MiB first read.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong

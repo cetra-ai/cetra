@@ -508,7 +508,7 @@ FineWeb (Braintrust's queries): Strata 307 ms for the absent phrase against Parq
 - **Large merged ranges.** A scan merged ranges up to 16 MiB, and one request of 16 MiB takes 190 ms at one connection's 90 MB/s: payload's `list_llm_1h` made 4 requests for 7.3 MB, `scan_all_payload` 16 requests of 10 MB. Merged ranges now stop at 4 MiB, which takes about as long to transfer as a request's latency.
 - **64 requests per wave.** A wave allowed 64 requests in flight, so the 1,063 requests of a one-hour search took 17 latencies. The process-wide limit of 256 (§ Braintrust's search benchmark) now applies alone.
 - **The dense gap.** With 256 requests of 30 ms in flight, a request costs about as much as 150 KB on a 10 Gbit/s link. Candidate frames that fill a quarter of their span (§ Common phrases) were merged with the scan's 1 MiB gap, which read 7.2 GB for the "help me" count; they now merge gaps under 128 KiB (`ScanKind::Dense`): 4.8 GB in 21,742 requests.
-- **Still behind:** a cold trace lookup takes 5 dependent waves (open, metadata, sort-key chunks, row chunks and refs, frames) and ties with Parquet; Vortex compact's full scans stay faster (333–523 ms against Strata's 530–842 on toucan, payload and wildchat).
+- **Still behind:** a cold trace lookup takes 5 dependent waves (open, metadata, sort-key chunks, row chunks and refs, frames) and ties with Parquet (since fixed: § Cold lookups on S3); Vortex compact's full scans stay faster (333–523 ms against Strata's 530–842 on toucan, payload and wildchat).
 
 **After** (Strata, ms, median of 3, committed code → this change):
 
@@ -526,6 +526,64 @@ FineWeb (Braintrust's queries): Strata 307 ms for the absent phrase against Parq
 | wildchat: `substring_input` | 285 | 236 |
 
 The other queries of the six datasets moved within the run-to-run noise (a few ms; the 5 ms queries by up to a few ms either way).
+
+## Cold lookups on S3
+
+A cold trace lookup on simulated S3 took 4 waves (5 on wildchat and FineWeb) and tied with Parquet (§ Simulated S3). One whole wave fetched metadata only: each column's block-table pages, dictionary and chunk dictionary, and the payload stores and headers, 640 KB to 950 KB per file in about 55 requests. These segments sat next to each column's data, spread over the whole file, so they could not come with the open.
+
+**The change** (`prototype-plan.md` § S1):
+- The writer keeps the metadata segments (block-table pages, dictionaries, chunk dictionaries, key filters, payload stores and headers) in a buffer of their own and writes them together after the data, before the hot tail. The postscript records where they start (`meta_offset`, from its reserved bytes).
+- The open reads that section with the hot tail when it is at most `Config::open_metadata_max` (4 MiB), and keeps it. Later reads of its segments are served from memory, with no request and no wave. A lookup on a freshly opened file then takes the path of a warm one: the sort-key, narrow-chunk and refs reads in one wave, then the frames.
+- The default first read at open grows from 64 KiB to 1 MiB (`Config::open_default_suffix`). `FileSummary::tail_len` gives the exact length, for a catalog to keep as the hint, so one read covers the tail.
+- The files keep their size: the same segments, in another order (within 1 KB on every dataset).
+
+**Results** (simulated S3, ms, mean of two rounds of 3, the committed code on the old files against this change on the same rows rewritten; Parquet from § Simulated S3):
+
+| Dataset | Before | After | Requests | Waves | Best Parquet |
+|---|---|---|---|---|---|
+| light | 169 | **151** | 131 → 71 | 4 → 3 | 165 |
+| payload | 173 | **143** | 129 → 68 | 4 → 3 | 164 |
+| swe | 156 | **135** | 53 → 28 | 4 → 3 | 155 |
+| openswe | 157 | **139** | 48 → 29 | 4 → 3 | 153 |
+| toucan | 165 | **147** | 117 → 61 | 4 → 3 | 168 |
+| wildchat | 201 | 179 | 115 → 60 | 5 → 4 | 170 |
+| FineWeb | 208 | **145** | 93 → 46 | 5 → 3 | 175 |
+
+- A cold lookup now beats the best Parquet on every dataset but wildchat, by 9–20%, and makes half the requests.
+- Wildchat keeps one more wave: its tail (970 KiB of metadata and a 70 KiB hot tail) is just over the 1 MiB first read, so the open reads twice. `light` (1.4 MiB of metadata) does too. A catalog's hint, or a 2 MiB first read, would remove it.
+- **Locally** a cold lookup costs 0 to 0.8 ms more (+0–12%; payload −9%): the open reads 0.1–1.5 MiB per file instead of 64 KiB, and the page cache makes the saved wave nearly free.
+- **The other queries** run on files already open, where the metadata was cached before too. On simulated S3 they moved within the run-to-run noise. Locally too, except FineWeb's absent phrase: 82 → 88 ms (median of 15, four alternating rounds), with the same requests and bytes. Profiles of both binaries show no new cost; the cause is not found.
+- **Memory:** an open file keeps its metadata section, 66 KiB (openswe) to 1.4 MiB (`light`) here, about what its decoded caches held after a first query.
+
+## Narrow chunks
+
+**Where `light` loses size** (MiB, the four files; Strata's narrow columns against `pq_default`'s column chunks):
+
+| Columns | Strata | Parquet |
+|---|---|---|
+| `span_id`, `trace_id`, `parent_span_id` (with the sort-key filter) | 20.8 | 17.5 |
+| `cost_total`, `cost_input`, `cost_output` | 8.3 | 5.0 |
+| token counts (total, input, output, cache read) | 8.7 | 4.9 |
+| `user_id`, `session_id` (with their key filters) | 4.9 | 2.5 |
+| low-cardinality text (`model`, `name`, `provider`, …), each | 0.2–1.0 | 0.1–0.8 |
+| `start_time`, `end_time`, `duration_ns` | **24.0** | 28.6 |
+| `attributes` | **24.7** | 31.0 |
+| `ingest_time` | **2.0** | 3.5 |
+
+A narrow chunk holds 2,048 rows and is stored raw unless zstd saves 30%. On these columns zstd saves 10–25% of a bit-packed chunk, so they stay raw, while Parquet compresses whole 1 MiB pages.
+
+**Tried** (scratch copy, `light` and `toucan`, sizes then local and simulated-S3 queries):
+
+| Variant | `light` size | Queries |
+|---|---|---|
+| zstd from 10% saved | 158 → 151 MiB | `model_rollup_day` +14% (17.8 → 20.3 ms, four alternating rounds), `metadata_filter` +6%, the rest within noise |
+| 8,192-row chunks | 158 → 150 MiB | trace lookups about 2× slower locally and 11–25% slower on S3; `list_llm_1h` +40% |
+| both | 158 → 146 MiB | as 8,192-row chunks |
+
+- A 5% bar saves no more than 10% (154.2 against 154.5 MiB of narrow columns).
+- At 10%, `span_id` matches Parquet (10.5 MiB) and the token, cost, `user_id` and dictionary-code columns shrink by 10–20% each. The rollup reads `model`, costs and tokens, whose chunks are then decompressed on every scan. The other datasets change by under 1%: most of their bytes are payloads.
+- Larger chunks make a lookup fetch and decode four times the rows it needs, which gives up Strata's main lead for 1–3% of size.
+- **Kept: 30% and 2,048 rows.** `light` stays 4% bigger than Parquet and 15% bigger than Vortex compact. What would close it without slowing scans is encodings Strata lacks: delta for sorted timestamps, ALP for floats, FSST for short strings, and zstd on ID columns only, which aggregates never scan.
 
 ## Reproduce
 

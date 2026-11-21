@@ -221,6 +221,9 @@ pub struct StrataFile {
     path: Path,
     size: u64,
     postscript: Postscript,
+    /// The metadata section (`Postscript::meta_offset` up to the hot tail), when the open read
+    /// it. Reads of its segments are served from it.
+    meta: Option<bytes::Bytes>,
     pub(crate) hot: HotTail,
     /// Index of the first sort-key column, or `None` when the file has no sort key.
     sort_key: Option<usize>,
@@ -253,20 +256,23 @@ pub struct StrataFile {
 }
 
 impl StrataFile {
-    /// Opens the file at `path`.
+    /// Opens the file at `path`, reading its tail: the metadata section when it is at most
+    /// `config.open_metadata_max` bytes, the hot tail and the postscript. The metadata section
+    /// is kept, and later reads of its segments are served from it with no request.
     ///
-    /// One suffix read covers the postscript and, when `hot_len_hint` is given, the
-    /// whole hot tail. Without a hint the suffix is `config.open_default_suffix`. A
-    /// longer hot tail costs one more ranged read.
+    /// One suffix read covers the tail when `tail_len_hint` is given, as
+    /// [`StrataFile::tail_len`] or [`FileSummary::tail_len`](crate::FileSummary) give it.
+    /// Without a hint the suffix is `config.open_default_suffix`. A longer tail costs one more
+    /// ranged read.
     pub async fn open(
         store: Arc<dyn ObjectStore>,
         path: Path,
-        hot_len_hint: Option<u32>,
+        tail_len_hint: Option<u64>,
         config: &Config,
     ) -> Result<StrataFile> {
-        let n = hot_len_hint
-            .map(|h| u64::from(h) + POSTSCRIPT_LEN)
-            .unwrap_or(config.open_default_suffix);
+        let n = tail_len_hint
+            .unwrap_or(config.open_default_suffix)
+            .max(POSTSCRIPT_LEN);
         let (size, start, tail) = crate::io::get_suffix(store.as_ref(), &path, n).await?;
 
         let too_small = || StrataError::Corrupt {
@@ -313,24 +319,39 @@ impl StrataFile {
             what: "hot tail range",
             offset: postscript.hot_offset,
         };
-        let hot: Vec<u8> = if postscript.hot_offset < start {
-            let head =
-                crate::io::get_range(store.as_ref(), &path, postscript.hot_offset..start).await?;
-            let body = tail.get(..ps_start).ok_or_else(hot_corrupt)?;
+        // The tail read: from the metadata section when it is small enough, else from the hot
+        // tail, up to the postscript.
+        let meta_len = postscript.hot_offset - postscript.meta_offset;
+        let from = if meta_len <= config.open_metadata_max {
+            postscript.meta_offset
+        } else {
+            postscript.hot_offset
+        };
+        let body = tail.slice(..ps_start);
+        let read: bytes::Bytes = if from < start {
+            let head = crate::io::get_range(store.as_ref(), &path, from..start).await?;
             let mut joined = Vec::with_capacity(head.len() + body.len());
             joined.extend_from_slice(&head);
-            joined.extend_from_slice(body);
-            joined
+            joined.extend_from_slice(&body);
+            joined.into()
         } else {
-            let skip = postscript
-                .hot_offset
-                .checked_sub(start)
-                .and_then(|v| usize::try_from(v).ok())
-                .ok_or_else(hot_corrupt)?;
-            tail.get(skip..ps_start).ok_or_else(hot_corrupt)?.to_vec()
+            let skip = usize::try_from(from - start).map_err(|_| hot_corrupt())?;
+            if skip > body.len() {
+                return Err(hot_corrupt());
+            }
+            body.slice(skip..)
+        };
+        let meta_len = usize::try_from(meta_len).map_err(|_| hot_corrupt())?;
+        let (meta, hot) = if from == postscript.meta_offset {
+            if meta_len > read.len() {
+                return Err(hot_corrupt());
+            }
+            (Some(read.slice(..meta_len)), read.slice(meta_len..))
+        } else {
+            (None, read)
         };
 
-        if !checksum_matches(checksum32(&[hot.as_slice()]), postscript.hot_checksum) {
+        if !checksum_matches(checksum32(&[&hot[..]]), postscript.hot_checksum) {
             return Err(StrataError::Corrupt {
                 what: "hot checksum",
                 offset: postscript.hot_offset,
@@ -424,6 +445,7 @@ impl StrataFile {
             path,
             size,
             postscript,
+            meta,
             hot,
             sort_key,
             sort_key_filter,
@@ -456,9 +478,15 @@ impl StrataFile {
         self.size
     }
 
-    /// Length of the hot tail in bytes.
-    pub fn hot_len(&self) -> u32 {
-        self.postscript.hot_len
+    /// Whether the open kept the metadata section, so that reading metadata costs no request.
+    pub(crate) fn has_metadata(&self) -> bool {
+        self.meta.is_some()
+    }
+
+    /// Length of the tail in bytes: the metadata section, the hot tail and the postscript.
+    /// Passed to [`StrataFile::open`] as its hint, one read covers the tail.
+    pub fn tail_len(&self) -> u64 {
+        self.size - self.postscript.meta_offset
     }
 
     /// The column directory.
@@ -614,12 +642,37 @@ impl StrataFile {
             return Ok(Vec::new());
         }
         let hot_offset = self.postscript.hot_offset;
+        let meta_offset = self.postscript.meta_offset;
+        // A segment of the metadata section the open kept is sliced from it; the others are
+        // fetched.
         let mut ranges = Vec::with_capacity(segments.len());
+        let mut kept: Vec<Option<bytes::Bytes>> = Vec::with_capacity(segments.len());
+        let mut remote = Vec::new();
         for (r, _) in segments {
             let end = segment_end(r.offset, r.len, hot_offset)?;
+            let slice = match &self.meta {
+                Some(meta) if r.offset >= meta_offset => {
+                    let at = usize::try_from(r.offset - meta_offset).ok();
+                    let to = usize::try_from(end - meta_offset).ok();
+                    match (at, to) {
+                        (Some(at), Some(to)) if to <= meta.len() => Some(meta.slice(at..to)),
+                        _ => {
+                            return Err(StrataError::Corrupt {
+                                what: "segment range",
+                                offset: r.offset,
+                            });
+                        }
+                    }
+                }
+                _ => None,
+            };
+            if slice.is_none() {
+                remote.push(r.offset..end);
+            }
             ranges.push(r.offset..end);
+            kept.push(slice);
         }
-        let (merged, owner) = coalesce(&ranges, kind);
+        let (merged, owner) = coalesce(&remote, kind);
         // Up to the process's limit in flight, which `get_range` enforces across waves; one
         // wave of a common search on S3 makes about a thousand requests, and 64 at a time cost
         // 16 latencies (`real-data.md` § Simulated S3). `buffered` keeps the order.
@@ -629,12 +682,19 @@ impl StrataFile {
             .try_collect()
             .await?;
 
+        let fetched: Vec<bool> = kept.iter().map(Option::is_none).collect();
         let mut slices = Vec::with_capacity(segments.len());
-        for (((r, segment_kind), range), &m) in segments.iter().zip(&ranges).zip(&owner) {
+        let mut owners = owner.iter();
+        for (((r, segment_kind), range), slice) in segments.iter().zip(&ranges).zip(kept) {
+            if let Some(slice) = slice {
+                slices.push((slice, r, *segment_kind));
+                continue;
+            }
             let corrupt = || StrataError::Corrupt {
                 what: "segment range",
                 offset: r.offset,
             };
+            let &m = owners.next().ok_or_else(corrupt)?;
             let whole = merged.get(m).ok_or_else(corrupt)?;
             let part = parts.get(m).ok_or_else(corrupt)?;
             let at = range
@@ -655,8 +715,12 @@ impl StrataFile {
             slices.push((part.slice(at..end), r, *segment_kind));
         }
         let bodies = decode_all(&slices, &f, on)?;
-        for (_, r, segment_kind) in &slices {
-            if let Some(counter) = self.kind_bytes.get(*segment_kind as usize) {
+        if merged.is_empty() {
+            return Ok(bodies);
+        }
+        for ((_, r, segment_kind), &was_fetched) in slices.iter().zip(&fetched) {
+            // Only fetched segments count; the kept ones were read by the open.
+            if was_fetched && let Some(counter) = self.kind_bytes.get(*segment_kind as usize) {
                 counter.fetch_add(u64::from(r.len), Ordering::Relaxed);
             }
         }
@@ -730,7 +794,8 @@ impl StrataFile {
 
     /// Loads into the caches the block entries, dictionaries and payload headers of `columns`
     /// (directory ids) that are not cached yet, with one `fetch` for all of them. Map parents
-    /// are skipped. The call is one wave, or none when nothing is left to read.
+    /// are skipped. The call is one wave, or none when nothing is left to read or the open kept
+    /// the metadata section.
     pub(crate) async fn load_metadata(&self, columns: &[usize], kind: ScanKind) -> Result<()> {
         let (segments, plan) = self.metadata_segments(columns)?;
         if plan.is_empty() {
@@ -1264,7 +1329,7 @@ impl StrataFile {
     clippy::panic,
     clippy::indexing_slicing
 )]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::format::{PAGE_REF_LEN, SEGMENT_HEADER_LEN};
     use crate::testgen::{assert_same, batch, schema as batch_schema, wide_batch, wide_schema};
@@ -1354,7 +1419,8 @@ mod tests {
 
     /// Fuzz finding `fuzz/regressions/file/hot-schema-unknown-type`: a hot schema with an
     /// unknown Arrow type id made arrow's IPC reader panic (`unimplemented!`). With its hot
-    /// checksum fixed, the file reaches that reader outside fuzzing too, and is corrupt.
+    /// checksum fixed, and the metadata offset the input predates set to the hot tail's, the
+    /// file reaches that reader outside fuzzing too, and is corrupt.
     #[test]
     fn a_hot_schema_that_makes_arrow_panic_is_corrupt() {
         let mut bytes = std::fs::read(
@@ -1362,6 +1428,9 @@ mod tests {
                 .join("fuzz/regressions/file/hot-schema-unknown-type"),
         )
         .unwrap();
+        let ps_at = bytes.len() - 64;
+        let hot = hot_offset_of(&bytes);
+        bytes[ps_at + 36..ps_at + 44].copy_from_slice(&hot.to_le_bytes());
         refresh_hot_checksum(&mut bytes);
         runtime().block_on(async {
             let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
@@ -1451,12 +1520,12 @@ mod tests {
             let counting = Arc::new(Counting::new());
             let store: Arc<dyn ObjectStore> = counting.clone();
             put(store.as_ref(), write_empty_file(spans_schema())).await;
-            let hot_len = StrataFile::open(store.clone(), path(), None, &Config::default())
+            let tail_len = StrataFile::open(store.clone(), path(), None, &Config::default())
                 .await
                 .unwrap()
-                .hot_len();
+                .tail_len();
             let before = counting.gets();
-            StrataFile::open(store, path(), Some(hot_len), &Config::default())
+            StrataFile::open(store, path(), Some(tail_len), &Config::default())
                 .await
                 .unwrap();
             assert_eq!(counting.gets() - before, 1);
@@ -1605,12 +1674,12 @@ mod tests {
     fn populated_file_opens_with_one_or_two_gets() {
         runtime().block_on(async {
             let (bytes, summary) = populated();
-            assert!(u64::from(summary.hot_len) + POSTSCRIPT_LEN > 1024);
+            assert!(summary.tail_len > 1024);
             let counting = Arc::new(Counting::new());
             let store: Arc<dyn ObjectStore> = counting.clone();
             put(store.as_ref(), bytes).await;
 
-            // Without a hint, the suffix is too short for the hot tail: one more read.
+            // Without a hint, the suffix is too short for the tail: one more read.
             let short = Config {
                 open_default_suffix: 1024,
                 ..Config::default()
@@ -1624,7 +1693,7 @@ mod tests {
 
             // With the exact hint, one read covers everything.
             let before = counting.gets();
-            let file = StrataFile::open(store, path(), Some(summary.hot_len), &Config::default())
+            let file = StrataFile::open(store, path(), Some(summary.tail_len), &Config::default())
                 .await
                 .unwrap();
             assert_eq!(counting.gets() - before, 1);
@@ -1967,6 +2036,10 @@ mod tests {
             let key = file.key_index(1).await.unwrap().unwrap();
             assert!(key.postings.is_some());
 
+            // Chunk bytes, not request bytes: a scan's requests merge gaps of up to 1 MiB, which
+            // in a file this small span every chunk.
+            let chunk_bytes =
+                |file: &StrataFile| file.io_stats().by_kind[Kind::NarrowChunk as usize];
             let all_bytes = {
                 file.reset_io_stats();
                 let req = ScanRequest {
@@ -1979,7 +2052,7 @@ mod tests {
                     top: None,
                 };
                 file.scan(&req).await.unwrap();
-                file.io_stats().bytes
+                chunk_bytes(&file)
             };
             for wanted in [vec!["user-17"], vec!["user-5", "user-1999"], vec!["nobody"]] {
                 let terms: Vec<Predicate> = wanted
@@ -2016,9 +2089,9 @@ mod tests {
                     }
                 }
                 assert!(
-                    file.io_stats().bytes * 4 < all_bytes,
+                    chunk_bytes(&file) * 4 < all_bytes,
                     "{wanted:?}: {} bytes against {all_bytes} for a full scan",
-                    file.io_stats().bytes
+                    chunk_bytes(&file)
                 );
             }
         });
@@ -2116,11 +2189,96 @@ mod tests {
 
     /// Writes `batch` with `config` and opens it.
     async fn open_written(batch: &RecordBatch, config: &Config) -> StrataFile {
+        open_written_with(batch, config, &Config::default()).await
+    }
+
+    /// `batch` written with `config` and opened with `open`.
+    async fn open_written_with(batch: &RecordBatch, config: &Config, open: &Config) -> StrataFile {
         let mut w =
             StrataWriter::new(batch.schema(), &["trace_id", "start_time"], config.clone()).unwrap();
         w.write(batch).unwrap();
         let (bytes, _) = w.finish().unwrap();
-        open_patched(bytes).await.unwrap()
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        put(store.as_ref(), bytes).await;
+        StrataFile::open(store, path(), None, open).await.unwrap()
+    }
+
+    /// Checks the layout of `file`: every metadata segment and key filter lies in the metadata
+    /// section, and every narrow chunk and payload frame before it.
+    pub(crate) async fn assert_layout(file: &StrataFile) {
+        let (from, to) = (file.postscript.meta_offset, file.postscript.hot_offset);
+        let all: Vec<usize> = (0..file.directory().len()).collect();
+        let (segments, _) = file.metadata_segments(&all).unwrap();
+        assert!(!segments.is_empty());
+        for (r, kind) in segments.iter().chain(
+            file.hot
+                .key_filters
+                .iter()
+                .map(|(_, r)| (*r, Kind::KeyFilter))
+                .collect::<Vec<_>>()
+                .iter(),
+        ) {
+            assert!(
+                r.offset >= from && r.offset + u64::from(r.len) <= to,
+                "{kind:?} at {} outside {from}..{to}",
+                r.offset
+            );
+        }
+        let before = |offset: u64, len: u32| len == 0 || offset + u64::from(len) <= from;
+        for (column, record) in file.directory().iter().enumerate() {
+            match record.layer {
+                Layer::MapParent => {}
+                Layer::Payload => {
+                    let header = crate::payload::read_header(file, column).await.unwrap();
+                    for frame in &header.store.frames {
+                        assert!(before(frame.offset, frame.len), "frame at {}", frame.offset);
+                    }
+                }
+                _ => {
+                    for entry in file.block_entries(column).await.unwrap().iter() {
+                        assert!(
+                            before(entry.segment_offset, entry.segment_len),
+                            "chunk at {}",
+                            entry.segment_offset
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn metadata_lies_in_its_section_and_the_data_before_it() {
+        runtime().block_on(async {
+            let config = Config {
+                payload_min_avg: 0,
+                // `uid` is a payload column here, with no filter; `short_id` stays narrow.
+                key_filter_columns: vec!["short_id".into()],
+                ..Config::default()
+            };
+            let file = open_written(&wide_batch(2_000), &config).await;
+            assert!(file.has_metadata());
+            assert!(!file.hot.key_filters.is_empty());
+            assert!(
+                file.directory()
+                    .iter()
+                    .any(|record| record.layer == Layer::Payload)
+            );
+            assert_layout(&file).await;
+            // The same file, opened without its section, reads the same metadata.
+            let lazy_file = open_written_with(&wide_batch(2_000), &config, &lazy()).await;
+            assert!(!lazy_file.has_metadata());
+            assert_layout(&lazy_file).await;
+        });
+    }
+
+    /// An open that keeps no metadata section: queries read the metadata they need, in a wave
+    /// of their own, as for a section over `open_metadata_max`.
+    fn lazy() -> Config {
+        Config {
+            open_metadata_max: 0,
+            ..Config::default()
+        }
     }
 
     #[test]
@@ -2219,31 +2377,35 @@ mod tests {
     #[test]
     fn one_wave_per_concurrent_read() {
         runtime().block_on(async {
-            // A dictionary column: block pages and dictionary in one wave, then the chunks.
-            let file = open_written(&batch(20_000), &Config::default()).await;
-            let model = file.schema().index_of("model").unwrap();
-            file.reset_io_stats();
-            crate::reader::read_column(&file, model).await.unwrap();
-            assert_eq!(file.io_stats().waves, 2);
+            // With the metadata section kept by the open, no metadata wave; without it, one
+            // wave for the block pages and dictionary, or the payload header, first.
+            for (open, metadata) in [(Config::default(), 0), (lazy(), 1)] {
+                // A dictionary column: the chunks.
+                let file = open_written_with(&batch(20_000), &Config::default(), &open).await;
+                let model = file.schema().index_of("model").unwrap();
+                file.reset_io_stats();
+                crate::reader::read_column(&file, model).await.unwrap();
+                assert_eq!(file.io_stats().waves, 1 + metadata);
 
-            // A plain column: block pages, chunks.
-            let file = open_written(&batch(20_000), &Config::default()).await;
-            let tokens = file.schema().index_of("input_tokens").unwrap();
-            file.reset_io_stats();
-            crate::reader::read_column(&file, tokens).await.unwrap();
-            assert_eq!(file.io_stats().waves, 2);
+                // A plain column: the chunks.
+                let file = open_written_with(&batch(20_000), &Config::default(), &open).await;
+                let tokens = file.schema().index_of("input_tokens").unwrap();
+                file.reset_io_stats();
+                crate::reader::read_column(&file, tokens).await.unwrap();
+                assert_eq!(file.io_stats().waves, 1 + metadata);
 
-            // A payload column: header, then refs pages and frames.
-            let config = Config {
-                payload_min_avg: 0,
-                ..Config::default()
-            };
-            let file = open_written(&wide_batch(2_000), &config).await;
-            let blob = file.schema().index_of("blob").unwrap();
-            assert_eq!(file.directory()[blob].layer, Layer::Payload);
-            file.reset_io_stats();
-            crate::reader::read_column(&file, blob).await.unwrap();
-            assert_eq!(file.io_stats().waves, 2);
+                // A payload column: the refs pages and frames.
+                let config = Config {
+                    payload_min_avg: 0,
+                    ..Config::default()
+                };
+                let file = open_written_with(&wide_batch(2_000), &config, &open).await;
+                let blob = file.schema().index_of("blob").unwrap();
+                assert_eq!(file.directory()[blob].layer, Layer::Payload);
+                file.reset_io_stats();
+                crate::reader::read_column(&file, blob).await.unwrap();
+                assert_eq!(file.io_stats().waves, 1 + metadata);
+            }
         });
     }
 

@@ -245,6 +245,7 @@ mod tests {
         let (bytes, summary) = merge(&inputs, &SORT, config.clone()).await.unwrap();
         assert_eq!(summary.rows, 8_000);
         let merged = open(bytes).await;
+        crate::file::tests::assert_layout(&merged).await;
         let one_go = open(write(&rows, &SORT, config.clone()).0).await;
         for column in 0..rows.num_columns() {
             let got = read_column(&merged, column).await.unwrap();
@@ -496,6 +497,7 @@ mod tests {
         assert_eq!(stats.frames, a_stats.frames + b_stats.frames);
         assert_eq!(stats.frame_bytes, a_stats.frame_bytes + b_stats.frame_bytes);
         let merged = open(bytes).await;
+        crate::file::tests::assert_layout(&merged).await;
         assert_eq!(body_rows(&merged).await, interleaved(&values, &values));
     }
 

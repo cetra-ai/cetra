@@ -1221,9 +1221,9 @@ impl StrataFile {
     }
 
     /// Rows whose first sort-key column equals `key`, with the projected columns. It runs in
-    /// waves, with the sort-key chunks of the first wave: cold (metadata not cached) it takes
-    /// two waves, or three with a payload column; warm, one or two. A key the sort-key filter or
-    /// the zones rule out costs no wave. With `views`, top-level Utf8 columns come out as
+    /// waves, with the sort-key chunks of the first wave: with the metadata cached, or kept by
+    /// the open, one wave, or two with a payload column; else one more. A key the sort-key
+    /// filter or the zones rule out costs no wave. With `views`, top-level Utf8 columns come out as
     /// `Utf8View`.
     pub async fn lookup_scan(
         &self,
@@ -1248,6 +1248,11 @@ impl StrataFile {
         let mut meta_columns: BTreeSet<usize> = narrow.clone();
         meta_columns.extend(payload.iter().copied());
         let meta_columns: Vec<usize> = meta_columns.into_iter().collect();
+        if self.has_metadata() {
+            // Served from the metadata section the open kept: no request, so the lookup takes
+            // the path of a file whose metadata is cached.
+            self.load_metadata(&meta_columns, kind).await?;
+        }
         let (meta_segments, meta_plan) = self.metadata_segments(&meta_columns)?;
         let cold = !meta_plan.is_empty();
         let narrow_vec: Vec<usize> = narrow.iter().copied().collect();
@@ -1779,6 +1784,11 @@ mod tests {
 
     /// `wide_batch(rows)`, written with `config`, and opened.
     async fn open_wide(rows: usize, config: &Config) -> StrataFile {
+        open_wide_with(rows, config, &Config::default()).await
+    }
+
+    /// `wide_batch(rows)` written with `config` and opened with `open`.
+    async fn open_wide_with(rows: usize, config: &Config, open: &Config) -> StrataFile {
         let mut w =
             StrataWriter::new(wide_schema(), &["trace_id", "start_time"], config.clone()).unwrap();
         w.write(&wide_batch(rows)).unwrap();
@@ -1786,9 +1796,16 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("table.strata");
         store.put(&path, PutPayload::from(bytes)).await.unwrap();
-        StrataFile::open(store, path, None, &Config::default())
-            .await
-            .unwrap()
+        StrataFile::open(store, path, None, open).await.unwrap()
+    }
+
+    /// An open that keeps no metadata section: queries read the metadata they need, in a wave
+    /// of their own, as for a section over `open_metadata_max`.
+    fn lazy() -> Config {
+        Config {
+            open_metadata_max: 0,
+            ..Config::default()
+        }
     }
 
     /// The column index of `name` in the wide schema.
@@ -2323,54 +2340,59 @@ mod tests {
     #[test]
     fn a_predicate_on_a_pruned_chunk_reads_only_the_candidates() {
         runtime().block_on(async {
-            let file = open_wide(20_000, &Config::default()).await;
-            let time = col("start_time");
-            // The `start_time` of row 19,000, from the generator's formula: the file is cold.
-            let threshold = 1_700_000_000_000_000_000i64 + 19_000 * 1_000_003;
-            file.reset_io_stats();
-            let req = ScanRequest {
-                projection: vec![time],
-                predicate: Some(Predicate::Cmp(time, CmpOp::GtEq, Lit::Int(threshold))),
-                row_ranges: None,
-                limit: None,
-                kind: ScanKind::Scan,
-                views: false,
-                top: None,
-            };
-            let batches = file.scan(&req).await.unwrap();
-            let stats = file.io_stats();
-            // Metadata, then the filter. The projection is the predicate column: no third wave.
-            assert_eq!(stats.waves, 2);
-            assert_eq!(stats.requests, 2);
-            let want = oracle(&file, req.predicate.as_ref(), None, &[time])
-                .await
-                .unwrap();
-            assert_batches_equal(&joined(&want.schema(), &batches), &want);
+            for (open, metadata) in [(Config::default(), 0), (lazy(), 1)] {
+                let file = open_wide_with(20_000, &Config::default(), &open).await;
+                let time = col("start_time");
+                // The `start_time` of row 19,000, from the generator's formula: the file is cold.
+                let threshold = 1_700_000_000_000_000_000i64 + 19_000 * 1_000_003;
+                file.reset_io_stats();
+                let req = ScanRequest {
+                    projection: vec![time],
+                    predicate: Some(Predicate::Cmp(time, CmpOp::GtEq, Lit::Int(threshold))),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                    views: false,
+                    top: None,
+                };
+                let batches = file.scan(&req).await.unwrap();
+                let stats = file.io_stats();
+                // The metadata when the open did not keep it, then the filter. The projection is
+                // the predicate column: no more waves.
+                assert_eq!(stats.waves, 1 + metadata);
+                assert_eq!(stats.requests, 1 + metadata);
+                let want = oracle(&file, req.predicate.as_ref(), None, &[time])
+                    .await
+                    .unwrap();
+                assert_batches_equal(&joined(&want.schema(), &batches), &want);
+            }
         });
     }
 
     #[test]
-    fn an_absent_dictionary_value_costs_only_the_metadata_wave() {
+    fn an_absent_dictionary_value_costs_only_the_metadata() {
         runtime().block_on(async {
-            let file = open_wide(20_000, &Config::default()).await;
-            let status = col("status");
-            file.reset_io_stats();
-            let req = ScanRequest {
-                projection: vec![status],
-                predicate: Some(Predicate::Cmp(
-                    status,
-                    CmpOp::Eq,
-                    Lit::Utf8("missing".into()),
-                )),
-                row_ranges: None,
-                limit: None,
-                kind: ScanKind::Scan,
-                views: false,
-                top: None,
-            };
-            let batches = file.scan(&req).await.unwrap();
-            assert!(batches.is_empty());
-            assert_eq!(file.io_stats().waves, 1);
+            for (open, metadata) in [(Config::default(), 0), (lazy(), 1)] {
+                let file = open_wide_with(20_000, &Config::default(), &open).await;
+                let status = col("status");
+                file.reset_io_stats();
+                let req = ScanRequest {
+                    projection: vec![status],
+                    predicate: Some(Predicate::Cmp(
+                        status,
+                        CmpOp::Eq,
+                        Lit::Utf8("missing".into()),
+                    )),
+                    row_ranges: None,
+                    limit: None,
+                    kind: ScanKind::Scan,
+                    views: false,
+                    top: None,
+                };
+                let batches = file.scan(&req).await.unwrap();
+                assert!(batches.is_empty());
+                assert_eq!(file.io_stats().waves, metadata);
+            }
         });
     }
 
@@ -2650,6 +2672,11 @@ mod tests {
 
     /// `batch(rows)`, written with the default config, and opened.
     async fn open_batch(rows: usize) -> StrataFile {
+        open_batch_with(rows, &Config::default()).await
+    }
+
+    /// `testgen::batch(rows)` written with the default config and opened with `open`.
+    async fn open_batch_with(rows: usize, open: &Config) -> StrataFile {
         let mut w = StrataWriter::new(
             crate::testgen::schema(),
             &["trace_id", "start_time"],
@@ -2661,9 +2688,7 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let path = Path::from("batch.strata");
         store.put(&path, PutPayload::from(bytes)).await.unwrap();
-        StrataFile::open(store, path, None, &Config::default())
-            .await
-            .unwrap()
+        StrataFile::open(store, path, None, open).await.unwrap()
     }
 
     /// The rows whose `trace_id` (column 0) is `key`, from a scan: the oracle of the lookups.
@@ -2712,13 +2737,15 @@ mod tests {
     }
 
     #[test]
-    fn map_key_predicates_match_the_oracle_and_a_promoted_key_takes_three_waves() {
+    fn map_key_predicates_match_the_oracle_and_a_promoted_key_takes_two_waves() {
         runtime().block_on(async {
+            let lazy_file = open_wide_with(20_000, &Config::default(), &lazy()).await;
             let file = open_wide(20_000, &Config::default()).await;
             let (attrs, uid) = (col("attrs"), col("uid"));
             let key = |name: &str, lit: Lit| Predicate::MapKeyEq(attrs, name.to_string(), lit);
 
-            // `k0` is promoted: it binds to its child column, and a cold scan takes three waves.
+            // `k0` is promoted: it binds to its child column, and a cold scan takes two waves,
+            // the filter and the projection, or three when the open kept no metadata.
             let promoted = key("k0", Lit::Utf8("v5-0".into()));
             assert!(matches!(
                 bind(&promoted, &file).unwrap().0,
@@ -2733,9 +2760,11 @@ mod tests {
                 views: false,
                 top: None,
             };
+            lazy_file.scan(&req).await.unwrap();
+            assert_eq!(lazy_file.io_stats().waves, 3);
             file.reset_io_stats();
             let batches = file.scan(&req).await.unwrap();
-            assert_eq!(file.io_stats().waves, 3);
+            assert_eq!(file.io_stats().waves, 2);
             let want = oracle(&file, Some(&promoted), None, &[uid]).await.unwrap();
             assert_batches_equal(&joined(&want.schema(), &batches), &want);
 
@@ -2930,17 +2959,27 @@ mod tests {
     #[test]
     fn lookup_scan_waves_and_results() {
         runtime().block_on(async {
-            let file = open_batch(20_000).await;
-            let all: Vec<usize> = (0..file.schema().fields().len()).collect();
             let trace = |row: u64| u128::from(row / 5);
 
-            // Cold: the metadata and the narrow chunks, two waves.
+            // Cold, without the metadata section: the metadata and the narrow chunks, two waves.
+            let lazy_file = open_batch_with(20_000, &lazy()).await;
+            let all: Vec<usize> = (0..lazy_file.schema().fields().len()).collect();
+            let got = lazy_file
+                .lookup_scan(&trace(1_000).to_be_bytes(), &all, false)
+                .await
+                .unwrap();
+            assert_eq!(lazy_file.io_stats().waves, 2);
+            let want = trace_rows(&lazy_file, trace(1_000), &all).await;
+            assert_batches_equal(&joined(&want.schema(), &got), &want);
+
+            // Cold, with the metadata section the open kept: one wave.
+            let file = open_batch(20_000).await;
             file.reset_io_stats();
             let got = file
                 .lookup_scan(&trace(1_000).to_be_bytes(), &all, false)
                 .await
                 .unwrap();
-            assert_eq!(file.io_stats().waves, 2);
+            assert_eq!(file.io_stats().waves, 1);
             let want = trace_rows(&file, trace(1_000), &all).await;
             assert_batches_equal(&joined(&want.schema(), &got), &want);
 

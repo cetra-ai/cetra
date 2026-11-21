@@ -499,8 +499,8 @@ impl StoreBuilder {
         u32::try_from(self.ends.len()).unwrap_or(u32::MAX)
     }
 
-    /// Writes the frames, the index pages and the store segment, in that order. Returns the
-    /// store segment and what was written. The frames use zstd `level`, and are compressed and
+    /// Writes the frames and the index pages to `out`, and the store segment to `meta`, with
+    /// an offset relative to `meta`. Returns the store segment and what was written. The frames use zstd `level`, and are compressed and
     /// indexed on `threads` threads; the bytes do not depend on it. A store of at least
     /// `DICT_MIN_RAW` bytes trains a dictionary of its own: one trained on another store's text
     /// fits it badly, and is slower.
@@ -510,6 +510,7 @@ impl StoreBuilder {
         threads: usize,
         codec: &mut SegmentCodec,
         out: &mut Out,
+        meta: &mut Out,
     ) -> Result<(SegmentRef, StoreStats)> {
         let n = self.ends.len();
         // Frames: consecutive chunks up to `FRAME_MAX_RAW` raw bytes.
@@ -728,7 +729,7 @@ impl StoreBuilder {
         };
         let mut body = Out(Vec::new());
         store.encode(&mut body)?;
-        let seg = encode_segment(Kind::PayloadStore, &body.0, Codec::Zstd, codec, out)?;
+        let seg = encode_segment(Kind::PayloadStore, &body.0, Codec::Zstd, codec, meta)?;
         stats.store_bytes = u64::from(seg.len);
         Ok((seg, stats))
     }
@@ -764,9 +765,10 @@ mod tests {
             b.add(c).unwrap();
         }
         let mut out = Out(Vec::new());
+        let mut meta = Out(Vec::new());
         let mut codec = SegmentCodec::new(3).unwrap();
-        let (seg, stats) = b.write(3, 4, &mut codec, &mut out).unwrap();
-        let bytes = &out.0[seg.offset as usize..(seg.offset + u64::from(seg.len)) as usize];
+        let (seg, stats) = b.write(3, 4, &mut codec, &mut out, &mut meta).unwrap();
+        let bytes = &meta.0[seg.offset as usize..(seg.offset + u64::from(seg.len)) as usize];
         let body = crate::segment::decode_segment(bytes, seg.offset, Kind::PayloadStore).unwrap();
         let store = PayloadStore::decode(&body, seg.offset).unwrap();
         (out.0, store, stats)
