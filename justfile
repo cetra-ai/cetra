@@ -434,10 +434,12 @@ web-demo-deploy branch: js-install
     test -n "$url" || { echo "no workers.dev URL in the wrangler output" >&2; exit 1; }
     echo "url=$url/"
 
-# Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first
+# Check the docs site's external links (D-W-13); needs lychee 0.24.2 and builds the site first.
+# Root-relative links resolve in website/dist. The https://cetra.sh/ URLs (canonical links) are
+# skipped: starlight-links-validator checks the site's own pages during the build.
 docs-links: js-install
     pnpm --dir website run build
-    lychee --no-progress --max-concurrency 8 --accept 200,206,429 --exclude '^http://localhost' --exclude-path website/dist/docs/reference/api 'website/dist/**/*.html'
+    lychee --no-progress --max-concurrency 8 --accept 200,206,429 --root-dir "$PWD/website/dist" --exclude '^http://localhost' --exclude '^https://cetra\.sh/' --exclude-path website/dist/docs/reference/api 'website/dist/**/*.html'
 
 # Regenerate crates/server/openapi.json and web/src/api/schema.gen.ts
 openapi: js-install
