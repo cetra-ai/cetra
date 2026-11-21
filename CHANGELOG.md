@@ -169,6 +169,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   login page links to (D-S-4, D-S-5, D-S-6).
 - Internal API: `POST /api/internal/v1/users/{revoke,disable,delete}` take `{subject, email}` and
   find a user who never signed in through the control plane by email (D-S-9).
+- The Alerts, Issues, Prompts, Playground, Evaluators, Online rules, Issue sources, Annotation
+  queues, Datasets and Experiments pages share one toolbar layout and table style. Experiments has
+  no Total chip and Evaluators no All button: select the selected chip again to clear the filter.
 
 ### Fixed
 
