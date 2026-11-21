@@ -1,7 +1,6 @@
 //! The device authorization routes (RFC 8628, D-AO-3): the CLI asks for a code and polls for
 //! its grant; the signed-in user reads, approves or denies the code in the web UI. Spec 08
 //! § Device authorization.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use axum::extract::{Extension, State};
 use axum::http::{Method, StatusCode, header};
@@ -194,18 +193,26 @@ async fn approve(
     let user = session_user(&principal)?;
     let now = state.clock.now_ns();
     check_lookup(&state, user.id, now)?;
-    let pending = state
+    let (pending, ticket) = state
         .device
         .claim(&user_code, now)
         .map_err(|_| ApiError::NotFound)?;
     let (grant, token_id, key) = match mint(&state, user, &pending, body, now).await {
         Ok(minted) => minted,
         Err(failure) => {
-            state.device.release(&user_code);
+            state.device.release(&user_code, ticket);
             return Err(failure);
         }
     };
-    state.device.complete(&user_code, grant).map_err(internal)?;
+    // NotFound: the approval went stale while minting and the code moved on. The minted
+    // secrets are not handed out.
+    state
+        .device
+        .complete(&user_code, ticket, grant)
+        .map_err(|error| match error {
+            DeviceError::NotFound => ApiError::NotFound,
+            other => internal(other),
+        })?;
     match key {
         Some((key_id, project_id)) => {
             tracing::info!(target: "audit", %token_id, %key_id, %project_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved");
@@ -829,6 +836,7 @@ mod tests {
             )
             .await;
             assert_eq!(approved.status, 204);
+            assert!(approved.body.is_empty());
             let polled = poll(&app, &code.device_code).await;
             assert_eq!(polled.status, 200);
             polled.json::<DeviceGrant>()

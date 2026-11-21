@@ -33,6 +33,7 @@ type Choice = { org: Org; project: Project };
 const TITLE = `Connect the ${PRODUCT_NAME} CLI`;
 const UNKNOWN_CODE =
   "This code is unknown or has expired. Run the command again to get a new code.";
+const APPROVE_NOT_FOUND = "Could not approve the code. Reload the page and choose a project.";
 const NO_PROJECT =
   "You need the admin role on a project to connect the CLI. Ask an admin of your organization.";
 const LOGIN_TEXT =
@@ -45,6 +46,15 @@ function projectsOptions(org: string) {
   return $api.queryOptions("get", "/api/v1/orgs/{org}/projects", {
     params: { path: { org }, query: { limit: 1000 } },
   });
+}
+
+/** The message for a failed approval. A 404 from approve is not an unknown code: the server also
+ * answers it when the chosen project is not visible, and the code is still pending. */
+function approveMessage(error: unknown): string {
+  if (problemOf(error)?.status === 404) {
+    return APPROVE_NOT_FOUND;
+  }
+  return problemMessage(error, "Could not approve the code.");
 }
 
 /** Admins and owners may manage a project's keys and create projects (spec 08 § Access). */
@@ -186,10 +196,8 @@ function DeviceApproval({
       </AuthLayout>
     );
   }
-  const unknown = [request.error, approve.error, deny.error].some(
-    (error) => problemOf(error)?.status === 404,
-  );
-  if (unknown) {
+  // Only the lookup of the code says that the code is unknown or expired.
+  if (problemOf(request.error)?.status === 404) {
     return (
       <AuthLayout title={TITLE}>
         <p className="text-body">{UNKNOWN_CODE}</p>
@@ -212,7 +220,7 @@ function DeviceApproval({
   }
 
   const failure = approve.error
-    ? problemMessage(approve.error, "Could not approve the code.")
+    ? approveMessage(approve.error)
     : deny.error
       ? problemMessage(deny.error, "Could not deny the code.")
       : undefined;

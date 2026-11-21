@@ -118,6 +118,7 @@ impl DeviceStore {
             inner: Mutex::new(Inner {
                 by_device: HashMap::new(),
                 by_user: HashMap::new(),
+                next_ticket: 1,
             }),
         }
     }
@@ -176,9 +177,11 @@ impl DeviceStore {
     /// Pending → approving. While approving (at most `APPROVING_TTL_NS`), `deny` and `claim`
     /// refuse it and a poll answers `Pending`. An approval older than that falls back to
     /// pending: its handler was dropped (a closed tab) and never called `release` or `complete`.
-    pub(crate) fn claim(&self, user_code: &str, now: i64) -> Result<Pending, DeviceError> {
+    /// Returns the pending view and the approval's ticket, which `release` and `complete` need.
+    pub(crate) fn claim(&self, user_code: &str, now: i64) -> Result<(Pending, u64), DeviceError> {
         let mut inner = lock(&self.inner);
         let hash = inner.find(user_code, now).ok_or(DeviceError::NotFound)?;
+        let ticket = inner.next_ticket;
         let entry = inner
             .by_device
             .get_mut(&hash)
@@ -186,25 +189,34 @@ impl DeviceStore {
         if !matches!(entry.state, State::Pending) {
             return Err(DeviceError::NotFound);
         }
-        entry.state = State::Approving { since: now };
-        Ok(entry.view())
+        entry.state = State::Approving { since: now, ticket };
+        let view = entry.view();
+        inner.next_ticket = ticket.wrapping_add(1);
+        Ok((view, ticket))
     }
 
-    /// Approving → pending, after the minting failed.
-    pub(crate) fn release(&self, user_code: &str) {
+    /// Approving → pending, after the minting failed. Does nothing unless the code is approving
+    /// under `ticket`, so a late release never undoes a later approval.
+    pub(crate) fn release(&self, user_code: &str, ticket: u64) {
         let mut inner = lock(&self.inner);
         if let Some(entry) = inner.by_user_mut(user_code)
-            && matches!(entry.state, State::Approving { .. })
+            && matches!(entry.state, State::Approving { ticket: held, .. } if held == ticket)
         {
             entry.state = State::Pending;
         }
     }
 
-    /// Approving → approved, with the grant.
-    pub(crate) fn complete(&self, user_code: &str, grant: Grant) -> Result<(), DeviceError> {
+    /// Approving → approved, with the grant. Refused with `NotFound` unless the code is
+    /// approving under `ticket`: an approval that went stale and was claimed again gets no grant.
+    pub(crate) fn complete(
+        &self,
+        user_code: &str,
+        ticket: u64,
+        grant: Grant,
+    ) -> Result<(), DeviceError> {
         let mut inner = lock(&self.inner);
         let entry = inner.by_user_mut(user_code).ok_or(DeviceError::NotFound)?;
-        if !matches!(entry.state, State::Approving { .. }) {
+        if !matches!(entry.state, State::Approving { ticket: held, .. } if held == ticket) {
             return Err(DeviceError::NotFound);
         }
         entry.state = State::Approved(grant);
@@ -287,6 +299,8 @@ struct Inner {
     by_device: HashMap<String, Entry>,
     /// From the normalized user code to that hash.
     by_user: HashMap<String, String>,
+    /// The ticket of the next approval. Wraps; a ticket is only compared with the one held.
+    next_ticket: u64,
 }
 
 struct Entry {
@@ -303,7 +317,11 @@ struct Entry {
 
 enum State {
     Pending,
-    Approving { since: i64 },
+    /// `ticket` identifies this approval among the ones the code gets over time.
+    Approving {
+        since: i64,
+        ticket: u64,
+    },
     Denied,
     Approved(Grant),
 }
@@ -371,7 +389,7 @@ impl Inner {
 /// An approval older than `APPROVING_TTL_NS` falls back to pending.
 fn settle(entry: &mut Entry, now: i64) {
     let stale = match entry.state {
-        State::Approving { since } => now >= since.saturating_add(APPROVING_TTL_NS),
+        State::Approving { since, .. } => now >= since.saturating_add(APPROVING_TTL_NS),
         _ => false,
     };
     if stale {
@@ -496,9 +514,9 @@ mod tests {
     fn approve_and_collect_hands_over_the_grant_once() {
         let store = DeviceStore::new();
         let issued = issue_at(&store, at(0));
-        store.claim(&issued.user_code, at(1)).expect("claimed");
+        let (_, ticket) = store.claim(&issued.user_code, at(1)).expect("claimed");
         store
-            .complete(&issued.user_code, grant("pat-cetra-one"))
+            .complete(&issued.user_code, ticket, grant("pat-cetra-one"))
             .expect("completed");
         let Poll::Granted(collected) = store.poll(&issued.device_code, at(2)) else {
             panic!("the approved code is granted");
@@ -534,10 +552,10 @@ mod tests {
         let store = DeviceStore::new();
         let issued = issue_at(&store, at(0));
         // Claimed 30 s before the code expires; the sweep runs 10 s after the expiry.
-        store.claim(&issued.user_code, at(570)).expect("claimed");
+        let (_, ticket) = store.claim(&issued.user_code, at(570)).expect("claimed");
         store.sweep(at(610));
         store
-            .complete(&issued.user_code, grant("pat-cetra-late"))
+            .complete(&issued.user_code, ticket, grant("pat-cetra-late"))
             .expect("still approving, so the entry is kept");
     }
 
@@ -588,12 +606,51 @@ mod tests {
     fn release_puts_an_approval_back_to_pending() {
         let store = DeviceStore::new();
         let issued = issue_at(&store, at(0));
-        store.claim(&issued.user_code, at(0)).expect("claimed");
-        store.release(&issued.user_code);
+        let (_, ticket) = store.claim(&issued.user_code, at(0)).expect("claimed");
+        store.release(&issued.user_code, ticket);
         assert!(store.pending(&issued.user_code, at(1)).is_some());
         store
             .claim(&issued.user_code, at(1))
             .expect("a second claim works");
+    }
+
+    #[test]
+    fn a_late_release_does_not_undo_a_later_approval() {
+        let store = DeviceStore::new();
+        let issued = issue_at(&store, at(0));
+        let (_, first) = store.claim(&issued.user_code, at(0)).expect("claimed");
+        // The first approval is stale after 60 s; the second claim takes the code.
+        let (_, second) = store
+            .claim(&issued.user_code, at(61))
+            .expect("claimed again");
+        assert_ne!(first, second);
+
+        store.release(&issued.user_code, first);
+        assert!(matches!(
+            store.poll(&issued.device_code, at(62)),
+            Poll::Pending
+        ));
+        store
+            .complete(&issued.user_code, second, grant("pat-cetra-second"))
+            .expect("the second approval still holds the code");
+        let Poll::Granted(collected) = store.poll(&issued.device_code, at(63)) else {
+            panic!("the second approval is granted");
+        };
+        assert_eq!(collected.token, "pat-cetra-second");
+    }
+
+    #[test]
+    fn a_late_complete_with_a_stale_ticket_gets_no_grant() {
+        let store = DeviceStore::new();
+        let issued = issue_at(&store, at(0));
+        let (_, first) = store.claim(&issued.user_code, at(0)).expect("claimed");
+        store
+            .claim(&issued.user_code, at(61))
+            .expect("claimed again");
+        assert!(matches!(
+            store.complete(&issued.user_code, first, grant("pat-cetra-late-first")),
+            Err(DeviceError::NotFound)
+        ));
     }
 
     #[test]
@@ -632,9 +689,9 @@ mod tests {
         let store = DeviceStore::new();
         let _pending = issue_at(&store, at(0));
         let issued = issue_at(&store, at(0));
-        store.claim(&issued.user_code, at(0)).expect("claimed");
+        let (_, ticket) = store.claim(&issued.user_code, at(0)).expect("claimed");
         store
-            .complete(&issued.user_code, grant("pat-cetra-sweep"))
+            .complete(&issued.user_code, ticket, grant("pat-cetra-sweep"))
             .expect("completed");
         store.sweep(at(600));
         assert_eq!(

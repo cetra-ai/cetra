@@ -19,7 +19,13 @@ use crate::credentials::{SavedToken, chosen_server, load, save, server_url};
 const DEADLINE_SLACK: Duration = Duration::from_secs(5);
 /// What `slow_down` adds to the poll interval (RFC 8628 § 3.5).
 const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
+/// The longest code lifetime the CLI accepts from the server, in seconds.
+const MAX_EXPIRES_IN_S: u64 = 900;
+/// The shortest poll interval the CLI uses, whatever the server says.
+const MIN_INTERVAL: Duration = Duration::from_secs(1);
 const EXPIRED: &str = "the sign-in code expired; run `cetra login` again";
+const BAD_URL: &str = "the server sent an invalid sign-in URL";
+const BAD_CODE: &str = "the server sent an invalid sign-in code";
 
 /// `cetra login`. `output` receives the sign-in URL, then the code, one line each.
 ///
@@ -41,12 +47,17 @@ pub(crate) async fn login(
     let host = local_host().as_deref().and_then(sanitise_host);
     let client = http_client()?;
     let code = request_code(&client, &server, host.as_deref()).await?;
-    writeln!(output, "{}", code.verification_uri_complete).context("printing the sign-in url")?;
+    // The server's answer is checked before anything is printed or opened.
+    let sign_in_url = parse_sign_in_url(&code.verification_uri_complete)?;
+    if !is_user_code(&code.user_code) {
+        anyhow::bail!(BAD_CODE);
+    }
+    writeln!(output, "{}", sign_in_url.as_str()).context("printing the sign-in url")?;
     writeln!(output, "Code: {}", code.user_code).context("printing the sign-in code")?;
     output.flush().context("printing the sign-in url")?;
     drop(output);
     if !no_browser {
-        open_browser(&code.verification_uri_complete);
+        open_browser(sign_in_url.as_str());
     }
     let token = poll_for_token(&client, &server, &code).await?;
     if !is_personal_token(&token) {
@@ -112,15 +123,16 @@ async fn request_code(
 }
 
 /// Polls the token endpoint until the grant arrives, the user denies, or the code expires.
-/// A network error on one poll is not fatal: the poll is retried until the deadline.
+/// A network error on one poll is not fatal: the poll is retried until the deadline. The
+/// server's interval is at least `MIN_INTERVAL` and its lifetime at most `MAX_EXPIRES_IN_S`.
 async fn poll_for_token(
     client: &reqwest::Client,
     server: &str,
     code: &CodeAnswer,
 ) -> anyhow::Result<String> {
-    let deadline = tokio::time::Instant::now()
-        + Duration::from_secs(code.expires_in).saturating_add(DEADLINE_SLACK);
-    let mut interval = Duration::from_secs(code.interval);
+    let lifetime = Duration::from_secs(code.expires_in.min(MAX_EXPIRES_IN_S));
+    let deadline = tokio::time::Instant::now() + lifetime.saturating_add(DEADLINE_SLACK);
+    let mut interval = Duration::from_secs(code.interval).max(MIN_INTERVAL);
     let mut warned = false;
     loop {
         tokio::time::sleep(interval).await;
@@ -163,8 +175,12 @@ async fn poll_for_token(
     }
 }
 
-/// What one poll answer means for the loop. Only a 400 with an RFC 8628 code continues it.
+/// What one poll answer means for the loop. A 400 with an RFC 8628 code continues it, and so
+/// does a 429 or a 502, 503 or 504 from a proxy: a blip does not end a live code.
 fn step(status: u16, body: &[u8]) -> Step {
+    if matches!(status, 429 | 502 | 503 | 504) {
+        return Step::Wait;
+    }
     if status != 400 {
         return Step::Failed(status);
     }
@@ -178,6 +194,27 @@ fn step(status: u16, body: &[u8]) -> Step {
         Some("expired_token") => Step::Expired,
         _ => Step::Failed(status),
     }
+}
+
+/// The sign-in URL the server sent, parsed. Only `http` and `https` are accepted; the returned
+/// URL is re-serialised, so it is the one that gets printed and opened.
+fn parse_sign_in_url(raw: &str) -> anyhow::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!(BAD_URL))?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        _ => anyhow::bail!(BAD_URL),
+    }
+}
+
+/// `XXXX-XXXX` in ASCII capitals, the shape the server issues (spec 08 § Device authorization).
+fn is_user_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || byte.is_ascii_uppercase())
 }
 
 fn next_interval(current: Duration) -> Duration {
@@ -334,8 +371,9 @@ fn browser_command(url: &str) -> Command {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("cmd");
-        command.args(["/c", "start", "", url]);
+        // No shell: `cmd /c start` would read `&` and `|` in the URL as commands.
+        let mut command = Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
         command
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -362,12 +400,21 @@ mod tests {
         )
     }
 
-    /// A code answer with a zero interval, so that a canned flow does not wait.
+    /// A code answer with a zero interval, so that a canned flow polls once a second.
     fn code_answer() -> String {
-        format!(
-            r#"{{"device_code":"{}","user_code":"BCDF-GHJK","verification_uri_complete":"http://127.0.0.1:8080/device?code=BCDF-GHJK","expires_in":600,"interval":0}}"#,
-            "d".repeat(43)
-        )
+        code_answer_with("http://127.0.0.1:8080/device?code=BCDF-GHJK", "BCDF-GHJK")
+    }
+
+    /// A code answer with the given sign-in URL and user code.
+    fn code_answer_with(url: &str, user_code: &str) -> String {
+        serde_json::json!({
+            "device_code": "d".repeat(43),
+            "user_code": user_code,
+            "verification_uri_complete": url,
+            "expires_in": 600,
+            "interval": 0,
+        })
+        .to_string()
     }
 
     fn grant(token: &str) -> String {
@@ -434,6 +481,105 @@ mod tests {
         assert_eq!(step(400, br#"{"code":"slow_down"}"#), Step::SlowDown);
         assert_eq!(step(400, br#"{"code":"access_denied"}"#), Step::Denied);
         assert_eq!(step(400, br#"{"code":"expired_token"}"#), Step::Expired);
+    }
+
+    #[test]
+    fn a_busy_or_unavailable_server_keeps_the_code_alive() {
+        assert_eq!(step(429, b""), Step::Wait);
+        assert_eq!(step(502, b""), Step::Wait);
+        assert_eq!(step(503, b""), Step::Wait);
+        assert_eq!(step(504, b""), Step::Wait);
+        assert_eq!(step(500, b""), Step::Failed(500));
+    }
+
+    #[test]
+    fn the_sign_in_url_must_be_http_or_https() {
+        assert!(parse_sign_in_url("javascript:alert(1)").is_err());
+        assert!(parse_sign_in_url("file:///etc/passwd").is_err());
+        assert!(parse_sign_in_url("not a url").is_err());
+        let url = parse_sign_in_url("https://cetra.example/device?code=BCDF-GHJK").unwrap();
+        assert_eq!(url.as_str(), "https://cetra.example/device?code=BCDF-GHJK");
+    }
+
+    #[test]
+    fn the_user_code_is_four_capitals_a_dash_and_four_capitals() {
+        assert!(is_user_code("BCDF-GHJK"));
+        assert!(!is_user_code("bcdf-ghjk"));
+        assert!(!is_user_code("BCDF-GHJK\n"));
+        assert!(!is_user_code("BCDFGHJK"));
+        assert!(!is_user_code("BCDF-GHJ"));
+    }
+
+    #[tokio::test]
+    async fn a_javascript_sign_in_url_is_refused_before_anything_is_printed() {
+        let canned = Canned::json(vec![(
+            200,
+            code_answer_with("javascript:alert(1)", "BCDF-GHJK"),
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let mut printed = Vec::new();
+        let error = login(&canned.url, true, &credentials, &mut printed)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), BAD_URL);
+        assert!(printed.is_empty());
+        assert!(!credentials.exists());
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_url_with_a_space_and_an_ampersand_is_printed_without_a_space() {
+        let canned = Canned::json(vec![
+            (
+                200,
+                code_answer_with(
+                    "http://127.0.0.1:8080/device?code=BCDF-GHJK&note=a b",
+                    "BCDF-GHJK",
+                ),
+            ),
+            (400, r#"{"code":"access_denied"}"#.to_owned()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = login(
+            &canned.url,
+            true,
+            &credentials,
+            LineWriter {
+                tx,
+                buf: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "sign-in denied in the browser");
+
+        let printed = rx.recv().await.expect("the sign-in url is printed");
+        assert!(!printed.contains(' '), "{printed}");
+        assert!(printed.starts_with("http://127.0.0.1:8080/device?code=BCDF-GHJK&"));
+        assert!(printed.contains("note=a%20b"), "{printed}");
+    }
+
+    #[tokio::test]
+    async fn a_user_code_that_is_not_in_the_shape_is_refused_before_anything_is_printed() {
+        for user_code in ["bcdf-ghjk", "BCDF-GHJK\n"] {
+            let canned = Canned::json(vec![(
+                200,
+                code_answer_with("http://127.0.0.1:8080/device?code=BCDF-GHJK", user_code),
+            )])
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = dir.path().join("cetra").join("credentials.toml");
+            let mut printed = Vec::new();
+            let error = login(&canned.url, true, &credentials, &mut printed)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), BAD_CODE, "{user_code:?}");
+            assert!(printed.is_empty(), "{user_code:?}");
+        }
     }
 
     #[test]

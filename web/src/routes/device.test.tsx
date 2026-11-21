@@ -328,6 +328,55 @@ it("shows the plan message when the plan does not allow another project", async 
   expect(await screen.findByRole("alert")).toHaveTextContent("Your plan allows one project.");
 });
 
+it("says to reload when the chosen project is not visible to approve", async () => {
+  stubMe([org(ORG_ID, "acme", "Acme", "member")]);
+  stubCode("login", "laptop");
+  server.use(
+    http.post("/api/auth/device/:userCode/approve", () => problemResponse(404, "not_found")),
+  );
+
+  const { user } = await renderApp("/device?code=BCDF-GHJK");
+  await user.click(await screen.findByRole("button", { name: "Approve" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Could not approve the code. Reload the page and choose a project.",
+  );
+  expect(screen.queryByText(/unknown or has expired/)).toBeNull();
+  expect(screen.getByRole("button", { name: "Approve" })).toBeEnabled();
+});
+
+it("says that the project name is taken when creating a project gets a 409", async () => {
+  stubMe([org(ORG_ID, "acme", "Acme", "owner")]);
+  stubProjects({});
+  server.use(http.post("/api/v1/orgs/:org/projects", () => problemResponse(409, "conflict")));
+  stubCode("init", "laptop");
+
+  const { user } = await renderApp("/device?code=BCDF-GHJK");
+  await user.click(await screen.findByRole("button", { name: "New project" }));
+  await user.type(screen.getByLabelText("Project name"), "Edge");
+  await user.click(screen.getByRole("button", { name: "Create project" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "A project with this name already exists. Choose another name.",
+  );
+});
+
+it("says that only admins can create a project when creating gets a 403", async () => {
+  stubMe([org(ORG_ID, "acme", "Acme", "owner")]);
+  stubProjects({});
+  server.use(http.post("/api/v1/orgs/:org/projects", () => problemResponse(403, "forbidden")));
+  stubCode("init", "laptop");
+
+  const { user } = await renderApp("/device?code=BCDF-GHJK");
+  await user.click(await screen.findByRole("button", { name: "New project" }));
+  await user.type(screen.getByLabelText("Project name"), "Edge");
+  await user.click(screen.getByRole("button", { name: "Create project" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Only admins and owners can create projects.",
+  );
+});
+
 it("shows the problem when approving is refused", async () => {
   stubMe([org(ORG_ID, "acme", "Acme", "member")]);
   stubCode("login", "laptop");
