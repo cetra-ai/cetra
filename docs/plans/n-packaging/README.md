@@ -188,14 +188,17 @@ Each archive contains one directory, `cetra-<version>-<target>/`, with four file
 
 - SemVer, 0.x for now. One version for everything: the workspace `[workspace.package] version`
   (all crates inherit it), the chart's `version` and `appVersion`, the compose default image and
-  the `.env.example` comment. `tools/packaging/versions-check.sh` checks that they agree, on every
-  PR (N9).
+  the `.env.example` comment, and the SDK versions (D-N-37): `sdks/typescript/package.json` and
+  `VERSION` in its `src/index.ts`, `sdks/python/pyproject.toml` and its `uv.lock`, the Python one
+  in PEP 440 form (`tools/packaging/pep440.sh`: `0.1.0-rc.1` is `0.1.0rc1`; only `-alpha.N`,
+  `-beta.N` and `-rc.N` pre-releases have one). `tools/packaging/versions-check.sh` checks that
+  they agree, on every PR (N9).
 - `CHANGELOG.md` is hand-written in the Keep a Changelog format, with an `## [Unreleased]` section
   that each user-visible change adds to. Commit subjects stay as they are (not Conventional
   Commits).
 - Releasing:
-  1. `just release-prep X.Y.Z` sets every version, refreshes `Cargo.lock` and dates the changelog
-     section.
+  1. `just release-prep X.Y.Z` sets every version, refreshes `Cargo.lock` and the Python SDK's
+     `uv.lock`, and dates the changelog section.
   2. The commit `Release X.Y.Z` is merged to `main`.
   3. Pushing the annotated tag `vX.Y.Z` on that commit runs `release.yml`.
   4. `just release-verify` checks four things: tag = version, files agree, the changelog section
@@ -427,7 +430,29 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
    without credentials. D-N-6 keeps the *artifacts* private, not the source.
 3. Settings → Actions → General: workflow permissions stay "Read repository contents". The
    workflow grants itself `contents: write`, `packages: write`, `id-token: write` and
-   `attestations: write` in the `publish` job only.
+   `attestations: write` in the `publish` job only, and `id-token: write` in `pypi` and `npm`.
+4. The SDKs (D-N-37). No registry token is stored anywhere; both registries trust the workflow's
+   OIDC token.
+   - Settings → Environments: create `pypi` and `npm`, each limited to tags `v*`, with the user as
+     required reviewer.
+   - PyPI, organization `cetra-ai` → Publishing → add a **pending publisher** for the project
+     `cetra-sdk`: owner `cetra-ai`, repository `cetra`, workflow `release.yml`, environment
+     `pypi`. The first upload creates the project in the organization.
+   - npm: create the organization `cetra-ai`. Publish the first version of `@cetra-ai/sdk` by hand
+     (npm configures trusted publishing only on a package that exists), e.g. a `0.0.0` placeholder
+     with the dist-tag `placeholder`, so `latest` stays free:
+
+     ```bash
+     cd sdks/typescript && pnpm run build && npm publish --access public --tag placeholder
+     ```
+
+     Then the package's Settings → Trusted publishing → GitHub Actions: organization `cetra-ai`,
+     repository `cetra`, workflow `release.yml`, environment `npm`, with "Allow npm publish"
+     ticked ("Allow npm dist-tag" stays off: the workflow sets the tag with `--tag`). npm marks the
+     setup "Pending validation" until a publish through it, and expires it after about two days:
+     add it no more than two days before the first tag (or delete and re-add it then), and that
+     tag's run validates it. Set "Publishing access" to
+     require two-factor authentication and disallow tokens, so only the workflow can publish.
 
 **Dry run (until D46):**
 
@@ -445,7 +470,14 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
    - `ghcr.io/cetra-ai/cetra:0.1.0-rc.1` with both platforms
      (`docker buildx imagetools inspect`);
    - `oci://ghcr.io/cetra-ai/charts/cetra` version `0.1.0-rc.1`;
-   - `gh attestation verify` on one archive, the image and the chart.
+   - `gh attestation verify` on one archive, the image and the chart;
+   - `cetra-sdk` `0.1.0rc1` on PyPI (a pre-release: `pip install --pre cetra-sdk`) with its
+     attestations, and `@cetra-ai/sdk@0.1.0-rc.1` on npm under the dist-tag `next`, with its
+     provenance.
+
+   The SDK jobs run after `publish` and wait for their own environment's approval. Unlike the
+   GHCR packages, the SDK pre-release is **public** from the start, and a PyPI or npm version can
+   never be reused: a failed SDK job is re-run, not re-tagged with the same version.
 4. On GitHub → Packages, make sure `cetra` and `charts/cetra` are **private**. Leave them so
    until the rename.
 5. Delete the draft release, or keep it as a record. Tags of drafts stay.

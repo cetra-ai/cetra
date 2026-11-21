@@ -1,7 +1,7 @@
 # cetra for TypeScript
 
-The `cetra` package (MIT, ESM only) is the TypeScript SDK of
-[cetra](../../docs/spec/10-sdk.md), an open-source LLM observability platform.
+The `@cetra-ai/sdk` package (MIT, ESM only) is the TypeScript SDK of
+[cetra](https://cetra.sh), an open-source LLM observability platform.
 It is a thin layer over OpenTelemetry: tracing goes out as OTLP/HTTP protobuf,
 scores and feedback over a small REST surface. Runs on Node ≥ 22.12, Bun, Deno
 and edge runtimes (D77) — one `fetch`-based transport everywhere.
