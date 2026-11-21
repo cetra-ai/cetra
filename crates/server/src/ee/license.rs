@@ -63,6 +63,9 @@ pub(crate) enum LicenseStatus {
     Expired,
 }
 
+/// Where self-hosted admins buy and renew licences (D-P-74). The only copy of this URL.
+pub(crate) const LICENSE_STORE_URL: &str = "https://app.cetra.sh/licenses";
+
 /// Where the instance's licence key comes from (D-P-75).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LicenseSource {
@@ -80,7 +83,6 @@ pub(crate) struct InstanceLicense {
     /// The verified key.
     pub(crate) state: LicenseState,
     /// Where it comes from.
-    #[cfg_attr(not(test), allow(dead_code))] // Licence renewal: P2 uses it.
     pub(crate) source: LicenseSource,
 }
 

@@ -203,7 +203,6 @@ pub(crate) struct EntitlementsState {
     /// The instance licence; replaced when an admin installs a key (D-P-75).
     license: RwLock<Arc<InstanceLicense>>,
     /// Serializes licence installs: the stored key and the held licence change together.
-    #[allow(dead_code)] // Licence renewal: P2 uses it.
     license_writes: tokio::sync::Mutex<()>,
     defaults: Defaults,
     /// The newest accepted token per org, valid or in grace at the time it was read.
@@ -278,13 +277,11 @@ impl EntitlementsState {
     }
 
     /// Replaces the instance licence. Every later check sees it (D-P-75).
-    #[cfg_attr(not(test), allow(dead_code))] // Licence renewal: P2 uses it.
     pub(crate) fn set_license(&self, license: InstanceLicense) {
         *self.license.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(license);
     }
 
     /// Held while a licence key is stored and set, so two installs cannot interleave.
-    #[allow(dead_code)] // Licence renewal: P2 uses it.
     pub(crate) async fn lock_license_writes(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.license_writes.lock().await
     }

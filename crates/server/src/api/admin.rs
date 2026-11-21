@@ -119,9 +119,9 @@ pub struct AdminSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LicenseStatus {
-    /// No key is configured.
+    /// No key is configured or installed.
     None,
-    /// A key is configured and was refused.
+    /// The key was refused.
     Invalid,
     /// Before `expires_at`.
     Active,
@@ -129,6 +129,16 @@ pub enum LicenseStatus {
     Grace,
     /// After `grace_ends_at`: enterprise features are locked.
     Expired,
+}
+
+/// Where the licence key comes from (D-P-75).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LicenseKeySource {
+    /// `license_key` in the configuration or `CETRA_LICENSE_KEY`. It wins over an installed key, and the API cannot change it.
+    Config,
+    /// Installed with `PUT /api/v1/admin/license`.
+    Stored,
 }
 
 /// `GET /api/v1/admin/license`. Never contains the key.
@@ -163,4 +173,25 @@ pub struct AdminLicense {
     )]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub grace_ends_at: Option<i64>,
+    /// Where the key comes from. Omitted with `none`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<LicenseKeySource>,
+    /// Where to buy or renew a licence (D-P-74). Omitted when `entitlements.upgrade_url` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renew_url: Option<String>,
+}
+
+/// `PUT /api/v1/admin/license`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct InstallLicenseRequest {
+    /// The licence key (`cetra1.…`). Surrounding whitespace is ignored.
+    pub key: String,
+}
+
+impl std::fmt::Debug for InstallLicenseRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstallLicenseRequest")
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
