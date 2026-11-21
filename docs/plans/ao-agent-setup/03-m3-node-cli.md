@@ -91,7 +91,7 @@ Settled from the code, and recorded in the design on 2026-11-21:
 
 | Package | Version | Where | Why |
 |---|---|---|---|
-| `smol-toml` | `1.9.1` (2026-10-09, BSD-3-Clause, no deps) | `node-cli` devDependencies, exact | the credentials file |
+| `smol-toml` | `1.9.1` (2026-10-09, BSD-3-Clause, no deps) | `node-cli` devDependencies, exact | the credentials file. It is bundled, so `node-cli/LICENSE` appends its BSD-3-Clause notice (copy it from its package) under a line "This package bundles smol-toml:" (C1) |
 | `typescript`, `vitest`, `tsdown`, `@types/node`, `publint` | the exact versions `sdks/typescript/package.json` pins | `node-cli` devDependencies | the same toolchain as the SDK |
 
 Re-check `smol-toml` with `npm view smol-toml version time --json` and report the version used.
@@ -162,7 +162,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
 
    **Check after the first build:** `ls node-cli/dist` shows `cli.js`, and `node-cli/dist/skills/cetra/SKILL.md` and `node-cli/dist/skills/cetra/references/` exist. If not, stop and report what `ls -R node-cli/dist` shows. `dist/cli.js` must start with `#!/usr/bin/env node`: tsdown keeps it from `src/cli.ts` and makes the file executable.
 4. **`.gitignore`** has one line, `.vitest/`, as the SDK's. Do **not** ignore `dist/` there: the root `.gitignore` already does.
-5. **`LICENSE`**: a copy of `sdks/typescript/LICENSE`.
+5. **`LICENSE`**: a copy of `sdks/typescript/LICENSE`, then a blank line, `This package bundles smol-toml, under the following licence:`, and smol-toml's `LICENSE` text from its package in the pnpm store (after `pnpm install`; find it with `find node_modules/.pnpm -path '*smol-toml*/LICENSE'`). `README.md`:
    **`README.md`**, about 25 lines in STYLE.md's voice:
    - what the package does;
    - `npx @cetra-ai/cli@latest init`;
@@ -199,19 +199,44 @@ The phases run in order: each uses the modules of the one before. Files per phas
    In the same file, the shared I/O type, so that command modules do not import `cli.ts`:
 
    ```ts
-   export interface Io { stdout: (s: string) => void; stderr: (s: string) => void; env: NodeJS.ProcessEnv; cwd: string }
+   import type { execFile, spawn } from "node:child_process";
+
+   /** Output takes one line at a time, without its newline; realIo() adds it. */
+   export interface Io { stdout: (line: string) => void; stderr: (line: string) => void; env: NodeJS.ProcessEnv; cwd: string }
+   /** Test seams; production passes nothing. sleep and now: C3 (device flow); skillSource: C5a/C5c;
+    *  spawn and execFile: C3 (browser) and C5b (local server). */
+   export interface Deps {
+     sleep?: (ms: number) => Promise<void>;
+     now?: () => number;            // milliseconds, like Date.now
+     skillSource?: string;
+     spawn?: typeof spawn;
+     execFile?: typeof execFile;
+   }
+   /** The real Io: process.stdout / process.stderr with "\n" added, process.env, process.cwd(). */
+   export function realIo(): Io;
+   /** Characters to strip or refuse: one place, so Biome's noControlCharactersInRegex is never hit. */
+   export const CONTROL = /\p{Cc}/gu;
    ```
+
+   Use `CONTROL` (or `new RegExp(CONTROL.source, "u")` for a test without `g`) wherever this plan says "control characters". A literal `[\u0000-\u001f]` class fails Biome.
 
    **`src/args.ts`** wraps `node:util` `parseArgs`:
 
    ```ts
-   /** parseArgs with `strict: true`; any parse error becomes CliError(<its message>, Exit.Usage). */
-   export function parseOptions<T extends ParseArgsConfig["options"]>(args: string[], options: T, allowPositionals: boolean): { values: …; positionals: string[] };
+   import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
+
+   type Parsed<T extends ParseArgsOptionsConfig> = ReturnType<
+     typeof parseArgs<{ args: string[]; options: T; strict: true; allowPositionals: true }>
+   >;
+   /** parseArgs with `strict: true` and positionals allowed; any parse error becomes
+    *  CliError(<its message>, Exit.Usage). A command that takes no positional checks
+    *  `positionals.length === 0` itself. */
+   export function parseOptions<const T extends ParseArgsOptionsConfig>(args: string[], options: T): Parsed<T>;
    /** The options list of a command, one line per option, for `--help`. */
    export function optionsHelp(command: string, summary: string, lines: [string, string][]): string;
    ```
 
-   Every command's `--help` prints `optionsHelp`'s text on stderr and returns 0. The option lines are the command's options from this plan, with one short description each.
+   Every command declares `help: { type: "boolean", short: "h" }`; when `values.help === true` it prints `optionsHelp`'s text on stderr and returns 0. If the `Parsed` type does not compile as written, keep the function's behaviour, use the nearest type that compiles, and report it. The option lines are the command's options from this plan, with one short description each.
 8. **`src/cli.ts`:**
    - starts with `#!/usr/bin/env node`;
    - `export const COMMANDS: Record<string, (args: string[], io: Io) => Promise<ExitCode>> = {}`. C3, C4 and C5c each add one entry. C1 registers none: there are no placeholder commands;
@@ -330,6 +355,8 @@ The phases run in order: each uses the modules of the one before. Files per phas
    ```ts
    export interface ProjectLink { server: string; org: string; project: string; project_id: string }
    export const LINK_FILE = ".cetra/project.json";
+   /** The first ancestor of `dir`, itself included, that holds a `.git` entry (file or directory); undefined when none. */
+   export async function gitTop(dir: string): Promise<string | undefined>;
    export async function writeLink(dir: string, link: ProjectLink): Promise<string>;   // returns the absolute path
    /** Looks in `cwd`, then its parents, up to the git work tree's top (or the filesystem root). */
    export async function findLink(cwd: string): Promise<ProjectLink | undefined>;
@@ -337,7 +364,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
 
    - The file is pretty JSON with two spaces and a trailing newline, mode 0644. It is created with its directory.
    - A file that is not valid JSON, or that lacks one of the four string fields, throws `CliError(".cetra/project.json is invalid", Exit.Error)`.
-   - **The git top.** Walking up, stop after the first directory that contains a `.git` entry, file or directory.
+   - **The walk.** `findLink` looks in `cwd` and each parent, and stops after `gitTop(cwd)` when there is one, else at the filesystem root.
 4. **`envfile.ts`:**
 
    ```ts
@@ -345,9 +372,9 @@ The phases run in order: each uses the modules of the one before. Files per phas
    export function setVariables(text: string | undefined, values: Record<string, string>): string;
    export function readVariable(text: string, name: string): string | undefined;
    export async function writeEnvFile(path: string, text: string): Promise<void>;  // 0600, tmp + rename
-   /** Adds the env file's name to <dir>/.gitignore when <dir> is in a git work tree and git does not ignore it.
-    *  Returns true when it added the line. Runs `git check-ignore -q <name>` in <dir>; exit 1 means "not ignored". */
-   export async function ignoreInGit(dir: string, fileName: string): Promise<boolean>;
+   /** Adds the env file (its path relative to <dir>) to <dir>/.gitignore when <dir> is in a git work tree and git
+    *  does not ignore it. Returns true when it added the line. */
+   export async function ignoreInGit(dir: string, envPath: string): Promise<boolean>;
    ```
 
    - **`setVariables`.**
@@ -380,7 +407,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
   - modes 0600 and 0700, on POSIX only (`it.skipIf(process.platform === "win32")`);
   - an invalid file;
   - `chosenServer` in its three cases.
-- **`link.test.ts`:** write then find from a subdirectory; stop at a `.git` boundary; an invalid file.
+- **`link.test.ts`:** write then find from a subdirectory; stop at a `.git` boundary; an invalid file; `gitTop` with a `.git` directory, a `.git` file, and none.
 - **`envfile.test.ts`:**
   - replace in place, keep comments and order, keep `export`;
   - a CRLF file stays CRLF, a BOM is kept, and `readVariable` on a CRLF file returns the value without `\r`;
@@ -412,7 +439,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
    - The command is `open <url>` on macOS, `xdg-open <url>` on Linux, and `rundll32 url.dll,FileProtocolHandler <url>` on Windows.
    - It uses `spawn` with `detached: true`, `stdio: "ignore"`, then `child.on("error", () => {})` and `unref()`. No shell. The `error` listener is what makes a missing program harmless: without it Node throws.
    - On Linux, when neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, it does nothing: there is no display.
-   - Signature: `openBrowser(url: string, env = process.env, platform = process.platform, spawnFn = spawn)`, so a test can pass a bogus program.
+   - Signature: `openBrowser(url: string, deps: Deps = {}, env = process.env, platform = process.platform)`; it spawns with `deps.spawn ?? spawn`, so a test can pass a bogus program.
 3. **`device.ts`:**
 
    ```ts
@@ -447,7 +474,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
       - `Open <url.href> in your browser and approve the code.`;
       - `Code: XXXX-XXXX`.
 
-      Unless `noBrowser`, call `openBrowser(url.href)`.
+      Unless `noBrowser`, call `openBrowser(url.href, deps)`.
    4. **Poll.**
       - `interval = max(interval * 1000, MIN_INTERVAL_MS)`, and the deadline is `now + min(expires_in, MAX_EXPIRES_IN_S) * 1000 + DEADLINE_SLACK_MS`.
       - Loop: `await sleep(interval)`. Past the deadline, throw "the sign-in code expired; run the command again" (`Exit.SignIn`). Otherwise `POST {server}/api/auth/device/token` with `{device_code}`.
@@ -458,10 +485,10 @@ The phases run in order: each uses the modules of the one before. Files per phas
         - any other 400, or any other status → throw "sign-in failed (HTTP <n>)".
 
         All of these throw with `Exit.SignIn`.
-   5. **Check the grant.** `isPersonalToken(grant.token)` must hold. For `init`, `grant.project` must be present and `isSecretKey(grant.ingest_key)` must hold. Otherwise throw "the server returned an invalid grant".
+   5. **Check the grant.** `serverUrl(grant.server)` must not throw and must match the `.env` value pattern of C2; `isPersonalToken(grant.token)` must hold. For `init`, `grant.project` must be present and `isSecretKey(grant.ingest_key)` must hold. Otherwise throw "the server returned an invalid grant".
    6. Never print the token, the key or the device code.
 4. **`test-server.ts`** (test helper, excluded from the build): `startCanned(answers: { status: number; body: unknown; headers?: Record<string,string> }[]): Promise<{ url: string; requests: { method: string; path: string; headers: Record<string,string>; body: unknown }[]; close(): Promise<void> }>`. It is a `node:http` server that answers in order and records each request; past the list it answers 500.
-5. **`login.ts`:** `export async function login(args: string[], io: Io): Promise<ExitCode>`.
+5. **`login.ts`:** `export async function login(args: string[], io: Io, deps: Deps = {}): Promise<ExitCode>`; it passes `deps` to `deviceSignIn`.
    - **Options** (`parseOptions`): `--url <URL>` (else `CETRA_URL`, else `chosenServer` of the saved file), `--no-browser`, `--json`, `--help`.
    - **Steps:**
      1. `server = serverUrl(…)`, then `deviceSignIn({purpose: "login"})`.
@@ -501,6 +528,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
 1. **`since.ts`:** `export function sinceWindow(text: string, now: Date): { from: string; to: string }`. This is the Rust `since_window`:
    - the last character is the unit, `s`, `m`, `h` or `d`;
    - the rest is 1 to 9 digits with no leading `0` and no sign;
+   - a window that puts `from` before 1970-01-01 is refused with the same message;
    - refused input throws `CliError("--since expects a duration such as 30m, 24h or 7d", Exit.Usage)`.
 
    The times are RFC 3339 with 9 fractional digits and `Z`, for example `2026-01-01T00:00:00.000000000Z`. Build them from `toISOString()` by replacing the three-digit milliseconds with nine digits (milliseconds followed by `000000`).
@@ -533,7 +561,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
    - Add `query` to `COMMANDS` in `cli.ts`.
 
 **Tests:**
-- `sinceWindow` on good and bad input, with exact strings for a fixed `now`; more than 9 digits is refused;
+- `sinceWindow` on good and bad input, with exact strings for a fixed `now`; more than 9 digits is refused, and so is `99999d`;
 - `renderTable`: alignment, NULL, JSON cells, the cut at 60, control characters, no columns;
 - **`query` against a canned server:**
   - the request path, with the project encoded as `acme%2Fdemo`;
@@ -575,7 +603,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
    export function bundledSkill(): string;   // fileURLToPath(new URL("./skills/cetra/", import.meta.url))
    export async function installSkill(source: string, root: string, targets: (keyof typeof SKILL_TARGETS)[],
      version: string): Promise<{ installed: string[]; skipped: { path: string; reason: string }[] }>;
-   /** The first ancestor of <dir> (itself included) holding a `.git` entry, else <dir>; the same walk as link.ts. */
+   /** (await gitTop(dir)) ?? dir — gitTop is link.ts's. */
    export async function skillRoot(dir: string): Promise<string>;
    ```
 
@@ -584,7 +612,6 @@ The phases run in order: each uses the modules of the one before. Files per phas
      - a directory that exists **without** `MARKER` is skipped with the reason "not installed by cetra-cli; left alone";
      - otherwise remove it, `fs.cp(source, target, { recursive: true })`, and write `MARKER` holding the version and a newline;
      - an error skips that target with its message. It never throws.
-   - Export the walk-up helper from `link.ts` (if C2 kept it private, export it now; `link.ts` is then in this phase's edits too) and reuse it in `skillRoot`.
 3. **`prompt.ts`:**
    - `export const CHECK_QUERY = "SELECT trace_id, name, start_time, span_count, llm_count, error_count FROM traces ORDER BY start_time DESC LIMIT 5";` This is the same statement as `skills/cetra/SKILL.md`'s step 5.
    - `export function agentPrompt(values: { envFile: string; tracesUrl: string; skill: boolean }): string` returns this text exactly, with the values filled in. When `skill` is false, step 1 reads "Read https://cetra.sh/llms.txt.":
@@ -635,9 +662,10 @@ The phases run in order: each uses the modules of the one before. Files per phas
    export function isLoopback(url: URL): boolean;   // hostname localhost, 127.0.0.0/8, or "[::1]" (URL keeps the brackets)
    export async function isReady(server: string): Promise<boolean>; // GET /readyz, 2 s timeout, 200 → true
    export function localDataDir(env: NodeJS.ProcessEnv, platform = process.platform, home = os.homedir()): string;
-   //   Linux: $XDG_DATA_HOME (absolute) else ~/.local/share; macOS: ~/Library/Application Support; + "cetra/local";
+   //   Linux: $XDG_DATA_HOME (absolute) else ~/.local/share; macOS: ~/Library/Application Support;
+   //   Windows: %LOCALAPPDATA%; then "cetra/local";
    //   path.win32 / path.posix join by platform, as credentialsPath does
-   export function isEmail(text: string): boolean;  // one "@", no whitespace, a domain with a ".", at most 254 chars
+   export function isEmail(text: string): boolean;  // one "@"; local part 1-64 chars; domain with a "." and no empty label; no whitespace; at most 254 chars
    export function generatedPassword(): string;     // 24 chars from [A-Za-z0-9], crypto.randomInt
    export function configToml(dataDir: string, port: number): string;
    /** The server URL init uses for a local start: http://localhost:<port>. */
@@ -660,21 +688,21 @@ The phases run in order: each uses the modules of the one before. Files per phas
    grpc_addr = "127.0.0.1:4317"
    ```
 
-   The file is written to `<data dir>/../local.toml`, next to the data dir, **not inside it**: the data dir must stay empty until the server's first start.
-4. **First start.** `firstStart` is true when `<data dir>/meta.db` does not exist. The server creates that file on its first start (check the name in `crates/server/src/meta/`; if it differs, use the right one and report it). An interrupted first run is then retried as a first start.
+   The file is written to `<data dir>/../local.toml`, next to the data dir, not inside it.
+4. **First start.** `firstStart` is true when `<data dir>/meta.db` does not exist (`crates/server/src/meta/mod.rs` names it). The server creates the admin **before** it binds its ports, so a first start that then fails would leave a `meta.db` with an admin whose password nobody kept. Therefore, when a first start fails (spawn error, the 30 s wait, a `docker run` error), `startLocal` removes what it created before it throws: the binary path removes the data dir; the Docker path runs `docker rm -f cetra-local` and `docker volume rm cetra-local`. The next run is a first start again.
 5. **`startLocal`:**
    1. **Questions.** Answers are read with `ask` and `yes`. With neither a terminal nor `--yes`, throw `CliError("no cetra server at <server>; pass --yes to start one", Exit.Unreachable)`.
       - The question is "No cetra server at <server>. Start one with `cetra serve`? [Y/n]", or "… with Docker? [Y/n]".
       - On a first start, the admin email: "Admin email for the local server [admin@cetra.local]:". `--yes` takes the default. An answer that fails `isEmail` throws `CliError("invalid email", Exit.Usage)` before anything starts.
-   2. **The child's environment** on a first start: `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD` (`generatedPassword()`), `CETRA_INIT_ORG=local` and `CETRA_INIT_PROJECT` (the base name of `dir`, or `default` if empty). Nothing else from `CETRA_INIT_*`.
-   3. **The binary** (`cetra version` runs through `execFile`):
+   2. **The child's environment** on a first start: `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD` (`generatedPassword()`), `CETRA_INIT_ORG=local` and `CETRA_INIT_PROJECT` (the base name of `dir` cut to 100 characters, or `default` if empty). Nothing else from `CETRA_INIT_*`.
+   3. **The binary** (`cetra version` runs through `deps.execFile ?? execFile`; every child process of this module goes through `deps.execFile` or `deps.spawn` when given):
       - `mkdir -p` the data dir and write `local.toml`;
       - open `<data dir>/server.log` with `fs.openSync(log, "a")`;
       - `spawn("cetra", ["serve", "--config", <local.toml>], { detached: true, stdio: ["ignore", fd, fd], env: {...process.env, ...initVars} })`, then `child.on("error", …)` and `unref()`;
       - write the PID to `<data dir>/server.pid`;
       - `stop` is `kill <pid>`, and `start` is `cetra serve --config <local.toml>`.
    4. **Else Docker** (`docker version` runs). Look for an existing container: `docker ps -a --filter name=^cetra-local$ --format {{.Names}}`.
-      - **When there is one,** run `docker start cetra-local`, with `firstStart` false.
+      - **When there is one,** run `docker start cetra-local`, with `firstStart` false. The wait (step 6) uses the host port that `docker port cetra-local 8080` prints, which may differ from `--url`'s; when it differs, say so on stderr and use it.
       - **Otherwise,** `firstStart` is true when `docker volume inspect cetra-local` fails. Run `docker run -d --name cetra-local -p 127.0.0.1:<port>:8080 -p 127.0.0.1:4317:4317 -p 127.0.0.1:4318:4318 -v cetra-local:/data -e CETRA_PUBLIC_URL=http://localhost:<port>`, plus `-e <NAME>` for each init variable (the **name only**; the values go in the `execFile` `env`, so the password is not in the process list), then `ghcr.io/cetra-ai/cetra:<VERSION>`.
       - **Errors.** A failure whose stderr mentions `pull access denied`, `not found` or `unauthorized` throws `CliError("docker could not pull ghcr.io/cetra-ai/cetra:<VERSION> (the image is public from the first release); install the binary instead: curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh", Exit.Unreachable)`. Any other failure throws `CliError("docker could not start cetra: <first line of stderr>", Exit.Unreachable)`.
       - `stop` is `docker stop cetra-local`, and `start` is `docker start cetra-local`.
@@ -693,12 +721,17 @@ The phases run in order: each uses the modules of the one before. Files per phas
 
 **Tests** (`local.test.ts`):
 - `isLoopback` on `localhost`, `127.0.0.2`, `[::1]` and `example.com`; `localServer` for `http://127.0.0.1:8080`, `http://[::1]:9000` and `http://localhost` (refused);
-- `localDataDir` per platform, with exact strings;
-- `isEmail` on `admin@cetra.local`, `admin@localhost` (refused), `a b@c.d` (refused) and `x@y.z`;
+- `localDataDir` for linux, darwin and win32, with exact strings;
+- `isEmail` on `admin@cetra.local`, `admin@localhost`, `a b@c.d`, `a@b.` and `a@.b` (refused) and `x@y.z`;
 - `generatedPassword` length and charset;
 - `configToml` exact, including a path with `"` and `\`;
 - `passwordSignIn` against a canned server: the requests carry `Origin` and the cookie, the token request body (scope `read`, an `expires_at` 90 days ahead), the key request path (`acme%2Fdemo`) and body, a 429 login message, and a no-project message;
-- `startLocal` with `deps.spawn`/`execFile` injected so that neither `cetra` nor `docker` is found: the "neither" error and exit 3. With no terminal and no `--yes`: the "pass --yes" error. The binary and Docker paths are not run in unit tests.
+- `startLocal` with `deps.execFile` and `deps.spawn` injected:
+  - neither `cetra` nor `docker` is found: the "neither" error and exit 3;
+  - no terminal and no `--yes`: the "pass --yes" error;
+  - a binary first start whose fake server never becomes ready (with a short wait injected through `deps.sleep`/`deps.now`) removes the data dir before it throws.
+
+  The real binary and Docker are not run in unit tests.
 
 **Done when:** `pnpm --dir node-cli exec vitest run src/local.test.ts` passes; the type check passes; Biome is clean.
 
@@ -721,6 +754,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
    3. **Sign in.**
       - On a local **first** start, `passwordSignIn(server, started.email, started.password, localHost())` gives the token, key and project, and `grantServer = server`.
       - Otherwise `deviceSignIn({ server, purpose: "init", project: --project, noBrowser, deps })` gives `grant`, and `grantServer = grant.server`. The device flow's org and project come from `grant.project`.
+      - On the local password path `--project` is ignored (the server has one project); say so in `--help`.
    4. **Credentials.** `saveToken(credentialsPath(io.env), server, token)`. It replaces a token saved for that server, including a `read, write` one from `login`; the docs page says so.
    5. **The env file.**
       - Read it if present.
@@ -776,10 +810,10 @@ The phases run in order: each uses the modules of the one before. Files per phas
 
 2. **`src/e2e.test.ts`** runs with `describe.skipIf(!process.env.CETRA_E2E_BASE_URL)`. The test has `{ timeout: 90_000 }`, because the server polls every 5 s.
    1. Temp `dir` and temp `XDG_CONFIG_HOME`. `env = { ...process.env, XDG_CONFIG_HOME }`.
-   2. Spawn `process.execPath` with `[<abs path of dist/cli.js>, "init", "--url", BASE, "--dir", dir, "--yes", "--no-browser", "--json", "--project", "acme/e2e"]` and that `env`. Collect stdout. Read stderr line by line until a line matches `^Code: ([A-Z]{4}-[A-Z]{4})$`.
+   2. The bin is `fileURLToPath(new URL("../dist/cli.js", import.meta.url))`. Spawn `process.execPath` with `[<that path>, "init", "--url", BASE, "--dir", dir, "--yes", "--no-browser", "--json", "--project", "acme/e2e"]` and that `env`. Collect stdout. Read stderr line by line until a line matches `^Code: ([A-Z]{4}-[A-Z]{4})$`.
    3. **Approve as the admin:**
       - `POST {BASE}/api/auth/login` with the admin email and password and `Origin: BASE`, keeping `cetra_session`;
-      - `GET {BASE}/api/v1/orgs/acme/projects`, taking the `e2e` project's id;
+      - `GET {BASE}/api/v1/orgs/acme/projects`: the answer is `{data: [{id, slug, …}], next_cursor}`; take the `id` of the entry whose `slug` is `e2e`;
       - `POST {BASE}/api/auth/device/<code>/approve` with `{project_id}`, the cookie and `Origin: BASE`. Expect 204.
    4. Wait for the child to exit with code 0. Parse its stdout as JSON; `project` is `acme/e2e`.
    5. Read `CETRA_API_KEY` from `<dir>/.env`. Send one span:
@@ -811,7 +845,7 @@ The phases run in order: each uses the modules of the one before. Files per phas
 - `CHANGELOG.md`, `AGENTS.md`, `docs/roadmap.md`, `docs/spec/09-api.md`
 
 **Steps.**
-1. **`coding-agent.mdx`** (Get started), in STYLE.md's voice. Title "Set up with your coding agent". Sections:
+1. **`coding-agent.mdx`** (Get started), in STYLE.md's voice. Title "Set up with your coding agent", description "Set an app up for cetra with one command, then give your coding agent the prompt it prints." (under 160 characters, as `check-terms` requires). Sections:
    - **The one-liner** (`npx @cetra-ai/cli@latest init`), and what it asks in the browser.
    - **What it changes:**
      - `.env`;
@@ -832,13 +866,13 @@ The phases run in order: each uses the modules of the one before. Files per phas
    - the files `init` writes;
    - the environment variables (`CETRA_URL`, `CETRA_TOKEN` (only with `--url` or `CETRA_URL`), `CETRA_PROJECT`, `XDG_CONFIG_HOME`).
 3. **Sidebar** (`astro.config.mjs`): `{ label: "Set up with your coding agent", link: "/docs/get-started/coding-agent/" }` first in Get started; `{ label: "cetra-cli", link: "/docs/reference/cetra-cli/" }` after `CLI` in Reference. **`reference/index.mdx`:** a `LinkCard` for cetra-cli after the CLI card, written in the same multi-line form as its neighbours.
-4. **`quickstart.mdx`.** Before `## Run cetra`, add an `<Aside>`: "Working with a coding agent? `npx @cetra-ai/cli@latest init` sets everything up and gives you a prompt for it." plus a link to `/docs/get-started/coding-agent/`. The design said "a tab"; an aside before the tabs is clearer, because the coding-agent path replaces the whole page, not one language. Write that in the design's § M3 too.
+4. **`quickstart.mdx`.** Before `## Run cetra`, add an `<Aside>`: "Working with a coding agent? `npx @cetra-ai/cli@latest init` sets everything up and gives you a prompt for it." plus a link to `/docs/get-started/coding-agent/`. The design's § Docs for agents already says "a short pointer above its tabs".
 5. **`check-skill.mjs`:**
    - `export const NODE_CLI_REFERENCE = "src/content/docs/docs/reference/cetra-cli.md";` and `export function nodeCliCommands(text)`, which reads the ``### `cetra-cli <name>` `` headings.
    - In `checkSkill`, on the same code texts as the `cetra` rule, match `/(?:^|[\s`("'])(?:npx @cetra-ai\/cli(?:@[\w.-]+)?|cetra-cli) ([a-z][a-z-]*)/g`. A name not in `ctx.nodeCommands` gives ``unknown command `cetra-cli <name>` ``.
    - `realContext()` adds `nodeCommands`. `main()` fails when it is empty, as it does for `commands`.
    - **Tests:** `npx @cetra-ai/cli@latest init` passes; `npx @cetra-ai/cli frob` is reported; `nodeCliCommands` on the real page gives `init, query, login`.
-6. **`check-env-vars.mjs`.** Add `"node-cli/src"` to the scanned code directories, with a test case where a page names a `CETRA_*` found only there.
+6. **`check-env-vars.mjs`.** Add `"node-cli/src"` to the scanned code directories. Test it through `checkSite` with a code string, as the existing cases do: `main(root)` reads fixed directories.
 7. **`CHANGELOG.md` `[Unreleased]` `### Added`:** "`npx @cetra-ai/cli init` sets an app up for cetra in one command and prints a prompt for your coding agent; `cetra-cli query` checks the traces from the terminal; the cetra agent skill is installed for Claude Code, Codex, Cursor, Gemini CLI and Copilot."
 8. **`AGENTS.md`:**
    - Layout: `node-cli/                     the cetra-cli package (npx @cetra-ai/cli): init, query, login (D-AO-2)` after `sdks/typescript/`.
