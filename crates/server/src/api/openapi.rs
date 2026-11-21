@@ -79,6 +79,10 @@ use super::datasets::{
 use super::deletions::{
     CreateDeletion, Deletion, DeletionPreview, DeletionPreviewRequest, DropParams,
 };
+use super::device::{
+    DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
+    DevicePurpose, DeviceRequest, DeviceTokenRequest,
+};
 use super::entitlements::{
     Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
     PutOrgTokenRequest, UsageNotice,
@@ -254,6 +258,14 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<PatchOrgSso>();
     set.insert::<SsoDiscoverRequest>();
     set.insert::<SsoDiscovery>();
+    set.insert::<DevicePurpose>();
+    set.insert::<DeviceCodeRequest>();
+    set.insert::<DeviceCodeResponse>();
+    set.insert::<DeviceTokenRequest>();
+    set.insert::<DeviceGrantProject>();
+    set.insert::<DeviceGrant>();
+    set.insert::<DeviceRequest>();
+    set.insert::<DeviceApproveRequest>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1405,7 +1417,114 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 429],
     ))
     .build();
+    let device_code = operation("post_device_code", "auth", "Start a device sign-in")
+        .description(Some(
+            "Issues a device code for `cetra login` or `cetra-cli init` (RFC 8628, D-AO-3). The CLI shows `user_code`, opens `verification_uri_complete` and polls `POST /api/auth/device/token` every `interval` seconds. The codes expire after `expires_in` seconds. No cookie and no `Origin` are needed. Ten codes a minute per client network (an IPv6 address counts by its /64); over that is 429.",
+        ))
+        .securities(Some(Vec::new()))
+        .request_body(Some(json_body("DeviceCodeRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DeviceCodeResponse>(
+                "The codes, the approval page's URLs and the polling interval.",
+            ),
+            &[400, 429, 503],
+        ))
+        .build();
+    let device_token = operation("post_device_token", "auth", "Poll for a device grant")
+        .description(Some(
+            "Answers the grant once the user approved the code, and only once; a second poll answers `expired_token`. Until then it answers 400 with an RFC 8628 code in `code`: `authorization_pending` (poll again after `interval`), `slow_down` (poll less often; the interval grew by 5 seconds), `access_denied` (the user denied the code) or `expired_token` (the code expired, was already collected, or is unknown). The answer carries `Cache-Control: no-store`.",
+        ))
+        .securities(Some(Vec::new()))
+        .request_body(Some(json_body("DeviceTokenRequest")))
+        .responses(responses(
+            "200",
+            json_of::<DeviceGrant>(
+                "The grant: the server origin, the token and, for `init`, the project and the ingest key.",
+            ),
+            &[400],
+        ))
+        .build();
+    let device_request = operation("get_device_request", "auth", "Read a pending device code")
+        .description(Some(
+            "What the approval page shows for a pending code: its purpose and the host the CLI reported. Session only. 404 for an unknown, expired or decided code. Thirty lookups, approvals and denials a minute per user.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_string(
+            "user_code",
+            "The code shown by the CLI, `XXXX-XXXX`.",
+        )]))
+        .responses(responses(
+            "200",
+            json_of::<DeviceRequest>("The pending code's purpose and host."),
+            AUTH_ERRORS,
+        ))
+        .build();
+    let device_approve = operation("post_device_approve", "auth", "Approve a device code")
+        .description(Some(
+            "Mints the grant for the signed-in user: a `read, write` personal access token for `login`; for `init`, a `read` token and an `ingest` key for `project_id`, a project on which the user may manage settings (an admin there). A project the user cannot see is 404; one the user can see with a lower role is 403. The CLI receives the secrets on its next poll. Session only: a session approval needs the `Origin` header. A failed approval leaves the code pending.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_string(
+            "user_code",
+            "The code shown by the CLI, `XXXX-XXXX`.",
+        )]))
+        .request_body(Some(json_body("DeviceApproveRequest")))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new()
+                .description("The code is approved. The CLI receives the grant on its next poll.")
+                .build(),
+            &[400, 401, 403, 404, 429],
+        ))
+        .build();
+    let device_deny = operation("post_device_deny", "auth", "Deny a device code")
+        .description(Some(
+            "Denies a pending code. The CLI's next poll answers `access_denied`. Session only. 404 for a code that is not pending.",
+        ))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .parameters(Some(vec![path_string(
+            "user_code",
+            "The code shown by the CLI, `XXXX-XXXX`.",
+        )]))
+        .responses(responses(
+            "204",
+            ResponseBuilder::new()
+                .description("The code is denied.")
+                .build(),
+            AUTH_ERRORS,
+        ))
+        .build();
     paths
+        .path(
+            "/api/auth/device/code",
+            PathItem::new(HttpMethod::Post, device_code),
+        )
+        .path(
+            "/api/auth/device/token",
+            PathItem::new(HttpMethod::Post, device_token),
+        )
+        .path(
+            "/api/auth/device/{user_code}",
+            PathItem::new(HttpMethod::Get, device_request),
+        )
+        .path(
+            "/api/auth/device/{user_code}/approve",
+            PathItem::new(HttpMethod::Post, device_approve),
+        )
+        .path(
+            "/api/auth/device/{user_code}/deny",
+            PathItem::new(HttpMethod::Post, device_deny),
+        )
         .path(
             "/api/auth/sso/discover",
             PathItem::new(HttpMethod::Post, sso_discover),

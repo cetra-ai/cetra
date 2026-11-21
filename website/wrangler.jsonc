@@ -1,15 +1,22 @@
-// The docs site as a Worker with static assets (D-W-3): no Worker script, only the built site.
+// The docs site as a Worker with static assets (D-W-3). Its script answers only /mcp, the docs
+// MCP server (D-AO-13); every other path is a static asset from `dist/`.
 // `just docs-deploy main` deploys production; `just docs-deploy pr-<number>` deploys a Preview.
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "cetra-site",
   "compatibility_date": "2026-11-01",
+  "main": "./worker/index.mjs",
   "assets": {
     "directory": "./dist",
+    "binding": "ASSETS",
+    // Only /mcp reaches the script; the rest is served from `dist/` without it.
+    "run_worker_first": ["/mcp"],
     // Astro writes `dist/404.html`; Starlight's pages end in a slash (trailingSlash: "always").
     "not_found_handling": "404-page",
     "html_handling": "auto-trailing-slash"
   },
+  // Nothing is logged (D-AO-13), whatever the dashboard's default is.
+  "observability": { "enabled": false },
   // Production is reached through its custom domain once one is attached; until then, workers.dev.
   "workers_dev": true,
   "preview_urls": true,

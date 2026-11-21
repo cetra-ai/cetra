@@ -48,6 +48,8 @@ pub(crate) struct AppInner {
     pub(crate) ready: health::ReadyCache,
     pub(crate) clock: Clock,
     pub(crate) limits: Limits,
+    /// Device-flow codes and their grants, in memory only (D-AO-3, D-AO-5).
+    pub(crate) device: crate::auth::device::DeviceStore,
     /// Successful API-key lookups, cached 60 s by hash.
     pub(crate) key_cache: ApiKeyCache,
     /// Successful personal-token lookups, cached 60 s by hash. The user is not cached.

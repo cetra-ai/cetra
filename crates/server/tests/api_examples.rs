@@ -37,6 +37,7 @@ use cetra_server::api::datasets::{
     ImportResult, ItemChange,
 };
 use cetra_server::api::deletions::{Deletion, DeletionPreview};
+use cetra_server::api::device::DeviceRequest;
 use cetra_server::api::entitlements::OrgEntitlements;
 use cetra_server::api::eval_jobs::{EvalJob, RunEvaluatorRequest};
 use cetra_server::api::evaluators::{
@@ -791,6 +792,7 @@ fn generated_files_roundtrip() {
             | "post_admin_user"
             | "get_admin_settings"
             | "get_admin_license" => {}
+            "get_device_request" => roundtrip::<DeviceRequest>(&example.file),
             "get_org_sso" => roundtrip::<OrgSso>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {

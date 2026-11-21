@@ -38,9 +38,8 @@ pub(crate) struct OrgRow {
 
 /// UI routes an org slug must not take. Project slugs use [`PROJECT_RESERVED`] instead.
 const RESERVED: &[&str] = &[
-    "account", "admin", "api", "assets", "cli-auth", "demo", "healthz", "invite", "login",
-    "logout", "mcp", "readyz", "reset", "settings", "setup", "signup", "sso", "static", "v1",
-    "verify",
+    "account", "admin", "api", "assets", "demo", "device", "healthz", "invite", "login", "logout",
+    "mcp", "readyz", "reset", "settings", "setup", "signup", "sso", "static", "v1", "verify",
 ];
 
 /// Org-level UI routes a project slug must not take. A project `settings` would take the
@@ -416,6 +415,7 @@ mod tests {
         assert_eq!(validate_slug("admin"), Err(SlugError::Reserved));
         assert_eq!(validate_slug("sso"), Err(SlugError::Reserved));
         assert_eq!(validate_slug("demo"), Err(SlugError::Reserved));
+        assert_eq!(validate_slug("device"), Err(SlugError::Reserved));
         assert_eq!(slug_from_name("Demo"), "demo-1");
         assert_eq!(slug_from_name("Acme, Inc."), "acme-inc");
         assert_eq!(slug_from_name("!!!"), "org");

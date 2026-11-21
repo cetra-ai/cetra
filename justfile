@@ -302,6 +302,10 @@ check-py:
 check-ts: js-install
     pnpm --dir sdks/typescript run check
 
+# The cetra-cli package: lint, types, build, tests, package lint (D-AO-2)
+check-cli-js: js-install
+    pnpm --dir node-cli run check
+
 # Documentation site checks: lint, script tests, types, content checks, build with link validation (D-W-13)
 check-docs: js-install
     pnpm --dir website run check
@@ -312,7 +316,7 @@ docs-screenshots *names: js-install
     cd website && node scripts/screenshots.mjs {{names}}
 
 # Every check (D79); must pass before every commit
-check: check-rust check-web check-py check-ts check-docs
+check: check-rust check-web check-py check-ts check-cli-js check-docs
 
 # Build the web, run the Rust e2e tests with the UI embedded, then the SDK suites against a real server (D-G-20, D-G-18)
 e2e: js-install
@@ -460,10 +464,15 @@ openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
     pnpm --dir web run gen:api
 
-# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references
-docs-gen:
+# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references, and the skill references (D-AO-8)
+docs-gen: js-install
     CETRA_DOCS_WRITE=1 cargo test -p cetra-cli cli_reference_is_up_to_date
     CETRA_DOCS_WRITE=1 cargo test -p cetra-server sql_schema_reference_is_up_to_date
+    cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs
+
+# Copy the agent skill and its plugin manifests into a checkout of cetra-ai/skills (D-AO-9); --push commits and pushes
+skills-mirror dest *flags:
+    tools/skills/mirror.sh "{{dest}}" {{flags}}
 
 # Regenerate fixtures/api responses and manifest
 api-examples:
