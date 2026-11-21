@@ -6934,8 +6934,7 @@ export interface components {
         };
         /**
          * @description `POST /api/internal/v1/device/codes` body: the control plane registers a code it issued
-         *     (D-AO-14). `Debug` is derived: the hash is not a secret, since the device code cannot be
-         *     recovered from it.
+         *     (D-AO-14).
          */
         InternalDeviceCode: {
             /** @description The lowercase hex SHA-256 of the device code: 64 characters. */

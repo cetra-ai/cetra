@@ -202,7 +202,7 @@ export async function deviceSignIn(options: {
 /** The origin a `moved` answer names. Only an https origin, or a loopback http origin when the
  *  typed server is loopback too (tests), is followed; the path, query and fragment are dropped.
  *  Loopback is tested here, not with `local.ts`, which imports this module. */
-function movedOrigin(value: string, typed: string): string {
+export function movedOrigin(value: string, typed: string): string {
   const invalid = () => new CliError(INVALID_SERVER, Exit.SignIn);
   let target: URL;
   let typedHost: string;

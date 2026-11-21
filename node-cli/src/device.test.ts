@@ -9,6 +9,7 @@ import {
   isUserCode,
   isUuid,
   MAX_EXPIRES_IN_S,
+  movedOrigin,
   type Purpose,
   type SignInResult,
   step,
@@ -534,5 +535,24 @@ describe("openBrowser", () => {
       openBrowser("http://127.0.0.1:9/device", { spawn: missing }, { DISPLAY: ":0" }, "linux"),
     ).not.toThrow();
     await new Promise((resolve) => setTimeout(resolve, 200));
+  });
+});
+
+describe("movedOrigin", () => {
+  const INVALID = "the server sent an invalid sign-in server";
+
+  it("refuses a loopback http target when the typed server is not loopback", () => {
+    expect(() => movedOrigin("http://127.0.0.1:9", "https://app.cetra.sh")).toThrow(CliError);
+    expect(() => movedOrigin("http://127.0.0.1:9", "https://app.cetra.sh")).toThrow(INVALID);
+  });
+
+  it("keeps only the origin of an https target", () => {
+    expect(movedOrigin("https://eu1.cetra.sh/x?y", "https://app.cetra.sh")).toBe(
+      "https://eu1.cetra.sh",
+    );
+  });
+
+  it("accepts a loopback http target when the typed server is loopback too", () => {
+    expect(movedOrigin("http://127.0.0.1:2", "http://127.0.0.1:1")).toBe("http://127.0.0.1:2");
   });
 });

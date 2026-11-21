@@ -1075,4 +1075,32 @@ mod tests {
             .register(&hash, "BCDF-GHJK", Purpose::Login, None, at(600), at(0))
             .expect("the identical retry is ok at the cap");
     }
+
+    #[test]
+    fn a_control_plane_hash_is_plain_lower_case_sha256() {
+        use sha2::{Digest, Sha256};
+        // The control plane computes the hash itself (D-AO-14), so pin it to SHA-256 directly,
+        // not to `hash_token`, which the other tests use.
+        let digest = Sha256::digest(b"device-code-pinned");
+        let sha256_hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(sha256_hex.len(), 64);
+        assert_eq!(sha256_hex, hash_token("device-code-pinned"));
+
+        let store = DeviceStore::new();
+        store
+            .register(
+                &sha256_hex,
+                "BCDF-GHJK",
+                Purpose::Login,
+                None,
+                at(600),
+                at(0),
+            )
+            .expect("registered");
+        // A poll with the plain device code reaches the entry: it is pending, not expired.
+        assert!(matches!(
+            store.poll("device-code-pinned", at(1)),
+            Poll::Pending
+        ));
+    }
 }

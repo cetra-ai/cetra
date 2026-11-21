@@ -148,8 +148,9 @@ pub struct DeviceApproveRequest {
 }
 
 /// `POST /api/internal/v1/device/codes` body: the control plane registers a code it issued
-/// (D-AO-14). `Debug` is derived: the hash is not a secret, since the device code cannot be
-/// recovered from it.
+/// (D-AO-14).
+// `Debug` is derived: the hash is not a secret, since the device code cannot be
+// recovered from it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InternalDeviceCode {
