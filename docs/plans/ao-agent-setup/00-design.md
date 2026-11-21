@@ -426,7 +426,7 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 ### M2 — The skill, its checks and the mirror
 
 **Delivers:**
-- `skills/cetra/SKILL.md`, `skills.json`, and the generated `references/`.
+- `skills/cetra/SKILL.md`, `skills/references.json`, and the generated `references/`.
 - `skill-references.mjs` with its write and check modes; the checks in `just check-docs` and the rewrite in `just docs-gen`.
 - The plugin manifests in `skills/manifests/`, `just skills-mirror`, and `skills-mirror.yml`.
 
@@ -484,7 +484,7 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 
 ## Open questions
 
-1. **The `cetra-ai/skills` repository and its deploy key.** The user creates the public repository and adds the deploy key secret (`SKILLS_MIRROR_KEY`) before M2's workflow can run. Until then the workflow's job is skipped when the secret is missing.
+1. **The `cetra-ai/skills` repository and its deploy key.** The user creates the public repository with an initial commit, and adds the deploy key secret (`SKILLS_MIRROR_KEY`) **after M3 and M4 are merged**: the skill names the Node CLI and the docs MCP, which must exist before the skill is published. Until then the workflow does nothing.
 2. **The cloud default before Q ships the relay.** Until then, `init` with no URL would reach `app.cetra.sh` without the device routes. Proposed: the CLI reads a 404 there as "use `--url <your cell>`" and says so. Is that acceptable for launch, or must M5 and Q's side land before launch?
 3. **The local admin email.** Init asks for it, and `--yes` uses `admin@localhost`. Should it default to `git config user.email` instead? Proposed: no, the CLI reads no personal data it does not need.
 4. **Plugin marketplaces.** Should the mirror also be submitted to the Claude Code and Cursor plugin directories at launch? That is a one-off manual step for the user, not code.
