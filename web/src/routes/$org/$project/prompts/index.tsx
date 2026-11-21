@@ -195,7 +195,7 @@ function PromptsPage() {
           className="h-7 w-56 text-body"
         />
         <Select value={label ?? ALL} onValueChange={setLabel}>
-          <SelectTrigger aria-label="Label" className="h-7 w-44 text-body">
+          <SelectTrigger aria-label="Label" size="sm" className="w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -208,7 +208,7 @@ function PromptsPage() {
           </SelectContent>
         </Select>
         <Select value={tag ?? ALL} onValueChange={setTag}>
-          <SelectTrigger aria-label="Tag" className="h-7 w-44 text-body">
+          <SelectTrigger aria-label="Tag" size="sm" className="w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

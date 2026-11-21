@@ -151,7 +151,7 @@ function IssuesPage() {
             setSearch((prev) => ({ ...prev, source: value === "all" ? undefined : value }));
           }}
         >
-          <SelectTrigger aria-label="Source" className="h-7 w-44 text-body">
+          <SelectTrigger aria-label="Source" size="sm" className="w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -172,7 +172,7 @@ function IssuesPage() {
             }
           }}
         >
-          <SelectTrigger aria-label="Kind" className="h-7 w-36 text-body">
+          <SelectTrigger aria-label="Kind" size="sm" className="w-36 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -192,7 +192,7 @@ function IssuesPage() {
             }
           }}
         >
-          <SelectTrigger aria-label="Sort" className="h-7 w-36 text-body">
+          <SelectTrigger aria-label="Sort" size="sm" className="w-36 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>

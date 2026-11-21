@@ -239,7 +239,7 @@ function ExperimentsPage() {
             });
           }}
         >
-          <SelectTrigger aria-label="Dataset" className="h-7 w-fit min-w-44 text-body">
+          <SelectTrigger aria-label="Dataset" size="sm" className="w-fit min-w-44 text-body">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
