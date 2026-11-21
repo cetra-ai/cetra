@@ -263,8 +263,8 @@ It holds no secret, so it may be committed. That lets a teammate run `query` wit
 When the URL is loopback (the default for a self-hosted trial is `http://localhost:8080`) and nothing answers, init offers to start a server on this machine, in this order:
 
 1. **The `cetra` binary**, if it is on PATH: "No cetra server at http://localhost:8080. Start one with `cetra serve`? [Y/n]".
-   - **Data directory.** It is `<data dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS. Init writes `cetra.toml` there (below).
-   - **Start.** `cetra serve --config <that dir>/cetra.toml` runs as a detached child (`spawn` with `detached: true`, then `unref`). Its output goes to `server.log` in the data directory, and its PID to `server.pid`.
+   - **Data directory.** It is `<data dir>/cetra/local`: `~/.local/share/cetra/local` on Linux, `~/Library/Application Support/cetra/local` on macOS. Init writes `local.toml` next to it (below), so the data dir stays empty until the first start; a first start is one without `meta.db`.
+   - **Start.** `cetra serve --config <local.toml>` runs as a detached child (`spawn` with `detached: true`, then `unref`). Its output goes to `server.log` in the data directory, and its PID to `server.pid`.
    - **Last lines.** Init prints how to stop it (`kill <pid>`) and how to start it again.
 2. **Docker**, if `docker version` answers: "Start one with Docker? [Y/n]".
    - The command is the quick start's `docker run -d` (`ghcr.io/cetra-ai/cetra:<the CLI's version>`), with the volume `cetra-local`, the container name `cetra-local` and the ports on `127.0.0.1`.
@@ -272,16 +272,16 @@ When the URL is loopback (the default for a self-hosted trial is `http://localho
 3. **Neither**: init prints the install.sh and Docker steps from the quick start and exits with code 3.
 
 **First-start values.** In both cases they go in the child's environment, never in a file:
-- `CETRA_INIT_ADMIN_EMAIL`, asked for at the prompt; `--yes` uses `admin@localhost`;
+- `CETRA_INIT_ADMIN_EMAIL`, asked for at the prompt; `--yes` uses `admin@cetra.local` (the server needs a dotted domain);
 - a generated 24-character `CETRA_INIT_ADMIN_PASSWORD` (letters and digits);
 - `CETRA_INIT_ORG=local`;
 - `CETRA_INIT_PROJECT`, the base name of `<dir>`, else `default`. The server derives the slugs; the CLI reads them back from the API, never computes them.
 
 No `CETRA_INIT_SECRET_KEY`: the server would give that key `ingest, read, write`, and D-AO-6 wants an ingest-only key. The variables apply on a first start only (spec 12). Init waits up to 30 s for `/readyz`.
 
-**The local config.** `cetra.toml` sets `data_dir`, `public_url = "http://localhost:<port>"`, and `http_addr`, `otlp_http_addr` and `grpc_addr` on `127.0.0.1` (the server's defaults listen on every interface).
+**The local config.** `local.toml` sets `data_dir`, `public_url = "http://localhost:<port>"`, and `http_addr`, `otlp_http_addr` and `grpc_addr` on `127.0.0.1` (the server's defaults listen on every interface).
 
-**Sign in without a browser.** On a first start init knows the password. With `Origin: <public_url>` on every session call:
+**Sign in without a browser.** Init uses `http://localhost:<port>` as the server for a local start, whatever loopback spelling was typed, because the server checks `Origin` against `public_url`. On a first start init knows the password. With `Origin: <public_url>` on every session call:
 1. `POST /api/auth/login` gives the session cookie;
 2. `GET /api/auth/me` and `GET /api/v1/orgs/{org}/projects` give the org and project slugs and the project id;
 3. `POST /api/v1/me/tokens` creates the `read` PAT, with `expires_at` 90 days ahead, named `CLI init on <host>`;
@@ -373,7 +373,7 @@ Its body is short (about 150 lines) and **routes**:
   - **Tests.** `node --test` covers the tools against a built index (unknown page, cut page, empty query). `just check-docs` builds the index.
 - **Docs pages** (M3 and M4):
   - a new "Set up with your coding agent" page under Get started, with the one-liner, what `init` changes, the prompt, the manual path (`npx skills add cetra-ai/skills`, setting the variables yourself), and how to add the trace and docs MCPs to Claude Code, Codex, Cursor and Gemini CLI;
-  - the quick start gets a "Coding agent" tab next to Python, TypeScript and OpenTelemetry (amends D-W-4's "without its agent-install preamble");
+  - the quick start gets a short pointer to that page above its tabs (amends D-W-4's "without its agent-install preamble");
   - the CLI reference is regenerated (`init`, and `login` on the device flow);
   - the CA pages say "to trace the agent itself" and link the new page the other way.
 
@@ -496,5 +496,5 @@ M1 and M2 do not depend on each other. M4 depends only on M2's script (it can ru
 
 1. **The `cetra-ai/skills` repository and its deploy key.** The user creates the public repository with an initial commit, and adds the deploy key secret (`SKILLS_MIRROR_KEY`) **after M3 and M4 are merged**: the skill names the Node CLI and the docs MCP, which must exist before the skill is published. Until then the workflow does nothing.
 2. **The cloud default before Q ships the relay.** Until then, `init` with no URL would reach `app.cetra.sh` without the device routes. Proposed: the CLI reads a 404 there as "use `--url <your cell>`" and says so. Is that acceptable for launch, or must M5 and Q's side land before launch?
-3. **The local admin email.** Init asks for it, and `--yes` uses `admin@localhost`. Should it default to `git config user.email` instead? Proposed: no, the CLI reads no personal data it does not need.
+3. **The local admin email.** Init asks for it, and `--yes` uses `admin@cetra.local`. Should it default to `git config user.email` instead? Proposed: no, the CLI reads no personal data it does not need.
 4. **Plugin marketplaces.** Should the mirror also be submitted to the Claude Code and Cursor plugin directories at launch? That is a one-off manual step for the user, not code.
