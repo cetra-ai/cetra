@@ -339,10 +339,14 @@ async fn put_license(
                 reason.to_string(),
             ));
         }
+        // `from_key(Some(_))` is never `Absent`; refuse it like a malformed key.
         LicenseState::Absent => {
             return Err(key_rejected(
-                "the licence key was refused: no key".to_owned(),
-                "no key".to_owned(),
+                format!(
+                    "the licence key was refused: {}",
+                    cetra_token::TokenError::Malformed
+                ),
+                cetra_token::TokenError::Malformed.to_string(),
             ));
         }
     };
