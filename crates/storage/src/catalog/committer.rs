@@ -29,6 +29,7 @@ use crate::counters::Counters;
 use crate::deletion::{Deletion, DeletionScope, DeletionStatus, PendingDeletion, Tombstones};
 use crate::error::{
     CatalogError, CommitError, DeletionError, GcError, MediaError, ObjectError, OrphanError,
+    SnapshotError,
 };
 use crate::hooks::{HookPoint, Hooks};
 use crate::objects::Objects;
@@ -81,7 +82,8 @@ enum Extra {
 }
 
 struct CommitterInner {
-    connection: SqliteConnection,
+    /// `None` once [`Committer::close`] closed it.
+    connection: Option<SqliteConnection>,
     catalog: Arc<Catalog>,
     flushed: [u64; 2],
     /// The pending deletions as last committed (spec 03 §7).
@@ -135,7 +137,7 @@ impl Committer {
         let stopped = Arc::new(AtomicBool::new(false));
         Ok(Self {
             inner: Mutex::new(CommitterInner {
-                connection,
+                connection: Some(connection),
                 catalog: Arc::new(catalog),
                 flushed: flushed_of(state),
                 tombstones: Arc::new(tombstones),
@@ -151,12 +153,16 @@ impl Committer {
     }
 
     /// Takes the mutex, or fails with [`CatalogError::Stopped`] once a fatal
-    /// SQLite I/O error stopped the committer (D-R-6). The flag is read under the
+    /// SQLite I/O error stopped the committer (D-R-6), or with
+    /// [`CatalogError::Closed`] after [`Self::close`]. The flag is read under the
     /// mutex, so a commit that stops it is seen by the next caller.
     async fn lock_running(&self) -> Result<MutexGuard<'_, CommitterInner>, CatalogError> {
         let inner = self.inner.lock().await;
         if self.stopped.load(Ordering::SeqCst) {
             return Err(CatalogError::Stopped);
+        }
+        if inner.connection.is_none() {
+            return Err(CatalogError::Closed);
         }
         Ok(inner)
     }
@@ -172,14 +178,19 @@ impl Committer {
         Arc::clone(&self.inner.lock().await.catalog)
     }
 
-    /// Closes the catalog connection. The committer is not used afterwards.
-    pub(crate) async fn close(self) -> Result<(), CatalogError> {
-        let inner = self.inner.into_inner();
-        inner
-            .connection
-            .close()
-            .await
-            .map_err(|source| CatalogError::Db { source })
+    /// Closes the catalog connection and waits for SQLite to finish: closing the
+    /// last connection checkpoints the WAL into `catalog.db`, so the file is final
+    /// when this returns. Every later SQLite call fails with
+    /// [`CatalogError::Closed`]; a second call does nothing.
+    pub(crate) async fn close(&self) -> Result<(), CatalogError> {
+        let connection = self.inner.lock().await.connection.take();
+        match connection {
+            Some(connection) => connection
+                .close()
+                .await
+                .map_err(|source| CatalogError::Db { source }),
+            None => Ok(()),
+        }
     }
 
     /// Highest flushed WAL sequence for `table`. Missing row is `0`.
@@ -190,11 +201,11 @@ impl Committer {
     /// `VACUUM INTO path` on the catalog connection and a clone of the in-memory
     /// catalog, in one critical section: the copy and the clone describe the same
     /// commit. `path` must not exist and must be UTF-8 (the caller checks both).
-    pub(crate) async fn snapshot_into(&self, path: &str) -> Result<Arc<Catalog>, sqlx::Error> {
+    pub(crate) async fn snapshot_into(&self, path: &str) -> Result<Arc<Catalog>, SnapshotError> {
         let mut inner = self.inner.lock().await;
         sqlx::query("VACUUM INTO ?")
             .bind(path)
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await?;
         Ok(Arc::clone(&inner.catalog))
     }
@@ -208,7 +219,7 @@ impl Committer {
     /// (spec 03 §8) and dropped projects (spec 03 §7).
     pub(crate) async fn project_states(&self) -> Result<ProjectStates, CatalogError> {
         let mut inner = self.lock_running().await?;
-        load_project_states(&mut inner.connection).await
+        load_project_states(open_connection(&mut inner.connection)?).await
     }
 
     /// Stores `deletion` with the next `deletion_seq`, then calls `publish` with
@@ -266,7 +277,7 @@ impl Committer {
         };
         let known: Option<i64> = sqlx::query_scalar("SELECT 1 FROM deletions WHERE id = ?")
             .bind(deletion.id.to_string())
-            .fetch_optional(&mut inner.connection)
+            .fetch_optional(open_connection(&mut inner.connection)?)
             .await
             .map_err(CatalogError::db)?;
         if known.is_some() {
@@ -279,7 +290,7 @@ impl Committer {
         let dropped: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM projects WHERE project_id = ?")
                 .bind(deletion.project.to_string())
-                .fetch_optional(&mut inner.connection)
+                .fetch_optional(open_connection(&mut inner.connection)?)
                 .await
                 .map_err(CatalogError::db)?;
         if dropped.is_some() {
@@ -287,7 +298,10 @@ impl Committer {
             let stored_seq = i64::try_from(seq).map_err(|_| DeletionError::Invalid {
                 reason: "integer does not fit the catalog",
             })?;
-            let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+            let mut transaction = open_connection(&mut inner.connection)?
+                .begin()
+                .await
+                .map_err(CatalogError::db)?;
             if let Err(error) = sqlx::query(
                 "INSERT INTO deletions (
                     id, deletion_seq, project_id, kind, cutoff, status, registered_at, applied_at
@@ -333,7 +347,10 @@ impl Committer {
         // Production hooks are `Copy`. Tests share one value and have to clone it.
         #[allow(clippy::clone_on_copy)]
         let hooks = inner.hooks.clone();
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         if let Err(error) = sqlx::query(
             "INSERT INTO deletions (
                 id, deletion_seq, project_id, kind, cutoff, status, registered_at
@@ -424,7 +441,10 @@ impl Committer {
         F: FnOnce(&Arc<Tombstones>),
     {
         let mut inner = self.lock_running().await?;
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         let updated = sqlx::query(
             "UPDATE deletions SET status = 'applied', applied_at = ?
              WHERE id = ? AND status = 'pending'",
@@ -469,7 +489,7 @@ impl Committer {
         let row: Option<(String, Option<i64>)> =
             sqlx::query_as("SELECT status, applied_at FROM deletions WHERE id = ?")
                 .bind(id.to_string())
-                .fetch_optional(&mut inner.connection)
+                .fetch_optional(open_connection(&mut inner.connection)?)
                 .await
                 .map_err(CatalogError::db)?;
         let Some((status, applied_at)) = row else {
@@ -505,7 +525,7 @@ impl Committer {
         .bind(newest_span_start)
         .bind(project.to_string())
         .bind(sha)
-        .execute(&mut inner.connection)
+        .execute(open_connection(&mut inner.connection)?)
         .await;
         let updated =
             commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
@@ -520,7 +540,7 @@ impl Committer {
             sqlx::query("INSERT OR REPLACE INTO staged_objects (path, created_at) VALUES (?, ?)")
                 .bind(path)
                 .bind(now)
-                .execute(&mut inner.connection)
+                .execute(open_connection(&mut inner.connection)?)
                 .await;
         commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
@@ -546,7 +566,10 @@ impl Committer {
         let stored_size = i64::try_from(size)
             .map_err(|_| CatalogError::corrupt("integer does not fit the catalog"))?;
         let mut inner = self.lock_running().await?;
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         // A put that passed its `is_dropped` check before the drop's commit
         // must not land a row after the drop deleted the project's media
         // (spec 03 §7).
@@ -612,7 +635,7 @@ impl Committer {
         )
         .bind(project.to_string())
         .bind(sha)
-        .fetch_optional(&mut inner.connection)
+        .fetch_optional(open_connection(&mut inner.connection)?)
         .await
         .map_err(CatalogError::db)?;
         row.map(|(mime_type, size, newest)| {
@@ -627,7 +650,7 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         let rows: Vec<String> =
             sqlx::query_scalar("SELECT DISTINCT project_id FROM media ORDER BY project_id")
-                .fetch_all(&mut inner.connection)
+                .fetch_all(open_connection(&mut inner.connection)?)
                 .await
                 .map_err(CatalogError::db)?;
         rows.into_iter()
@@ -651,7 +674,7 @@ impl Committer {
         )
         .bind(project.to_string())
         .bind(before)
-        .fetch_all(&mut inner.connection)
+        .fetch_all(open_connection(&mut inner.connection)?)
         .await
         .map_err(CatalogError::db)
     }
@@ -685,7 +708,7 @@ impl Committer {
         )
         .bind(project.to_string())
         .bind(sha)
-        .fetch_optional(&mut inner.connection)
+        .fetch_optional(open_connection(&mut inner.connection)?)
         .await
         .map_err(CatalogError::db)?;
         let Some(last_seen) = last_seen else {
@@ -695,7 +718,10 @@ impl Committer {
             return Ok(None);
         }
         let path = Objects::media_path(project, sha);
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         if let Err(error) = sqlx::query("DELETE FROM media WHERE project_id = ? AND sha256 = ?")
             .bind(project.to_string())
             .bind(sha)
@@ -725,7 +751,7 @@ impl Committer {
         let bytes = delete().await?;
         let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
             .bind(&path)
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await;
         commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(Some(bytes))
@@ -736,7 +762,7 @@ impl Committer {
     pub(crate) async fn staged_paths(&self) -> Result<Vec<String>, CatalogError> {
         let mut inner = self.lock_running().await?;
         sqlx::query_scalar("SELECT path FROM staged_objects ORDER BY path")
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await
             .map_err(CatalogError::db)
     }
@@ -746,7 +772,7 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         sqlx::query_scalar("SELECT sha256 FROM media WHERE project_id = ? ORDER BY sha256")
             .bind(project.to_string())
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await
             .map_err(CatalogError::db)
     }
@@ -761,7 +787,7 @@ impl Committer {
         let outcome = sqlx::query("DELETE FROM media WHERE project_id = ? AND sha256 = ?")
             .bind(project.to_string())
             .bind(sha)
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await;
         commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
@@ -773,7 +799,7 @@ impl Committer {
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT project_id FROM projects WHERE state = 'dropping' ORDER BY project_id",
         )
-        .fetch_all(&mut inner.connection)
+        .fetch_all(open_connection(&mut inner.connection)?)
         .await
         .map_err(CatalogError::db)?;
         rows.into_iter()
@@ -790,7 +816,7 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         let outcome = sqlx::query("UPDATE projects SET state = 'dropped' WHERE project_id = ?")
             .bind(project.to_string())
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await;
         commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(())
@@ -805,7 +831,7 @@ impl Committer {
         let mut inner = self
             .lock_running()
             .await
-            .map_err(|_| CommitError::Stopped)?;
+            .map_err(|error| CommitError::refused(&error))?;
         let mut pairs: BTreeSet<(FileId, FileId)> = BTreeSet::new();
         for chunk in spans.chunks(500) {
             let mut builder = sqlx::QueryBuilder::new(
@@ -821,7 +847,10 @@ impl Committer {
             builder.push("))");
             let rows = builder
                 .build_query_as::<(String, String)>()
-                .fetch_all(&mut inner.connection)
+                .fetch_all(
+                    open_connection(&mut inner.connection)
+                        .map_err(|error| CommitError::refused(&error))?,
+                )
                 .await
                 .map_err(CommitError::db)?;
             for (traces, spans) in rows {
@@ -839,7 +868,7 @@ impl Committer {
         let mut inner = self
             .lock_running()
             .await
-            .map_err(|_| CommitError::Stopped)?;
+            .map_err(|error| CommitError::refused(&error))?;
         let rows: Vec<String> = sqlx::query_scalar(
             "SELECT fs.spans_file_id FROM file_sources AS fs
              JOIN data_files AS t ON t.id = fs.traces_file_id
@@ -848,7 +877,9 @@ impl Committer {
              ORDER BY fs.spans_file_id",
         )
         .bind(traces.to_string())
-        .fetch_all(&mut inner.connection)
+        .fetch_all(
+            open_connection(&mut inner.connection).map_err(|error| CommitError::refused(&error))?,
+        )
         .await
         .map_err(CommitError::db)?;
         rows.iter()
@@ -869,7 +900,7 @@ impl Committer {
              ORDER BY id",
         )
         .bind(project.to_string())
-        .fetch_all(&mut inner.connection)
+        .fetch_all(open_connection(&mut inner.connection)?)
         .await
         .map_err(CatalogError::db)?;
         let mut files = Vec::with_capacity(rows.len());
@@ -893,7 +924,10 @@ impl Committer {
     pub(crate) async fn retire_quarantined(&self, ids: &[FileId]) -> Result<(), CatalogError> {
         let mut inner = self.lock_running().await?;
         let now = now_ns();
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         for id in ids {
             sqlx::query(
                 "UPDATE data_files SET state = 'obsolete', obsoleted_at = ?
@@ -937,7 +971,10 @@ impl Committer {
 
     async fn insert_staged(&self, paths: &[String], created_at: i64) -> Result<(), CatalogError> {
         let mut inner = self.lock_running().await?;
-        let mut transaction = inner.connection.begin().await.map_err(CatalogError::db)?;
+        let mut transaction = open_connection(&mut inner.connection)?
+            .begin()
+            .await
+            .map_err(CatalogError::db)?;
         for path in paths {
             if let Err(error) =
                 sqlx::query("INSERT INTO staged_objects (path, created_at) VALUES (?, ?)")
@@ -975,7 +1012,7 @@ impl Committer {
         let mut inner = self
             .lock_running()
             .await
-            .map_err(|_| CommitError::Stopped)?;
+            .map_err(|error| CommitError::refused(&error))?;
         let next = commit_inner(&mut inner, edit, &Extra::None).await?;
         publish(&next);
         Ok(next)
@@ -998,12 +1035,15 @@ impl Committer {
         let mut inner = self
             .lock_running()
             .await
-            .map_err(|_| CommitError::Stopped)?;
+            .map_err(|error| CommitError::refused(&error))?;
         // A dropped project has nothing to retain: no commit, no publish.
         let dropped: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM projects WHERE project_id = ?")
                 .bind(project.to_string())
-                .fetch_optional(&mut inner.connection)
+                .fetch_optional(
+                    open_connection(&mut inner.connection)
+                        .map_err(|error| CommitError::refused(&error))?,
+                )
                 .await
                 .map_err(CommitError::db)?;
         if dropped.is_some() {
@@ -1016,7 +1056,10 @@ impl Committer {
         let stored: Option<String> =
             sqlx::query_scalar("SELECT keep_from FROM retention_watermarks WHERE project_id = ?")
                 .bind(project.to_string())
-                .fetch_optional(&mut inner.connection)
+                .fetch_optional(
+                    open_connection(&mut inner.connection)
+                        .map_err(|error| CommitError::refused(&error))?,
+                )
                 .await
                 .map_err(CommitError::db)?;
         let stored = stored
@@ -1085,10 +1128,13 @@ impl Committer {
         let mut inner = self
             .lock_running()
             .await
-            .map_err(|_| CommitError::Stopped)?;
+            .map_err(|error| CommitError::refused(&error))?;
         let known: Option<i64> = sqlx::query_scalar("SELECT 1 FROM projects WHERE project_id = ?")
             .bind(project.to_string())
-            .fetch_optional(&mut inner.connection)
+            .fetch_optional(
+                open_connection(&mut inner.connection)
+                    .map_err(|error| CommitError::refused(&error))?,
+            )
             .await
             .map_err(CommitError::db)?;
         if known.is_some() {
@@ -1125,7 +1171,7 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         sqlx::query_scalar("SELECT path FROM staged_objects WHERE created_at < ? ORDER BY path")
             .bind(cutoff_ns)
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await
             .map_err(CatalogError::db)
     }
@@ -1138,7 +1184,7 @@ impl Committer {
         let mut inner = self.inner.lock().await;
         let paths: Vec<String> =
             sqlx::query_scalar("SELECT path FROM data_files WHERE state = 'active'")
-                .fetch_all(&mut inner.connection)
+                .fetch_all(open_connection(&mut inner.connection)?)
                 .await?;
         let mut keys: HashSet<String> = paths.into_iter().collect();
         let media: Vec<(String, String)> = sqlx::query_as(
@@ -1147,7 +1193,7 @@ impl Committer {
                  SELECT 1 FROM projects p
                  WHERE p.project_id = m.project_id AND p.state IN ('dropping', 'dropped'))",
         )
-        .fetch_all(&mut inner.connection)
+        .fetch_all(open_connection(&mut inner.connection)?)
         .await?;
         for (project, sha) in media {
             keys.insert(media_key(&project, &sha)?);
@@ -1161,13 +1207,13 @@ impl Committer {
     pub(crate) async fn known_keys(&self) -> Result<HashSet<String>, OrphanError> {
         let mut inner = self.inner.lock().await;
         let paths: Vec<String> = sqlx::query_scalar("SELECT path FROM data_files")
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await?;
         let staged: Vec<String> = sqlx::query_scalar("SELECT path FROM staged_objects")
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await?;
         let media: Vec<(String, String)> = sqlx::query_as("SELECT project_id, sha256 FROM media")
-            .fetch_all(&mut inner.connection)
+            .fetch_all(open_connection(&mut inner.connection)?)
             .await?;
         let mut keys: HashSet<String> = paths.into_iter().chain(staged).collect();
         for (project, sha) in media {
@@ -1200,7 +1246,7 @@ impl Committer {
         let mut inner = self.lock_running().await?;
         let published: Option<i64> = sqlx::query_scalar("SELECT 1 FROM data_files WHERE path = ?")
             .bind(path)
-            .fetch_optional(&mut inner.connection)
+            .fetch_optional(open_connection(&mut inner.connection)?)
             .await
             .map_err(CatalogError::db)?;
         if published.is_some() {
@@ -1211,13 +1257,13 @@ impl Committer {
                 sqlx::query_scalar("SELECT 1 FROM media WHERE project_id = ? AND sha256 = ?")
                     .bind(project)
                     .bind(sha)
-                    .fetch_optional(&mut inner.connection)
+                    .fetch_optional(open_connection(&mut inner.connection)?)
                     .await
                     .map_err(CatalogError::db)?;
             if stored.is_some() {
                 let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
                     .bind(path)
-                    .execute(&mut inner.connection)
+                    .execute(open_connection(&mut inner.connection)?)
                     .await;
                 commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
                 return Ok(StagedRemoval::MediaStored);
@@ -1227,7 +1273,7 @@ impl Committer {
             sqlx::query_scalar("SELECT 1 FROM staged_objects WHERE path = ? AND created_at < ?")
                 .bind(path)
                 .bind(before)
-                .fetch_optional(&mut inner.connection)
+                .fetch_optional(open_connection(&mut inner.connection)?)
                 .await
                 .map_err(CatalogError::db)?;
         if staged.is_none() {
@@ -1240,7 +1286,7 @@ impl Committer {
         let bytes = delete().await?;
         let outcome = sqlx::query("DELETE FROM staged_objects WHERE path = ?")
             .bind(path)
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await;
         commit_point(&self.stopped, &inner.hooks, outcome).map_err(CatalogError::db)?;
         Ok(StagedRemoval::Deleted { bytes })
@@ -1267,7 +1313,7 @@ impl Committer {
                 .bind(time)
                 .bind(id.to_string())
                 .bind(i64::from(limit))
-                .fetch_all(&mut inner.connection)
+                .fetch_all(open_connection(&mut inner.connection)?)
                 .await
             }
             None => {
@@ -1278,7 +1324,7 @@ impl Committer {
                 )
                 .bind(cutoff)
                 .bind(i64::from(limit))
-                .fetch_all(&mut inner.connection)
+                .fetch_all(open_connection(&mut inner.connection)?)
                 .await
             }
         };
@@ -1323,7 +1369,7 @@ impl Committer {
         }
         let state: Option<String> = sqlx::query_scalar("SELECT state FROM data_files WHERE id = ?")
             .bind(file.id.to_string())
-            .fetch_optional(&mut inner.connection)
+            .fetch_optional(open_connection(&mut inner.connection)?)
             .await
             .map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
         if state.as_deref() != Some("obsolete") {
@@ -1344,7 +1390,7 @@ impl Committer {
         }
         let outcome = sqlx::query("DELETE FROM data_files WHERE id = ?")
             .bind(file.id.to_string())
-            .execute(&mut inner.connection)
+            .execute(open_connection(&mut inner.connection)?)
             .await;
         commit_point(&self.stopped, &inner.hooks, outcome)
             .map_err(|source| GcError::Catalog(CatalogError::db(source)))?;
@@ -1557,6 +1603,14 @@ fn media_path_parts(path: &str) -> Option<(&str, &str)> {
     Some((project, sha))
 }
 
+/// The open catalog connection, or [`CatalogError::Closed`] after
+/// [`Committer::close`].
+fn open_connection(
+    connection: &mut Option<SqliteConnection>,
+) -> Result<&mut SqliteConnection, CatalogError> {
+    connection.as_mut().ok_or(CatalogError::Closed)
+}
+
 /// The body of [`Committer::commit`] up to and including the SQLite commit
 /// and the in-memory updates, with `extra`'s SQL run after `write_edit` and
 /// before the `CatalogCommit` hook. Does not publish; the caller holds the
@@ -1571,7 +1625,11 @@ async fn commit_inner(
     // Production hooks are `Copy`. Tests share one value and have to clone it.
     #[allow(clippy::clone_on_copy)]
     let hooks = inner.hooks.clone();
-    let mut transaction = inner.connection.begin().await.map_err(CommitError::db)?;
+    let mut transaction = open_connection(&mut inner.connection)
+        .map_err(|error| CommitError::refused(&error))?
+        .begin()
+        .await
+        .map_err(CommitError::db)?;
     if let Err(error) = write_edit(transaction.as_mut(), edit).await {
         let _ = transaction.rollback().await;
         return Err(error);

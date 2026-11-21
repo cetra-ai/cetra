@@ -12,6 +12,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Instance admins install a licence key from the admin settings, and it applies without a restart. A key in `CETRA_LICENSE_KEY` still wins.
 - The licence card links to the licence store to buy or renew a licence.
 
+### Fixed
+
+- Shutdown closes `catalog.db` before it releases the data directory lock, so the SQLite
+  checkpoint no longer writes the file after the server has stopped.
+
 ## [0.1.0-rc.1] - 2026-11-21
 
 ### Upgrade notes

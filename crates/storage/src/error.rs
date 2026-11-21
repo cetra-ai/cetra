@@ -356,6 +356,9 @@ pub enum CatalogError {
     /// Every catalog call is refused until a restart (D-R-6).
     #[error("catalog stopped after an I/O error; restart required")]
     Stopped,
+    /// The storage shut down and closed `catalog.db`.
+    #[error("catalog closed for shutdown")]
+    Closed,
 }
 
 /// One staged-object collection failed.
@@ -421,11 +424,23 @@ pub enum CommitError {
     /// Every catalog call is refused until a restart (D-R-6).
     #[error("catalog stopped after an I/O error; restart required")]
     Stopped,
+    /// The storage shut down and closed `catalog.db`.
+    #[error("catalog closed for shutdown")]
+    Closed,
 }
 
 impl CommitError {
     pub(crate) fn db(source: sqlx::Error) -> Self {
         Self::Db { source }
+    }
+
+    /// The committer refused the call: [`CatalogError::Closed`] after shutdown,
+    /// [`CatalogError::Stopped`] (the only other refusal) after a fatal I/O error.
+    pub(crate) fn refused(error: &CatalogError) -> Self {
+        match error {
+            CatalogError::Closed => Self::Closed,
+            _ => Self::Stopped,
+        }
     }
 
     pub(crate) fn conflict(reason: &'static str) -> Self {
@@ -803,6 +818,9 @@ pub enum SnapshotError {
     /// SQLite failed, or a value of the copy is invalid.
     #[error("catalog snapshot: {0}")]
     Db(#[from] sqlx::Error),
+    /// The catalog connection is closed (the storage shut down).
+    #[error("catalog snapshot: {0}")]
+    Catalog(#[from] CatalogError),
     /// A `media` row of the copy names a project id that does not parse.
     #[error("catalog snapshot: invalid project id in the copy")]
     BadProjectId,
@@ -849,6 +867,9 @@ pub enum OrphanError {
     /// Reading the catalog failed.
     #[error("reading the catalog: {0}")]
     Db(#[from] sqlx::Error),
+    /// The catalog connection is closed (the storage shut down).
+    #[error("reading the catalog: {0}")]
+    Catalog(#[from] CatalogError),
     /// A `media` row names a project id that does not parse.
     #[error("reading the catalog: invalid project id")]
     BadProjectId,
