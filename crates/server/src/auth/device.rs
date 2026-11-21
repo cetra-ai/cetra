@@ -805,7 +805,7 @@ mod tests {
         let store = DeviceStore::new();
         let issued = issue_at(&store, at(0));
         let shown = format!("{issued:?}");
-        assert!(!shown.contains(&issued.device_code), "{shown}");
+        assert!(!shown.contains(&issued.device_code));
 
         let secret = Grant {
             token: "pat-cetra-DEBUGSECRET".to_owned(),
@@ -818,9 +818,10 @@ mod tests {
             ingest_key: Some("sk-cetra-DEBUGKEY".to_owned()),
         };
         let shown = format!("{secret:?}");
-        assert!(!shown.contains("pat-cetra-DEBUGSECRET"), "{shown}");
-        assert!(!shown.contains("sk-cetra-DEBUGKEY"), "{shown}");
-        assert!(shown.contains("<redacted>"), "{shown}");
+        // No message argument: printing `shown` would put the Debug output in a log.
+        assert!(!shown.contains("pat-cetra-DEBUGSECRET"));
+        assert!(!shown.contains("sk-cetra-DEBUGKEY"));
+        assert!(shown.contains("<redacted>"));
     }
 
     const SKEW_NS: i64 = 30 * 1_000_000_000;
