@@ -2,7 +2,7 @@
 
 The Rust lint, test and e2e jobs, and the `check-packaging` job of `workflows/packaging.yml`
 (main pushes and the weekly run), use kache 2.0.0 with the Garage bucket `kache`
-served at `https://s3.chapu.is`. The S3 endpoint and bucket are configured in
+served at `https://s3.chapu.is:8443`. The S3 endpoint and bucket are configured in
 `actions/rust/action.yml`; the region is `us-east-1`.
 
 ## Credentials
@@ -89,11 +89,10 @@ built-in object lifecycle rules; if the bucket grows too large, delete old
 objects under `kache-v2/` and `kache-pr-v2/` with a script and a temporary
 broad key. Deleted entries are rebuilt on demand.
 
-`s3.chapu.is` is served through Cloudflare's proxy, which caps the size of a
-single request body (100 MB unless the zone is on Enterprise). Kache uploads
-one object per compilation; if its job summary ever shows upload failures for
-large cached executables, grey-cloud the `s3` DNS record or set
-`cache-executables: false` in `actions/rust/action.yml`.
+Port 8443 of `s3.chapu.is` goes straight to Garage through Caddy, not through
+Cloudflare's proxy, so Cloudflare's 100 MB cap on a request body does not apply to
+the large cached executables kache uploads. Caddy gets its certificate from Let's
+Encrypt through the Cloudflare DNS challenge.
 
 References:
 [kache action](https://github.com/kunobi-ninja/kache-action/tree/ad7317540dcdd71c904f7a60a87b620a0c0e67ed),
