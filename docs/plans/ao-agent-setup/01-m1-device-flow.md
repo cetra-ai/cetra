@@ -84,9 +84,9 @@ D1 (store, codes, limits) ──► D2 (routes, API types, OpenAPI, specs) ─�
 
 D3 and D4 do not depend on each other and touch disjoint files; they may run in parallel after D2. Files per phase:
 - D1: `crates/server/src/auth/{device.rs (new), mod.rs, limits.rs}`, `crates/server/src/api/common.rs`, `crates/server/src/http/{error.rs, mod.rs}`, `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs`.
-- D2: `crates/server/src/routes/{device.rs (new), mod.rs}`, `crates/server/src/api/{device.rs (new), mod.rs, openapi.rs}`, `crates/server/src/http/{access.rs, csrf.rs, access_suite.rs}`, `crates/server/src/meta/orgs.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/{openapi.rs, api_examples.rs}`, `fixtures/api/static/device-request.json` (new), `docs/spec/08-auth.md`, `docs/spec/09-api.md`.
+- D2: `website/src/content/docs/docs/reference/api/overview.mdx`, `crates/server/src/routes/{device.rs (new), mod.rs}`, `crates/server/src/api/{device.rs (new), mod.rs, openapi.rs}`, `crates/server/src/http/{access.rs, csrf.rs, access_suite.rs}`, `crates/server/src/meta/orgs.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/{openapi.rs, api_examples.rs}`, `fixtures/api/static/device-request.json` (new), `docs/spec/08-auth.md`, `docs/spec/09-api.md`.
 - D3: `web/src/routes/device.tsx` and `device.test.tsx` (new); `web/src/routes/cli-auth.tsx`, `cli-auth.test.tsx`, `web/src/lib/cli-auth.ts` and `cli-auth.test.ts` (deleted); `web/src/lib/{external-navigation.ts, external-navigation.test.ts, redirect.test.ts}`; `web/src/routes/invite/$token.test.tsx`; `web/src/routes/login.test.tsx` (only if it sets `submit`); `web/src/mocks/writes.ts`; `crates/ui/src/lib.rs`; `docs/spec/11-ui.md`; `docs/spec/12-operations.md`.
-- D4: `crates/cli/src/{login.rs, main.rs}`, `crates/cli/Cargo.toml`, `docs/spec/08-auth.md` (the CLI login bullet only), `docs/spec/09-api.md` (the CLI row only), `docs/mvp-decisions.md`, `CHANGELOG.md`, `website/src/content/docs/docs/platform/api-keys.mdx`, `docs/roadmap.md`.
+- D4: `crates/cli/src/{login.rs, main.rs}`, `crates/cli/Cargo.toml`, `Cargo.lock`, `docs/spec/08-auth.md` (the CLI login bullet only), `docs/spec/09-api.md` (the CLI row only), `docs/mvp-decisions.md`, `CHANGELOG.md`, `website/src/content/docs/docs/platform/api-keys.mdx`, `docs/roadmap.md`.
 
 D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2's commit, so there is no conflict.
 
@@ -135,7 +135,25 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    ```
 
    In `problem()` it maps to `Problem::new(*code, None)`, as `Forbidden { code }` does.
-3. **Limiter** (`auth/limits.rs`). Add the field `pub(crate) device_code: KeyedLimiter<IpAddr>` to `Limits`. In `Limits::new` set it to `KeyedLimiter::new(Bucket { capacity: 10, per: Duration::from_secs(60) }, MAX_KEYS)`, and prune it in `Limits::prune` like `sso_discover`. Doc comment: "`POST /api/auth/device/code`: 10 a minute per client IP (D-AO-3)."
+3. **Limiters** (`auth/limits.rs`). Add two fields to `Limits`, set them in `Limits::new`, and prune them in `Limits::prune` like `sso_discover`:
+   - `pub(crate) device_code: KeyedLimiter<IpAddr>`: `KeyedLimiter::new(Bucket { capacity: 10, per: Duration::from_secs(60) }, MAX_KEYS)`. Doc comment: "`POST /api/auth/device/code`: 10 a minute per client IP, an IPv6 address counted by its /64 (D-AO-3)."
+   - `pub(crate) device_lookup: KeyedLimiter<Uuid>`: `Bucket { capacity: 30, per: Duration::from_secs(60) }`. Doc comment: "Device-code lookups, approvals and denials: 30 a minute per user, so a signed-in user cannot enumerate user codes (D-AO-3)."
+
+   Add, in `limits.rs`, the function the `device_code` call site uses for its key:
+
+   ```rust
+   /// The limiter key of a client address: an IPv6 address counts by its /64, since one
+   /// host usually holds the whole /64; an IPv4 address counts by itself.
+   pub(crate) fn network_key(ip: IpAddr) -> IpAddr {
+       match ip {
+           IpAddr::V4(_) => ip,
+           IpAddr::V6(v6) => {
+               let s = v6.segments();
+               IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+           }
+       }
+   }
+   ```
 4. **The store** (`auth/device.rs`, new; add `pub(crate) mod device;` to `auth/mod.rs` in alphabetical order). Write these contracts exactly:
 
    ```rust
@@ -158,6 +176,8 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    pub(crate) const POLL_INTERVAL_S: u64 = 5;
    /// What `slow_down` adds to a code's interval, in seconds.
    pub(crate) const SLOW_DOWN_STEP_S: u64 = 5;
+   /// How long an approval may take between `claim` and `complete`.
+   pub(crate) const APPROVING_TTL_NS: i64 = 60 * 1_000_000_000;
    /// At most this many codes at once (pending, being approved or approved and not collected).
    pub(crate) const MAX_CODES: usize = 10_000;
    /// The user-code letters: no vowels, so a code never spells a word (RFC 8628 § 6.1).
@@ -196,7 +216,8 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
        pub(crate) created_at: i64,
    }
 
-   /// The answer to one poll.
+   /// The answer to one poll. `Debug` is derived: `Grant`'s own `Debug` hides the secrets.
+   #[derive(Debug)]
    pub(crate) enum Poll { Pending, SlowDown, Denied, Expired, Granted(Grant) }
 
    #[derive(Debug, thiserror::Error)]
@@ -219,8 +240,9 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
        pub(crate) fn issue(&self, purpose: Purpose, host: Option<String>, now: i64) -> Result<Issued, DeviceError>;
        /// A pending, unexpired code; `None` otherwise.
        pub(crate) fn pending(&self, user_code: &str, now: i64) -> Option<Pending>;
-       /// Pending → approving. While approving, `deny`, `claim` and `sweep` leave it alone,
-       /// and a poll answers `Pending`.
+       /// Pending → approving. While approving (at most `APPROVING_TTL_NS`), `deny` and `claim`
+       /// refuse it and a poll answers `Pending`. An approval older than that falls back to
+       /// pending: its handler was dropped (a closed tab) and never called `release` or `complete`.
        pub(crate) fn claim(&self, user_code: &str, now: i64) -> Result<Pending, DeviceError>;
        /// Approving → pending, after the minting failed.
        pub(crate) fn release(&self, user_code: &str);
@@ -244,7 +266,8 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
      - `by_device: HashMap<String, Entry>`, keyed by `hash_token(device_code)`;
      - `by_user: HashMap<String, String>`, from the normalized user code to that hash.
    - **`Entry`** has `user_code` (normalized), `purpose`, `host`, `created_at`, `expires_at`, `interval_s: u64`, `last_poll: Option<i64>` and `state: State`.
-   - **`State`** is `Pending`, `Approving`, `Denied` or `Approved(Grant)`.
+   - **`State`** is `Pending`, `Approving { since: i64 }`, `Denied` or `Approved(Grant)`.
+   - **Stale approvals.** Every method that takes `now` (`pending`, `claim`, `deny`, `poll`, `sweep`) first turns an `Approving { since }` with `now >= since + APPROVING_TTL_NS` back into `Pending`. `complete` takes no `now`, and accepts any approving entry, because its handler is still running.
    - **The lock.** Lock the mutex with a helper that recovers a poisoned lock (`into_inner` on the poison error), as `auth/limits.rs` does with its private `lock`. Copy that helper into `device.rs`; do not change `limits.rs` for it.
 6. **`issue`:**
    1. If `by_device.len() >= MAX_CODES`, run the sweep logic first. If it is still full, return `DeviceError::Full`.
@@ -257,17 +280,17 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    1. Normalize the code; an invalid one is `None` or `NotFound`.
    2. Find the entry. A missing entry, or one with `now >= expires_at` and not `Approving`, is `None` or `NotFound`.
    3. `pending` returns `Some` only in `State::Pending`.
-   4. `claim` moves `Pending` to `Approving` and returns the `Pending` view; in any other state it returns `NotFound`.
+   4. `claim` moves `Pending` to `Approving { since: now }` and returns the `Pending` view; in any other state it returns `NotFound`.
    5. `deny` moves `Pending` to `Denied`; in any other state it returns `NotFound`.
 8. **`release`** moves `Approving` back to `Pending` and does nothing in any other state. **`complete`** moves `Approving` to `Approved(grant)`; in any other state, or for an unknown code, it returns `NotFound`.
 9. **`poll(device_code, now)`:**
    1. Look up `hash_token(device_code)`. Missing → `Expired`.
-   2. If `now >= expires_at` and the state is neither `Approving` nor `Approved`, remove the entry from both maps and return `Expired`.
+   2. If `now >= expires_at` and the state is `Pending` (after the stale-approval rule), remove the entry from both maps and return `Expired`. A `Denied` entry answers `Denied` even after its expiry; an approving or approved one is never expired here.
    3. **`Approved`:** remove the entry from both maps and return `Granted(grant)`. The grant leaves the store at that moment, so a second poll gets `Expired`.
    4. **`Denied`:** remove the entry and return `Denied`.
-   5. **`Pending` or `Approving`:** if `last_poll` is `Some(t)` and `now - t < interval_s * 1e9`, set `interval_s += SLOW_DOWN_STEP_S` and `last_poll = Some(now)`, and return `SlowDown`. Otherwise set `last_poll = Some(now)` and return `Pending`.
+   5. **`Pending` or `Approving`:** if `last_poll` is `Some(t)` and `now - t < i64::try_from(interval_s).unwrap_or(i64::MAX).saturating_mul(1_000_000_000)` (`unwrap_or` is allowed; it is not `unwrap`), set `interval_s += SLOW_DOWN_STEP_S` and `last_poll = Some(now)`, and return `SlowDown`. Otherwise set `last_poll = Some(now)` and return `Pending`.
 10. **`sweep(now)`:**
-    - Remove every entry whose `expires_at <= now` and whose state is not `Approving`.
+    - Apply the stale-approval rule, then remove every entry whose `expires_at <= now` and whose state is `Pending` or `Denied`.
     - Also remove an `Approved` entry whose `expires_at + CODE_TTL_NS <= now`: a grant nobody collected within 10 minutes after the expiry is dropped.
 
     `by_user` is kept in step.
@@ -282,16 +305,24 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
 - `normalize_user_code` accepts `bcdf-ghjk`, `BCDFGHJK` and `BCDF-GHJK`, and refuses `BCDF-GHJ`, `BCDF-GHJA` (a vowel), `BCDF GHJK` and the empty string.
 - **Polling.** A fresh code polls `Pending`. A second poll 1 s later is `SlowDown`. A poll 10 s after that is `Pending`, because the interval is now 10 s. A poll 5 s after that is `SlowDown`.
 - **Approve and collect.** `claim`, `complete` then `poll` gives `Granted` with the same token. A second `poll` gives `Expired`.
-- **While approving.** A poll answers `Pending`. `deny` returns `NotFound`. `sweep` after the expiry keeps the entry, and `complete` still succeeds.
+- **While approving.** A poll answers `Pending`. `deny` returns `NotFound`. With a code claimed 30 s before its expiry, `sweep` 10 s after the expiry keeps the entry, and `complete` still succeeds.
+- **Stale approval.** `claim`, then 61 s later a second `claim` succeeds: the first approval was dropped. `sweep` past the expiry and 61 s after a `claim` removes the entry.
+- **Denied late.** `deny`, then a poll after the expiry gives `Denied`.
 - **Release.** `claim` then `release` gives `Pending` again, and a second `claim` works.
 - **Deny.** `deny` then `poll` gives `Denied`, and the next poll gives `Expired`.
 - **Expiry.** After `CODE_TTL_NS`, `pending` is `None`, `claim` is `NotFound`, and `poll` is `Expired`.
 - **Sweep.** It removes expired pending entries. It removes an approved entry only after `expires_at + CODE_TTL_NS`.
 - **Full.** With `MAX_CODES` entries, `issue` is `Full`. After they expire, `issue` succeeds, because it sweeps first. Build the full table with a test-only loop of `issue` calls.
 - **`Debug`.** `format!("{:?}", grant)` and `format!("{:?}", issued)` contain neither the token, the key nor the device code.
-- **Limiter.** In `auth/limits.rs`'s tests, the 11th `device_code.check` from one IP within a minute is refused, and another IP passes.
+- **Limiters** (`auth/limits.rs`'s tests):
+  - the 11th `device_code.check` from one IP within a minute is refused, and another IP passes;
+  - `network_key` maps `2001:db8:1:2:3:4:5:6` and `2001:db8:1:2:ff::1` to the same key, and leaves `192.0.2.1` alone;
+  - the 31st `device_lookup.check` for one user id within a minute is refused.
+- **Problem codes.**
+  - `api/common.rs`'s tests: the four new codes have status 400 and phrase "Bad Request".
+  - `http/error.rs`'s tests: `ApiError::DeviceGrant { code: ProblemCode::SlowDown }` gives a 400 problem with code `slow_down`.
 
-**Done when:** the code is written as above and committed. It is compiled and tested in the final check (check rule).
+**Done when:** the code is written as above and committed. It is compiled and tested in the final check (check rule). D1 alone would not pass `just lint`: the store and the limiters are unused until D2.
 
 **Commit:** `Add the device authorization store`
 
@@ -317,6 +348,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
 - `fixtures/api/static/device-request.json` (new)
 - `docs/spec/08-auth.md`
 - `docs/spec/09-api.md`
+- `website/src/content/docs/docs/reference/api/overview.mdx`
 
 **Steps.**
 1. **API types** (`api/device.rs`; `pub mod device;` in `api/mod.rs`, alphabetical). Every type derives `Debug` (except where hand-written below), `Clone`, `Serialize`, `Deserialize` and `ToSchema`. Requests use `#[serde(deny_unknown_fields)]`.
@@ -387,6 +419,11 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    ```
 
    Copy the `time_serde` import and the `ProjectId` type from `api/keys.rs` or `api/account.rs`, whichever uses them.
+
+   In `routes/device.rs`, write three private conversion functions:
+   - `purpose_in(DevicePurpose) -> Purpose`;
+   - `purpose_out(Purpose) -> DevicePurpose`;
+   - `project_out(GrantProject) -> DeviceGrantProject`, field by field: `id`, `org_slug`, `slug`, `name`.
 2. **Routes** (`routes/device.rs`; `pub(crate) mod device;` in `routes/mod.rs`, alphabetical; `routes.extend(crate::routes::device::routes())` in `http/access.rs` `routes()`, after the `auth` line). Five `RouteDef`s, all `documented: true`:
 
    | Method, path | Access | Handler |
@@ -397,8 +434,11 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    | `POST /api/auth/device/{user_code}/approve` | `Access::User { session_only: true }` | `post(approve)` |
    | `POST /api/auth/device/{user_code}/deny` | `Access::User { session_only: true }` | `post(deny)` |
 
+   **Extractors.** Handlers use `State(state): State<AppState>`, `ClientIp(ip): ClientIp`, `Extension(principal): Extension<Principal>`, `error::Path(user_code): error::Path<String>` and `error::Json(body): error::Json<T>`, as `routes/tokens.rs` does. Never axum's own `Path` or `Json`.
+
+   **The three session handlers** start with `let user = session_user(&principal)?;`, then `state.limits.device_lookup.check(&user.id, now)`. A refusal maps to `ApiError::RateLimited { retry_after_s: retry.0.as_secs().max(1) }`.
 3. **`issue_code(State, ClientIp(ip), error::Json<DeviceCodeRequest>)`:**
-   1. `state.limits.device_code.check(&ip, now)`. A refusal returns `ApiError::RateLimited { retry_after_s: retry.0.as_secs().max(1) }`.
+   1. `state.limits.device_code.check(&network_key(ip), now)`. A refusal returns `ApiError::RateLimited { retry_after_s: retry.0.as_secs().max(1) }`.
    2. **Host.** Keep only `[A-Za-z0-9.-]` characters, truncate to 64 characters, and use `None` when nothing is left. This is the CLI's `sanitise_host` rule; write it here as a private `fn sanitise_host(raw: &str) -> Option<String>`.
    3. `state.device.issue(purpose, host, now)`:
       - `Full` → `ApiError::Unavailable { detail: "too many pending device codes" }`;
@@ -412,29 +452,54 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
    - `SlowDown` → `SlowDown`;
    - `Denied` → `AccessDenied`;
    - `Expired` → `ExpiredToken`;
-   - `Granted(g)` → `200 DeviceGrant { server: state.config.public_url.origin().to_owned(), token: g.token, project: g.project.map(..), ingest_key: g.ingest_key }`.
-5. **`get_request(State, Path(user_code))`:** `state.device.pending(&user_code, now)`. `None` is `ApiError::NotFound`; otherwise `200 DeviceRequest`.
-6. **`approve(State, Extension(principal), Path(user_code), error::Json<DeviceApproveRequest>)`:**
-   1. `let user = session_user(&principal)?;`.
-   2. `let pending = state.device.claim(&user_code, now)` — `NotFound` → `ApiError::NotFound`. From here on, every early return calls `state.device.release(&user_code)` first.
-   3. **`Login`.** If `project_id` is `Some`, release and return a 400 field error on `project_id` with "only for init".
+   - `Granted(g)` → `200 DeviceGrant { server: state.config.public_url.origin().to_owned(), token: g.token, project: g.project.map(project_out), ingest_key: g.ingest_key }`, with the headers `Cache-Control: no-store` and `Pragma: no-cache` (RFC 6749 § 5.1). The handler returns `Result<Response, ApiError>` and builds that answer as `([(header::CACHE_CONTROL, "no-store"), (header::PRAGMA, "no-cache")], error::Json(grant)).into_response()`.
+5. **`get_request`:** after the user and limiter lines, call `state.device.pending(&user_code, now)`. `None` is `ApiError::NotFound`; otherwise answer `200 DeviceRequest { purpose: purpose_out(p.purpose), host: p.host, created_at: p.created_at }`.
+6. **`approve`** (state, principal, path, and `error::Json<DeviceApproveRequest>`). It is split in two, so that no `?` can skip the release:
+
+   ```rust
+   async fn approve(/* extractors */) -> Result<StatusCode, ApiError> {
+       let user = session_user(&principal)?;
+       let now = state.clock.now_ns();
+       state.limits.device_lookup.check(&user.id, now).map_err(/* RateLimited */)?;
+       let pending = state.device.claim(&user_code, now).map_err(|_| ApiError::NotFound)?;
+       match mint(&state, user, &pending, body, now).await {
+           Ok(minted) => { /* steps 6.4 to 6.6 */ }
+           Err(error) => {
+               state.device.release(&user_code);
+               Err(error)
+           }
+       }
+   }
+
+   /// The grant, the PAT's id, and for `init` the key's id and its project.
+   async fn mint(state: &AppState, user: &AuthUser, pending: &Pending, body: DeviceApproveRequest, now: i64)
+       -> Result<(Grant, Uuid, Option<(Uuid, ProjectId)>), ApiError>;
+   ```
+
+   If the handler future is dropped mid-way, because the tab closed, D1's stale-approval rule puts the code back to pending after 60 s.
+
+   **`mint`** may use `?` freely:
+   1. **`Login`.** If `body.project_id` is `Some`, return `field_error("project_id", "only for init")` (`http/error.rs`).
       - Mint a PAT as `routes/tokens.rs` `create_token` does: `secret::new_key(KeyKind::Personal)`, then `personal_tokens::insert_token` with `NewToken { user_id, name, prefix, hash, scopes: vec![KeyScope::Read, KeyScope::Write], expires_at: Some(now + NINETY_DAYS_NS) }`.
       - The name is `CLI on <host>`, or `CLI` without a host.
       - Grant `{ token, project: None, ingest_key: None }`.
-   4. **`Init`.** If `project_id` is `None`, release and return a 400 field error on `project_id` with "required for init".
-      - `let access = user_project(&state, user, &project_id.to_string(), ProjectPerm::ManageSettings).await` — release on error and return it, so 404 or 403 per D138.
-      - Read the org slug of `access.project.org_id`, with the same reader call that `user_project` uses (`org_by_id`).
+   2. **`Init`.** If `body.project_id` is `None`, return `field_error("project_id", "required for init")`.
+      - `let access = user_project(state, user, &project_id.to_string(), ProjectPerm::ManageSettings).await?;` answers 404 or 403 per D138.
+      - `let org = org_by_id(state.meta.reader(), access.project.org_id).await?`; `None` is `ApiError::NotFound`.
       - In **one** `state.meta.write` transaction, insert:
         - the PAT: scopes `[KeyScope::Read]`, expiry now + 90 days, name `CLI init on <host>` / `CLI init`;
         - the API key: `NewApiKey { project_id: access.project.id, kind: "secret", scopes: vec![KeyScope::Ingest], name: Some(<same name>), prefix, hash, created_by: user.id, expires_at: None }` (`secret::new_key(KeyKind::Secret)`).
-      - Grant `{ token, project: Some(GrantProject { id, org_slug, slug, name }), ingest_key: Some(key) }`.
-   5. A `meta` error releases and returns `ApiError::from(error)`.
-   6. `state.device.complete(&user_code, grant)`. A `NotFound` here cannot happen, because an approving entry is never swept. Map it to `ApiError::Internal` anyway.
-   7. Audit: `tracing::info!(target: "audit", %token_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved")`. For `init`, add `%key_id` and `project_id = %…`. Never the codes or secrets.
-   8. Answer `204`.
+      - Grant `{ token, project: Some(GrantProject { id, org_slug: org.slug, slug, name }), ingest_key: Some(key) }`.
+   3. A `meta` error returns `ApiError::from(error)`, and a `secret::new_key` error returns `ApiError::Internal(Box::new(e))`.
+
+   **`approve`, on `Ok`:**
+
+   4. `state.device.complete(&user_code, grant)`. A `NotFound` here cannot happen, because `complete` accepts any approving entry. Map it to `ApiError::Internal` anyway.
+   5. Audit: `tracing::info!(target: "audit", %token_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved")`. For `init`, add `%key_id` and `project_id = %…`. Never the codes or secrets.
+   6. Answer `204`.
 
    `const NINETY_DAYS_NS: i64 = 90 * 24 * 60 * 60 * 1_000_000_000;` is a private const in `routes/device.rs`.
-7. **`deny`:** `session_user`, then `state.device.deny(&user_code, now)`. `NotFound` → `ApiError::NotFound`. Audit `"device code denied"` with `user_id`. Answer `204`.
+7. **`deny`:** the user and limiter lines, then `state.device.deny(&user_code, now)`. `NotFound` → `ApiError::NotFound`. Audit `"device code denied"` with `user_id`. Answer `204`.
 8. **CSRF** (`http/csrf.rs` `must_check`). Exempt exactly the two public paths, with the comment "The device flow's CLI calls carry no cookie and no Origin (D-AO-3)":
 
    ```rust
@@ -447,7 +512,7 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
 9. **Reserved slugs** (`meta/orgs.rs` `RESERVED`). Replace `"cli-auth"` with `"device"`, keeping the list's order rule. Update the test `slugs_match_the_shape_and_the_reserved_list` the same way.
 10. **Access suite** (`http/access_suite.rs` `concrete_path`). Add `.replace("{user_code}", "BCDF-GHJK")` next to the other replacements.
 11. **OpenAPI** (`api/openapi.rs`):
-    - Insert the seven types in `collect_schemas`.
+    - Insert the eight types (`DevicePurpose`, `DeviceCodeRequest`, `DeviceCodeResponse`, `DeviceTokenRequest`, `DeviceGrantProject`, `DeviceGrant`, `DeviceRequest`, `DeviceApproveRequest`) in `collect_schemas`, with a `use crate::api::device::{…};` at the top of `openapi.rs`.
     - Add five operations in `auth_paths` with tag `auth`, ids `post_device_code`, `post_device_token`, `get_device_request`, `post_device_approve` and `post_device_deny`.
     - Securities: the first two empty, the last three the `session` requirement.
     - Request bodies: `DeviceCodeRequest`, `DeviceTokenRequest` and `DeviceApproveRequest`.
@@ -472,24 +537,34 @@ D2 and D4 both edit specs 08 and 09, in different paragraphs. D4 starts from D2'
     - **Line 41 (CSRF).** After "…whatever its credentials (…)", add: "except the device flow's `POST /api/auth/device/code` and `POST /api/auth/device/token`, which carry no cookie (D-AO-3)".
     - **Line 27 (rate limits).** Add "Device codes: 10 per minute per client IP."
     - **Line 133 (session-only).** Add: "Approving a device code (`POST /api/auth/device/{user_code}/approve`) mints a PAT, and for `init` an ingest-only key, with the session (D-AO-3)."
-    - **New subsection after the CLI login bullet**, `### Device authorization (D-AO-3)`. It holds design § Device flow (M1) as prose and the routes table, with the codes, polling, approval, scopes, names, hand-over, bounds, CSRF and phishing rules, and the problem codes. Leave the CLI login bullet itself to D4.
+    - **New subsection after the CLI login bullet**, `### Device authorization (D-AO-3)`. It holds design § Device flow (M1) as prose and the routes table, with:
+      - the codes, polling, approval, scopes and names;
+      - the hand-over, including that a grant whose answer was lost leaves its PAT and key on the account and project pages under those names, where the user can revoke them;
+      - the bounds and limits: 10 codes a minute per IP or IPv6 /64, 30 lookups a minute per user, 60 s for an approval in progress;
+      - the CSRF and phishing rules, and the problem codes.
+
+      Leave the CLI login bullet itself to D4.
 15. **Spec 09:**
     - **§ Auth table.** Add the five routes in the existing row style.
     - **§ Conventions, errors.** Add `authorization_pending`, `slow_down`, `access_denied`, `expired_token` (400; device flow) to the list of codes.
+    - **Line 10** (the `/api/auth/*` row): add "device flow" to its list.
+16. **`website/src/content/docs/docs/reference/api/overview.mdx`.** Add one row per new problem code to its problem-code table (about lines 56–67): status 400, with spec 09's wording.
 
 **Tests:**
 - **Inline in `routes/device.rs`** (`TestApp`, `app.seed()`, the manual clock, `TestRequest` with `.origin(None)` on the two public calls so that the CSRF exemption is really exercised):
   - `post_device_code` with no `Origin` answers 200: the URIs start with the public URL, `interval` is 5, `expires_in` is 600.
-  - The 11th code from the same `.peer(ip)` within a minute is 429; another IP gets 200.
+  - The 11th code from the same `.peer(ip)` within a minute is 429; another IP gets 200; two IPv6 peers of one /64 share the bucket.
+  - The 31st `GET /api/auth/device/{code}` by one user within a minute is 429.
+  - The grant answer carries `Cache-Control: no-store`.
   - Polling a new code is a 400 problem `authorization_pending`. Polling again at once is `slow_down`. An unknown device code is `expired_token`.
   - **Login flow.** `GET /api/auth/device/{code}` with the seeded cookie is `{purpose: "login", host}`. Approve with `{}` is 204. The poll returns `server` = public origin, a `pat-cetra-` token, and no project or key. `GET /api/auth/me` with that bearer answers 200. The token's row has scopes `read, write`, name `CLI on <host>`, and expires 90 days after `now`. A second poll is `expired_token`.
   - **Init flow.** Approve with the seeded project's id. The grant has the project (`acme`, `support-bot`) and an `sk-cetra-` key. The key's row has scopes `ingest` only and the name `CLI init on <host>`. The PAT has scope `read` only.
   - Init approve without `project_id` is 400 on `project_id`; login approve with one is 400. The code stays pending after both: `GET` still answers 200.
-  - Init approve by an org member (role `member`, `app.add_member`) is 403. For a project of another org it is 404. The code stays pending.
+  - Init approve by an org member (role `member`, `app.add_member`) is 403. For a project of another org it is 404: create it with `test_support::second_org(app, slug, owner_email)`, which returns `(OrgId, Member)`, then insert a project in that org the way `second_org`'s callers do. The seeded user is an instance admin, and instance admins have no implicit access to other orgs, so the 404 holds. The code stays pending after both.
   - Deny gives 204, then the poll gives `access_denied`. Deny of an unknown code is 404.
   - A bearer PAT on `GET`, approve and deny is 403, because they are session-only.
   - A session approve with no `Origin` is 403, because CSRF still applies to the session.
-  - The approve response and the logs contain neither the token nor the key: use `assert_logs_clean` with the grant's secrets as needles, after collecting the grant.
+  - The logs contain neither the token nor the key. Wrap approve and the poll in `let (grant, logs) = capture_logs(async { … }).await;`, return the `DeviceGrant` from the block, then assert `!logs.contains(&grant.token)` and `!logs.contains(<the key>)`, and that the approve body is empty. `assert_logs_clean` does not fit here: it needs the needles before the block runs.
 - **The access suite** covers the five routes automatically once `concrete_path` knows `{user_code}`.
 - **`tests/openapi.rs`** and **`tests/api_examples.rs`** cover the contract and the fixture.
 
@@ -536,16 +611,20 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
      - for `init`: "This creates a read-only personal access token, valid for 90 days, and a key that can only send traces to the project you choose."
 4. **Project picker** (`purpose === "init"` only):
    - **Orgs.** `me.orgs` without `demo` orgs, from `meQuery`.
-   - **Projects.** One query per org: `$api.queryOptions("get", "/api/v1/orgs/{org}/projects", { params: { path: { org: slug }, query: { limit: 1000 } } })` through TanStack's `useQueries`.
+   - **Projects.** One query per org, through TanStack's `useQueries`: `const options = (slug: string) => $api.queryOptions("get", "/api/v1/orgs/{org}/projects", { params: { path: { org: slug }, query: { limit: 1000 } } })`. After a project is created, invalidate with `queryClient.invalidateQueries({ queryKey: options(slug).queryKey })`: `projectListOptions(org)` keys on `limit: 50` and would not refresh this query. The page's tests stub the call with `server.use`, so the dev-mock manifest does not need a `limit=1000` entry.
    - **Eligible.** A project is eligible when its `role` is `admin` or `owner`.
    - **The list.** A `RadioGroup`, grouped by org name, of eligible projects labelled `<org name> / <project name>`.
    - **Preselection.** The project whose `<org slug>/<project slug>` equals `search.project`; else the only eligible project when there is exactly one.
    - **"New project"** button, shown when at least one org has role `owner` or `admin`. It opens an inline form with:
      - a `Select` of those orgs, defaulting to the first;
      - a name field;
-     - "Create", which calls `$api.useMutation("post", "/api/v1/orgs/{org}/projects", { gcTime: 0 })` with `{ name }`.
+     - "Create", which calls `$api.useMutation("post", "/api/v1/orgs/{org}/projects")` with `{ name }`.
 
-     On success, invalidate that org's projects query and select the new project. Map errors as `components/settings/new-project-dialog.tsx` does: `plan_limit` gives "Your plan does not allow another project.", 409 gives "A project with this name already exists.", 403 gives "Only admins and owners can create projects.", and anything else `problemMessage(error, "Could not create the project.")`.
+     On success, invalidate that org's projects query (above) and select the new project. Errors:
+     - `plan_limit`: `problemMessage(error, "Your plan does not allow another project.")`, as `new-project-dialog.tsx` does;
+     - 409: "A project with this name already exists. Choose another name." This text is new on purpose: this form sends no slug, so a 409 comes from the name;
+     - 403: "Only admins and owners can create projects.";
+     - anything else: `problemMessage(error, "Could not create the project.")`.
    - **No eligible project and no org to create in:** "You need the admin role on a project to connect the CLI. Ask an admin of your organization." Approve stays disabled.
 5. **Actions:**
    - **Approve** (primary): `$api.useMutation("post", "/api/auth/device/{user_code}/approve", { gcTime: 0 })` with body `{}` for login and `{ project_id }` for init. Disabled for init until a project is selected.
@@ -558,10 +637,12 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
    - Remove the form test and the `submit:` members from `external-navigation.test.ts`, `routes/invite/$token.test.tsx`, and `routes/login.test.tsx` if it has one.
    - Run `grep -rn "submitExternalForm\|submit:" web/src` to find every other use. If a non-test file still uses them, stop and report.
 8. **`redirect.test.ts`.** Change `isPublicPath("/cli-auth")` to `isPublicPath("/device")`; it is still expected to be `false`.
-9. **`web/src/mocks/writes.ts`.** Add the four POST operations (`post_device_code`, `post_device_token`, `post_device_approve`, `post_device_deny`) to `WRITE_OPERATIONS` in its order, with handlers:
-   - `post_device_code`: `HttpResponse.json({ device_code: "mock-device-code-0000000000000000000000000000", user_code: "BCDF-GHJK", verification_uri: "http://localhost:5173/device", verification_uri_complete: "http://localhost:5173/device?code=BCDF-GHJK", expires_in: 600, interval: 5 })`;
-   - `post_device_token`: the 400 problem `authorization_pending`, built the way other write mocks build problems in that file;
-   - approve and deny: `noContent()`.
+9. **`web/src/mocks/writes.ts`.** It has two structures, and `writes.test.ts` checks both: the `WRITE_OPERATIONS` array (about line 62) and the `RESPONSES` record (about line 540). Add the four ids to `WRITE_OPERATIONS`, after `post_invite_accept`, and four keys to `RESPONSES`:
+   - `post_device_code: () => HttpResponse.json({ device_code: "mock-device-code-0000000000000000000000000000", user_code: "BCDF-GHJK", verification_uri: "http://localhost:5173/device", verification_uri_complete: "http://localhost:5173/device?code=BCDF-GHJK", expires_in: 600, interval: 5 })`;
+   - `post_device_token: () => problem(400, "authorization_pending")`, with the file's `problem` helper (about line 1065);
+   - `post_device_approve: () => noContent()` and `post_device_deny: () => noContent()`.
+
+   `writes.test.ts` needs no edit: it reads `openapi.json` and passes once that is regenerated.
 10. **CSP** (`crates/ui/src/lib.rs`).
     - Remove ` http://127.0.0.1:*` from `form-action` in `CONTENT_SECURITY_POLICY_VALUE`, which becomes `form-action 'self'`, and from its test.
     - Update the comment that cites the CLI callback.
@@ -569,6 +650,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 12. **Spec 12 line 165.** The CSP becomes `form-action 'self'`; remove the sentence about the loopback callback.
 
 **Tests** (`device.test.tsx`, `renderApp`, `server.use` for every call; the vitest server fails on unhandled requests):
+- `/device?code=1234&project=123/456` keeps both values as strings (`"1234"`, `"123/456"`), and `?project=1e3` gives the string `"1e3"`. Read the raw query string with `router.history.location.search` and `URLSearchParams`, as `cli-auth.tsx` did, if `validateSearch` cannot give that.
 - A signed-out visit to `/device?code=BCDF-GHJK` redirects to `/login` with `redirect=/device?code=BCDF-GHJK`.
 - Without a code, typing `bcdf-ghjk` and pressing Continue navigates to `/device?code=bcdf-ghjk`.
 - An unknown code (404) shows the unknown-or-expired text.
@@ -596,6 +678,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 - `crates/cli/src/login.rs`
 - `crates/cli/src/main.rs` (the `Login` doc comments only)
 - `crates/cli/Cargo.toml`
+- `Cargo.lock` (only the `cetra-cli` entry, as cargo rewrites it)
 - `docs/spec/08-auth.md` (the CLI login bullet)
 - `docs/spec/09-api.md` (the CLI row)
 - `docs/mvp-decisions.md`
@@ -607,8 +690,11 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 1. **`login.rs`** header doc: "`cetra login` and `cetra logout` (spec 08 § Device authorization, D-AO-4). Login asks the server for a device code, prints the URL and the code, and polls `POST /api/auth/device/token` until the user approves, denies or the code expires. The token is checked with `GET /api/auth/me` and stored in the credentials file. It is never logged."
 2. **Delete** everything that code facts § 14 lists as dead after the device flow:
    - `Callback`, `Head`, `WAIT`, `READ_TIMEOUT`, `HEAD_LIMIT`, `BODY_LIMIT`, `PAGE`, `CANCELLED_PAGE`;
-   - `cli_auth_url`, `new_state`, `wait_for_callback`, `handle_callback`, `read_head`, `parse_length`, `parse_head`, `callback_for`, `read_body`, `is_form`, `token_callback`, `respond`, `first_field`, `form_fields`, `form_decode`, `query_value`;
-   - their tests, and their imports.
+   - `cli_auth_url`, `new_state`, `wait_for_callback`, `handle_callback`, `read_head`, `parse_length`, `parse_head`, `callback_for`, `read_body`, `is_form`, `token_callback`, `respond`, `first_field`, `form_fields`, `form_decode`;
+   - their tests;
+   - the imports nothing uses afterwards: `base64`, `URL_SAFE_NO_PAD`, `rand::TryRng`, `tokio::io::{AsyncReadExt, AsyncWriteExt}`, `tokio::net::{TcpListener, TcpStream}`. `Duration` stays.
+
+   Keep the test helpers `LineWriter` and `query_value` (the real-server test uses them).
 
    Keep:
    - `sanitise_host`, `local_host`, `open_browser`, `browser_command`, `verify`, `revoke`, `http_client`, `warn`, `logout`;
@@ -641,7 +727,25 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
    Write `Debug` by hand for `CodeAnswer` and `Grant`, hiding `device_code` and `token`; `TokenRequest` needs no `Debug`.
 4. **`pub(crate) async fn login(raw, no_browser, credentials, mut output)`**, with the same signature:
    1. `let server = server_url(raw)?;` (unchanged; the refused-URL test still holds).
-   2. `POST {server}/api/auth/device/code` with `CodeRequest { purpose: "login", host: local_host().and_then(sanitise_host) }` (adapt to their actual signatures). A non-200 answer bails with `"the server refused a sign-in code (HTTP <status>)"`, and a network error with the context `"requesting a sign-in code"`.
+   2. Request the code exactly so (no `Origin`, no `Authorization`; the tests check both):
+
+      ```rust
+      let host = local_host().as_deref().and_then(sanitise_host);
+      let client = http_client()?;
+      let response = client
+          .post(format!("{server}/api/auth/device/code"))
+          .json(&CodeRequest { purpose: "login", host: host.as_deref() })
+          .send()
+          .await
+          .context("requesting a sign-in code")?;
+      let status = response.status();
+      if status != reqwest::StatusCode::OK {
+          anyhow::bail!("the server refused a sign-in code (HTTP {})", status.as_u16());
+      }
+      let answer: CodeAnswer = response.json().await.context("reading the sign-in code")?;
+      ```
+
+      If `http_client` does not return a `Result`, drop its `?`. Each poll is built the same way, against `/api/auth/device/token` with `TokenRequest`, and passes `status.as_u16()` and `response.bytes().await` to `step`.
    3. Write two lines to `output`:
       - line 1: `verification_uri_complete`;
       - line 2: `Code: <user_code>`.
@@ -666,7 +770,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 5. **`main.rs`.** Change only the `Login` doc comments:
    - command: `/// Sign in with a code you approve in the browser, and save a personal access token for a server.` and `/// The token expires after 90 days. Run \`cetra login\` again when it does.`;
    - `--no-browser`: `/// Print the sign-in URL and code, and do not open a browser.`
-6. **`Cargo.toml`.** If `grep -rn "rand::\|base64" crates/cli/src` finds nothing after step 2, remove `rand` and `base64` from `crates/cli/Cargo.toml` `[dependencies]`.
+6. **`Cargo.toml`.** Remove `rand` and `base64` from `crates/cli/Cargo.toml` `[dependencies]`: only the deleted `new_state` used them. A `base64` hit in a `main.rs` doc comment is prose, not a use. `Cargo.lock` changes with it; cargo rewrites it at the final check, and that commit includes it.
 7. **Spec 08, the CLI login bullet (line 158).** Replace it whole with:
 
    "CLI login: `cetra login --url https://…` gets a device code (§ Device authorization), prints the URL and the code, and opens the browser unless `--no-browser` is given. It polls until the user approves or denies on `/device`, or the code expires after 10 minutes. On approval it gets a `read, write` PAT named `CLI on <host>` (`CLI` without a host) that expires after 90 days, checks it with `GET /api/auth/me`, and saves it in `~/.config/cetra/credentials.toml` (0600) under the URL given to `--url`. Because the token expires after 90 days, `cetra login` must be run again then. `cetra logout` revokes that PAT with `DELETE /api/v1/me/tokens/current`. The device flow works when the browser runs on another machine (SSH, containers) (D-AO-4)."
@@ -674,6 +778,7 @@ The page uses the types of D2's OpenAPI. `schema.gen.ts` is regenerated after D4
 9. **`docs/mvp-decisions.md`.**
    - D-L-9: prefix its decision text with "**Superseded by D-AO-4** (the device flow; the token name and expiry are kept)."
    - D140: append "The CLI sign-in is the device flow since D-AO-4."
+   - D-L-8 (the route list with `/cli-auth?port=&state=&host=`) and every reserved-slug list that names `cli-auth`: replace the route with `/device?code=&project=` and the slug with `device`, followed by "(D-AO-4)". Find them with `grep -n "cli-auth" docs/mvp-decisions.md`.
 10. **`CHANGELOG.md` `[Unreleased]`.**
     - `### Changed`: "`cetra login` signs in with a code you approve in the browser, so it works over SSH and in containers."
     - `### Removed`: "The `/cli-auth` page and the CLI's localhost callback."
