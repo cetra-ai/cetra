@@ -1,6 +1,6 @@
 import { keepPreviousData, useQueries } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { Table2 } from "lucide-react";
+import { Plus, Table2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { $api } from "@/api/client";
 import { datasetTrendsInit } from "@/api/queries-dataset-trends";
@@ -15,6 +15,7 @@ import { DatasetsListEmpty } from "@/components/datasets/datasets-empty";
 import { DatasetsSummary } from "@/components/datasets/datasets-summary";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { PageToolbar } from "@/components/page-toolbar";
 import { TraceLayoutControls } from "@/components/layout-switcher";
 import { useProject } from "@/components/shell/project-context";
 import { Filmstrip } from "@/components/trace/filmstrip";
@@ -162,17 +163,8 @@ function DatasetsPage() {
           }
           start={
             <div className="flex h-full min-h-0 flex-col">
-              <div className="flex min-h-9 shrink-0 items-center gap-3 border-b px-3">
-                <Input
-                  aria-label="Search datasets"
-                  placeholder="Search by name"
-                  value={text}
-                  onChange={(event) => {
-                    setText(event.target.value);
-                  }}
-                  className="h-7 max-w-xs text-body"
-                />
-                <div className="ml-auto">
+              <PageToolbar
+                actions={
                   <DisabledReason
                     reason={canManage ? undefined : "Only members can create datasets"}
                   >
@@ -184,11 +176,22 @@ function DatasetsPage() {
                         setCreating(true);
                       }}
                     >
+                      <Plus />
                       New dataset
                     </Button>
                   </DisabledReason>
-                </div>
-              </div>
+                }
+              >
+                <Input
+                  aria-label="Search datasets"
+                  placeholder="Search by name"
+                  value={text}
+                  onChange={(event) => {
+                    setText(event.target.value);
+                  }}
+                  className="h-7 w-56 text-body"
+                />
+              </PageToolbar>
               {query.isPending ? (
                 <div className="flex flex-col gap-2 p-3">
                   <Skeleton className="h-7 w-full" />
@@ -210,26 +213,28 @@ function DatasetsPage() {
                       <EmptyState icon={Table2} title="No dataset matches" />
                     )
                   ) : (
-                    <DatasetTrendsContext value={trends}>
-                      <DataTable
-                        tableId="datasets"
-                        ariaLabel="Datasets"
-                        columns={DATASET_COLUMNS}
-                        rows={rows}
-                        getRowId={(row) => row.id}
-                        selectedRowId={openId}
-                        onActivate={(row) => {
-                          openDataset(row.id);
-                        }}
-                        onSelectionMove={(row) => {
-                          openDataset(row.id, true);
-                        }}
-                        hasNextPage={query.hasNextPage}
-                        isFetchingNextPage={query.isFetchingNextPage}
-                        fetchNextPage={fetchNextPage}
-                        emptyState={null}
-                      />
-                    </DatasetTrendsContext>
+                    <div className="flex min-h-0 flex-1 flex-col px-3 py-3">
+                      <DatasetTrendsContext value={trends}>
+                        <DataTable
+                          tableId="datasets"
+                          ariaLabel="Datasets"
+                          columns={DATASET_COLUMNS}
+                          rows={rows}
+                          getRowId={(row) => row.id}
+                          selectedRowId={openId}
+                          onActivate={(row) => {
+                            openDataset(row.id);
+                          }}
+                          onSelectionMove={(row) => {
+                            openDataset(row.id, true);
+                          }}
+                          hasNextPage={query.hasNextPage}
+                          isFetchingNextPage={query.isFetchingNextPage}
+                          fetchNextPage={fetchNextPage}
+                          emptyState={null}
+                        />
+                      </DatasetTrendsContext>
+                    </div>
                   )}
                 </>
               )}

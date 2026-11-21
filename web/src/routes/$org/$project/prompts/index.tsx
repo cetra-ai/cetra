@@ -1,12 +1,13 @@
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { FileText } from "lucide-react";
+import { FileText, Plus } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { promptSettingsQuery, promptsInit } from "@/api/queries-prompts";
 import { DataTable } from "@/components/data-table/data-table";
 import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
+import { PageToolbar } from "@/components/page-toolbar";
 import { NewPromptDialog } from "@/components/prompts/new-prompt-dialog";
 import { PROMPT_COLUMNS } from "@/components/prompts/prompt-columns";
 import { ProtectedLabelsDialog } from "@/components/prompts/protected-labels-dialog";
@@ -158,7 +159,31 @@ function PromptsPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex min-h-9 shrink-0 flex-wrap items-center gap-2 border-b px-3 py-1.5">
+      <PageToolbar
+        actions={
+          <>
+            <DisabledReason reason={canProtect ? undefined : SETTINGS_REASON}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={!canProtect}
+                onClick={() => {
+                  setProtecting(true);
+                }}
+              >
+                Protected labels
+              </Button>
+            </DisabledReason>
+            <DisabledReason reason={canManage ? undefined : VIEWER_REASON}>
+              <Button type="button" size="sm" disabled={!canManage} onClick={openCreate}>
+                <Plus />
+                New prompt
+              </Button>
+            </DisabledReason>
+          </>
+        }
+      >
         <Input
           aria-label="Search prompts"
           placeholder="Search by name"
@@ -167,7 +192,7 @@ function PromptsPage() {
             typing.current = true;
             setText(event.target.value);
           }}
-          className="h-7 max-w-xs text-body"
+          className="h-7 w-56 text-body"
         />
         <Select value={label ?? ALL} onValueChange={setLabel}>
           <SelectTrigger aria-label="Label" className="h-7 w-44 text-body">
@@ -195,29 +220,9 @@ function PromptsPage() {
             ))}
           </SelectContent>
         </Select>
-        <div className="ml-auto flex items-center gap-2">
-          <DisabledReason reason={canProtect ? undefined : SETTINGS_REASON}>
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={!canProtect}
-              onClick={() => {
-                setProtecting(true);
-              }}
-            >
-              Protected labels
-            </Button>
-          </DisabledReason>
-          <DisabledReason reason={canManage ? undefined : VIEWER_REASON}>
-            <Button type="button" size="sm" disabled={!canManage} onClick={openCreate}>
-              New prompt
-            </Button>
-          </DisabledReason>
-        </div>
-      </div>
+      </PageToolbar>
       {query.isPending ? (
-        <div className="flex flex-col gap-2 p-3">
+        <div className="flex flex-col gap-2 px-3 py-3">
           <Skeleton className="h-7 w-full" />
           <Skeleton className="h-7 w-full" />
           <Skeleton className="h-7 w-full" />
@@ -233,7 +238,7 @@ function PromptsPage() {
           />
         )
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
+        <div className="flex min-h-0 flex-1 flex-col px-3 py-3">
           <DataTable
             tableId="prompts"
             ariaLabel="Prompts"
