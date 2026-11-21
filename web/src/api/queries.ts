@@ -96,6 +96,7 @@ export function spanListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"SpanSort">;
     order?: Schema<"SortOrder">;
     search?: string;
@@ -106,7 +107,7 @@ export function spanListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
@@ -169,6 +170,7 @@ export function sessionListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"SessionSort">;
     order?: Schema<"SortOrder">;
     filter?: string;
@@ -178,7 +180,7 @@ export function sessionListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),
@@ -236,6 +238,7 @@ export function userListOptions(
   query: {
     from: string;
     to: string;
+    limit?: number;
     sort?: Schema<"UserSort">;
     order?: Schema<"SortOrder">;
     filter?: string;
@@ -245,7 +248,7 @@ export function userListOptions(
 ) {
   const path = { project: projectRef(org, project) };
   const listQuery = {
-    limit: 100,
+    limit: query.limit ?? 100,
     from: query.from,
     to: query.to,
     ...(query.sort ? { sort: query.sort } : {}),

@@ -7,6 +7,7 @@ import { axisStyle, formatTick } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { chooseBucket } from "@/lib/chart-scale";
 import { formatTimestamp } from "@/lib/format";
+import { LIST_CACHE } from "@/lib/list-anchor";
 import { bucketRange, epochMs } from "@/lib/metrics";
 import { type TimeZoneSetting, useTimeZone } from "@/lib/settings";
 
@@ -88,8 +89,8 @@ export function TracesHistogram({
   onRange,
 }: Props) {
   const zone = useTimeZone();
-  const query = useQuery(
-    widgetQuery(org, project, {
+  const query = useQuery({
+    ...widgetQuery(org, project, {
       from,
       to,
       shape: "series",
@@ -105,7 +106,8 @@ export function TracesHistogram({
         ],
       },
     }),
-  );
+    ...LIST_CACHE,
+  });
   const [drag, setDrag] = useState<{ start: number; end: number } | null>(null);
 
   if (query.isError) {
