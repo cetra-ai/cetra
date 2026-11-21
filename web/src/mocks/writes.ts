@@ -7,6 +7,7 @@ import promptSettingsDocument from "../../../fixtures/api/responses/prompt-setti
 import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
+import adminLicenseDocument from "../../../fixtures/api/static/admin-license.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
 import alertRulesDocument from "../../../fixtures/api/static/alert-rules.json";
@@ -235,6 +236,7 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/admin/settings/test-email",
   },
+  { operationId: "put_admin_license", method: "put", path: "/api/v1/admin/license" },
   { operationId: "create_channel", method: "post", path: "/api/v1/projects/{project}/channels" },
   {
     operationId: "update_channel",
@@ -806,6 +808,7 @@ const RESPONSES: Record<string, Respond> = {
     return HttpResponse.json({ url: adminUserCreatedDocument.reset_url });
   },
   post_admin_settings_test_email: () => problem(400, "bad_request", "email is not configured"),
+  put_admin_license: () => HttpResponse.json(adminLicenseDocument),
 
   create_channel: ({ body }) => {
     const sample =

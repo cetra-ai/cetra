@@ -162,6 +162,105 @@ it("says when a licence has expired", async () => {
   ).toBeInTheDocument();
 });
 
+const STORE_URL = "https://app.cetra.sh/licenses";
+
+it("links to the licence store", async () => {
+  await renderApp("/admin/settings");
+
+  const link = await screen.findByRole("link", { name: "Buy or renew a licence" });
+  expect(link).toHaveAttribute("href", STORE_URL);
+  expect(link).toHaveAttribute("target", "_blank");
+});
+
+it("has no store link without renew_url", async () => {
+  server.use(
+    http.get("/api/v1/admin/license", () => HttpResponse.json({ status: "none", features: [] })),
+  );
+
+  await renderApp("/admin/settings");
+  await screen.findByText("No licence key. Enterprise features are locked.");
+
+  expect(screen.queryByRole("link", { name: "Buy or renew a licence" })).toBeNull();
+});
+
+it("says the key comes from the configuration", async () => {
+  await renderApp("/admin/settings");
+  const licence = await screen.findByRole("region", { name: "Licence" });
+
+  expect(
+    within(licence).getByText(
+      "Set by CETRA_LICENSE_KEY or license_key in the configuration. Change it there and restart the server.",
+    ),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Licence key" })).toBeNull();
+});
+
+it("installs a licence key", async () => {
+  let body: unknown;
+  server.use(
+    http.get("/api/v1/admin/license", () =>
+      HttpResponse.json({ status: "none", features: [], renew_url: STORE_URL }),
+    ),
+    http.put("/api/v1/admin/license", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({
+        status: "active",
+        id: "01900000-0000-7000-8000-000000000500",
+        customer: "Example Corp",
+        features: ["project_roles"],
+        expires_at: "2099-01-01T00:00:00.000000000Z",
+        grace_ends_at: "2099-02-01T00:00:00.000000000Z",
+        source: "stored",
+        renew_url: STORE_URL,
+      });
+    }),
+  );
+
+  const { user } = await renderApp("/admin/settings");
+  await user.type(await screen.findByRole("textbox", { name: "Licence key" }), "  cetra1.abc\n");
+  await user.click(screen.getByRole("button", { name: "Install" }));
+
+  expect(await screen.findByText("Active until 2099-01-01")).toBeInTheDocument();
+  expect(body).toEqual({ key: "cetra1.abc" });
+  expect(screen.getByText("Installed from this page.")).toBeInTheDocument();
+  expect(await screen.findByText("Saved")).toBeInTheDocument();
+  expect(screen.getByRole("textbox", { name: "Licence key" })).toHaveValue("");
+});
+
+it("shows why installing a key was refused", async () => {
+  server.use(
+    http.get("/api/v1/admin/license", () => HttpResponse.json({ status: "none", features: [] })),
+    http.put("/api/v1/admin/license", () =>
+      problemResponse(400, "bad_request", {
+        detail: "the licence key was refused: the token is malformed",
+      }),
+    ),
+  );
+
+  const { user } = await renderApp("/admin/settings");
+  await user.type(await screen.findByRole("textbox", { name: "Licence key" }), "cetra1.bad");
+  await user.click(screen.getByRole("button", { name: "Install" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "the licence key was refused: the token is malformed",
+  );
+});
+
+it("cannot install an empty key", async () => {
+  server.use(
+    http.get("/api/v1/admin/license", () => HttpResponse.json({ status: "none", features: [] })),
+  );
+
+  const { user } = await renderApp("/admin/settings");
+  const field = await screen.findByRole("textbox", { name: "Licence key" });
+  const button = screen.getByRole("button", { name: "Install" });
+  expect(button).toBeDisabled();
+
+  await user.type(field, "   ");
+
+  expect(button).toBeDisabled();
+});
+
 it("says when single sign-on is not enforced without a licence", async () => {
   server.use(withSettings({ enforce_sso_domains: ["sso.example"], enforce_sso_applied: false }));
 
