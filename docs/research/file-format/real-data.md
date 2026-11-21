@@ -488,7 +488,7 @@ The other datasets follow the same pattern. On payload, swe and openswe Strata i
 Every number above is local disk with the OS page cache warm, where a request costs microseconds. On S3 a request costs a first-byte latency, and one request runs at one connection's throughput, so the same reader can rank differently. `FMT_SIM_S3=1` estimates S3 times without S3 (2026-11-20, `bench/src/sim.rs`):
 - Each GET reads the local file, then waits until the time it would end on S3: 30 ms of first-byte latency, plus its bytes at 90 MB/s, and no earlier than a shared 10 Gbit/s link allows for all the bytes in flight (`FMT_SIM_LATENCY_MS`, `FMT_SIM_CONN_MBPS`, `FMT_SIM_LINK_GBPS`).
 - Dependent waves, concurrency and the CPU work between requests come from each reader, so every format pays for its own access pattern.
-- Not modelled: throttling (S3 allows about 5,500 GETs per second per prefix), tail latency, retries, and connection set-up. The constants are AWS's typical figures; one run against real S3 would calibrate them.
+- Not modelled: throttling (S3 allows about 5,500 GETs per second per prefix), retries, and connection set-up. The constants are AWS's typical figures. Tail latency and the LIST round trip were added after a run on real S3 (§ Real S3); the tables here are without them.
 - Request cost on S3 Standard is $0.0004 per 1,000 GETs: the full "help me" count's 21,742 requests cost $0.009, Parquet's 20 requests nothing measurable.
 
 **Before the changes below** (ms, median of 3; Strata / best Parquet / Vortex compact; bold where Strata is fastest):
@@ -555,6 +555,36 @@ A cold trace lookup on simulated S3 took 4 waves (5 on wildchat and FineWeb) and
 - **The other queries** run on files already open, where the metadata was cached before too. On simulated S3 they moved within the run-to-run noise. Locally too, except FineWeb's absent phrase: 82 → 88 ms (median of 15, four alternating rounds), with the same requests and bytes. Profiles of both binaries show no new cost; the cause is not found.
 - **Memory:** an open file keeps its metadata section, 66 KiB (openswe) to 1.4 MiB (`light`) here, about what its decoded caches held after a first query.
 
+## Real S3
+
+The cold lookups ran on a real object store, to check the simulator (2026-11-21): Cloudflare R2, EU jurisdiction, read from ubuntu-vm in Helsinki (a guest on big-server, about 1 Gbit/s of link). The six datasets were uploaded with `fmtbench upload` (154 files, 11.5 GiB, in under 2 minutes). The machine was idle before each step, and its load stayed under 1.5 during the R2 runs, with fmtbench the only busy process.
+
+**The store** (`fmtbench probe`, the AnyBlob method: ranged GETs of 1 KiB to 16 MiB on one 64 MiB object, then 1 to 256 GETs in flight; three runs between 13:00 and 16:30 UTC):
+- First byte: median 59–69 ms at every size; p90 73–115 ms, p99 80–230 ms on one connection.
+- One request: 99–118 MB/s. The fitted model is 61–64 ms + size / (99–118 MB/s).
+- HEAD and LIST: median 57–63 ms, one round trip like a GET. A GET on a new client costs 80–85 ms: 20–25 ms of connection set-up.
+- In flight together: at 16 and 64 GETs of 64 KiB, the median stays at 65–71 ms but p90 is 101–135 ms and p99 138–273 ms. All requests together reach about 105 MB/s, the VM's link: with 64 GETs of 1 MiB in flight a request waits 0.5 s, and a few took 8–30 s.
+
+**Cold lookups** (ms per trace id, mean of 3 passes over 20 ids; real R2 at 14:00–15:05 UTC, one round per dataset; the simulator at the probe's numbers, 60 ms, 115 MB/s and 0.9 Gbit/s, first without and then with the changes below; best Parquet is the best of `pq_default`, `pq_tuned` and `pq_cetra` through DataFusion; Strata is `st_fast`):
+
+| Dataset | R2: best Parquet | R2: Strata | R2: Vortex compact | Simulator before: Parquet / Strata | Simulator after: Parquet / Strata |
+|---|---|---|---|---|---|
+| light | 536 | **458** | 1,039 | 303 / 242 | 498 / 431 |
+| payload | 553 | **468** | 1,121 | 299 / 264 | 521 / 454 |
+| swe | **375** | 383 | 702 | 270 / 246 | 459 / 432 |
+| openswe | 406 | **393** | 1,281 | 270 / 233 | 459 / 430 |
+| toucan | 481 | **425** | 1,015 | 291 / 247 | 504 / 438 |
+| wildchat | 598 | **481** | 1,449 | 332 / 318 | 517 / 512 |
+
+- **On real R2, Strata is 12–20% faster than the best Parquet** on light, payload, toucan and wildchat, and level on swe (+2%) and openswe (−3%), which one round cannot separate. Strata through SQL (`st`) is 20–90 ms slower than `st_fast` and still ahead on four datasets. Vortex is 2–3× slower everywhere: it reads 30–250 MB per lookup.
+- **The simulator gave half the real times.** Strata's 3 waves at a 60 ms median predicted about 240 ms against 380–480 measured. Two costs were missing:
+  - each cold lookup lists the variant's files first, one round trip that the simulator answered at once;
+  - a wave sends 20–40 requests at once and waits for the slowest, which on R2 is near the p90–p99, not the median.
+- **The change** (`bench/src/sim.rs`): a LIST waits one first-byte latency, and each first-byte latency is drawn from a lognormal whose median is `FMT_SIM_LATENCY_MS` and whose shape is `FMT_SIM_LATENCY_SIGMA` (fixed seed). σ = 0.35 matches the probe's spread under concurrency (p90/p50 ≈ 1.6). The default stays 0, so the earlier tables reproduce.
+- **After it, the simulator is within ±15% of R2** for Strata and Parquet through DataFusion (Strata −6% to +13%; Parquet −14% to +13%, and +22% on swe), against −40% to −50% before. It still ranks Strata first on swe and openswe, where R2 shows a tie.
+- **Still not modelled: queueing.** `pq_fast` makes 250–4,400 requests per lookup; R2 took 1.6–2.4 s for it, 1.0–2.1× the simulator's estimate, as the link and the store queue them. Connection set-up (20–25 ms on a new client) is also left out: the benchmark's store reuses its connections.
+- For estimates of R2 from this machine: `FMT_SIM_S3=1 FMT_SIM_LATENCY_MS=60 FMT_SIM_CONN_MBPS=115 FMT_SIM_LINK_GBPS=0.9 FMT_SIM_LATENCY_SIGMA=0.35`. The defaults (30 ms, 90 MB/s, 10 Gbit/s) remain AWS's in-region figures, unmeasured here.
+
 ## Narrow chunks
 
 **Where `light` loses size** (MiB, the four files; Strata's narrow columns against `pq_default`'s column chunks):
@@ -594,4 +624,9 @@ python -I bench/convert_convos.py toucan raw/toucan.parquet 1000000 k2-0.parquet
 python -I bench/convert_convos.py wildchat raw/wildchat.parquet 1000000 w-0.parquet w-1.parquet w-2.parquet
 fmtbench gen ~/bench/openswe 0 4 --convo 100000000 raw/openswe.parquet
 fmtbench query ~/bench/openswe 30
+# real S3 (AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION=auto for R2)
+fmtbench probe s3://<bucket>/fmtbench 50
+fmtbench upload ~/bench8/light s3://<bucket>/bench8/light
+fmtbench query s3://<bucket>/bench8/light 3 trace_lookup_cold
+FMT_SIM_S3=1 FMT_SIM_LATENCY_MS=60 FMT_SIM_CONN_MBPS=115 FMT_SIM_LINK_GBPS=0.9 FMT_SIM_LATENCY_SIGMA=0.35 fmtbench query ~/bench8/light 3 trace_lookup_cold
 ```

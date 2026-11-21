@@ -586,6 +586,8 @@ Two gaps remain:
 
 - **Cold lookups on S3:** the metadata segments now lie together before the hot tail, and the open reads them with it. A cold trace lookup on simulated S3 takes one wave less and half the requests: 135–151 ms against 156–173 before on five datasets, 145 against 208 on FineWeb. It now beats the best Parquet by 9–20%, except on wildchat (179 against 170), whose tail is just over the open's 1 MiB first read.
 
+- **Real S3:** on Cloudflare R2 (EU, read from Helsinki: 60 ms to the first byte, 100–118 MB/s per request, about 1 Gbit/s of link), a cold trace lookup takes 383–481 ms with Strata, 12–20% under the best Parquet on four datasets and level on swe and openswe; Vortex takes 2–3× as long. The simulator gave half these times: it charged nothing for the LIST and no slow requests. It now draws each latency from a lognormal (`FMT_SIM_LATENCY_SIGMA`, 0.35 on R2) and charges the LIST, and lands within ±15% of R2.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong

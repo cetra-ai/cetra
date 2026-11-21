@@ -3,10 +3,13 @@
 //! fmtbench gen <dir> <traces> <files>
 //! fmtbench query <dir|s3://bucket/key> [runs]
 //! fmtbench profile <dir|s3://bucket/key> [runs]
+//! fmtbench probe <s3://bucket/key> [reps]
+//! fmtbench upload <dir> <s3://bucket/key> [variant...]
 
 mod counting;
 mod payload;
 mod pqfast;
+mod probe;
 mod profile;
 mod series;
 mod sim;
@@ -105,6 +108,11 @@ async fn run() -> R<()> {
             .await
         }
         Some("merge") => merge_cmd(&args[2]).await,
+        Some("probe") => {
+            let reps: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(50);
+            probe::probe(args.get(2).ok_or(USAGE)?, reps).await
+        }
+        Some("upload") => probe::upload(Path::new(args.get(2).ok_or(USAGE)?), args.get(3).ok_or(USAGE)?, args.get(4..).unwrap_or_default()).await,
         Some("series") => {
             let runs: usize = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(5);
             series::series_cmd(Path::new(args.get(2).ok_or(USAGE)?), Path::new(args.get(3).ok_or(USAGE)?), runs, args.get(5..).unwrap_or_default()).await
@@ -135,7 +143,7 @@ async fn run() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION and AWS_ALLOW_HTTP=true";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | probe <s3://bucket/key> [reps] | upload <dir> <s3://bucket/key> [variant...] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (R2: auto), and AWS_ALLOW_HTTP=true for a plain-HTTP endpoint";
 
 // ------------------------------------------------------------------ generate
 
@@ -588,20 +596,25 @@ struct Location {
     prefix: ObjPath,
 }
 
+/// A new S3 client for `bucket`, from the `AWS_*` variables (see USAGE). Each call makes its own
+/// HTTP client, so its first request opens a new connection.
+fn s3_store(bucket: &str) -> R<Arc<dyn ObjectStore>> {
+    Ok(Arc::new(
+        AmazonS3Builder::from_env()
+            .with_bucket_name(bucket)
+            .with_virtual_hosted_style_request(false)
+            .build()?,
+    ))
+}
+
 /// `dir` is a local directory, or `s3://bucket/key` (AWS settings: see USAGE).
 fn location(dir: &str) -> R<Location> {
-    if let Some(rest) = dir.strip_prefix("s3://") {
-        let (bucket, key) = rest.split_once('/').unwrap_or((rest, ""));
-        let inner: Arc<dyn ObjectStore> = Arc::new(
-            AmazonS3Builder::from_env()
-                .with_bucket_name(bucket)
-                .with_virtual_hosted_style_request(false)
-                .build()?,
-        );
+    if dir.starts_with("s3://") {
+        let (bucket, key) = probe::split_url(dir)?;
         return Ok(Location {
-            store: Arc::new(counting::Counting::new(inner)),
+            store: Arc::new(counting::Counting::new(s3_store(&bucket)?)),
             url: url::Url::parse(&format!("s3://{bucket}/"))?,
-            prefix: ObjPath::parse(key.trim_matches('/'))?,
+            prefix: ObjPath::parse(&key)?,
         });
     }
     let abs = std::fs::canonicalize(dir)?;
