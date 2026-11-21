@@ -33,7 +33,7 @@ expression: "&normalized.spans"
       "cetra.span.kind": "evaluator"
     },
     "scope_name": "cetra-eval",
-    "scope_version": "0.0.0",
+    "scope_version": "[version]",
     "conventions": [
       "cetra"
     ],
@@ -64,7 +64,7 @@ expression: "&normalized.spans"
       "server.address": "hooks.example"
     },
     "scope_name": "cetra-eval",
-    "scope_version": "0.0.0",
+    "scope_version": "[version]",
     "conventions": [
       "cetra"
     ],
