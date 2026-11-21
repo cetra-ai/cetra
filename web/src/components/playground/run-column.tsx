@@ -78,7 +78,7 @@ type RunColumnProps = {
   errors: Record<string, string>;
   /** Why Run is disabled, if it is. */
   runReason: string | undefined;
-  /** The run-all shortcut's label (`⌘↵` or `Ctrl↵`), shown before the first run. */
+  /** The run-all shortcut's label (`⌘↵` or `Ctrl+Enter`), shown before the first run. */
   shortcut: string;
   canRemove: boolean;
   /** The callbacks take the column's id, so the parent can pass the same functions to every column. */

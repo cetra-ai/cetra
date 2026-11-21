@@ -44,7 +44,7 @@ function panel(): HTMLElement | null {
 }
 
 async function openPanelFromTopBar(user: Awaited<ReturnType<typeof renderApp>>["user"]) {
-  await user.click(await screen.findByRole("button", { name: "Assistant" }));
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
   return screen.findByRole("region", { name: "Assistant" });
 }
 
@@ -100,7 +100,7 @@ it("hides the button from viewers", async () => {
   await renderApp("/acme/support-bot/traces");
 
   await screen.findByRole("heading", { level: 1, name: "Traces" });
-  expect(screen.queryByRole("button", { name: "Assistant" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Ask AI" })).not.toBeInTheDocument();
 });
 
 it("says the assistant is off in the organization, with a link for admins", async () => {

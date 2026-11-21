@@ -1,12 +1,6 @@
 import { expect, it } from "vitest";
 import type { Problem } from "@/api/problem";
-import {
-  formatShortcutLabel,
-  isSqlResult,
-  resultStatus,
-  runShortcutLabel,
-  sqlProblemMessage,
-} from "@/lib/sql/format";
+import { isSqlResult, resultStatus, sqlProblemMessage } from "@/lib/sql/format";
 
 it("narrows a run answer to a SQL result", () => {
   expect(isSqlResult({ columns: [], rows: [], truncated: false })).toBe(true);
@@ -51,16 +45,4 @@ it("formats the result status line", () => {
   expect(resultStatus(1, false, 0)).toBe("1 row · 0 ms");
   expect(resultStatus(5, false, 12)).toBe("5 rows · 12 ms");
   expect(resultStatus(10000, true, 3)).toBe("10000 rows (truncated) · 3 ms");
-});
-
-it("labels the Run shortcut for the platform", () => {
-  expect(runShortcutLabel("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)")).toBe("⌘↵");
-  expect(runShortcutLabel(navigator.userAgent)).toBe("Ctrl↵");
-  expect(runShortcutLabel("Mozilla/5.0 (X11; Linux x86_64)")).toBe("Ctrl↵");
-});
-
-it("labels the Format shortcut for the platform", () => {
-  expect(formatShortcutLabel("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0)")).toBe("⇧⌥F");
-  expect(formatShortcutLabel("Mozilla/5.0 (iPhone; CPU iPhone OS 17_0)")).toBe("⇧⌥F");
-  expect(formatShortcutLabel("Mozilla/5.0 (X11; Linux x86_64)")).toBe("Shift+Alt+F");
 });

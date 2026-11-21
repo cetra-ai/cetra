@@ -30,6 +30,7 @@ import {
 import { parseTurnEvent, type TurnEvent } from "@/lib/assistant/types";
 import { postEventStream, StreamRequestError } from "@/lib/event-stream";
 import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import { shortcutLabel } from "@/lib/shortcuts";
 import { activeTabOf, readTabs } from "@/lib/sql/tabs";
 
 const PAUSE_HINT = "Ask an admin to check the LLM connection.";
@@ -305,7 +306,7 @@ export function AssistantPanel() {
           </HeaderButton>
           <HeaderButton
             label="Close the assistant"
-            hint="Close (Ctrl/Cmd+I)"
+            hint={`Close (${shortcutLabel("⌘I", navigator.userAgent)})`}
             onClick={() => {
               setPanelOpen(false);
             }}

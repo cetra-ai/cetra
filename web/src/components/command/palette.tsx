@@ -28,6 +28,7 @@ import {
   isElementShortcut,
   isTypingTarget,
   reduceShortcut,
+  shortcutLabel,
 } from "@/lib/shortcuts";
 
 const CHORD_MS = 1000;
@@ -171,7 +172,7 @@ export function CommandPalette() {
           <Search />
           Search or jump to…
         </span>
-        <kbd className="font-mono text-caption">⌘K</kbd>
+        <kbd className="font-mono text-caption">{shortcutLabel("⌘K", navigator.userAgent)}</kbd>
       </Button>
       <CommandDialog
         open={palette}

@@ -78,7 +78,7 @@ afterEach(() => {
 
 /** Opens the panel from the top bar and returns its region. */
 async function openPanel(user: User) {
-  await user.click(await screen.findByRole("button", { name: "Assistant" }));
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
   return screen.findByRole("region", { name: "Assistant" });
 }
 

@@ -83,7 +83,7 @@ async function askForDraft(
   draft: unknown,
 ) {
   server.use(http.post(TURNS, () => draftAnswer(kind, draft)));
-  await user.click(await screen.findByRole("button", { name: "Assistant" }));
+  await user.click(await screen.findByRole("button", { name: "Ask AI" }));
   const region = await screen.findByRole("region", { name: "Assistant" });
   await typeMessage(user, region, "Draft it");
   await user.click(within(region).getByRole("button", { name: "Send" }));
