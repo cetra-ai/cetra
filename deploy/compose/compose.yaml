@@ -9,7 +9,7 @@ name: cetra
 
 services:
   cetra:
-    image: ${CETRA_IMAGE:-ghcr.io/cetra-ai/cetra:0.0.0}
+    image: ${CETRA_IMAGE:-ghcr.io/cetra-ai/cetra:0.1.0-rc.1}
     restart: unless-stopped
     # Shutdown drains requests (20 s) and flushes memtables (30 s) (spec 12 § Process lifecycle).
     stop_grace_period: 60s

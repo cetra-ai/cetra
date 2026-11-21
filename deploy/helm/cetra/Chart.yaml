@@ -3,8 +3,8 @@ name: cetra
 description: LLM observability and evaluation in one binary (one StatefulSet, one volume).
 type: application
 # Chart version = app version = the workspace version (D-N-5); `just release-prep` sets both.
-version: 0.0.0
-appVersion: "0.0.0"
+version: 0.1.0-rc.1
+appVersion: "0.1.0-rc.1"
 home: https://github.com/cetra-ai/cetra
 sources:
   - https://github.com/cetra-ai/cetra
