@@ -238,6 +238,9 @@ importers:
       starlight-sidebar-topics:
         specifier: 0.9.0
         version: 0.9.0(@astrojs/starlight@0.42.10(astro@7.4.8(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))(supports-color@10.2.2)(typescript@5.9.3))(astro@7.4.8(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
+      tidymd:
+        specifier: 0.2.0
+        version: 0.2.0
     devDependencies:
       '@astrojs/check':
         specifier: 0.9.12
@@ -5450,6 +5453,9 @@ packages:
 
   through@2.3.8:
     resolution: {integrity: sha512-w89qg7PI8wAdvX60bMDP+bFoD5Dvhm9oLheFp5O4a2QF0cSBGsBX4qZmadPMvVqlLJBBci+WqGGOAPvcDeNSVg==}
+
+  tidymd@0.2.0:
+    resolution: {integrity: sha512-Ut9ARcbUL3xMGk63f25PKBRFWj0GXwg0lCAlLMikH16NuDNXtdDI2SbKn8u+ADHwyHu/WX93mTgC+NH4umtsKw==}
 
   tiny-inflate@1.0.3:
     resolution: {integrity: sha512-pkY1fj1cKHb2seWDy0B16HeWyczlJA9/WW3u3c4z/NiWDsO3DOU5D7nhTLE9CF0yXv/QZFY7sEJmj24dK+Rrqw==}
@@ -11804,6 +11810,10 @@ snapshots:
       any-promise: 1.3.0
 
   through@2.3.8: {}
+
+  tidymd@0.2.0:
+    dependencies:
+      yaml: 2.9.1
 
   tiny-inflate@1.0.3: {}
 
