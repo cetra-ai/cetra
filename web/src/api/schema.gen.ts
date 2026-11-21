@@ -2519,13 +2519,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
+        get?: never;
+        put?: never;
         /**
          * Get facets
-         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call.
+         * @description Evaluation, playground and assistant traces (`environment = cetra-eval`, `environment = cetra-playground` or `environment = cetra-assistant`) and experiment traces are excluded unless `include_eval` or `include_experiments` is set. Answers 1 to 20 fields over the rows the list would show: the window, the default exclusions, `search` and `filter`, given once for every field, but not the list's cursor, sort or limit. The answer has one result per field, in request order, with either `facet` or `error`: a bad field, `limit` or `q`, or a field that times out, fails only that field. A bad filter, `search` on sessions, a bad window, or 0 or more than 20 fields fail the whole request. A field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server. A read: a read-only personal access token and a `read` key may call it.
          */
-        get: operations["get_facets"];
-        put?: never;
-        post?: never;
+        post: operations["post_facets"];
         delete?: never;
         options?: never;
         head?: never;
@@ -6428,6 +6428,32 @@ export interface components {
          * @enum {string}
          */
         ExportFormat: "jsonl" | "csv";
+        /**
+         * @description One field's facet.
+         *
+         *     `values` and `more` are present for kinds `values` and `keys`. `histogram` is present for
+         *     kind `histogram` when at least one row has a value.
+         */
+        Facet: {
+            /** @description The histogram of a number field. */
+            histogram?: components["schemas"]["FacetHistogram"];
+            /** @description What the answer describes. */
+            kind: components["schemas"]["FacetKind"];
+            /**
+             * Format: int64
+             * @description Rows with no value: null, or an empty list or map.
+             */
+            missing: number;
+            /** @description True when more distinct values matched than `limit`. */
+            more?: boolean;
+            /**
+             * Format: int64
+             * @description Rows counted.
+             */
+            total: number;
+            /** @description At most `limit` values or keys, by count descending then value ascending. */
+            values?: components["schemas"]["FacetValue"][];
+        };
         /** @description One histogram bucket. `[lo, hi)`, except the last bucket, which is `[lo, hi]`. */
         FacetBucket: {
             /**
@@ -6445,6 +6471,21 @@ export interface components {
              * @description Lower bound.
              */
             lo: number;
+        };
+        /** @description One field of a facet batch. */
+        FacetFieldRequest: {
+            /** @description `column` or `map['key']`. A bare map column facets its keys. */
+            field: string;
+            /**
+             * Format: int32
+             * @description Most values or keys returned (1 to 100, default 10). Ignored by histograms.
+             */
+            limit?: number;
+            /**
+             * @description Case-insensitive substring the value or key must contain. 1 to 200 characters after
+             *     trimming. Ignored by histograms.
+             */
+            q?: string;
         };
         /** @description A histogram of a number field. `min` and `max` are exact; the percentiles are approximate. */
         FacetHistogram: {
@@ -6481,6 +6522,15 @@ export interface components {
          * @enum {string}
          */
         FacetKind: "values" | "keys" | "histogram";
+        /** @description One field's result: exactly one of `facet` and `error`. */
+        FacetResult: {
+            /** @description Why this field was not answered. The other fields are not affected. */
+            error?: components["schemas"]["Problem"];
+            /** @description The facet, when the field was answered. */
+            facet?: components["schemas"]["Facet"];
+            /** @description The field, as requested. */
+            field: string;
+        };
         /** @description One value or key and the rows under it. */
         FacetValue: {
             /**
@@ -6496,34 +6546,30 @@ export interface components {
          * @enum {string}
          */
         FacetView: "traces" | "spans" | "sessions";
-        /**
-         * @description The answer of a facet request.
-         *
-         *     `values` and `more` are present for kinds `values` and `keys`. `histogram` is present for
-         *     kind `histogram` when at least one row has a value.
-         */
+        /** @description Body of `POST /api/v1/projects/{project}/facets`: fields over the rows of one list (D-C-24). */
+        FacetsRequest: {
+            /** @description The fields, 1 to 20. Answered in this order. */
+            fields: components["schemas"]["FacetFieldRequest"][];
+            /** @description Filter DSL expression over `view`. Blank means no filter. */
+            filter?: string;
+            /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
+            from?: components["schemas"]["TimeParam"];
+            /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. */
+            include_eval?: boolean;
+            /** @description Include experiment traces. Default false. */
+            include_experiments?: boolean;
+            /** @description Full-text search. `traces` and `spans` only. At most 1,024 bytes. */
+            search?: string;
+            /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
+            to?: components["schemas"]["TimeParam"];
+            /** @description The list the facets describe. */
+            view: components["schemas"]["FacetView"];
+        };
+        /** @description The answer of a facet batch: one result per requested field, in request order. */
         FacetsResponse: {
-            /** @description The field, as requested. */
-            field: string;
-            /** @description The histogram of a number field. */
-            histogram?: components["schemas"]["FacetHistogram"];
-            /** @description What the answer describes. */
-            kind: components["schemas"]["FacetKind"];
-            /**
-             * Format: int64
-             * @description Rows with no value: null, or an empty list or map.
-             */
-            missing: number;
-            /** @description True when more distinct values matched than `limit`. */
-            more?: boolean;
-            /**
-             * Format: int64
-             * @description Rows counted.
-             */
-            total: number;
-            /** @description At most `limit` values or keys, by count descending then value ascending. */
-            values?: components["schemas"]["FacetValue"][];
-            /** @description The list the facet describes. */
+            /** @description One result per requested field, in request order. */
+            results: components["schemas"]["FacetResult"][];
+            /** @description The list the facets describe. */
             view: components["schemas"]["FacetView"];
         };
         /**
@@ -23740,33 +23786,9 @@ export interface operations {
             };
         };
     };
-    get_facets: {
+    post_facets: {
         parameters: {
-            query: {
-                /** @description The list the facet describes. */
-                view: components["schemas"]["FacetView"];
-                /** @description `column` or `map['key']`. A bare map column facets its keys. */
-                field: string;
-                /** @description Filter DSL expression over `view`. Blank means no filter. */
-                filter?: string;
-                /** @description Full-text search. `traces` and `spans` only. At most 1,024 bytes. */
-                search?: string;
-                /** @description Inclusive range start. RFC 3339 or epoch milliseconds. */
-                from?: components["schemas"]["TimeParam"];
-                /** @description Exclusive range end. RFC 3339 or epoch milliseconds. */
-                to?: components["schemas"]["TimeParam"];
-                /** @description Include traces from the reserved environments (`cetra-eval`, `cetra-playground`, `cetra-assistant`). Default false. */
-                include_eval?: boolean;
-                /** @description Include experiment traces. Default false. */
-                include_experiments?: boolean;
-                /**
-                 * @description Case-insensitive substring the value or key must contain. 1 to 200 characters after
-                 *     trimming. Ignored by histograms.
-                 */
-                q?: string;
-                /** @description Most values or keys returned (1 to 100, default 10). */
-                limit?: number;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project UUID, URL-encoded org-slug/project-slug, or `current`. */
@@ -23774,9 +23796,13 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FacetsRequest"];
+            };
+        };
         responses: {
-            /** @description A facet: values, keys or a histogram. */
+            /** @description One result per field, in request order. */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -23814,6 +23840,24 @@ export interface operations {
             };
             /** @description The resource does not exist. */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is not JSON. */
+            415: {
                 headers: {
                     [name: string]: unknown;
                 };

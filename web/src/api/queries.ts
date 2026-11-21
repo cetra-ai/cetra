@@ -6,6 +6,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 import { $api, api } from "./client";
+import { askFacet, type FacetShared } from "./facet-batch";
 import { projectRef } from "./project-ref";
 import type { Schema } from "./types";
 
@@ -333,8 +334,8 @@ export function userQuery(
 }
 
 /**
- * One facet of a list (D1). The client caches each answer for 30 seconds; the server keeps none.
- * Every facet request goes through here, so readers of one URL share one query shape.
+ * One facet of a list (D1). Each field has its own cache entry, kept 30 seconds; fields asked
+ * together go out as one `POST /facets` (D-C-24). The server keeps none.
  */
 export type FacetAsk = {
   view: Schema<"FacetView">;
@@ -349,29 +350,39 @@ export type FacetAsk = {
   limit?: number;
 };
 
-export function facetQuery(org: string, project: string, query: FacetAsk) {
+/** The shared part of a facet ask, as the request body spells it, with empty parts left out. */
+export function facetShared(query: FacetAsk): FacetShared {
   return {
-    ...$api.queryOptions("get", "/api/v1/projects/{project}/facets", {
-      params: {
-        path: { project: projectRef(org, project) },
-        query: {
-          view: query.view,
-          field: query.field,
-          from: query.from,
-          to: query.to,
-          ...(query.filter ? { filter: query.filter } : {}),
-          ...(query.search ? { search: query.search } : {}),
-          ...(query.includeEval ? { include_eval: true } : {}),
-          ...(query.includeExperiments ? { include_experiments: true } : {}),
-          ...(query.q ? { q: query.q } : {}),
-          ...(query.limit === undefined ? {} : { limit: query.limit }),
-        },
-      },
-    }),
+    view: query.view,
+    from: query.from,
+    to: query.to,
+    ...(query.filter ? { filter: query.filter } : {}),
+    ...(query.search ? { search: query.search } : {}),
+    ...(query.includeEval ? { include_eval: true } : {}),
+    ...(query.includeExperiments ? { include_experiments: true } : {}),
+  };
+}
+
+/** The field part of a facet ask, with empty parts left out. */
+export function facetField(query: FacetAsk): Schema<"FacetFieldRequest"> {
+  return {
+    field: query.field,
+    ...(query.q ? { q: query.q } : {}),
+    ...(query.limit === undefined ? {} : { limit: query.limit }),
+  };
+}
+
+export function facetQuery(org: string, project: string, query: FacetAsk) {
+  const ref = projectRef(org, project);
+  const shared = facetShared(query);
+  const field = facetField(query);
+  return queryOptions({
+    queryKey: ["facets", ref, shared, field] as const,
+    queryFn: () => askFacet(ref, shared, field),
     staleTime: 30_000,
     // Keeps the previous answer on screen while a filter, q or limit change refetches.
     placeholderData: keepPreviousData,
-  };
+  });
 }
 
 /**
@@ -380,17 +391,23 @@ export function facetQuery(org: string, project: string, query: FacetAsk) {
  * latest cached answer to the same question over a window of the same length, instead of a
  * loading state.
  */
-export function useFacetQuery(org: string, project: string, query: FacetAsk) {
+export function useFacetQuery(
+  org: string,
+  project: string,
+  query: FacetAsk,
+  { enabled = true }: { enabled?: boolean } = {},
+) {
   const client = useQueryClient();
   const options = facetQuery(org, project, query);
   return useQuery({
     ...options,
+    enabled,
     placeholderData: (previous) => previous ?? latestFacetAnswer(client, options.queryKey),
   });
 }
 
 type FacetKey = ReturnType<typeof facetQuery>["queryKey"];
-type FacetAnswer = Schema<"FacetsResponse">;
+type FacetAnswer = Schema<"Facet">;
 
 function windowLength(from: string | undefined, to: string | undefined): number | undefined {
   return from === undefined || to === undefined ? undefined : Date.parse(to) - Date.parse(from);
@@ -398,28 +415,24 @@ function windowLength(from: string | undefined, to: string | undefined): number 
 
 /** The newest cached answer whose key differs from `key` only by a window of the same length. */
 export function latestFacetAnswer(client: QueryClient, key: FacetKey): FacetAnswer | undefined {
-  const [method, path, init] = key;
-  const wanted = init?.params;
-  if (wanted === undefined) {
-    return undefined;
-  }
-  const { from, to, ...rest } = wanted.query;
+  const [, ref, shared, field] = key;
+  const { from, to, ...rest } = shared;
   const length = windowLength(from, to);
   if (length === undefined) {
     return undefined;
   }
-  const same = JSON.stringify([wanted.path, rest]);
+  const same = JSON.stringify([rest, field]);
   let best: { at: number; data: FacetAnswer } | undefined;
-  for (const cached of client.getQueryCache().findAll({ queryKey: [method, path] })) {
+  for (const cached of client.getQueryCache().findAll({ queryKey: ["facets", ref] })) {
     const data = cached.state.data as FacetAnswer | undefined;
-    const params = (cached.queryKey[2] as typeof init)?.params;
-    if (data === undefined || params === undefined) {
+    if (data === undefined) {
       continue;
     }
-    const { from: cachedFrom, to: cachedTo, ...cachedRest } = params.query;
+    const [, , cachedShared, cachedField] = cached.queryKey as FacetKey;
+    const { from: cachedFrom, to: cachedTo, ...cachedRest } = cachedShared;
     if (
       windowLength(cachedFrom, cachedTo) !== length ||
-      JSON.stringify([params.path, cachedRest]) !== same
+      JSON.stringify([cachedRest, cachedField]) !== same
     ) {
       continue;
     }

@@ -411,6 +411,7 @@ function SpansPage() {
                   }
                   presets={
                     <PresetChips
+                      hold={hold}
                       view="spans"
                       filter={search.filter ?? ""}
                       onFilter={(text) => {

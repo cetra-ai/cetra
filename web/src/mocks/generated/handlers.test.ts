@@ -8,6 +8,15 @@ const NOW = Date.parse("2026-06-01T00:00:00.000Z");
 const PROJECT = `${location.origin}/api/v1/projects/acme%2Fsupport-bot`;
 const DAY_MS = 86_400_000;
 
+/** `POST …/facets` with a batch body (D-C-24). */
+function postFacets(body: unknown): Promise<Response> {
+  return fetch(`${PROJECT}/facets`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 type User = Omit<Schema<"EndUserSummary">, "activity">;
 
 function user(overrides: Partial<User> & { user_id: string }): User {
@@ -406,19 +415,35 @@ it("counts a values facet over the rows the list shows", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
   server.use(...largeHandlers(dataset));
   const body = (await (
-    await fetch(`${PROJECT}/facets?view=traces&field=status&limit=50`)
+    await postFacets({ view: "traces", fields: [{ field: "status", limit: 50 }] })
   ).json()) as Schema<"FacetsResponse">;
+  const facet = body.results[0]?.facet;
 
   const visible = visibleTraces(dataset.traces, false, false);
   const expected = new Map<string, number>();
   for (const trace of visible) {
     expected.set(trace.status, (expected.get(trace.status) ?? 0) + 1);
   }
-  expect(body.kind).toBe("values");
-  expect(body.total).toBe(visible.length);
-  expect(body.missing).toBe(0);
-  expect(body.more).toBe(false);
-  expect(new Map((body.values ?? []).map((row) => [row.value, row.count]))).toEqual(expected);
+  expect(facet?.kind).toBe("values");
+  expect(facet?.total).toBe(visible.length);
+  expect(facet?.missing).toBe(0);
+  expect(facet?.more).toBe(false);
+  expect(new Map((facet?.values ?? []).map((row) => [row.value, row.count]))).toEqual(expected);
+});
+
+it("answers every field of a batch in order", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
+  server.use(...largeHandlers(dataset));
+  const body = (await (
+    await postFacets({
+      view: "traces",
+      fields: [{ field: "status" }, { field: "duration_ms" }],
+    })
+  ).json()) as Schema<"FacetsResponse">;
+  expect(body.view).toBe("traces");
+  expect(body.results.map((result) => result.field)).toEqual(["status", "duration_ms"]);
+  expect(body.results[0]?.facet?.kind).toBe("values");
+  expect(body.results[1]?.facet?.kind).toBe("histogram");
 });
 
 it("counts a list field once per distinct element, and facets metadata keys", async () => {
@@ -426,9 +451,11 @@ it("counts a list field once per distinct element, and facets metadata keys", as
   server.use(...largeHandlers(dataset));
   const visible = visibleTraces(dataset.traces, false, false);
 
-  const tags = (await (
-    await fetch(`${PROJECT}/facets?view=traces&field=tags&limit=100`)
-  ).json()) as Schema<"FacetsResponse">;
+  const tags = (
+    (await (
+      await postFacets({ view: "traces", fields: [{ field: "tags", limit: 100 }] })
+    ).json()) as Schema<"FacetsResponse">
+  ).results[0]?.facet;
   const tagCounts = new Map<string, number>();
   let untagged = 0;
   for (const trace of visible) {
@@ -439,13 +466,15 @@ it("counts a list field once per distinct element, and facets metadata keys", as
       tagCounts.set(tag, (tagCounts.get(tag) ?? 0) + 1);
     }
   }
-  expect(tags.missing).toBe(untagged);
-  expect(new Map((tags.values ?? []).map((row) => [row.value, row.count]))).toEqual(tagCounts);
+  expect(tags?.missing).toBe(untagged);
+  expect(new Map((tags?.values ?? []).map((row) => [row.value, row.count]))).toEqual(tagCounts);
 
-  const keys = (await (
-    await fetch(`${PROJECT}/facets?view=traces&field=metadata&limit=100`)
-  ).json()) as Schema<"FacetsResponse">;
-  expect(keys.kind).toBe("keys");
+  const keys = (
+    (await (
+      await postFacets({ view: "traces", fields: [{ field: "metadata", limit: 100 }] })
+    ).json()) as Schema<"FacetsResponse">
+  ).results[0]?.facet;
+  expect(keys?.kind).toBe("keys");
   const keyNames = new Set<string>();
   for (const trace of visible) {
     for (const key of Object.keys(trace.metadata)) {
@@ -454,24 +483,25 @@ it("counts a list field once per distinct element, and facets metadata keys", as
       }
     }
   }
-  expect(new Set((keys.values ?? []).map((row) => row.value))).toEqual(keyNames);
-  expect((keys.values ?? []).some((row) => row.value.startsWith("cetra."))).toBe(false);
+  expect(new Set((keys?.values ?? []).map((row) => row.value))).toEqual(keyNames);
+  expect((keys?.values ?? []).some((row) => row.value.startsWith("cetra."))).toBe(false);
 });
 
 it("answers a histogram whose buckets cover every row with a value", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 300 });
   server.use(...largeHandlers(dataset));
   const body = (await (
-    await fetch(`${PROJECT}/facets?view=traces&field=duration_ms`)
+    await postFacets({ view: "traces", fields: [{ field: "duration_ms" }] })
   ).json()) as Schema<"FacetsResponse">;
+  const facet = body.results[0]?.facet;
 
   const durations = visibleTraces(dataset.traces, false, false).map(
     (trace) => trace.duration_ns / 1e6,
   );
-  expect(body.kind).toBe("histogram");
-  expect(body.total).toBe(durations.length);
-  expect(body.values).toBeUndefined();
-  const histogram = body.histogram;
+  expect(facet?.kind).toBe("histogram");
+  expect(facet?.total).toBe(durations.length);
+  expect(facet?.values).toBeUndefined();
+  const histogram = facet?.histogram;
   expect(histogram?.min).toBe(Math.min(...durations));
   expect(histogram?.max).toBe(Math.max(...durations));
   const buckets = histogram?.buckets ?? [];
@@ -491,26 +521,40 @@ it("narrows values by q, case-insensitively, and answers the limit", async () =>
   const first = visibleTraces(dataset.traces, false, false)[0];
   const needle = (first?.name ?? "").slice(0, 3);
   const body = (await (
-    await fetch(
-      `${PROJECT}/facets?view=traces&field=name&q=${encodeURIComponent(needle.toUpperCase())}&limit=1`,
-    )
+    await postFacets({
+      view: "traces",
+      fields: [{ field: "name", q: needle.toUpperCase(), limit: 1 }],
+    })
   ).json()) as Schema<"FacetsResponse">;
-  expect(body.values?.length).toBe(1);
-  expect(body.values?.[0]?.value.toLowerCase()).toContain(needle.toLowerCase());
-  expect(typeof body.more).toBe("boolean");
+  const facet = body.results[0]?.facet;
+  expect(facet?.values?.length).toBe(1);
+  expect(facet?.values?.[0]?.value.toLowerCase()).toContain(needle.toLowerCase());
+  expect(typeof facet?.more).toBe("boolean");
 });
 
-it("answers 400 for a field it cannot facet, a bad limit, and search on sessions", async () => {
+it("answers a bad field, limit or q as that field's error, and a bad view or search on sessions as 400", async () => {
   const dataset = createDataset({ seed: 1, now: NOW, traces: 5 });
   server.use(...largeHandlers(dataset));
-  for (const query of [
-    "view=traces&field=input",
-    "view=traces&field=metadata[",
-    "view=traces&field=trace_id",
-    "view=traces&field=status&limit=101",
-    "view=sessions&field=user_id&search=x",
+  for (const field of [
+    { field: "input" },
+    { field: "metadata[" },
+    { field: "trace_id" },
+    { field: "status", limit: 101 },
+    { field: "status", q: "   " },
   ]) {
-    const response = await fetch(`${PROJECT}/facets?${query}`);
-    expect(response.status, query).toBe(400);
+    const body = (await (
+      await postFacets({ view: "traces", fields: [{ field: "status" }, field] })
+    ).json()) as Schema<"FacetsResponse">;
+    expect(body.results[0]?.facet, field.field).toBeDefined();
+    expect(body.results[1]?.facet, field.field).toBeUndefined();
+    expect(body.results[1]?.error?.code, field.field).toBe("bad_request");
   }
+  const badView = await postFacets({ view: "users", fields: [{ field: "status" }] });
+  expect(badView.status).toBe(400);
+  const sessionsSearch = await postFacets({
+    view: "sessions",
+    search: "x",
+    fields: [{ field: "user_id" }],
+  });
+  expect(sessionsSearch.status).toBe(400);
 });

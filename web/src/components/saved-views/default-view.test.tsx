@@ -1,6 +1,7 @@
 import type { QueryClient } from "@tanstack/react-query";
 import { screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { savedViewHandlers, seedWithDefaultView } from "@/mocks/saved-views";
 import { renderApp } from "@/test/render";
@@ -22,20 +23,41 @@ afterEach(() => {
   }
 });
 
-/** The list and facet requests the page makes for `list`, as URLs. Stopped after the test. */
-function recordList(list: "traces" | "spans"): { rows: URL[]; facets: URL[] } {
-  const seen = { rows: [] as URL[], facets: [] as URL[] };
+/**
+ * The list and facet requests the page makes for `list`: the rows as URLs, the facet batches that
+ * ask the name field as parsed bodies. Stopped after the test.
+ */
+function recordList(list: "traces" | "spans"): {
+  rows: URL[];
+  facets: Schema<"FacetsRequest">[];
+} {
+  const seen = { rows: [] as URL[], facets: [] as Schema<"FacetsRequest">[] };
   const listener = ({ request }: { request: Request }) => {
     const url = new URL(request.url);
     if (url.pathname.endsWith(`/support-bot/${list}`)) {
       seen.rows.push(url);
-    } else if (url.pathname.endsWith("/facets") && url.searchParams.get("field") === "name") {
-      seen.facets.push(url);
+    } else if (request.method === "POST" && url.pathname.endsWith("/facets")) {
+      void request
+        .clone()
+        .json()
+        .then((body: Schema<"FacetsRequest">) => {
+          if (body.fields.some((field) => field.field === "name")) {
+            seen.facets.push(body);
+          }
+        });
     }
   };
   server.events.on("request:start", listener);
   stops.push(() => server.events.removeListener("request:start", listener));
   return seen;
+}
+
+/** The filter each recorded request carries, null when it carries none. */
+function filtersOf(seen: ReturnType<typeof recordList>): (string | null)[] {
+  return [
+    ...seen.rows.map((url) => url.searchParams.get("filter")),
+    ...seen.facets.map((body) => body.filter ?? null),
+  ];
 }
 
 /**
@@ -187,7 +209,7 @@ it("asks for the default view's rows and facets only", async () => {
   await waitFor(() => {
     expect(seen.facets.length).toBeGreaterThan(0);
   });
-  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  const filters = filtersOf(seen);
   expect(filters).not.toContain(null);
   expect(new Set(filters)).toEqual(new Set(["status = 'error'"]));
 });
@@ -204,7 +226,7 @@ it("asks for the carried filter's rows and facets only", async () => {
   await waitFor(() => {
     expect(seen.facets.length).toBeGreaterThan(0);
   });
-  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  const filters = filtersOf(seen);
   expect(new Set(filters)).toEqual(new Set(["user_id = 'u-1'"]));
 });
 
@@ -231,6 +253,6 @@ it("asks for the default view's rows only when coming back from another list", a
   });
   await screen.findByRole("grid", { name: "Traces" });
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const filters = [...seen.rows, ...seen.facets].map((url) => url.searchParams.get("filter"));
+  const filters = filtersOf(seen);
   expect(filters).not.toContain(null);
 });

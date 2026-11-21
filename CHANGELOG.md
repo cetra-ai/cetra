@@ -60,7 +60,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - A demo org that every signed-in user can read (`demo.org`): users see it last in their org switcher as an implicit viewer, without a membership row (D187).
 - SDK prompts (D-V-14, D-V-15): get_prompt / getPrompt with a 60 s cache, stale-while-revalidate and a fallback, Prompt.compile, prompt links through context(prompt=…) / withContext({ prompt }), and client.prompts.
 - Prompt registry API (D191, D-V-2 to D-V-13): versioned text and chat prompts with plain {{var}} templates, labels with protected labels, label history, and a fetch with ETag at GET /prompts/{name}/resolve.
-- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `GET /facets` endpoint (D-C-13).
+- A filter sidebar on the Traces, Spans, Sessions and Users lists: per-field values with counts, keys of metadata and attributes, and histograms with range selection for durations, costs and tokens, all written into the filter text. Backed by the new `POST /facets` endpoint (D-C-13).
 - Preset filters (Errors, Slow, Expensive, Has score, LLM), value autocomplete in the filter editor, a "+ Filter" button with a searchable field picker and token input for `IN`, and wrapping chips in a new filter row.
 - Lists opened without URL parameters keep the range, flags and compatible filters of the last list (D-C-14).
 - A right-click menu on filterable list cells: filter, exclude, copy, open the session or user.
@@ -126,6 +126,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Changed
 
+- `GET /facets` is replaced by `POST /facets`, which answers up to 20 fields of a list in one request, each with its own result or error; the facet sidebar and presets send one request when a list opens without a filter or search (D-C-24).
 - Traces, Spans, Sessions and Users come back from cache within 15 minutes, with the same rows and
   scroll position; newer rows wait behind an "N new … ↑" pill, and a new filter or range keeps the
   previous rows dimmed until the answer arrives.

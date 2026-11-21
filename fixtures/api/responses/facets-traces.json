@@ -1,0 +1,375 @@
+{
+  "view": "traces",
+  "results": [
+    {
+      "field": "status",
+      "facet": {
+        "kind": "values",
+        "total": 5,
+        "missing": 0,
+        "values": [
+          {
+            "value": "ok",
+            "count": 3
+          },
+          {
+            "value": "error",
+            "count": 1
+          },
+          {
+            "value": "unset",
+            "count": 1
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "name",
+      "facet": {
+        "kind": "values",
+        "total": 5,
+        "missing": 0,
+        "values": [
+          {
+            "value": "support-agent",
+            "count": 2
+          },
+          {
+            "value": "answer-question",
+            "count": 1
+          },
+          {
+            "value": "chat claude-sonnet-4-5",
+            "count": 1
+          },
+          {
+            "value": "describe-image",
+            "count": 1
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "environment",
+      "facet": {
+        "kind": "values",
+        "total": 5,
+        "missing": 0,
+        "values": [
+          {
+            "value": "production",
+            "count": 4
+          },
+          {
+            "value": "staging",
+            "count": 1
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "tags",
+      "facet": {
+        "kind": "values",
+        "total": 5,
+        "missing": 3,
+        "values": [
+          {
+            "value": "beta",
+            "count": 2
+          },
+          {
+            "value": "refund",
+            "count": 1
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "models",
+      "facet": {
+        "kind": "values",
+        "total": 5,
+        "missing": 0,
+        "values": [
+          {
+            "value": "claude-sonnet-4-5",
+            "count": 3
+          },
+          {
+            "value": "gpt-4o-mini",
+            "count": 2
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "metadata",
+      "facet": {
+        "kind": "keys",
+        "total": 5,
+        "missing": 4,
+        "values": [
+          {
+            "value": "user.name",
+            "count": 1
+          },
+          {
+            "value": "user.plan",
+            "count": 1
+          }
+        ],
+        "more": false
+      }
+    },
+    {
+      "field": "duration_ms",
+      "facet": {
+        "kind": "histogram",
+        "total": 5,
+        "missing": 0,
+        "histogram": {
+          "min": 800.0,
+          "max": 4200.0,
+          "p50": 2500.0,
+          "p95": 4200.0,
+          "p99": 4200.0,
+          "buckets": [
+            {
+              "lo": 800.0,
+              "hi": 970.0,
+              "count": 1
+            },
+            {
+              "lo": 970.0,
+              "hi": 1140.0,
+              "count": 0
+            },
+            {
+              "lo": 1140.0,
+              "hi": 1310.0,
+              "count": 0
+            },
+            {
+              "lo": 1310.0,
+              "hi": 1480.0,
+              "count": 0
+            },
+            {
+              "lo": 1480.0,
+              "hi": 1650.0,
+              "count": 0
+            },
+            {
+              "lo": 1650.0,
+              "hi": 1820.0,
+              "count": 0
+            },
+            {
+              "lo": 1820.0,
+              "hi": 1990.0,
+              "count": 0
+            },
+            {
+              "lo": 1990.0,
+              "hi": 2160.0,
+              "count": 1
+            },
+            {
+              "lo": 2160.0,
+              "hi": 2330.0,
+              "count": 0
+            },
+            {
+              "lo": 2330.0,
+              "hi": 2500.0,
+              "count": 0
+            },
+            {
+              "lo": 2500.0,
+              "hi": 2670.0,
+              "count": 1
+            },
+            {
+              "lo": 2670.0,
+              "hi": 2840.0,
+              "count": 0
+            },
+            {
+              "lo": 2840.0,
+              "hi": 3010.0,
+              "count": 1
+            },
+            {
+              "lo": 3010.0,
+              "hi": 3180.0,
+              "count": 0
+            },
+            {
+              "lo": 3180.0,
+              "hi": 3350.0,
+              "count": 0
+            },
+            {
+              "lo": 3350.0,
+              "hi": 3520.0,
+              "count": 0
+            },
+            {
+              "lo": 3520.0,
+              "hi": 3690.0,
+              "count": 0
+            },
+            {
+              "lo": 3690.0,
+              "hi": 3860.0,
+              "count": 0
+            },
+            {
+              "lo": 3860.0,
+              "hi": 4030.0,
+              "count": 0
+            },
+            {
+              "lo": 4030.0,
+              "hi": 4200.0,
+              "count": 0
+            },
+            {
+              "lo": 4200.0,
+              "hi": 4200.0,
+              "count": 1
+            }
+          ]
+        }
+      }
+    },
+    {
+      "field": "cost_total",
+      "facet": {
+        "kind": "histogram",
+        "total": 5,
+        "missing": 1,
+        "histogram": {
+          "min": 0.00133,
+          "max": 0.00306,
+          "p50": 0.00255,
+          "p95": 0.00306,
+          "p99": 0.00306,
+          "buckets": [
+            {
+              "lo": 0.00133,
+              "hi": 0.0014165,
+              "count": 1
+            },
+            {
+              "lo": 0.0014165,
+              "hi": 0.001503,
+              "count": 0
+            },
+            {
+              "lo": 0.001503,
+              "hi": 0.0015895,
+              "count": 0
+            },
+            {
+              "lo": 0.0015895,
+              "hi": 0.001676,
+              "count": 0
+            },
+            {
+              "lo": 0.001676,
+              "hi": 0.0017625,
+              "count": 0
+            },
+            {
+              "lo": 0.0017625,
+              "hi": 0.001849,
+              "count": 0
+            },
+            {
+              "lo": 0.001849,
+              "hi": 0.0019355,
+              "count": 0
+            },
+            {
+              "lo": 0.0019355,
+              "hi": 0.002022,
+              "count": 0
+            },
+            {
+              "lo": 0.002022,
+              "hi": 0.0021085,
+              "count": 0
+            },
+            {
+              "lo": 0.0021085,
+              "hi": 0.002195,
+              "count": 0
+            },
+            {
+              "lo": 0.002195,
+              "hi": 0.0022814999999999997,
+              "count": 0
+            },
+            {
+              "lo": 0.0022814999999999997,
+              "hi": 0.002368,
+              "count": 0
+            },
+            {
+              "lo": 0.002368,
+              "hi": 0.0024545,
+              "count": 0
+            },
+            {
+              "lo": 0.0024545,
+              "hi": 0.002541,
+              "count": 1
+            },
+            {
+              "lo": 0.002541,
+              "hi": 0.0026274999999999996,
+              "count": 0
+            },
+            {
+              "lo": 0.0026274999999999996,
+              "hi": 0.002714,
+              "count": 1
+            },
+            {
+              "lo": 0.002714,
+              "hi": 0.0028005,
+              "count": 0
+            },
+            {
+              "lo": 0.0028005,
+              "hi": 0.002887,
+              "count": 0
+            },
+            {
+              "lo": 0.002887,
+              "hi": 0.0029734999999999996,
+              "count": 0
+            },
+            {
+              "lo": 0.0029734999999999996,
+              "hi": 0.00306,
+              "count": 0
+            },
+            {
+              "lo": 0.00306,
+              "hi": 0.00306,
+              "count": 1
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,9 +1,12 @@
 import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { delay, HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
+import { FACET_BATCH_MS } from "@/api/facet-batch";
+import type { Schema } from "@/api/types";
 import { FiltersToggle } from "@/components/facets/facet-panel";
 import { ANCHOR_REUSE_MS } from "@/lib/list-anchor";
 import { server } from "@/mocks/node";
+import { facetsHandler } from "@/test/facets";
 import { renderApp } from "@/test/render";
 
 const TRACES = "/acme/support-bot/traces?range=15m";
@@ -16,49 +19,52 @@ afterEach(() => {
   }
 });
 
-/** Every facet request the page makes, as URLs. Stopped after the test. */
-function recordFacets(): URL[] {
-  const urls: URL[] = [];
+/** Every facet request the page makes, as parsed bodies. Stopped after the test. */
+function recordFacets(): Schema<"FacetsRequest">[] {
+  const bodies: Schema<"FacetsRequest">[] = [];
   const listener = ({ request }: { request: Request }) => {
     const url = new URL(request.url);
-    if (url.pathname.endsWith("/facets")) {
-      urls.push(url);
+    if (request.method === "POST" && url.pathname.endsWith("/facets")) {
+      void request
+        .clone()
+        .json()
+        .then((body) => {
+          bodies.push(body as Schema<"FacetsRequest">);
+        });
     }
   };
   server.events.on("request:start", listener);
   stops.push(() => server.events.removeListener("request:start", listener));
-  return urls;
+  return bodies;
+}
+
+/** The fields the page asked, in the order their requests went out. */
+function fieldsAsked(bodies: Schema<"FacetsRequest">[]): string[] {
+  return bodies.flatMap((body) => body.fields.map((field) => field.field));
 }
 
 /** Answers the facets of one field with fixed values; every other field has none. */
 function answerField(
   field: string,
-  answer: { values?: { value: string; count: number }[]; missing?: number; kind?: string },
+  answer: {
+    values?: { value: string; count: number }[];
+    missing?: number;
+    kind?: "values" | "keys";
+  },
 ) {
   server.use(
-    http.get("/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      if (url.searchParams.get("field") !== field) {
-        return HttpResponse.json({
-          view: url.searchParams.get("view"),
-          field: url.searchParams.get("field"),
-          kind: "values",
-          total: 0,
-          missing: 0,
-          values: [],
-          more: false,
-        });
+    facetsHandler((ask) => {
+      if (ask.field !== field) {
+        return undefined;
       }
       const values = answer.values ?? [];
-      return HttpResponse.json({
-        view: url.searchParams.get("view"),
-        field,
+      return {
         kind: answer.kind ?? "values",
         total: values.reduce((sum, item) => sum + item.count, 0),
         missing: answer.missing ?? 0,
         values,
         more: false,
-      });
+      };
     }),
   );
 }
@@ -90,16 +96,16 @@ it("opens the default sections and keeps the others collapsed", async () => {
 });
 
 it("makes no facet request for a collapsed section until it is opened", async () => {
-  const urls = recordFacets();
+  const bodies = recordFacets();
   const { user } = await renderApp(TRACES);
   await screen.findByRole("button", { name: /^Status/ });
   await waitFor(() => {
-    expect(urls.some((url) => url.searchParams.get("field") === "status")).toBe(true);
+    expect(fieldsAsked(bodies)).toContain("status");
   });
-  expect(urls.some((url) => url.searchParams.get("field") === "models")).toBe(false);
+  expect(fieldsAsked(bodies)).not.toContain("models");
   await user.click(screen.getByRole("button", { name: /^Models/ }));
   await waitFor(() => {
-    expect(urls.some((url) => url.searchParams.get("field") === "models")).toBe(true);
+    expect(fieldsAsked(bodies)).toContain("models");
   });
 });
 
@@ -142,11 +148,11 @@ it("writes the (none) row as IS NULL", async () => {
 
 it("counts a facet without its own conjuncts", async () => {
   answerField("status", STATUS);
-  const urls = recordFacets();
+  const bodies = recordFacets();
   await renderApp(`${TRACES}&filter=${encodeURIComponent("status = 'ok' AND name = 'x'")}`);
   await waitFor(() => {
-    const status = urls.find((url) => url.searchParams.get("field") === "status");
-    expect(status?.searchParams.get("filter")).toBe("name = 'x'");
+    const status = bodies.find((body) => body.fields.some((field) => field.field === "status"));
+    expect(status?.filter).toBe("name = 'x'");
   });
 });
 
@@ -162,12 +168,12 @@ it("opens a metadata key into a nested values facet", async () => {
     kind: "keys",
     values: [{ value: "team", count: 3 }],
   });
-  const urls = recordFacets();
+  const bodies = recordFacets();
   const { user } = await renderApp(TRACES);
   await user.click(await screen.findByRole("button", { name: /^Metadata/ }));
   await user.click(await screen.findByRole("button", { name: /^team/ }));
   await waitFor(() => {
-    expect(urls.some((url) => url.searchParams.get("field") === "metadata['team']")).toBe(true);
+    expect(fieldsAsked(bodies)).toContain("metadata['team']");
   });
 });
 
@@ -270,14 +276,39 @@ it("names the toggle with its active count", () => {
   expect(screen.getByRole("button", { name: "Filters 2 active" })).toBeInTheDocument();
 });
 
+it("opening the spans page sends one facet request, and opening a section sends one more", async () => {
+  // Batches an earlier test asked for go out within FACET_BATCH_MS; let them leave first.
+  await new Promise((resolve) => setTimeout(resolve, FACET_BATCH_MS * 3));
+  const bodies = recordFacets();
+  const { user } = await renderApp("/acme/support-bot/spans?range=15m");
+  await section(/^Status/);
+  // The open sections (span kind, status, name, duration) and the Slow and Expensive presets (their
+  // p95s: duration and cost) mount together, so one batch asks them all.
+  await waitFor(() => {
+    expect(bodies).toHaveLength(1);
+  });
+  // No straggler follows: a section or chip mounting late would send a second batch.
+  await new Promise((resolve) => setTimeout(resolve, FACET_BATCH_MS * 5));
+  expect(bodies).toHaveLength(1);
+  expect(fieldsAsked(bodies)).toEqual(
+    expect.arrayContaining(["cost_total", "duration_ms", "name", "span_kind", "status"]),
+  );
+
+  await user.click(await screen.findByRole("button", { name: /^Model/ }));
+  await waitFor(() => {
+    expect(bodies).toHaveLength(2);
+  });
+  expect(bodies[1]?.fields.map((field) => field.field)).toEqual(["model"]);
+});
+
 it("shows the last counts at once when coming back to the list", async () => {
   answerField("status", STATUS);
-  const urls = recordFacets();
+  const bodies = recordFacets();
   const { router } = await renderApp(TRACES);
   await within(await section(/^Status/)).findByRole("checkbox", { name: "ok" });
-  const firstFrom = urls
-    .find((url) => url.searchParams.get("field") === "status")
-    ?.searchParams.get("from");
+  const firstFrom = bodies.find((body) =>
+    body.fields.some((field) => field.field === "status"),
+  )?.from;
 
   await router.navigate({
     to: "/$org/$project/spans",
@@ -289,7 +320,7 @@ it("shows the last counts at once when coming back to the list", async () => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(Date.now() + ANCHOR_REUSE_MS + 20_000);
   server.use(
-    http.get("/api/v1/projects/:project/facets", async () => {
+    http.post("/api/v1/projects/:project/facets", async () => {
       await delay("infinite");
       return HttpResponse.json({});
     }),
@@ -304,11 +335,10 @@ it("shows the last counts at once when coming back to the list", async () => {
     expect(within(status).getByRole("checkbox", { name: "ok" })).toBeInTheDocument();
     expect(status.querySelector('[data-slot="skeleton"]')).toBeNull();
     await waitFor(() => {
-      const asked = urls.filter(
-        (url) =>
-          url.searchParams.get("field") === "status" && url.searchParams.get("view") === "traces",
+      const asked = bodies.filter(
+        (body) => body.view === "traces" && body.fields.some((field) => field.field === "status"),
       );
-      expect(asked.at(-1)?.searchParams.get("from")).not.toBe(firstFrom);
+      expect(asked.at(-1)?.from).not.toBe(firstFrom);
     });
   } finally {
     vi.useRealTimers();

@@ -1,7 +1,9 @@
 import { screen, waitFor } from "@testing-library/react";
 import { delay, HttpResponse, http } from "msw";
 import { afterEach, expect, it } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
+import { facetsHandler } from "@/test/facets";
 import { renderApp } from "@/test/render";
 import { ANNOTATION_DEFINITIONS, serveAnnotationDefinitions } from "@/test/score-definitions";
 
@@ -19,30 +21,18 @@ afterEach(() => {
  */
 function answerP95(field: string, p95: number | null) {
   server.use(
-    http.get("/api/v1/projects/:project/facets", ({ request }) => {
-      const url = new URL(request.url);
-      const view = url.searchParams.get("view");
-      if (url.searchParams.get("field") !== field) {
-        return HttpResponse.json({
-          view,
-          field: url.searchParams.get("field"),
-          kind: "values",
-          total: 0,
-          missing: 0,
-          values: [],
-          more: false,
-        });
+    facetsHandler((ask): Schema<"Facet"> | undefined => {
+      if (ask.field !== field) {
+        return undefined;
       }
-      return HttpResponse.json({
-        view,
-        field,
+      return {
         kind: "histogram",
         total: p95 === null ? 0 : 5,
         missing: 0,
         ...(p95 === null
           ? {}
           : { histogram: { min: 1, max: p95, p50: p95, p95, p99: p95, buckets: [] } }),
-      });
+      };
     }),
   );
 }
@@ -102,19 +92,18 @@ it("writes Expensive as a lower bound at the p95 of cost", async () => {
 
 it("keeps Slow disabled while the p95 is loading", async () => {
   server.use(
-    http.get("/api/v1/projects/:project/facets", async ({ request }) => {
-      const url = new URL(request.url);
-      if (url.searchParams.get("field") === "duration_ms") {
+    http.post("/api/v1/projects/:project/facets", async ({ request }) => {
+      const body = (await request.json()) as Schema<"FacetsRequest">;
+      // A batch that asks the duration field waits, so the Slow preset's p95 stays loading.
+      if (body.fields.some((field) => field.field === "duration_ms")) {
         await delay("infinite");
       }
       return HttpResponse.json({
-        view: url.searchParams.get("view"),
-        field: url.searchParams.get("field"),
-        kind: "values",
-        total: 0,
-        missing: 0,
-        values: [],
-        more: false,
+        view: body.view,
+        results: body.fields.map((field) => ({
+          field: field.field,
+          facet: { kind: "values", total: 0, missing: 0, values: [], more: false },
+        })),
       });
     }),
   );

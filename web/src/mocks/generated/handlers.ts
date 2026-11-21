@@ -135,7 +135,7 @@ export function largeHandlers(dataset: Dataset): HttpHandler[] {
       oneUser(dataset, request, params.user_id),
     ),
     http.get(`${PROJECT}/users`, ({ request }) => listUsers(dataset, request)),
-    http.get(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
+    http.post(`${PROJECT}/facets`, ({ request }) => facets(dataset, request)),
     http.get(`${PROJECT}/score-definitions`, () =>
       HttpResponse.json({ data: SCORE_DEFINITIONS, next_cursor: null }),
     ),
@@ -875,15 +875,14 @@ function bucketsOf(
   return buckets;
 }
 
-/** The answer of one facet request over the rows of its view (D1). */
+/** The answer of one facet field over the rows of its view (D1). */
 function facetAnswer(
   view: "traces" | "spans" | "sessions",
   field: { column: string; key?: string },
   rows: FacetRow[],
   search: string | undefined,
   limit: number,
-): Schema<"FacetsResponse"> {
-  const fieldText = field.key === undefined ? field.column : `${field.column}['${field.key}']`;
+): Schema<"Facet"> {
   const kind = FACET_COLUMNS[view][field.column] ?? "value";
   const total = rows.length;
   if (kind === "number" && field.key === undefined) {
@@ -892,8 +891,6 @@ function facetAnswer(
       .filter((value): value is number => typeof value === "number" && Number.isFinite(value))
       .sort((left, right) => left - right);
     const base = {
-      view,
-      field: fieldText,
       kind: "histogram" as const,
       total,
       missing: total - numbers.length,
@@ -940,8 +937,6 @@ function facetAnswer(
             : 0,
     );
   return {
-    view,
-    field: fieldText,
     kind: field.key === undefined && kind === "keys" ? "keys" : "values",
     total,
     missing,
@@ -950,47 +945,78 @@ function facetAnswer(
   };
 }
 
-/** `GET …/facets` (D1). The mock ignores `filter` and `search`; `q` narrows the values. */
-function facets(dataset: Dataset, request: Request): Response {
-  const url = new URL(request.url);
-  const parsed = readQuery(url);
-  if (parsed instanceof Response) {
-    return parsed;
-  }
-  const view = url.searchParams.get("view");
+/** One field of a batch that fails its own checks: a `bad_request` with the reason, as the server answers it. */
+function fieldError(field: string, message: string): Schema<"FacetResult"> {
+  return {
+    field,
+    error: {
+      type: "about:blank",
+      title: "Bad Request",
+      status: 400,
+      code: "bad_request",
+      detail: message,
+    },
+  };
+}
+
+/**
+ * `POST …/facets` (D-C-24): one result per field of the batch, in request order. The mock ignores
+ * `filter` and `search`; a field's `q` narrows its values.
+ */
+async function facets(dataset: Dataset, request: Request): Promise<Response> {
+  const body = (await request.json()) as Partial<Schema<"FacetsRequest">>;
+  const view = body.view;
   if (view !== "traces" && view !== "spans" && view !== "sessions") {
     return problem(400, "bad_request", "Bad Request", [
       { field: "view", message: "is not a view" },
     ]);
   }
-  const field = parseFacetField(view, url.searchParams.get("field") ?? "");
-  if (!field) {
+  const asks = body.fields;
+  if (!Array.isArray(asks) || asks.length < 1 || asks.length > 20) {
     return problem(400, "bad_request", "Bad Request", [
-      { field: "field", message: "field cannot be faceted" },
+      { field: "fields", message: "must hold 1 to 20 fields" },
     ]);
   }
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit === null ? 10 : /^\d+$/.test(rawLimit) ? Number(rawLimit) : 0;
-  if (limit < 1 || limit > 100) {
-    return problem(400, "bad_request", "Bad Request", [
-      { field: "limit", message: "must be 1 to 100" },
-    ]);
-  }
-  const rawQuery = url.searchParams.get("q");
-  const search = rawQuery === null ? undefined : rawQuery.trim();
-  if (search !== undefined && (search.length < 1 || [...search].length > 200)) {
-    return problem(400, "bad_request", "Bad Request", [
-      { field: "q", message: "must be 1 to 200 characters" },
-    ]);
-  }
-  if (view === "sessions" && url.searchParams.has("search")) {
+  if (view === "sessions" && typeof body.search === "string" && body.search.length > 0) {
     return problem(400, "bad_request", "Bad Request", [
       { field: "search", message: "is not supported for sessions" },
     ]);
   }
-  return HttpResponse.json(
-    facetAnswer(view, field, facetRows(dataset, view, parsed), search, limit),
-  );
+  const url = new URL(request.url);
+  for (const name of ["from", "to", "filter", "search"] as const) {
+    const value = body[name];
+    if (value !== undefined) {
+      url.searchParams.set(name, String(value));
+    }
+  }
+  for (const name of ["include_eval", "include_experiments"] as const) {
+    const value = body[name];
+    if (value !== undefined) {
+      url.searchParams.set(name, String(value));
+    }
+  }
+  const parsed = readQuery(url);
+  if (parsed instanceof Response) {
+    return parsed;
+  }
+  const rows = facetRows(dataset, view, parsed);
+  // The server's order: limit, then q, then the field.
+  const results = asks.map((ask): Schema<"FacetResult"> => {
+    const limit = ask.limit ?? 10;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+      return fieldError(ask.field, "limit must be between 1 and 100");
+    }
+    const search = ask.q === undefined ? undefined : ask.q.trim();
+    if (search !== undefined && (search.length < 1 || [...search].length > 200)) {
+      return fieldError(ask.field, "q must be 1 to 200 characters");
+    }
+    const field = parseFacetField(view, ask.field);
+    if (!field) {
+      return fieldError(ask.field, "field cannot be faceted");
+    }
+    return { field: ask.field, facet: facetAnswer(view, field, rows, search, limit) };
+  });
+  return HttpResponse.json({ view, results });
 }
 
 /** The user id of a filter of exactly the form `user_id = '<id>'` (UP-5), else undefined. */

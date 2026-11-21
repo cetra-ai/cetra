@@ -334,6 +334,7 @@ function SessionsPage() {
           }
           presets={
             <PresetChips
+              hold={hold}
               view="sessions"
               filter={search.filter ?? ""}
               onFilter={(text) => {

@@ -548,7 +548,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/assistant",
         "get_project_assistant",
     ),
-    ("get", "/api/v1/projects/{project}/facets", "get_facets"),
+    ("post", "/api/v1/projects/{project}/facets", "post_facets"),
     (
         "get",
         "/api/v1/projects/{project}/media/{sha256}",
@@ -1055,7 +1055,6 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_dashboards",
     "get_dashboard",
     "get_overview",
-    "get_facets",
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
@@ -1097,7 +1096,6 @@ const READ_OPERATIONS: &[&str] = &[
     "list_users",
     "get_user",
     "list_scores",
-    "get_facets",
     "get_experiment_results",
     "compare_experiments",
     "get_evaluator_stats",
@@ -1412,7 +1410,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
-        } else if *id == "run_sql" || *id == "query_widget" {
+        } else if *id == "run_sql" || *id == "query_widget" || *id == "post_facets" {
             expected_errors.extend(["400", "401", "403", "404", "413", "415", "422", "429"]);
         } else if *id == "create_deletion" {
             expected_errors.extend(["400", "401", "403", "404", "409", "422", "429"]);
@@ -1793,7 +1791,6 @@ fn check_property_names(schema: &Value, owner: &str) {
 
 fn assert_exclusions(document: &Value) {
     const EXPECTED: &[&str] = &[
-        "get_facets",
         "get_session",
         "get_user",
         "list_sessions",

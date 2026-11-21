@@ -99,7 +99,7 @@ use super::experiments::{
     ExperimentStatus, ExperimentSummaries, ExperimentSummary, FinishExperimentRequest, ResultRow,
     ResultScore, ResultsParams, ScoreDelta, ScoreDeltas, ScoreSummary, SummariesParams,
 };
-use super::facets::{FacetsParams, FacetsResponse};
+use super::facets::{Facet, FacetFieldRequest, FacetResult, FacetsRequest, FacetsResponse};
 use super::internal::{
     CreateInternalOrgRequest, InternalDrop, InternalDropKind, InternalDropsQuery, InternalMember,
     InternalMembers, InternalMembersQuery, InternalOrg, InternalOwner, InternalUsageQuery,
@@ -363,6 +363,10 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<WidgetPoint>();
     set.insert::<WidgetTotalResponse>();
     set.insert::<TotalRow>();
+    set.insert::<FacetsRequest>();
+    set.insert::<FacetFieldRequest>();
+    set.insert::<FacetResult>();
+    set.insert::<Facet>();
     set.insert::<FacetsResponse>();
     set.insert::<SqlQueryRequest>();
     set.insert::<SqlQueryResult>();
@@ -2641,15 +2645,16 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
             AUTH_ERRORS,
         ))
         .build();
-    let facets = operation("get_facets", "traces", "Get facets")
+    let facets = operation("post_facets", "traces", "Get facets")
         .description(Some(format!(
-            "{EXCLUSIONS} A facet describes one field over the rows the list would show: the window, the default exclusions, `search` and `filter`, but not the list's cursor, sort or limit. The field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server; a facet is computed on each call."
+            "{EXCLUSIONS} Answers 1 to 20 fields over the rows the list would show: the window, the default exclusions, `search` and `filter`, given once for every field, but not the list's cursor, sort or limit. The answer has one result per field, in request order, with either `facet` or `error`: a bad field, `limit` or `q`, or a field that times out, fails only that field. A bad filter, `search` on sessions, a bad window, or 0 or more than 20 fields fail the whole request. A field is a column of the view, or `map['key']` of a map column; a bare map column facets its keys. `kind` is `values` (strings, booleans, lists and `map['key']`), `keys` (a bare map) or `histogram` (numbers: min, max, approximate p50, p95 and p99, and 20 equal buckets below p99 plus one bucket from p99 to max). `total` counts rows, `missing` the rows with no value (null, or an empty list or map). Values are counted per row: a list counts a row once under each distinct element. Keys starting with `cetra.` are left out. `q` keeps values containing it, ignoring case. Spans count stored copies separately. Sessions take no `search`. Nothing is cached on the server. A read: a read-only personal access token and a `read` key may call it."
         )))
-        .parameters(Some(with_query::<FacetsParams>(vec![project_param()])))
+        .parameters(Some(vec![project_param()]))
+        .request_body(Some(json_body("FacetsRequest")))
         .responses(responses(
             "200",
-            json_of::<FacetsResponse>("A facet: values, keys or a histogram."),
-            READ_ERRORS,
+            json_of::<FacetsResponse>("One result per field, in request order."),
+            &[400, 401, 403, 404, 413, 415, 422, 429, 503],
         ))
         .build();
     paths
@@ -2683,7 +2688,7 @@ fn score_paths(paths: PathsBuilder) -> PathsBuilder {
         )
         .path(
             format!("{PROJECT}/facets"),
-            PathItem::new(HttpMethod::Get, facets),
+            PathItem::new(HttpMethod::Post, facets),
         )
 }
 

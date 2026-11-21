@@ -1,0 +1,15 @@
+{
+  "view": "traces",
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-01-02T00:00:00Z",
+  "fields": [
+    { "field": "status" },
+    { "field": "name" },
+    { "field": "environment" },
+    { "field": "tags" },
+    { "field": "models" },
+    { "field": "metadata" },
+    { "field": "duration_ms" },
+    { "field": "cost_total" }
+  ]
+}

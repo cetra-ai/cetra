@@ -3,6 +3,8 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
+
 use arrow::array::{Array, AsArray};
 use arrow::record_batch::RecordBatch;
 use datafusion::common::{NullHandling, UnnestOptions};
@@ -42,24 +44,36 @@ pub enum FacetView {
     Sessions,
 }
 
-/// One facet request.
+/// Most fields one facet batch asks.
+pub const MAX_FACET_FIELDS: usize = 20;
+/// Fields of one batch computed at the same time (D-C-24).
+const FIELDS_AT_ONCE: usize = 4;
+
+/// One field of a facet batch.
 #[derive(Debug, Clone, Copy)]
-pub struct FacetRequest<'a> {
-    /// The list the facet describes.
-    pub view: FacetView,
+pub struct FacetField<'a> {
     /// `column` or `map['key']` (see D1 of the filtering plan).
     pub field: &'a str,
+    /// Case-insensitive substring the value or key must contain. Ignored by histograms.
+    pub query: Option<&'a str>,
+    /// Most values or keys returned, `1..=`[`MAX_FACET_LIMIT`].
+    pub limit: usize,
+}
+
+/// A facet batch: fields over the rows of one list (D-C-24).
+#[derive(Debug, Clone, Copy)]
+pub struct FacetsRequest<'a> {
+    /// The list the facets describe.
+    pub view: FacetView,
     /// Filter text over `view`. Blank means no filter.
     pub filter: Option<&'a str>,
     /// Full-text search. Traces and spans only; blank means no search.
     pub search: Option<&'a str>,
     /// The list's window and default exclusions.
     pub scope: ListScope,
-    /// Case-insensitive substring the value or key must contain. Ignored by histograms.
-    pub query: Option<&'a str>,
-    /// Most values or keys returned, `1..=`[`MAX_FACET_LIMIT`].
-    pub limit: usize,
-    /// Read timeout of the whole facet.
+    /// The fields, `1..=`[`MAX_FACET_FIELDS`].
+    pub fields: &'a [FacetField<'a>],
+    /// Read timeout of the whole batch.
     pub timeout: Duration,
 }
 
@@ -216,7 +230,7 @@ fn columns_of(view: FacetView) -> &'static FacetColumns {
 
 /// A parsed field. Names are the view's own column names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum FacetField {
+enum ParsedField {
     Values(&'static str),
     Bool(&'static str),
     List(&'static str),
@@ -248,23 +262,23 @@ const INTERNAL_KEY_PREFIX: &str = "cetra.";
 /// # Errors
 ///
 /// [`RunError::InvalidRequest`] when the field is not a facet column of the view.
-fn parse_field(view: FacetView, text: &str) -> Result<FacetField, RunError> {
+fn parse_field(view: FacetView, text: &str) -> Result<ParsedField, RunError> {
     let columns = columns_of(view);
     let find = |names: &'static [&'static str]| names.iter().find(|name| **name == text).copied();
     if let Some(name) = find(columns.values) {
-        return Ok(FacetField::Values(name));
+        return Ok(ParsedField::Values(name));
     }
     if let Some(name) = find(columns.bools) {
-        return Ok(FacetField::Bool(name));
+        return Ok(ParsedField::Bool(name));
     }
     if let Some(name) = find(columns.lists) {
-        return Ok(FacetField::List(name));
+        return Ok(ParsedField::List(name));
     }
     if let Some(name) = find(columns.keys) {
-        return Ok(FacetField::Keys(name));
+        return Ok(ParsedField::Keys(name));
     }
     if let Some(name) = find(columns.numbers) {
-        return Ok(FacetField::Number(name));
+        return Ok(ParsedField::Number(name));
     }
     for name in columns.keys {
         let key = text
@@ -273,7 +287,7 @@ fn parse_field(view: FacetView, text: &str) -> Result<FacetField, RunError> {
             .and_then(|rest| rest.strip_suffix("']"))
             .and_then(unescape_key);
         if let Some(key) = key {
-            return Ok(FacetField::MapValue(name, key));
+            return Ok(ParsedField::MapValue(name, key));
         }
     }
     Err(RunError::InvalidRequest(CANNOT_FACET.to_owned()))
@@ -294,20 +308,22 @@ fn unescape_key(escaped: &str) -> Option<String> {
     (1..=MAX_FACET_KEY).contains(&length).then_some(key)
 }
 
-/// The facet of `request`: its values, keys or histogram, over the rows of its list.
+/// A field that passed its checks: the parsed field, its trimmed `q` and its limit.
+type CheckedField<'a> = (ParsedField, Option<&'a str>, usize);
+
+/// The limit and `q` of one field, and the parsed field. The limit is checked first, then `q`,
+/// then the field name.
 ///
 /// # Errors
 ///
-/// [`RunError::InvalidRequest`] for a bad limit, `q`, field, or `search` on sessions;
-/// [`RunError::Invalid`] for a bad filter (both checked before any query runs);
-/// [`RunError::Timeout`] past `timeout`; DataFusion failures through [`classify`].
-pub async fn facet(ctx: &QueryContext, request: FacetRequest<'_>) -> Result<FacetData, RunError> {
-    if !(1..=MAX_FACET_LIMIT).contains(&request.limit) {
+/// [`RunError::InvalidRequest`] for a bad limit, `q` or field.
+fn check_field<'a>(view: FacetView, field: &FacetField<'a>) -> Result<CheckedField<'a>, RunError> {
+    if !(1..=MAX_FACET_LIMIT).contains(&field.limit) {
         return Err(RunError::InvalidRequest(format!(
             "limit must be between 1 and {MAX_FACET_LIMIT}"
         )));
     }
-    let query = match request.query {
+    let query = match field.query {
         Some(text) => {
             let trimmed = text.trim();
             if !(1..=MAX_FACET_QUERY).contains(&trimmed.chars().count()) {
@@ -319,7 +335,32 @@ pub async fn facet(ctx: &QueryContext, request: FacetRequest<'_>) -> Result<Face
         }
         None => None,
     };
-    let field = parse_field(request.view, request.field)?;
+    let parsed = parse_field(view, field.field)?;
+    Ok((parsed, query, field.limit))
+}
+
+/// The facets of `request`, one result per field in request order: each field's values, keys or
+/// histogram, over the rows of the list. The rows are built once and the fields run
+/// concurrently under one deadline (D-C-24).
+///
+/// # Errors
+///
+/// The outer error fails the whole batch: [`RunError::InvalidRequest`] for 0 or more than
+/// [`MAX_FACET_FIELDS`] fields, or `search` on sessions; [`RunError::Invalid`] for a bad filter
+/// (all checked before any query runs); [`RunError::Timeout`] when building the rows passes
+/// `timeout`; DataFusion failures through [`classify`].
+///
+/// A field's own error is in its slot: [`RunError::InvalidRequest`] for a bad limit, `q` or
+/// field; [`RunError::Timeout`] when the field passes the deadline; query failures.
+pub async fn facets(
+    ctx: &QueryContext,
+    request: FacetsRequest<'_>,
+) -> Result<Vec<Result<FacetData, RunError>>, RunError> {
+    if !(1..=MAX_FACET_FIELDS).contains(&request.fields.len()) {
+        return Err(RunError::InvalidRequest(format!(
+            "fields must hold 1 to {MAX_FACET_FIELDS} fields"
+        )));
+    }
     if request.view == FacetView::Sessions && present(request.search).is_some() {
         return Err(RunError::InvalidRequest(
             "search is not supported for sessions".to_owned(),
@@ -329,10 +370,49 @@ pub async fn facet(ctx: &QueryContext, request: FacetRequest<'_>) -> Result<Face
         Some(text) => Some(ctx.parse_filter(filter_view(request.view), text)?),
         None => None,
     };
-    match tokio::time::timeout(request.timeout, run(ctx, &request, &field, filter, query)).await {
-        Err(_) => Err(RunError::Timeout),
-        Ok(result) => result,
+    let checked: Vec<Result<CheckedField<'_>, RunError>> = request
+        .fields
+        .iter()
+        .map(|field| check_field(request.view, field))
+        .collect();
+    if checked.iter().all(Result::is_err) {
+        // No field is valid, so no query runs.
+        return Ok(checked
+            .into_iter()
+            .map(|entry| match entry {
+                Err(error) => Err(error),
+                Ok(_) => Err(internal(
+                    "a valid field reached the error-only path".to_owned(),
+                )),
+            })
+            .collect());
     }
+    let deadline = tokio::time::Instant::now() + request.timeout;
+    let frame = match tokio::time::timeout_at(deadline, rows(ctx, &request, filter)).await {
+        Err(_) => return Err(RunError::Timeout),
+        Ok(frame) => frame?,
+    };
+    // Collected first: a lazy `map` inside the stream makes the handler's future not `Send`.
+    let futures: Vec<_> = checked
+        .into_iter()
+        .map(|entry| {
+            let frame = frame.clone();
+            async move {
+                let (field, query, limit) = entry?;
+                match tokio::time::timeout_at(deadline, one(ctx, frame, &field, query, limit)).await
+                {
+                    Err(_) => Err(RunError::Timeout),
+                    Ok(result) => result,
+                }
+            }
+        })
+        .collect();
+    // At most `FIELDS_AT_ONCE` fields run at a time, so one batch does not take the scans of
+    // twenty readers; `buffered` keeps the request order.
+    Ok(futures::stream::iter(futures)
+        .buffered(FIELDS_AT_ONCE)
+        .collect()
+        .await)
 }
 
 fn filter_view(view: FacetView) -> FilterView {
@@ -343,23 +423,51 @@ fn filter_view(view: FacetView) -> FilterView {
     }
 }
 
-async fn run(
+/// The one set of rows every field of the batch is counted over: the list's rows before its
+/// cursor, sort and limit, with the filter applied.
+async fn rows(
     ctx: &QueryContext,
-    request: &FacetRequest<'_>,
-    field: &FacetField,
+    request: &FacetsRequest<'_>,
     filter: Option<Filter>,
-    query: Option<&str>,
-) -> Result<FacetData, RunError> {
-    let frame = match request.view {
+) -> Result<DataFrame, RunError> {
+    match request.view {
         FacetView::Traces => {
-            window_rows(ctx, "traces", FilterView::Traces, request, filter).await?
+            window_rows(
+                ctx,
+                "traces",
+                FilterView::Traces,
+                request.scope,
+                request.search,
+                filter,
+            )
+            .await
         }
-        FacetView::Spans => window_rows(ctx, "spans", FilterView::Spans, request, filter).await?,
-        FacetView::Sessions => session_rows(ctx, request.scope, filter).await?,
-    };
+        FacetView::Spans => {
+            window_rows(
+                ctx,
+                "spans",
+                FilterView::Spans,
+                request.scope,
+                request.search,
+                filter,
+            )
+            .await
+        }
+        FacetView::Sessions => session_rows(ctx, request.scope, filter).await,
+    }
+}
+
+/// The facet of one parsed field over `frame`: a histogram for a number, else its values.
+async fn one(
+    ctx: &QueryContext,
+    frame: DataFrame,
+    field: &ParsedField,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<FacetData, RunError> {
     match field {
-        FacetField::Number(name) => histogram(ctx, frame, name).await,
-        _ => values(ctx, frame, field, query, request.limit).await,
+        ParsedField::Number(name) => histogram(ctx, frame, name).await,
+        _ => values(ctx, frame, field, query, limit).await,
     }
 }
 
@@ -369,7 +477,8 @@ async fn window_rows(
     ctx: &QueryContext,
     table: &str,
     view: FilterView,
-    request: &FacetRequest<'_>,
+    scope: ListScope,
+    text_search: Option<&str>,
     filter: Option<Filter>,
 ) -> Result<DataFrame, RunError> {
     let references_environment = filter
@@ -377,20 +486,20 @@ async fn window_rows(
         .is_some_and(|filter| filter.references_environment);
     let mut frame = ctx.session().table(table).await.map_err(classify)?;
     let mut conjuncts = Vec::new();
-    if let Some(window) = request.scope.window {
+    if let Some(window) = scope.window {
         conjuncts.push(time_window(window));
     }
     if let Some(expr) = exclusions(
         ctx,
         view,
-        request.scope.include_eval,
-        request.scope.include_experiments,
+        scope.include_eval,
+        scope.include_experiments,
         references_environment,
     )? {
         conjuncts.push(expr);
     }
-    if let Some(text) = present(request.search)
-        && let Some(expr) = search(view, text, request.scope.window, ctx).await?
+    if let Some(text) = present(text_search)
+        && let Some(expr) = search(view, text, scope.window, ctx).await?
     {
         conjuncts.push(expr);
     }
@@ -404,18 +513,18 @@ async fn window_rows(
 }
 
 /// The expression of the field's value, one per element for a list and one per key for keys.
-fn value_expr(frame: &DataFrame, field: &FacetField) -> Result<Expr, RunError> {
+fn value_expr(frame: &DataFrame, field: &ParsedField) -> Result<Expr, RunError> {
     match field {
-        FacetField::Values(name) | FacetField::Bool(name) => Ok(col(*name)),
-        FacetField::List(name) => Ok(array_distinct(col(*name))),
-        FacetField::Keys(name) => Ok(map_keys(col(*name))),
-        FacetField::MapValue(name, key) => {
+        ParsedField::Values(name) | ParsedField::Bool(name) => Ok(col(*name)),
+        ParsedField::List(name) => Ok(array_distinct(col(*name))),
+        ParsedField::Keys(name) => Ok(map_keys(col(*name))),
+        ParsedField::MapValue(name, key) => {
             let key = key.replace('\'', "''");
             frame
                 .parse_sql_expr(&format!("{name}['{key}']"))
                 .map_err(classify)
         }
-        FacetField::Number(_) => Err(internal("a number field has no values".to_owned())),
+        ParsedField::Number(_) => Err(internal("a number field has no values".to_owned())),
     }
 }
 
@@ -423,11 +532,11 @@ fn value_expr(frame: &DataFrame, field: &FacetField) -> Result<Expr, RunError> {
 async fn values(
     ctx: &QueryContext,
     frame: DataFrame,
-    field: &FacetField,
+    field: &ParsedField,
     query: Option<&str>,
     limit: usize,
 ) -> Result<FacetData, RunError> {
-    let list = matches!(field, FacetField::List(_) | FacetField::Keys(_));
+    let list = matches!(field, ParsedField::List(_) | ParsedField::Keys(_));
     let value = value_expr(&frame, field)?;
     let base = frame.select(vec![value.alias(VALUE)]).map_err(classify)?;
     let missing = if list {
@@ -466,7 +575,7 @@ async fn values(
         base
     };
     groups = groups.filter(col(VALUE).is_not_null()).map_err(classify)?;
-    if matches!(field, FacetField::Keys(_)) {
+    if matches!(field, ParsedField::Keys(_)) {
         groups = groups
             .filter(starts_with(col(VALUE), lit(INTERNAL_KEY_PREFIX)).not())
             .map_err(classify)?;
@@ -516,7 +625,7 @@ async fn values(
     let more = values.len() > limit;
     values.truncate(limit);
     Ok(FacetData {
-        kind: if matches!(field, FacetField::Keys(_)) {
+        kind: if matches!(field, ParsedField::Keys(_)) {
             FacetKind::Keys
         } else {
             FacetKind::Values
@@ -766,8 +875,20 @@ mod tests {
         )
     }
 
-    fn request(view: FacetView, field: &str) -> FacetRequest<'_> {
-        FacetRequest {
+    /// One field asked alone, the shape the single-field tests were written for.
+    #[derive(Debug, Clone, Copy)]
+    struct Ask<'a> {
+        view: FacetView,
+        field: &'a str,
+        filter: Option<&'a str>,
+        search: Option<&'a str>,
+        scope: ListScope,
+        query: Option<&'a str>,
+        limit: usize,
+    }
+
+    fn request(view: FacetView, field: &str) -> Ask<'_> {
+        Ask {
             view,
             field,
             filter: None,
@@ -779,7 +900,52 @@ mod tests {
             },
             query: None,
             limit: 10,
+        }
+    }
+
+    /// `ask` as a batch of one; the batch's error or the field's.
+    async fn facet(ctx: &QueryContext, ask: Ask<'_>) -> Result<FacetData, RunError> {
+        let fields = [FacetField {
+            field: ask.field,
+            query: ask.query,
+            limit: ask.limit,
+        }];
+        let mut results = facets(
+            ctx,
+            FacetsRequest {
+                view: ask.view,
+                filter: ask.filter,
+                search: ask.search,
+                scope: ask.scope,
+                fields: &fields,
+                timeout: TIMEOUT,
+            },
+        )
+        .await?;
+        results.pop().expect("one result per field")
+    }
+
+    /// A batch over `fields` with no window, filter or search.
+    fn batch<'a>(view: FacetView, fields: &'a [FacetField<'a>]) -> FacetsRequest<'a> {
+        FacetsRequest {
+            view,
+            filter: None,
+            search: None,
+            scope: ListScope {
+                window: None,
+                include_eval: false,
+                include_experiments: false,
+            },
+            fields,
             timeout: TIMEOUT,
+        }
+    }
+
+    fn field(name: &str) -> FacetField<'_> {
+        FacetField {
+            field: name,
+            query: None,
+            limit: 10,
         }
     }
 
@@ -986,35 +1152,35 @@ mod tests {
     fn parse_field_accepts_columns_and_map_keys() {
         assert_eq!(
             parse_field(FacetView::Traces, "status").expect("status"),
-            FacetField::Values("status")
+            ParsedField::Values("status")
         );
         assert_eq!(
             parse_field(FacetView::Traces, "has_root").expect("has_root"),
-            FacetField::Bool("has_root")
+            ParsedField::Bool("has_root")
         );
         assert_eq!(
             parse_field(FacetView::Traces, "models").expect("models"),
-            FacetField::List("models")
+            ParsedField::List("models")
         );
         assert_eq!(
             parse_field(FacetView::Traces, "metadata").expect("metadata"),
-            FacetField::Keys("metadata")
+            ParsedField::Keys("metadata")
         );
         assert_eq!(
             parse_field(FacetView::Traces, "metadata['user.plan']").expect("map"),
-            FacetField::MapValue("metadata", "user.plan".to_owned())
+            ParsedField::MapValue("metadata", "user.plan".to_owned())
         );
         assert_eq!(
             parse_field(FacetView::Traces, "metadata['it''s']").expect("quote"),
-            FacetField::MapValue("metadata", "it's".to_owned())
+            ParsedField::MapValue("metadata", "it's".to_owned())
         );
         assert_eq!(
             parse_field(FacetView::Traces, "duration_ms").expect("duration"),
-            FacetField::Number("duration_ms")
+            ParsedField::Number("duration_ms")
         );
         assert!(matches!(
             parse_field(FacetView::Spans, "attributes['x']"),
-            Ok(FacetField::MapValue("attributes", _))
+            Ok(ParsedField::MapValue("attributes", _))
         ));
     }
 
@@ -1281,5 +1447,132 @@ mod tests {
             .expect("facet");
         assert_eq!(pairs(&value), [("v1", 1)]);
         assert_eq!(value.missing, 0);
+    }
+
+    #[tokio::test]
+    async fn batch_answers_each_field_in_order() {
+        let ctx = context();
+        let fields = [field("status"), field("duration_ms"), field("metadata")];
+        let mut request = batch(FacetView::Traces, &fields);
+        request.scope.window = hour();
+        let results = facets(&ctx, request).await.expect("batch");
+        assert_eq!(results.len(), 3);
+        let status = results[0].as_ref().expect("status");
+        assert_eq!(pairs(status), [("ok", 3), ("error", 1), ("unset", 1)]);
+        assert_eq!(
+            results[1].as_ref().expect("duration").kind,
+            FacetKind::Histogram
+        );
+        assert_eq!(results[2].as_ref().expect("metadata").kind, FacetKind::Keys);
+    }
+
+    /// More fields than run at once still come back in request order.
+    #[tokio::test]
+    async fn more_fields_than_run_at_once_keep_their_order() {
+        let ctx = context();
+        let names = [
+            "status",
+            "duration_ms",
+            "metadata",
+            "name",
+            "cost_total",
+            "tags",
+            "input",
+        ];
+        assert!(names.len() > FIELDS_AT_ONCE);
+        let fields: Vec<FacetField<'_>> = names.iter().map(|name| field(name)).collect();
+        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+            .await
+            .expect("batch");
+        let kinds: Vec<Option<FacetKind>> = results
+            .iter()
+            .map(|result| result.as_ref().ok().map(|data| data.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                Some(FacetKind::Values),
+                Some(FacetKind::Histogram),
+                Some(FacetKind::Keys),
+                Some(FacetKind::Values),
+                Some(FacetKind::Histogram),
+                Some(FacetKind::Values),
+                None,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_bad_field_does_not_fail_the_others() {
+        let ctx = context();
+        let zero_limit = FacetField {
+            field: "status",
+            query: None,
+            limit: 0,
+        };
+        let fields = [field("status"), field("input"), zero_limit];
+        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+            .await
+            .expect("batch");
+        assert!(results[0].is_ok());
+        assert!(matches!(&results[1], Err(RunError::InvalidRequest(_))));
+        assert!(matches!(&results[2], Err(RunError::InvalidRequest(_))));
+    }
+
+    #[tokio::test]
+    async fn duplicate_fields_are_answered_twice() {
+        let ctx = context();
+        let fields = [field("status"), field("status")];
+        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+            .await
+            .expect("batch");
+        assert_eq!(results.len(), 2);
+        assert_eq!(
+            results[0].as_ref().expect("first"),
+            results[1].as_ref().expect("second")
+        );
+    }
+
+    #[tokio::test]
+    async fn no_field_or_too_many_fail_the_batch() {
+        let ctx = context();
+        let none: [FacetField<'_>; 0] = [];
+        assert!(matches!(
+            facets(&ctx, batch(FacetView::Traces, &none)).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+        let many = [field("status"); MAX_FACET_FIELDS + 1];
+        assert!(matches!(
+            facets(&ctx, batch(FacetView::Traces, &many)).await,
+            Err(RunError::InvalidRequest(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn bad_filter_fails_the_batch_before_the_fields() {
+        let ctx = context();
+        let fields = [field("input")];
+        let mut request = batch(FacetView::Traces, &fields);
+        request.filter = Some("error_count >");
+        assert!(matches!(
+            facets(&ctx, request).await,
+            Err(RunError::Invalid(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn only_bad_fields_answer_their_errors() {
+        let ctx = context();
+        let fields = [field("input"), field("output")];
+        let results = facets(&ctx, batch(FacetView::Traces, &fields))
+            .await
+            .expect("batch");
+        assert_eq!(results.len(), 2);
+        for result in &results {
+            assert!(
+                matches!(result, Err(RunError::InvalidRequest(_))),
+                "{result:?}"
+            );
+        }
     }
 }

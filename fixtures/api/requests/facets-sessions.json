@@ -1,0 +1,11 @@
+{
+  "view": "sessions",
+  "from": "2026-01-01T00:00:00Z",
+  "to": "2026-01-02T00:00:00Z",
+  "fields": [
+    { "field": "user_id" },
+    { "field": "tags" },
+    { "field": "duration_ms" },
+    { "field": "cost_total" }
+  ]
+}
