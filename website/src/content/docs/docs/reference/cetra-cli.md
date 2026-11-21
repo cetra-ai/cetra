@@ -17,7 +17,7 @@ npx @cetra-ai/cli@latest init [--url <URL>] [--project <org/project>] [--dir <PA
 
 | Option | What it does |
 |---|---|
-| `--url <URL>` | The server. Defaults to `CETRA_URL`, then the project link, then the cloud (`https://app.cetra.sh`). Use `http://localhost:<port>` for a self-hosted server on this machine. |
+| `--url <URL>` | The server. Defaults to `CETRA_URL`, then the project link, then the cloud (`https://app.cetra.sh`). Use `http://localhost:<port>` for a self-hosted server on this machine. With no `--url`, `init` signs you in at `app.cetra.sh`, and the sign-in continues on your organization's region. |
 | `--project <org/project>` | Preselects the project on the approval page. Ignored when `init` starts a local server, which has one project. |
 | `--dir <PATH>` | The project directory. Defaults to the current directory. It must exist. |
 | `--env-file <PATH>` | The env file, relative to `--dir`. Defaults to `.env`. |
