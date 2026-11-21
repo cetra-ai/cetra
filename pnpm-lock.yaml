@@ -12,6 +12,27 @@ importers:
         specifier: 2.6.6
         version: 2.6.6
 
+  node-cli:
+    devDependencies:
+      '@types/node':
+        specifier: 26.6.6
+        version: 26.6.6
+      publint:
+        specifier: 0.3.25
+        version: 0.3.25
+      smol-toml:
+        specifier: 1.9.1
+        version: 1.9.1
+      tsdown:
+        specifier: 0.23.7
+        version: 0.23.7(@arethetypeswrong/core@0.18.5)(@volar/typescript@2.4.31(typescript@5.9.3))(publint@0.3.25)(typescript@5.9.3)
+      typescript:
+        specifier: 5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: 5.1.0
+        version: 5.1.0(@opentelemetry/api@1.9.1)(@types/node@26.6.6)(jsdom@31.0.0)(msw@3.0.4(@types/node@26.6.6)(supports-color@10.2.2)(typescript@5.9.3)(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1)))(vite@8.3.6(@types/node@26.6.6)(esbuild@0.28.2)(jiti@2.7.0)(yaml@2.9.1))
+
   sdks/typescript:
     dependencies:
       '@opentelemetry/context-async-hooks':
