@@ -65,6 +65,27 @@ test("documentFor ignores a heading-like line inside a bash fence", () => {
   assert.match(doc.body, /## comment/);
 });
 
+test("documentFor takes no heading from inside a four-backtick fence holding a three-backtick line", () => {
+  const doc = documentFor(
+    "/docs/fence/",
+    [
+      "# Fence",
+      "",
+      "Desc.",
+      "",
+      "````md",
+      "```",
+      "## not a heading",
+      "```",
+      "````",
+      "",
+      "## Real",
+      "",
+    ].join("\n"),
+  );
+  assert.equal(doc.headings, "Real");
+});
+
 test("documentFor fails on a page without a title line", () => {
   assert.throws(() => documentFor("/docs/x/", "No title here.\n"), /no "# " title line/);
 });

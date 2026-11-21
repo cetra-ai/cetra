@@ -6,7 +6,7 @@ import { cleanStarlightMarkdown, extractStarlightFrontmatter } from "tidymd";
 export const SITE = "https://cetra.sh";
 
 const FRONT_MATTER = "---";
-const PROSE = 0;
+export const PROSE = 0;
 const FENCE = 1; // a fence's opening or closing line
 const CODE = 2; // a line between the fence's lines
 
@@ -22,7 +22,7 @@ function closesFence(trimmed, run) {
 }
 
 /** The kind of each line: PROSE, FENCE or CODE. */
-function fenceKinds(lines) {
+export function fenceKinds(lines) {
   let fence = 0;
   return lines.map((line) => {
     const trimmed = line.trim();
@@ -120,7 +120,7 @@ export function prepass(source) {
       i += 1;
       continue;
     }
-    if (trimmed.startsWith("<LinkCard") && !trimmed.endsWith("/>")) {
+    if (trimmed.startsWith("<LinkCard") && !trimmed.endsWith(">")) {
       let end = i;
       while (end < lines.length && !lines[end].trim().endsWith("/>")) end += 1;
       if (end === lines.length) throw new Error(`unclosed <LinkCard> at line ${lineNo}`);

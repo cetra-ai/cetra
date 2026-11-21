@@ -4,14 +4,10 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import MiniSearch from "minisearch";
 import { INDEX_OPTIONS } from "./docs-search.mjs";
+import { fenceKinds, PROSE } from "./markdown.mjs";
 
 export const DOCS = "dist/docs";
 export const INDEX = "dist/mcp-index.json";
-
-/** The heading-like lines are "##" to "####"; a line whose trimmed text starts with ``` opens or closes a fence. */
-function isFence(line) {
-  return line.trim().startsWith("```");
-}
 
 /** One document per Markdown page: url "/docs/<p>/", title (the "# " line), description (the first
  *  paragraph after it), headings ("##"–"####" lines outside fenced code, joined by "\n"), body (the rest:
@@ -19,16 +15,8 @@ function isFence(line) {
 export function documentFor(url, markdown) {
   const lines = markdown.split("\n");
   // prose[i] is true for a line outside fenced code; the fence lines themselves are not prose.
-  const prose = [];
-  let inFence = false;
-  for (const line of lines) {
-    if (isFence(line)) {
-      inFence = !inFence;
-      prose.push(false);
-    } else {
-      prose.push(!inFence);
-    }
-  }
+  // Fences are decided by markdown.mjs's fenceKinds, so both scripts agree on what a fence is.
+  const prose = fenceKinds(lines).map((kind) => kind === PROSE);
   const titleAt = lines.findIndex((line, i) => prose[i] && /^# .+/.test(line));
   if (titleAt < 0) throw new Error(`${url}: no "# " title line`);
   const title = lines[titleAt].slice(2).trim();

@@ -117,6 +117,7 @@ test("pagePath gives the page path for a docs URL or path", () => {
     "/docs/get-started/quickstart/",
   );
   assert.equal(pagePath("http://www.cetra.sh/docs/x"), "/docs/x/");
+  assert.equal(pagePath("HTTPS://cetra.sh/docs/x/"), "/docs/x/");
   assert.equal(pagePath("/docs/x"), "/docs/x/");
   assert.equal(pagePath("docs/x/"), "/docs/x/");
   assert.equal(pagePath("/docs/"), "/docs/");

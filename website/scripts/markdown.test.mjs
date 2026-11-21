@@ -95,6 +95,22 @@ test("prepass throws on a LinkCard that is never closed", () => {
   );
 });
 
+test("prepass does not join a one-line LinkCard that is not self-closing with a later /> line", () => {
+  const source =
+    '<LinkCard title="A" href="/docs/a/">\nText between.\n<Image src={x} alt="y" />\nAfter.';
+  assert.equal(prepass(source), '<LinkCard title="A" href="/docs/a/">\nText between.\nAfter.');
+});
+
+test("toMarkdown throws on a one-line LinkCard that is not self-closing, and does not swallow the lines after it", () => {
+  assert.throws(
+    () =>
+      toMarkdown(
+        '---\ntitle: T\n---\n\n<LinkCard title="A" href="/docs/a/">\nText between.\n<Image src={x} alt="y" />\nAfter.\n',
+      ),
+    /unconverted component <LinkCard/,
+  );
+});
+
 test("prepass throws on a tilde fence outside code", () => {
   assert.throws(() => prepass("Text.\n~~~bash\necho hi\n~~~"), /line 2: use backtick fences/);
 });

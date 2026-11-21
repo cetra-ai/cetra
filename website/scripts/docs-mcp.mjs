@@ -11,7 +11,7 @@ export const MAX_PAGE_CHARS = 100_000;
 /** The page path "/docs/<p>/" for a docs URL or path; undefined for anything else. */
 export function pagePath(input) {
   let path = input.trim();
-  if (/^https?:\/\//.test(path)) {
+  if (/^https?:\/\//i.test(path)) {
     let url;
     try {
       url = new URL(path);
