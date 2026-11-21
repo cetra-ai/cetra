@@ -1320,10 +1320,9 @@ fn document_lint() {
             expected_errors.extend(["404"]);
         } else if *id == "get_sso_authorize" {
             expected_errors.extend(["429"]);
-        } else if *id == "post_sso_discover" {
+        } else if *id == "post_sso_discover" || *id == "post_device_code" {
+            // `post_device_code` also documents a 503; the lint compares 4xx only.
             expected_errors.extend(["400", "429"]);
-        } else if *id == "post_device_code" {
-            expected_errors.extend(["400", "429", "503"]);
         } else if *id == "post_device_token" {
             expected_errors.extend(["400"]);
         } else if *id == "post_device_approve" {
