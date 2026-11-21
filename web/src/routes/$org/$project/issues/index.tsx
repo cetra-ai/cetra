@@ -137,7 +137,7 @@ function IssuesPage() {
             }
           }}
         >
-          <TabsList className="h-7">
+          <TabsList className="group-data-horizontal/tabs:h-8">
             {ISSUE_STATE_TABS.map((tab) => (
               <TabsTrigger key={tab} value={tab}>
                 {STATE_LABEL[tab]}
