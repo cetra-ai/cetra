@@ -20,6 +20,8 @@ export default defineConfig({
       components: {
         // "On this page" as wide as the left sidebar (Starlight's grows with the window).
         TwoColumnContent: "./src/components/TwoColumnContent.astro",
+        // Title actions: copy or view the page as Markdown (D-AO-12).
+        PageTitle: "./src/components/PageTitle.astro",
       },
       social: [{ icon: "github", label: "GitHub", href: "https://github.com/cetra-ai/cetra" }],
       editLink: { baseUrl: "https://github.com/cetra-ai/cetra/edit/main/website/" },

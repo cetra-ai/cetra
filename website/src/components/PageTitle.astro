@@ -1,0 +1,45 @@
+---
+// Starlight's PageTitle (0.42.10) with two actions for agents (D-AO-12): copy the page's
+// Markdown copy (written by scripts/md-pages.mjs) or open it. Hidden on the generated
+// API reference pages, which have no Markdown source.
+import Default from "@astrojs/starlight/components/PageTitle.astro";
+
+const path = Astro.url.pathname;
+const generated =
+  path.startsWith("/docs/reference/api/") && path !== "/docs/reference/api/overview/";
+const markdown = `${path.endsWith("/") ? path : `${path}/`}index.md`;
+---
+<div class="title-row">
+  <Default {...Astro.props} />
+  {!generated && path.startsWith("/docs/") && (
+    <div class="page-actions" data-pagefind-ignore>
+      <button type="button" class="page-action" data-markdown={markdown}>Copy page</button>
+      <a class="page-action" href={markdown}>View as Markdown</a>
+    </div>
+  )}
+</div>
+<script>
+  for (const button of document.querySelectorAll<HTMLButtonElement>("button[data-markdown]")) {
+    button.addEventListener("click", async () => {
+      const label = button.textContent;
+      try {
+        const response = await fetch(button.dataset.markdown ?? "");
+        if (!response.ok) throw new Error(String(response.status));
+        await navigator.clipboard.writeText(await response.text());
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Copy failed";
+      }
+      setTimeout(() => { button.textContent = label; }, 2000);
+    });
+  }
+</script>
+<style>
+  .title-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; }
+  .page-actions { display: flex; gap: 0.5rem; }
+  .page-action {
+    font-size: var(--sl-text-sm); color: var(--sl-color-gray-2); background: none; cursor: pointer;
+    border: 1px solid var(--sl-color-gray-5); border-radius: 0.25rem; padding: 0.125rem 0.5rem; text-decoration: none;
+  }
+  .page-action:hover { color: var(--sl-color-white); border-color: var(--sl-color-gray-3); }
+</style>
