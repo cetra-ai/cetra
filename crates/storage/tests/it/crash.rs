@@ -784,12 +784,23 @@ async fn collect_crash_orphans(dir: &Path) -> Result<(), String> {
     let storage = Storage::open(quiet_child_config(dir))
         .await
         .map_err(|error| error.to_string())?;
+    // The shutdown flushes what the open replayed. The second open then has
+    // nothing to flush, and its first compaction pass is an interval away, so
+    // nothing stages a path while the zero-age collection runs.
     storage
         .shutdown()
         .await
         .map_err(|error| error.to_string())?;
+    drop(storage);
+    let storage = Storage::open(quiet_child_config(dir))
+        .await
+        .map_err(|error| error.to_string())?;
     storage
         .collect_staged(Duration::ZERO)
+        .await
+        .map_err(|error| error.to_string())?;
+    storage
+        .shutdown()
         .await
         .map_err(|error| error.to_string())?;
     drop(storage);
