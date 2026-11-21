@@ -8,7 +8,7 @@
     "dev": "pnpm gen:openapi && pnpm gen:changelog && astro dev",
     "build": "pnpm gen:openapi && pnpm gen:changelog && astro build",
     "test:scripts": "node --test scripts/",
-    "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs && node scripts/check-env-vars.mjs && node scripts/check-backing.mjs && node scripts/check-screenshots.mjs",
+    "check:content": "node scripts/check-terms.mjs && node scripts/check-samples.mjs && node scripts/check-env-vars.mjs && node scripts/check-backing.mjs && node scripts/check-screenshots.mjs && node scripts/skill-references.mjs",
     "check": "biome check . && pnpm test:scripts && pnpm gen:openapi && pnpm gen:changelog && astro check && pnpm check:content && astro build"
   },
   "dependencies": {

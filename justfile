@@ -460,10 +460,11 @@ openapi: js-install
     CETRA_OPENAPI_WRITE=1 cargo test -p cetra-server --test openapi -- contract_file_is_up_to_date
     pnpm --dir web run gen:api
 
-# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references
-docs-gen:
+# Regenerate the generated docs pages (D-W-7): the CLI and SQL schema references, and the skill references (D-AO-8)
+docs-gen: js-install
     CETRA_DOCS_WRITE=1 cargo test -p cetra-cli cli_reference_is_up_to_date
     CETRA_DOCS_WRITE=1 cargo test -p cetra-server sql_schema_reference_is_up_to_date
+    cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs
 
 # Regenerate fixtures/api responses and manifest
 api-examples:
