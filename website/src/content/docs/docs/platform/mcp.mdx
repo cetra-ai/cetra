@@ -88,6 +88,37 @@ For example, ask your agent: "Which issues in support-bot are open? Read a trace
 
 The MCP server cannot write. It cannot send spans, add scores, change settings or delete data. Use the [REST API](/docs/reference/api/overview/) or the UI for that.
 
-## For coding agents that read the docs
+## Docs for coding agents
 
 The documentation is also published as plain text for coding agents: `https://cetra.sh/llms.txt` is an index, and `https://cetra.sh/llms-full.txt` holds the whole site.
+
+Each docs page also has a Markdown copy at `https://cetra.sh/docs/<page>/index.md`. The page title has two actions: **Copy page** copies the Markdown to the clipboard, and **View as Markdown** opens it. The generated API reference pages, except the overview, have neither.
+
+### Docs MCP server
+
+The docs MCP server answers questions from the documentation. It runs at `https://cetra.sh/mcp`, needs no token and has two read-only tools:
+
+| Tool | Arguments | Returns |
+|---|---|---|
+| `search_docs` | `query`, `limit` (1 to 20, default 8) | The pages that match, each with its title, URL and a one-line summary. Read one with `get_page`. |
+| `get_page` | `url` | One page as Markdown. `url` is a `https://cetra.sh/docs/…` URL or a `/docs/…` path. |
+
+In Claude Code, run:
+
+```bash
+claude mcp add --transport http cetra-docs https://cetra.sh/mcp
+```
+
+In Cursor, add this to `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cetra-docs": {
+      "url": "https://cetra.sh/mcp"
+    }
+  }
+}
+```
+
+The docs MCP server searches the documentation only and has no access to your data. It is separate from the trace MCP above, which needs a personal access token.
