@@ -334,6 +334,16 @@ it("a viewer sees no form and sends no lease", async () => {
   requests.stop();
 });
 
+it("links back to the queue", async () => {
+  serveReview();
+  serveWrites();
+  serveAnnotationDefinitions(ANNOTATION_DEFINITIONS);
+  serveScores([]);
+  await renderApp(ITEM_URL);
+  const back = await screen.findByRole("link", { name: `Back to ${queue.name}` });
+  expect(back.getAttribute("href")).toMatch(new RegExp(`/annotation-queues/${QUEUE}$`));
+});
+
 it("a deleted trace shows the not-available state, and Remove moves on", async () => {
   serveReview();
   serveWrites();
