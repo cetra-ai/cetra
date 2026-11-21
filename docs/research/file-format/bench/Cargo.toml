@@ -8,11 +8,12 @@ publish = false
 
 [dependencies]
 cetra-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
+fmt-testdata = { path = "../testdata" }
 arrow = { version = "59.2", default-features = false, features = ["ipc", "prettyprint"] }
 parquet = { version = "59.2", default-features = false, features = ["arrow", "async", "object_store", "zstd"] }
 datafusion = { version = "55.2", default-features = false, features = ["nested_expressions", "parquet", "sql", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }
-object_store = "0.13"
-tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs"] }
+object_store = { version = "0.13", features = ["aws"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "fs", "time"] }
 futures = "0.3.34"
 async-trait = "0.1.92"
 bytes = "1.12"
@@ -22,10 +23,12 @@ vortex-arrow = { path = "/home/sebastien/github/vortex/vortex-arrow" }
 vortex-datafusion = { path = "/home/sebastien/github/vortex/vortex-datafusion" }
 mimalloc = "0.1"
 url = "2"
-zstd = "0.13"
+zstd = { version = "0.13", features = ["experimental"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
 cpu-time = "1.0.0"
+pprof = { version = "=0.15.0", default-features = false }
+strata = { path = "../strata" }
 
 [profile.release]
 debug = 1

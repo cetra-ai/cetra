@@ -1,0 +1,36 @@
+[package]
+name = "strata"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+arrow = { version = "59.2", default-features = false, features = ["ipc"] }
+object_store = "0.13"
+bytes = "1.12"
+futures = "0.3.34"
+zstd = { version = "0.13", features = ["experimental"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+thiserror = "2.0"
+memchr = "2"
+xorf = { version = "0.13.0", default-features = false, features = ["binary-fuse"] }
+datafusion = { version = "55.2", default-features = false, features = ["sql", "nested_expressions"] }
+async-trait = "0.1.92"
+simdutf8 = "0.1.5"
+# The process-wide limit on reads in flight (`io.rs`); DataFusion already depends on tokio.
+tokio = { version = "1.54", default-features = false, features = ["sync"] }
+
+# cargo-fuzz sets `--cfg fuzzing` (fuzz/).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
+
+[dev-dependencies]
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros"] }
+proptest = "1.12.0"
+serde_json = "1"
+cetra-core = { path = "/home/sebastien/travaux/llm-observer/crates/core" }
+fmt-testdata = { path = "../testdata" }
+parquet = { version = "59.2", default-features = false, features = ["arrow", "zstd"] }
+datafusion = { version = "55.2", default-features = false, features = ["sql", "nested_expressions", "parquet", "string_expressions", "unicode_expressions", "datetime_expressions", "regex_expressions"] }

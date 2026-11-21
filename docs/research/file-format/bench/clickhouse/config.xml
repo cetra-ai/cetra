@@ -1,0 +1,20 @@
+<!-- The server of the comparison: the defaults, plus query_log for per-query timings. -->
+<clickhouse>
+    <logger><level>information</level><log>./server.log</log><errorlog>./server.err.log</errorlog></logger>
+    <path>./</path>
+    <tmp_path>./tmp/</tmp_path>
+    <user_files_path>./user_files/</user_files_path>
+    <format_schema_path>./format_schemas/</format_schema_path>
+    <tcp_port>9000</tcp_port>
+    <http_port>8123</http_port>
+    <listen_host>127.0.0.1</listen_host>
+    <user_directories>
+        <users_xml><path>users.xml</path></users_xml>
+        <local_directory><path>./access/</path></local_directory>
+    </user_directories>
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>1000</flush_interval_milliseconds>
+    </query_log>
+</clickhouse>

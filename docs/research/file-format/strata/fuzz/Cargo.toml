@@ -1,0 +1,36 @@
+[package]
+name = "strata-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, outside Strata's; nightly only, like the repository's `fuzz/`.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "=0.4.13"
+strata = { path = ".." }
+
+[[bin]]
+name = "file"
+path = "fuzz_targets/file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "narrow_chunk"
+path = "fuzz_targets/narrow_chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "payload_values"
+path = "fuzz_targets/payload_values.rs"
+test = false
+doc = false
+bench = false

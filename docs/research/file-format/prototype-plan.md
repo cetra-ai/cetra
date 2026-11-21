@@ -9,6 +9,19 @@ This plan builds a prototype of the two-layer format from [README.md](README.md)
 - [parquet.md](parquet.md) and [vortex.md](vortex.md): what to keep and what to avoid;
 - [other-formats-a.md](other-formats-a.md) and [other-formats-b.md](other-formats-b.md): ideas from other formats. This plan adopts some of them, cited by number (a#3 is idea 3 in `other-formats-a.md`).
 
+**Design versus implementation plans.** This file is the design. § Phases below is the milestone outline only. Each milestone gets a detailed implementation plan in [`plans/`](plans/), written just before the milestone starts, from the code that exists then, in the format of `docs/plans/a1-storage/01-m1-walking-skeleton.md`. Each sub-phase there has an **Edit** list, numbered steps with exact types, signatures and formats, a **Tests** list, **Done when** and a **Commit** message.
+
+| Milestone | Phases here | Plan |
+|---|---|---|
+| M0 | 0 | the phase 0 brief (moving the test-data crate) |
+| M1 | 1, 2a, 2b, 2c | [plans/01-m1-container-narrow.md](plans/01-m1-container-narrow.md) |
+| M2 | 3a, 3b, 3c | written after M1 |
+| M3 | 4 | written after M2 |
+| M4 | 5a, 5b | written after M3 |
+| M5 | 6, 7 | written after M4 |
+| M6 | 8 | written after M5 |
+| M7 | 9a, 9b, 9c | written after M6 |
+
 **Who works on it.**
 - Phases 0–9b are implemented by Haiku, one commit each, on the research branch.
 - A Sonnet review runs after phases 3c, 6 and 9b.
@@ -108,17 +121,28 @@ What these add:
 - Every offset stored in the file is an **absolute byte offset from the start of the file**, unless stated otherwise.
 - Any length or offset read from a file is bounds-checked. A violation returns `StrataError::Corrupt { what, offset }` and never panics.
 - Limits: a file holds fewer than 2³² rows, and a merge has at most 255 inputs. Exceeding either is an error.
+- **Limits (decoder bounds).** These are format rules, and a file that breaks one is corrupt; the reader checks each one before it allocates. `MAX_SEGMENT_RAW` (256 MiB) bounds the raw body of a segment. `MAX_CHUNK_ROWS` (65,535) bounds the rows of a narrow chunk. `MAX_CHUNK_ELEMENTS` (2²⁰) bounds the list or map elements of one chunk. `MAX_CHUNK_OUTPUT` (256 MiB) bounds the value bytes a chunk may decode to. `MAX_PAGE_ENTRIES` (4,096) bounds the block-table entries of one page. `MAX_DICT_VALUES` (2²⁰) bounds the values of one dictionary. `MAX_PROMOTED_KEYS` (64) bounds the promoted keys of one shredded map. `MAX_ROWS` (2³² − 1) bounds the rows of a file. A refs page holds exactly 1,024 rows (4,096 in v0; smaller pages cut the refs a lookup reads by four), the last one fewer, so a column has one refs page per started block of 1,024 rows. `MAX_PAGE_IDS` (2²⁴) bounds the chunk ids of one refs page after tail sharing is expanded. The writer keeps every chunk and page within them.
+
+**Limits of the reader (scan, M4F).** These bound the work and memory one request may cause; they are not format rules.
+- `MAX_PREDICATE_DEPTH` (64) and `MAX_PREDICATE_NODES` (4,096) bound a predicate: each `In` literal counts as one node. A larger predicate fails with `Unsupported` before any recursion.
+- `MAX_READ_IDS` (2²⁸) bounds the chunk ids one read of a payload column returns, summed over its rows. Above it the read fails with `Corrupt`; the writer refuses a column with more chunk references.
+- `MAX_GETS_IN_FLIGHT` (256) bounds the GETs in flight in the whole process, across files, waves and queries: every read takes a permit of one static semaphore while its request runs. A local store opens a descriptor per request, so this also keeps reads under the default limit of 1,024 open files.
+- With a predicate, `limit` does not bound the bytes fetched: the filter wave still fetches every surviving predicate chunk. `limit` bounds the evaluation (per window of 65,536 rows) and the output.
 
 ## Design decisions for v0
 
 ### S1. File layout
 
 ```
-0          "STRA" · u16 version = 0 · u16 flags = 0                 (8 B)
-8          segment*
-hot_offset hot tail
-end − 64   postscript (64 B)
+0           "STRA" · u16 version = 0 · u16 flags = 0                 (8 B)
+8           data segment*: narrow chunks, payload frames, refs pages, gram index pages
+meta_offset metadata segment*: block-table pages, dictionaries, chunk dictionaries,
+            key filters, payload stores, payload headers
+hot_offset  hot tail
+end − 64    postscript (64 B)
 ```
+
+The metadata segments lie together before the hot tail, so an open reads them with it (§ Open). The writer keeps them in a buffer of their own while it writes the data, then appends them and makes their references absolute. Until then every column's metadata sat next to its data, and a cold lookup spent a wave of about 55 requests per file on it (`real-data.md` § Cold lookups).
 
 **Segment** (a#9). A 16-byte header, then the stored bytes:
 
@@ -128,8 +152,8 @@ bytes[stored_len]
 ```
 
 - Every reference to a segment stores its offset (the header's offset) and its length (`16 + stored_len`), so the reader fetches the header and the body in one range.
-- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 1) for narrow, frame and table segments; level 3 for payload frames.
-- The writer stores a segment raw when zstd does not make it smaller (a#12).
+- `codec`: 0 = raw, 1 = zstd. Level `config.zstd_level` (default 3) for narrow, frame and table segments; level 9 for payload frames in v1 (3 in v0 and v2; see § S4 in v2).
+- The writer stores a segment raw when zstd does not make it smaller (a#12). A narrow chunk, which every scan decompresses, is stored raw unless zstd saves at least 30% (15% in v1), to spare scans the decompression of chunks that zstd barely shrinks. With 2,048-row chunks, it grew `light`'s files from 168 to 177 MiB. A 10% bar was measured again later and dropped (`real-data.md` § Narrow chunks).
 
 | `kind` | Content |
 |---|---|
@@ -142,10 +166,11 @@ bytes[stored_len]
 | 7 | column block-table page (≤ 64 entries, raw) |
 | 8 | dictionary |
 | 9 | file key filter (binary fuse) |
+| 10 | chunk dictionary: the zstd dictionary of a narrow column's chunks (S3, stored raw) |
 
 **Hot tail.** Seven sections in this order, each prefixed by a `u32` length. A section may be empty (length 0); every section exists from phase 1 on and is empty until its phase fills it.
 
-1. Arrow schema: `arrow_ipc::convert::IpcSchemaEncoder::new().schema_to_fb(&schema).finished_data()`, read back with `arrow_ipc::convert::try_schema_from_flatbuffer_bytes`. These are the arrow-ipc 59.3 names; if they differ, use the equivalent pair and record it in the commit message.
+1. Arrow schema: an Arrow IPC **stream** holding only the schema message and the end-of-stream marker (`arrow::ipc::writer::StreamWriter::try_new(&mut buf, &schema)?` then `finish()`, with no batch). It is read back with `arrow::ipc::reader::StreamReader::try_new(bytes, None)?.schema()`.
 2. Column directory (S2).
 3. Sort-key block table: a copy of the block table of the first sort-key column (S3, 56 B entries).
 4. Sort-key filter: the binary fuse filter over the first sort-key column (S5).
@@ -153,27 +178,33 @@ bytes[stored_len]
 6. Key filter index: `u32 n` · `n × (u32 column_id · u64 offset · u32 len)`, pointing to the kind 9 segments of the other filtered columns (S5).
 7. Block-table page index. For each narrow column, the list of its block-table pages, each entry `u32 first_row · u64 offset · u32 len` (16 B). The directory record points into this section.
 
-Only these sections go into the hot tail. Block-table pages, dictionaries, filters and payload headers are separate segments, fetched on demand and cached by `StrataFile`. The hot tail size is about:
+Only these sections go into the hot tail. Block-table pages, dictionaries, filters and payload headers are separate segments in the metadata section, decoded on demand and cached by `StrataFile`. The hot tail size is about:
 
 `n_columns × 64 B` (directory) `+ n_sort_key_chunks × 56 B` (section 3) `+ 1.13 B × distinct sort keys` (section 4) `+ n_columns × ceil(n_chunks / 64) × 16 B` (section 7).
 
 The writer reports it in `FileSummary::hot_len`.
 
+**Arrow IPC decoding and panics.** arrow-ipc 59.3.2 can panic on a structurally invalid flatbuffer (for example `convert.rs:198`, `fields().unwrap()`, and the `type_as_*().unwrap()` calls). Strata therefore decodes Arrow IPC bytes (hot-tail section 1, `IPC` chunks) **only after** their checksum has been verified.
+- Random corruption cannot reach those panics; only a deliberately forged file with a correct checksum can.
+- That residual risk is accepted for the prototype and noted as a v1 item. A production format would carry its own schema encoding.
+
 **Postscript** (64 B):
 
 ```
 u64 hot_offset · u32 hot_len · u32 checksum32(hot tail) · u64 row_count · u32 n_columns (directory records)
-u16 version (= header version) · u16 flags (= header flags) · [u8; 28] zero · "STRA"
+u16 version (= header version) · u16 flags (= header flags) · u32 sort_key_column · u64 meta_offset · [u8; 16] zero · "STRA"
 ```
 
-Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 28 + 4 = 64. The reader checks:
+Field sizes: 8 + 4 + 4 + 8 + 4 + 2 + 2 + 4 + 8 + 16 + 4 = 64. `sort_key_column` is the index of the first sort-key column, or `u32::MAX` for none. `meta_offset` is the start of the metadata section. The reader checks:
 - `hot_offset + hot_len + 64 == file length`;
+- `8 ≤ meta_offset ≤ hot_offset`;
 - the version and flags equal the header's.
 
 **Open.**
-- `StrataFile::open(store, path, hot_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n: u64 = hint + 64`, or 256 KiB with no hint. All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
+- `StrataFile::open(store, path, tail_len_hint)` issues one `store.get_opts(path, GetOptions { range: Some(GetRange::Suffix(n)), .. })`, where `n` is the hint, or `Config::open_default_suffix` (1 MiB) with no hint. The tail is the metadata section, the hot tail and the postscript; `FileSummary::tail_len` and `StrataFile::tail_len` give its length, for a catalog to keep as the hint. All object-store offsets are `u64` (`get_range` takes `Range<u64>` in object_store 0.13.2).
 - `GetRange::Suffix` saturates at the object length, and the `GetResult` reports the object size, so no HEAD request is needed.
-- If the hot tail is longer than what was read, one more ranged read fetches the rest.
+- The open reads from `meta_offset` when the metadata section is at most `Config::open_metadata_max` (4 MiB), else from `hot_offset`. If that start lies before what the suffix read, one more ranged read fetches the rest.
+- A kept metadata section serves every later read of its segments, with no request: a query on a freshly opened file needs no metadata wave, and a lookup takes the path of a file whose metadata is cached. A larger section is read column by column, as queries need it, as before.
 
 ### S2. Column directory
 
@@ -186,11 +217,11 @@ u32 column_id · u32 parent (u32::MAX = none; for a layer-3 child, the map's col
 u8 layer · u8 flags · u16 reserved
 u32 pages_offset (byte offset of this column's page list within hot-tail section 7) · u32 n_pages · u32 n_chunks
 u64 dict_offset (kind 8 segment; 0 = none) · u32 dict_len
-u64 payload_offset (kind 4 segment; 0 unless layer = 1) · u32 payload_len
-u64 null_count · u32 reserved
+u64 payload_offset (layer 1: kind 4 segment; narrow layers with flags bit 1: kind 10 segment; else 0) · u32 payload_len
+u64 null_count · u64 reserved2 (zero)
 ```
 
-Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 4 = 60. Add the final `u32 reserved2`, set to 0, to reach **64**.
+Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 8 = **64**.
 
 | `layer` | Meaning |
 |---|---|
@@ -198,9 +229,9 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 4 = 60. Add the
 | 1 | payload column |
 | 2 | shredded map parent, no data of its own |
 | 3 | shredded map child (narrow rules) |
-| 4 | residual map (narrow rules, `IPC` encoding) |
+| 4 | residual map (narrow rules, `MAP` encoding) |
 
-`flags`: bit 0 = sorted dictionary present.
+`flags`: bit 0 = sorted dictionary present; bit 1 = chunk dictionary present (narrow layers only; `payload_offset`/`payload_len` locate it).
 
 ### S3. Narrow layer
 
@@ -208,7 +239,7 @@ Field sizes: 4 + 4 + 1 + 1 + 2 + 4 + 4 + 4 + 8 + 4 + 8 + 4 + 8 + 4 = 60. Add the
 
 **Chunks.**
 - Each column is cut into chunks independently.
-- A chunk is closed when it holds 4,096 rows, or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the sum of value lengths + 4 B per row. For `IPC` columns, the slice's `get_array_memory_size()` is used.
+- A chunk is closed when it holds 2,048 rows (4,096 before v2), or when the bytes of its values reach 32 KiB, whichever comes first. Value bytes are the fixed width × rows, or for variable-width values the encoded width of the row: a Utf8 row with a dictionary is 4 B (its code), a Utf8 or Binary row without one is its length + 4 B, a List(Utf8) row with a dictionary is 4 B per element + 4 B, and a `MAP` row is, per entry, key length + value length + 8 B, plus 4 B. For `IPC` columns, the slice's `to_data().get_slice_memory_size()` is used, measured per 256-row step.
 - The chunk is the unit of I/O and decoding: a mini-block in the Lance sense (b#1).
 
 **Block table.** One 56-byte entry per chunk, stored raw in kind 7 pages of at most 64 entries (3.6 KiB). A lookup fetches only the page holding its row range, found through hot-tail section 7. The sort-key column's entries are also copied whole into hot-tail section 3.
@@ -228,12 +259,16 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 | 1 | zone values valid |
 | 2 | has NaN |
 | 3 | all null |
+| 4 | shared-prefix zone (`VARBIN` only, below) |
 
 **Zone values:**
 - Integers (Int8–Int64, UInt8–UInt32) and timestamps: i64 in `min[0..8]` and `max[0..8]`. UInt64 has no zone.
-- Floats: f64 over non-NaN values, with −0.0 stored as 0.0. NaN sets flag bit 2.
+- Floats: f64 over non-NaN values, with −0.0 stored as 0.0. NaN sets flag bit 2. `FLOAT_DICT` chunks keep this float zone, not codes.
 - Dictionary columns: the minimum and maximum code, as u32.
 - FixedSizeBinary(w), w ≤ 16: the minimum and maximum values, zero-padded. They are exact, so comparisons are inclusive.
+- `VARBIN` chunks (Utf8 or Binary without a dictionary), from the lowest and highest valid value in byte order. There are two forms:
+  - **Plain form:** the first 16 bytes of each bound, zero-padded. Zero-padding keeps the byte order, but two values can share a prefix, so every comparison prunes as non-strict: `<` as `<=`, `>` as `>=`.
+  - **Shared-prefix form** (flag bit 4), when the two values share a prefix of `k ≥ 6` bytes (at most 255 are counted). Both bounds start with `u8 k` and the low four bytes of `xxh3_64` of the prefix, then hold the next 11 bytes of their value, zero-padded. Only equality prunes in this form: a literal shorter than `k`, or with another prefix hash, cannot be in the chunk, and neither can one whose next 11 bytes fall outside the bounds. A hash collision only keeps a chunk. Sorted ids often share prefixes longer than 16 bytes, which the plain form cannot see past (time-series comparison, `timeseries.md`).
 - Other types: none (flag bit 1 clear).
 
 **Encodings** (the `encoding` byte):
@@ -247,10 +282,16 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 | 4 | `FSB_RAW` | FixedSizeBinary | Values back to back. |
 | 5 | `FSB_RLE` | FixedSizeBinary when runs < n_rows / 2 | `u16 n_runs` · `u16 run_len[n_runs]` · `n_runs` values. |
 | 6 | `DICT` | Utf8 with a sorted file dictionary | `u8 width`, then the codes packed like `FOR_BITPACK` with an explicit base of 0 (the zone's min code is not used as the base). |
-| 7 | `VARBIN` | other Utf8 and Binary | `u32 offsets[n+1]`, then the bytes. |
-| 8 | `LIST_DICT` | List(Utf8) whose values use a dictionary and with no null element inside any list (a chunk with one uses `IPC`) | `u32 list_offsets[n+1]`, then `u8 width` and the packed codes of all elements. |
+| 7 | `VARBIN` | other Utf8 and Binary | lengths block of the `n` value lengths, then the bytes (see below). |
+| 8 | `LIST_DICT` | List(Utf8) whose values use a dictionary and with no null element inside any list (a chunk with one uses `IPC`) | lengths block of the `n` list lengths, then `u8 width` and the packed codes of all elements. |
 | 9 | `BOOL` | Boolean | Arrow bitmap, `ceil(n/8)` bytes. |
-| 10 | `IPC` | every other type (events, links, residual maps) | Arrow IPC stream (`StreamWriter`) of a one-column batch holding the chunk. |
+| 10 | `IPC` | every other type (events, links, maps other than Map<Utf8, Utf8>) | Arrow IPC stream (`StreamWriter`) of a one-column batch holding the chunk. |
+| 11 | `MAP` | `Map<Utf8, Utf8>` with the shape below | lengths block of the entry count of each map (null maps 0) · lengths block of the key lengths · key bytes · `u8 value_nulls` (0, or 1 and a value-validity bitmap of E bits) · lengths block of the value lengths · value bytes. `E` is the number of entries. |
+| 12 | `FLOAT_DICT` | Float64 with a file dictionary (below), when bit-packed codes beat plain values by the writer's 30% rule | `u8 width`, then the codes packed like `DICT`. Null slots hold code 0. The decoder copies each code's eight bytes, so NaN payloads and −0.0 come back bit for bit. |
+
+**Lengths block.** `u32 base · u8 width · packed (len − base)`, where `base` is the minimum length (0 when there is a null, since null slots have length 0) and `width` is the bit width of the largest `len − base`. `width` above 32 is corrupt. The packed values use the `FOR_BITPACK` bit layout. Storing lengths instead of cumulative offsets keeps the bodies small and repetitive, so zstd compresses them well. **Null rule:** in `VARBIN`, `LIST_DICT` and `MAP`, a null slot has length 0, and a decoder rejects any other length there as corrupt.
+
+**`MAP` shape.** A column uses `MAP` when `is_utf8_map` holds: the type is `Map(entries, _)` with a non-nullable `entries` field, whose struct has exactly two fields, a non-nullable Utf8 `keys` field and a nullable Utf8 `values` field. Other maps stay `IPC`.
 
 **`FOR_BITPACK` rules:**
 - Each value becomes `u = (v as i64 as u64).wrapping_sub(min as u64)`.
@@ -262,12 +303,18 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 
 **Dictionaries** (kind 8 segment):
 - Layout: `u32 n` · `u32 offsets[n+1]` · bytes, values sorted bytewise (b#4, a#11). A code is the value's rank.
-- Built when a Utf8 column (or a List(Utf8)'s values) has ≤ 65,535 distinct values **and** the dictionary is ≤ 64 KiB. Otherwise `VARBIN`.
-- A predicate on a dictionary column is evaluated once against the dictionary, which turns it into a set or range of codes.
+- Built when a Utf8 column (or a List(Utf8)'s values) has ≤ 65,535 distinct values **and** the dictionary is ≤ 1 MiB. Otherwise `VARBIN`. (v0 used 64 KiB; the M8 speed work raised it so that `user_id` gets a dictionary.)
+- A Float64 column gets one too when its valid values average at least 8 rows per distinct value (`FLOAT_DICT_MIN_REPEAT`), within the same limits. Its values are the eight little-endian bytes of each distinct bit pattern, sorted bytewise; codes are not in value order, so predicates use the chunks' float zones and the decoded values, never codes. Each chunk then stores `FLOAT_DICT` first and `PLAIN` second, and keeps `PLAIN` only when it is 30% smaller after zstd. Costs computed from token counts repeat: on `light` this cut the three cost columns from 16.7 to 8.5 MB (`real-data.md` § Smaller files).
 
-**Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise.
+**Chunk dictionaries** (kind 10 segment, flag bit 1). A narrow column whose `VARBIN`, `MAP` and `IPC` chunks hold at least 1 MiB of raw bodies trains a 64 KiB zstd dictionary on whole bodies of evenly spread chunks (about 1 MiB in all). Each of those chunks is compressed with it at the column's zstd level; a chunk keeps the dictionary form only when it passes the 30% rule and is smaller than its plain zstd form, and is then stored with codec 2 (`ZstdDict`). The dictionary is kept only when those chunks plus the dictionary take at most 95% of what they take without it. Short text chunks are where it pays: zstd finds little to match within one 32 KiB chunk, and the dictionary gives it the column's common strings. The reader loads the dictionary with the column's block-table pages, in the same metadata wave, and decodes a chunk segment with it when the segment's codec asks for it.
+- A predicate on a dictionary column is evaluated once against the dictionary, which turns it into a set or range of codes.
+- A scan decodes a dictionary column's chunks as `Dictionary(UInt32, Utf8)` arrays that share the file dictionary's values, so no row's string is copied. Comparisons run on the codes: the dictionary is sorted bytewise, so the literal's position in it turns `=`, `<>`, `<`, `<=`, `>` and `>=` into comparisons of codes. Through DataFusion the columns come out as `Utf8View` built over the same values.
+
+**Row order.** The writer is given the sort key (`["trace_id", "start_time"]`). It checks that rows arrive in that order and returns `StrataError::Unsorted` otherwise. An empty sort key writes the rows in the order given, with `sort_key_column = u32::MAX`: such a file has no sort-key lookup and cannot be merged. The time-series comparison uses it to store unsorted data as the other formats do.
 
 ### S4. Payload layer
+
+v2 replaces parts of this section; see § S4 in v2.
 
 **Classification.** A Utf8 or Binary column is a payload column when its average non-null value length in the file is ≥ `config.payload_min_avg` (256 B). It is decided per file by the writer, which buffers the file (S7).
 
@@ -290,7 +337,9 @@ Field sizes: 4 + 4 + 8 + 4 + 1 + 1 + 2 + 16 + 16 = 56. `const_len` is the byte l
 - **Invariant:** the chunks of one frame have consecutive ids, and frames are numbered in id order.
 - The writer assigns ids in order of first appearance. A merge assigns them frame by frame (S10).
 
-**Frames** (kind 2, zstd level 3):
+**One chunk store per file** (M8, after v0): all payload columns of a file share one frame builder. Rows are walked in order and, within a row, the payload columns in schema order, so a value and its near copy in a later column of the same trace (an answer, then the next call's input that repeats it) are written close together and zstd matches them; an identical chunk is stored once whatever its column. Each column keeps its own refs pages and header, and every header lists the same frames. Columns named in `config.own_store_columns` (default `input_preview`, `output_preview`) get a store of their own: previews are near copies of the payloads' first bytes and would fill the shared store, and as narrow columns their long values make chunks of a few dozen rows, which a lookup reads by the hundred. Search filters and edge groups are written only with `config.payload_filters` (default off, since they cost about 20% of the payload); without them `Contains` reads and searches every value, and a header without filters has no edge groups.
+
+**Frames** (kind 2, zstd level 9):
 - New chunks are appended to the current frame.
 - A frame is closed when its raw size reaches 64 KiB, or when its estimated compressed size reaches 16 KiB (a#10). The estimate is raw size ÷ the column's running compression ratio, which starts at 4.0 and is updated after each frame.
 - **Raw frame layout:** `u32 n_chunks` · `u32 end_offset[n_chunks]` (relative to the data start) · chunk bytes. Chunk *k* of the frame is `[end_offset[k−1] or 0, end_offset[k])`.
@@ -369,38 +418,74 @@ The writer reports filter bytes, rollup saturation and the percentage of frames 
    This is complete because every chunk except a value's last is ≥ 256 B, so a needle of ≤ 64 B spans at most two chunks. Any such crossing puts R's frame among the candidates.
 5. A row matches if any of its chunks matches, or any of its pairs matches.
 
+### S4 in v2 (M9)
+
+Strata v2 replaces the payload layer's frames table, filters, edge groups and rollup above. The chunking rules, the refs pages and `Contains`'s exactness stay. The code is the reference: `strata/src/payload/{store,gram,search,copy,write}.rs`.
+
+**Chunking.** Units of 2 KiB or more (was 8 KiB) are cut by the gear chunker with pieces of 256 B to 4 KiB (average about 1 KiB, mask 10 bits; was 512 B to 8 KiB). Smaller pieces let near copies of mid-size tool outputs dedup: −13% of payload bytes on `swe`. Pieces are still merged to ≥ 256 B (`MIN_CHUNK`). A JSON scan skips strings with `memchr`. A gear cut that falls inside a UTF-8 character moves back to its first byte (at most 3 bytes), so the chunks of UTF-8 text are UTF-8 and a frame's chunk data can be checked as a whole.
+
+**Reuse of the previous value.** A value that equals the previous non-null value of its column reuses its chunk ids. A value that starts with the previous one, up to a chunk ending at a top-level cut (a conversation that grew by some messages), reuses those chunk ids and only cuts the rest. The prefix is checked byte for byte, so the result equals chunking from scratch. A value of 256 B or more is also remembered by its `xxh3_128`, so a value seen earlier anywhere in the store (a system prompt or tool list shared by many traces) reuses its chunk ids without being cut again. On `payload` it cuts the bytes that go through the chunker from 477 to 325 MiB per file (185 MiB end up unique). Comparing a value with the last 8 values of its column instead of the last one was tried and dropped: 10% fewer bytes to cut, no time saved, and slower writes on `swe`.
+
+**Stores and runs.** A payload store (kind 6, `PayloadStore`) holds the unique chunks of one or more payload columns: one shared store per file, plus one per `own_store_columns` column. Every store is written the same way: frames at `Config::payload_zstd_level` (3 by default, 19 in `Config::cold()`), and a trained dictionary once it holds 4 MiB of unique chunks. (Own stores used level 1 and no dictionary until the size work of 2026-11-19: a dictionary made wildchat's preview frames about 17% smaller for one training per store.) Every store with frames gets a gram index. The directory record of a payload column points to its store with `dict_offset`/`dict_len`, and to its header with `payload_offset`/`payload_len`. The store body: `u32 n_chunks · u32 n_frames · u32 n_runs`, then per run `u32 first_frame · u32 dict_len · dict · u32 index_rows · u32 index_frames · u32 rows_per_page · u32 n_pages · n_pages × (u64 offset · u32 len)`, then per frame `u64 offset · u32 len · u32 raw_len · u32 n_chunks`. A write makes one run; a merge copies the runs of its inputs. The column header keeps only `u32 n_rows · u32 n_pages · n_pages × (u64 offset · u32 len)`.
+
+**Frames.** A frame closes once it holds 64 KiB of raw chunk bytes (the compressed-size estimate is gone). It is compressed at the store's level and, for a store of at least 4 MiB of unique chunks, with a 64 KiB dictionary trained on 4 KiB samples of evenly spread frames (256 KiB in all) and attached (`ForceAttachDict`), not copied, per frame. Such frames use codec 2 (`ZstdDict`): `decode_segment` checks them, and the reader decompresses them with the run's dictionary, which is loaded with the store, in the metadata wave. A dictionary trained on one store is not reused by another: it fits another store's text badly and slows zstd down. The frames are compressed, and their index bitmaps built, on `Config::write_threads` threads (default: the cores), in batches of 1,024 frames; each thread keeps one compressor, and the frames are written in order, so the file is the same for any thread count.
+
+**Gram index** (kind 5, `PayloadIndex`, raw). Per run, one bit per frame and per row: row `r` of frame `f` is set when a 5-gram of `f`'s chunks hashes to `r` (`h = ((x & 0xFF_FFFF_FFFF) × 0x9E3779B97F4A7C15) >> 32` over the gram's 5 bytes, little-endian; `r = (h × rows) >> 32`). Grams that cross a chunk boundary are covered by windows, each the last 4 bytes of a chunk and the first 63 bytes of the chunk that follows it in some value, added to the left chunk's frame: for every chunk and the chunk with the next id (only the 4 crossing grams when both are in one frame), and for every other pair seen in a value. So every gram of a needle of ≤ 64 B lies in the frame of the chunk where an occurrence starts. `rows` is about the distinct grams of a frame ÷ 0.8 (estimated by linear counting on the first, middle and last frames), so about 55% of the bits are set. The matrix is stored bit-sliced, row-major, in pages of about 1 KiB. The writer sets one byte per row for the frame being indexed and packs it into the frame's bitmap when the frame ends, then transposes the bitmaps eight frames at a time with an 8×8 bit-matrix transpose: OR-ing into a bitmap word made each gram wait on the last store to that word.
+
+**`Contains(needle)`**, exact, after the header and store (metadata):
+1. One wave: the index rows of every gram of the needle, in every run, and the refs pages of the rows searched. The AND of the index rows gives the candidate frames (every frame for a needle under 5 B); a candidate frame that holds no chunk of a searched row is dropped.
+2. One wave: the candidate frames. They use point coalescing (4 KiB gaps), or scan coalescing when they hold at least a quarter of the bytes from the first to the last (`frames_kind`): a common needle then reads a few large ranges instead of one request per frame.
+3. In the candidate frames, a chunk is a hit when it holds the needle, and a partial hit for each `k` where it ends with the needle's first `k` bytes. Each frame is searched on the decoding threads as soon as it is decoded (`fetch_map`), and its body is kept only when it holds a partial hit; a continuation that needs a dropped frame reads it again in step 4's wave.
+4. A row matches when it refers to a hit, or to a partial hit followed by chunks that hold the rest of the needle. A rest that needs a frame not read yet costs one more wave.
+
+**Searching after the other filters.** In a scan, when every `Contains` term is a conjunct of the predicate (nested `AND`s included, never under `OR` or `NOT`), the filter wave evaluates the other conjuncts first, and each search then runs on the rows they keep only (`late_contains`, `payload_contains_rows`). A time range thus decompresses the frames of its rows, not every candidate frame of the file. A `Contains` term is never NULL, so the split is exact. Otherwise the searches run over the whole file before the filter wave, as before.
+
+**Point reads.** A read of some rows of several payload columns fetches and decompresses each frame once, even when the columns share its store: frames are planned across the columns, by file offset. A refs page is decoded only up to the last row wanted from it, since a row's list builds on earlier rows only. On `payload`, the two cut a warm full-trace lookup's execute time from 4.57 to 3.81 ms (one partition).
+
+**Building values.** The frames of a read are fetched as stored and decoded on first use, by the thread that needs them, so their bytes are still in cache when copied; a frame used by several columns or rows is decoded once. Values are built in pieces of 8,192 rows (one per output batch) on one thread per core. With `views` (the DataFusion path), a Utf8 column is built as `Utf8View`: a value whose chunks are contiguous in one decoded frame is a view into that frame's buffer, shared without a copy; other values are copied into blocks of up to 256 KiB, each value sized first so a block never grows. Each value is checked as UTF-8 when its view is added. Each thread keeps a zstd context loaded with the last dictionary it used. A wave of more than 4 MiB of other segments is decoded on several threads. A scan does its I/O up front, then builds batches a few at a time (one per thread) as DataFusion pulls them, and drops each frame after the last batch that uses it; fetched segments are slices of the read buffers, not copies. On `payload`, a full scan of `input` and `output` went from 674 to 370 ms (1.14× the best Parquet's minimum; 1.09× by median), CPU from 4.5 to 3.3 s (Parquet 2.1 s) and peak RSS from 4.6 to 1.84 GB (Parquet 0.77 GB); on `swe` from 499 to 290 ms (1.09×). The rest of the memory gap is frames shared across a file: later rows reuse early frames, so most of a file's decoded frames stay until near its end.
+
+**Merge** (S10 in v2). When every input groups the same payload columns in the same stores, each store is copied: frames and index pages byte for byte, dictionaries as they are, chunk ids shifted by the chunks of earlier inputs. Only the refs pages are written again, in the merged row order. Identical chunks of two inputs are then stored twice, in two runs. Otherwise the payload columns are decoded and written again.
+
 ### S5. Indexes
 
-**Sort-key lookup** (FixedSizeBinary(16) `trace_id`), using the hot-tail block table:
-1. `i = max(0, partition_point(min < key) − 1)`.
-2. Fetch and decode chunks `i, i+1, …` while `chunk.min ≤ key`.
-3. Binary-search each decoded chunk for the row range equal to `key`.
+**Sort-key lookup** (the first sort-key column, FixedSizeBinary of 1 to 16 bytes), using the sort-key block table (hot-tail section 3):
+1. Candidates are the entries whose zone holds the key, compared bytewise over the first `w` bytes (`min ≤ key ≤ max`), plus the entries that have no zone. The table is scanned linearly; it is short.
+2. The candidate chunks are fetched concurrently and decoded. The rows equal to `key` are collected, and adjacent rows are merged into ranges.
+3. A sort-key filter that answers "absent" ends the lookup before any read.
 
 The result is a list of row ranges (usually 1–2 chunks).
 
-**Key filters.** A binary fuse 8-bit filter (a#2) from the `xorf` crate (version looked up when added; if `xorf` is unusable, a self-written 8-bit binary fuse following its algorithm).
-- Built over `xxh3_64` of the distinct non-null values, deduplicated before construction. With fewer than 2 distinct values, no filter is written (length 0), and `may_contain` answers from the values themselves (0 or 1 value, kept inline in the filter index entry's place as raw bytes).
-- `xorf` is fetched from crates.io; it is not in the local registry.
-- Serialization is self-written: seed, segment length, segment length mask, segment count length, then the fingerprints. The commit records the exact field list.
-- Kept for the first sort-key column (hot-tail section 4), and for `user_id` and `session_id` (kind 9 segments, indexed by hot-tail section 6).
-- Exposed as `StrataFile::key_filter(column) -> Option<&BinaryFuse8>` and `StrataFile::may_contain(column, value) -> Option<bool>`.
+**Key filters.** A binary fuse 8-bit filter (a#2) from the `xorf` crate 0.13.0 (crates.io, `default-features = false`, feature `binary-fuse`).
+- Built over `xxh3_64` of the distinct non-null values, sorted and deduplicated before construction. Integer and timestamp values are their 8-byte little-endian `i64`.
+- A filter body starts with a tag:
+  - `0` empty: no non-null value; always absent;
+  - `1` one value, stored inline as `u32 len · bytes`, with `len ≤ 1024`;
+  - `2` binary fuse: `u64 seed · u32 segment_length · u32 segment_length_mask · u32 segment_count_length · u32 n_fingerprints · fingerprints[n_fingerprints]`;
+  - `3` unknown: the filter could not be built; always "may contain".
+- Validity for tag 2: `segment_length` is a power of two; `segment_length_mask = segment_length − 1`; `segment_count_length ≥ segment_length` and is a multiple of it; `n_fingerprints = segment_count_length + 2 × segment_length`. These keep `contains` in bounds, so a forged geometry is `Corrupt`, never a panic. Any other byte after the body is `Corrupt`.
+- Kept for the first sort-key column (hot-tail section 4, the body raw), and for `user_id` and `session_id` (kind 9 segments, indexed by hot-tail section 6). Only narrow columns with key bytes get one; maps and payload columns do not.
+- A kind 9 segment's body is `u32 filter_len` · the filter body · the column's **chunk postings**, when the column has a dictionary (nothing otherwise).
+- **Chunk postings** list, for each bucket of `2^shift` consecutive codes, the chunks holding one of them: `u32 n_codes` · `u8 shift` · `u32 n_buckets` · `u32 offsets[n_buckets + 1]` · the lists, each ascending chunk indexes as LEB128 deltas. `shift` is the smallest giving at most 4,096 buckets. A scan whose predicate matches at most 256 codes of the column reads only the listed chunks; `StrataFile::may_match` uses them, with the zones, to drop whole files before DataFusion partitions are planned.
+- The only accessor is `StrataFile::may_contain(column, value) -> Result<Option<bool>>`. `Some(false)` is a proof of absence; `None` means the column has no filter.
 
 ### S6. Shredded maps
 
 Applies to `Map<Utf8, Utf8>` columns.
 
-**Promotion.** A key becomes a child column (layer 3, narrow rules, usually `DICT`) when it is present with a non-null value in ≥ 5% of the file's rows.
-- A child's null means "key absent".
-- A row in which a promoted key has a null value, or appears more than once, keeps that key in the residual instead (the child is null for that row).
-- For each promoted key the writer records `residual_hits`: how many rows keep that key in the residual. S8 uses it.
+**Promotion.** A key becomes a child column (layer 3, narrow rules, usually `DICT`) when it occurs **exactly once with a non-null value** in at least 5% of the map column's rows. The count is over rows, rounded up, with a minimum of one row. A null map row counts in the denominator.
+- A key longer than 1,024 bytes is never promoted.
+- At most 64 keys are promoted (`MAX_PROMOTED_KEYS`). Candidates are ranked by count, descending, then by key bytes, ascending, and the top 64 are kept. The promoted keys are stored sorted bytewise.
+- A child's null means "key absent", or "the key stays in the residual of this row".
+- A row in which a promoted key has a null value, or appears more than once, keeps every occurrence of that key in the residual (the child is null for that row).
+- For each promoted key the writer records `residual_hits`: the number of rows in which the key was present but stayed in the residual (a null value, or more than one occurrence). Each row counts once. S8 uses it.
 
 **Null versus empty map.** The residual column carries the map's validity:
 - a null residual means the map is null;
 - an empty residual with every child null means an empty map.
 
-**Residual.** Keys that are not promoted form the residual map column (layer 4, `IPC` encoding).
+**Residual.** Keys that are not promoted form the residual map column (layer 4, `MAP` encoding).
 
-**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. cetra-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys.
+**Reconstruction.** The map is rebuilt with entries sorted bytewise by key, using the field names and nullability of the map's type in the Arrow schema. cetra-core already writes maps from `BTreeMap`s, and tests compare maps with sorted keys. `unshred` returns each row's entries sorted bytewise by key (stable for equal keys); the original entry order is not kept.
 
 **Hot-tail section 5 layout:** `u32 n_maps`, then per map: `u32 map_column_id` · `u32 residual_column_id` · `u32 n_keys` · `n_keys × (u32 child_column_id · u32 residual_hits · u16 key_len · key bytes)`.
 
@@ -420,18 +505,22 @@ pub struct FileSummary { pub rows: u64, pub bytes: u64, pub hot_len: u32, pub pe
 
 pub struct StrataFile;
 impl StrataFile {
-    pub async fn open(store: Arc<dyn ObjectStore>, path: Path, hot_len_hint: Option<u32>) -> Result<Self>;
+    pub async fn open(store: Arc<dyn ObjectStore>, path: Path, hint: Option<u32>, config: &Config) -> Result<Self>;
     pub fn schema(&self) -> SchemaRef;                     // file schema (Utf8, Binary)
     pub async fn lookup(&self, key: &[u8]) -> Result<Vec<Range<u32>>>;
-    pub async fn lookup_scan(&self, key: &[u8], projection: Vec<usize>) -> Result<Vec<RecordBatch>>; // the W0–W3 path below
+    pub async fn lookup_scan(&self, key: &[u8], projection: &[usize]) -> Result<Vec<RecordBatch>>; // M4.3; the W0–W3 path below
     pub fn may_contain(&self, column: &str, value: &[u8]) -> Option<bool>;
-    pub fn scan(&self, req: ScanRequest) -> BoxStream<'static, Result<RecordBatch>>;
+    pub async fn scan(&self, req: &ScanRequest) -> Result<Vec<RecordBatch>>; // M4.2
     pub fn io_stats(&self) -> IoStats;                     // requests, bytes, waves
 }
 pub struct ScanRequest { projection: Vec<usize>, predicate: Option<Predicate>, row_ranges: Option<Vec<Range<u32>>>, limit: Option<usize>, kind: ScanKind /* Point | Scan */ }
-pub enum Predicate { And(Vec<_>), Or(Vec<_>), Not(Box<_>), Eq(col, Scalar), In(col, Vec<Scalar>),
-                     Cmp(col, Op, Scalar), IsNull(col), IsNotNull(col), MapKeyEq(col, key, Scalar), Contains(col, Vec<u8>) }
+pub enum Lit { Null, Bool(bool), Int(i64), UInt(u64), Float(f64), Utf8(String), Bytes(Vec<u8>) }
+pub enum CmpOp { Eq, NotEq, Lt, LtEq, Gt, GtEq }
+pub enum Predicate { And(Vec<Predicate>), Or(Vec<Predicate>), Not(Box<Predicate>), Cmp(usize, CmpOp, Lit),
+                     In(usize, Vec<Lit>), IsNull(usize), IsNotNull(usize), MapKeyEq(usize, String, Lit), Contains(usize, Vec<u8>) }
 ```
+
+Returning a `Vec` instead of a stream is a prototype simplification; M5 wraps it.
 
 **The writer buffers the whole file.** Every decision is per file: payload classification, dictionary eligibility, map promotion. G8 compares against the Parquet writer on the same data, and the report states that Parquet streams while Strata buffers.
 
@@ -440,18 +529,18 @@ pub enum Predicate { And(Vec<_>), Or(Vec<_>), Not(Box<_>), Eq(col, Scalar), In(c
 **Waves.** A **wave** is one `try_join_all` batch of requests. `IoStats` counts waves, requests and bytes. Metadata already cached costs no request and no wave.
 
 **`scan`, wave by wave:**
-1. **Metadata.** Fetch, not yet cached: the block-table pages covering the requested row ranges (all pages of a column for a full scan) for every predicate and projection column; their dictionaries; the payload headers of the payload columns involved; and, for `Contains`, the filters segment.
-2. **Filter.** Zones prune chunks, and dictionary predicates become code sets. Fetch the surviving chunks of the predicate columns, and evaluate them to a row mask. For `Contains`, also fetch the candidate frames and the needed edge groups.
+1. **Metadata.** Fetch, not yet cached: the block-table pages covering the requested row ranges (all pages of a column for a full scan) for every predicate and projection column; their dictionaries; the payload headers of the payload columns involved; the residuals of `MapKeyEq` masks; and, for `Contains`, the filters segment.
+2. **Filter.** Zones prune chunks, and dictionary predicates become code sets. Fetch the surviving chunks of the predicate columns, and evaluate them to a row mask. `MapKeyEq` on a promoted key is a plain comparison on its child column; other `MapKeyEq` terms are masks over the residual.
 3. **Project.** Fetch the projection's narrow chunks that hold a selected row, plus the refs pages covering the selected rows.
 4. **Frames.** Fetch the frames the selected rows reference that are not already loaded.
 
-Waves with nothing to fetch are skipped. A cold predicate scan therefore takes at most 4 waves after open.
+Waves with nothing to fetch are skipped. Without `Contains`, a cold scan therefore takes at most 4 waves after open. Each `Contains` term adds up to 4 waves of its own, before the filter wave: its filters, refs pages, candidate frames and edge groups, as `payload_contains` reads them.
 
 **Output.** One batch per chunk-aligned range of up to 8,192 rows. Columns use the file schema's types (Utf8, not Utf8View); the DataFusion layer converts (S8).
 
 **I/O.**
 - Strata does its own coalescing, then issues one `store.get_range(path, range)` per merged range, all concurrently (`futures::future::try_join_all`). It does not use `get_ranges`, whose built-in 1 MiB coalescing would undo the point-lookup policy.
-- `ScanKind::Point` merges ranges whose gap is < 64 KiB; `ScanKind::Scan` merges gaps < 1 MiB, with merged ranges capped at 16 MiB.
+- `ScanKind::Point` merges ranges whose gap is < 4 KiB (64 KiB in v0, which doubled the bytes of a lookup); `ScanKind::Scan` merges gaps < 1 MiB and `ScanKind::Dense` (the candidate frames of a common needle) gaps < 128 KiB, both with merged ranges capped at 4 MiB (16 MiB before the simulated-S3 runs of `real-data.md` § Simulated S3: one request runs at one connection's throughput).
 - `StrataFile` caches the hot tail, block tables, dictionaries, payload headers and key filters after first use.
 
 **Dependent waves.** A wave is one batch of concurrent requests that needs the results of the previous batch. Cold (nothing cached), a single-trace all-columns lookup is:
@@ -463,34 +552,49 @@ Waves with nothing to fetch are skipped. A cold predicate scan therefore takes a
 | W2 | Decode the sort-key chunks to get the exact row ranges. Fetch the projected narrow chunks overlapping those ranges, plus the refs pages covering them. |
 | W3 | the frames |
 
-`lookup_scan` drives this sequence. So a single-trace lookup takes 4 waves cold, and 2 waves (W2, W3) when the metadata is already cached, since W1's sort-key chunk is then the only fetch left and is merged into W2.
+`lookup_scan` drives this sequence, as M4.3 sets it out. Cold, a single-trace lookup takes 3 waves (W1, W2, W3) when a payload column is projected, and 2 (W1, W2) when none is: W3 is skipped. When the metadata is already cached, W1 holds only the candidate sort-key chunks, the narrow chunks overlapping the candidate span and the refs pages of its rows, so the lookup takes 2 waves with a payload column (W1, then the frames) and 1 without. Absent keys that the sort-key filter or the zones rule out cost no wave at all.
 
 The Parquet baseline is measured with the same counting store (`bench/src/counting.rs`), so its waves and bytes come from the same instrument.
 
 ### S8. DataFusion integration
 
 **`StrataTable`.**
-- `StrataTable::new(store, files: Vec<Path>)` opens all files.
+- `StrataTable::open(store, paths, &Config)` opens the files concurrently; `StrataTable::new(files)` takes files already open. Every file must have the same schema and the same sort key.
 - `schema()` is the file schema with top-level Utf8 → Utf8View and Binary → BinaryView. This matches DataFusion's Parquet reader with `schema_force_view_types = true`; `StrataExec` casts its output.
 - `supports_filters_pushdown` returns, per filter expression:
 
-| Expression shape (after unwrapping `CAST`/`TRY_CAST` of a column or literal to a compatible type) | Result |
+| Expression shape | Result |
 |---|---|
-| `trace_id = <Binary/FixedSizeBinary literal of 16 B>`, `trace_id IN (…)` | `Exact` (key index + filter) |
-| `col {=,<,<=,>,>=,!=} literal`, `col IN (literals)`, `col IS [NOT] NULL`, `col BETWEEN`, with `col` a narrow column of a supported type, and timestamp literals of any timezone normalised to ns UTC | `Exact` |
-| `AND`, `OR`, `NOT` of `Exact` shapes | `Exact` |
-| `get_field(map_col, 'k') = literal`, with `k` promoted and `residual_hits = 0` in **every** file | `Exact` |
-| the same shape when some file has `k` in its residual (`residual_hits > 0`, or `k` not promoted) | `Inexact`: Strata prunes with the child column, and checks the residual for the rows that have one |
-| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Inexact` (DataFusion re-checks) |
-| anything else, `ILIKE` included | `Unsupported` |
+| `trace_id = <FixedSizeBinary literal of 16 B>` | `Exact` (key index + filter); lookup mode when it is the only filter |
+| `col {=,<,<=,>,>=,!=} literal` (either side), `col IN (literals)`, `col IS [NOT] NULL`, `col BETWEEN`, with `col` a narrow column of a comparable type, and timestamp literals of any timezone normalised to ns UTC | `Exact` |
+| `AND`, `OR` of `Exact` shapes; `NOT` of an `Exact` shape with no `Contains` term | `Exact` |
+| `AND` or `OR` mixing `Exact` and `Inexact` terms | `Inexact` |
+| any `AND` or `OR` with a `No` term | `Unsupported` |
+| `get_field(map_col, 'k') = literal`, with `k` promoted and `residual_hits = 0` in **every** file | `Exact` (`MapKeyEq`): `get_field` returns the first entry with the key, so the same key in the residual would differ |
+| `get_field` in any other case, including `k` in some file's residual or not promoted | `Unsupported` |
+| `col LIKE '%lit%'` on a payload column, `lit` 1–64 B, with no `%`, `_` or escape character inside | `Exact` (`Contains`, which is exact since v2). Under `NOT` it is `Unsupported`: `Contains` is FALSE on a null row, where `LIKE` is NULL |
+| any `Cast` or `TRY_CAST` on the column, a non-literal operand, `ILIKE`, anything else | `Unsupported` (no unwrapping of casts) |
 
-- `scan()` translates the pushed filters to `Predicate`. For `trace_id` equality it calls `may_contain` on each file, drops the files whose filter says no, and then uses `lookup_scan`.
+- Literal types must match the column's file type exactly; a mismatched literal is `Unsupported`.
+- Float columns (Float32, Float64) are never pushed: a comparison, `IN` or `BETWEEN` on them is `Unsupported`. DataFusion compares floats with `-0.0 == 0.0`, while Arrow's kernels, which Strata uses, order them by the IEEE total order, so the two would disagree.
+- A boolean literal `TRUE`, `FALSE` or `NULL` is `Exact` and becomes the `Const` predicate, a constant TRUE, FALSE or NULL for every row. DataFusion's simplifier produces these when it rewrites a filter, for example `i IN (1, NULL)` becomes `i = 1 OR NULL`. A top-level FALSE or NULL conjunct makes `scan` prune every chunk.
+- `supports_filters_pushdown` accepts a filter only while the predicates it has accepted before still fit the predicate size limit together; a filter that would not fit is `Unsupported`.
+- `scan()` translates the pushed filters to `Predicate` and leaves `Unsupported` filters to DataFusion. DataFusion passes it only the filters that were accepted, so a filter that does not translate there, or a set of filters that no longer fits the size limit together (the same running check as above), is a `DataFusionError::Plan` and never a dropped filter; a dropped filter would return wrong rows. For `trace_id` equality it calls `may_contain` on each file and drops the files whose filter says no. It uses `lookup_scan` only when that filter is the only kept filter and there is no `limit`.
 - `scan()` needs the hot tails, so it opens the files (cached in `StrataTable`). Planning a lookup can therefore cost the open wave.
 
 **`StrataExec`.**
-- One partition per remaining file. When a `trace_id` filter leaves ≤ 1 file, it reports **1 partition**.
-- `output_ordering`: the sort key, truncated at the first sort column that is not in the projection.
-- `limit` is pushed into `scan`.
+- One partition per remaining file; with no file left, one partition that reads nothing. A `trace_id` lookup that leaves one file therefore reports 1 partition, as does one that leaves none.
+- `output_ordering`: the first sort-key column only, declared when that column is in the projection. Each partition reads at most one file, so the order holds per partition.
+- Statistics: the row count from the postscripts, per partition or in total. It is exact for a plain scan, so DataFusion answers `count(*)` without a read; with a predicate, a lookup or a limit it is only an estimate. Column statistics are unknown.
+- `limit` reaches `scan` only when DataFusion passes it, which it does only when every pushed filter is `Exact`.
+- A sort with a limit whose first key is a narrow column is pushed in (`try_pushdown_sort`, then `with_fetch`): each partition keeps the rows that can rank in the limit ([`TopRows`]) and outputs them sorted (`real-data.md` § Top rows in the scan).
+- **Staged top.** When the predicate also holds a `Contains` term and the first key is a signed integer or a timestamp, the scan is one partition that reads the files in stages (`staged_top`), since each file's search is the costly part:
+  1. The files are ranked by the best first-key value their zones allow (`StrataFile::int_range`): the largest maximum first for a descending sort, the smallest minimum first for an ascending one; files without a range go last.
+  2. Stages of 1, 4, 16, … files (`STAGE_GROWTH`) run in rank order. The files of a stage run at once, each in its own task on its share of the cores. The rows kept so far and the stage's rows are sorted by every key, and the first `fetch` kept.
+  3. Once `fetch` rows are kept, the k-th row's first key `v` is added to the predicate of later files: `key >= v` (descending) or `key <= v` (ascending). Ties pass, so the result is the full sort's. When nulls sort first, a file whose zones show nulls gets `key IS NULL OR key >= v` instead, which the zones cannot prune.
+  4. A file whose zones rule out the bound prunes every chunk and reads no payload.
+
+  With files that are time slices and a needle found in the newest one, the query reads one file. With files that each span the whole time range, it reads every file, in fewer and larger stages than one file at a time.
 - Metrics, registered with `MetricBuilder`:
 
 | Metric | Kind |
@@ -500,38 +604,43 @@ The Parquet baseline is measured with the same counting store (`bench/src/counti
 | `strata_bytes_fetched` | counter |
 | `strata_requests` | counter |
 | `strata_waves` | counter |
-| `strata_chunks_pruned` | counter |
-| `strata_frames_read` | counter |
+
+  The counters come from `IoStats` before and after each partition's read. Strata's `scan` does not report chunks pruned or frames read, so those two counters are dropped.
+
+**`StrataAggregateRule`** (physical optimizer rule; the session registers it). It replaces an aggregate over a plain `StrataExec` (no lookup, limit or pushed sort; through repartitions, partition merges and a projection of columns and numeric casts) by a `StrataAggregateExec` when there is one group column, a narrow Utf8 column of every file, and every aggregate is `count`, `sum`, `avg`, `min` or `max` of a narrow signed-integer column (`count`, `sum`, `avg` also of floats, `count` of a literal), with no `DISTINCT`, `FILTER` or `ORDER BY`. The exec scans the files' row ranges as a scan's partitions, one task each, with the group column as dictionary arrays, and accumulates per code; it outputs one batch in one partition. Results are DataFusion's (`real-data.md` § Narrow aggregates).
 
 ### S9. Fast paths (no DataFusion)
 
 ```rust
-pub async fn trace_detail(files: &[StrataFile], trace_id: [u8; 16], projection: &[&str]) -> Result<RecordBatch>;
-pub async fn trace_list(files: &[StrataFile], time: Range<i64>, predicate: Option<Predicate>, k: usize, projection: &[&str]) -> Result<RecordBatch>;
+pub async fn trace_detail(files: &[Arc<StrataFile>], trace_id: [u8; 16], projection: &[&str]) -> Result<RecordBatch>;
+pub async fn trace_list(files: &[Arc<StrataFile>], time: Range<i64>, predicate: Option<Predicate>, k: usize, projection: &[&str]) -> Result<RecordBatch>;
 ```
 
-Both return batches in the file schema, cast to the `StrataTable` schema.
+Both return batches in the `StrataTable` schema (`table_schema` of the file schema), so they match DataFusion's rows. An empty result is an empty batch of that schema.
 
 **`trace_list` ordering.** Rows are ordered by `(start_time DESC, trace_id DESC, span_id DESC)`. The bench query `list_llm_1h` is changed to use the same tie-break, so DataFusion and the fast path agree.
 
 **`trace_list` algorithm:**
-1. Read the `start_time` block table and order its chunks by `max` descending.
-2. Evaluate the predicate per chunk, keeping a top-k heap.
-3. Stop when the next chunk's `max` is below the heap's minimum and the heap is full.
-4. Fetch the projection for the k rows.
+1. Read the `start_time` block table of every file. Keep the chunks whose zone overlaps `time`, and order them by `max` descending.
+2. Scan the kept chunks one at a time, in that order, with the window and the predicate, and the projection of each chunk. Keep a top-k heap of the rows seen.
+3. Stop when the heap holds `k` rows and the next chunk's `max` is strictly below the heap's minimum `start_time`. Equal times still continue, because of the tie-break.
+4. Build the output columns from the kept chunks with `interleave`, in heap order.
+5. **Compaction.** After each chunk, when the kept batches hold more than `2k + 8,192` rows, they are replaced by one batch of the heap's rows, and each heap entry points at its row of that batch. The rows keep their (batch, row) order, so ties resolve as before. Memory then stays proportional to `k`, not to the window. An empty projection gives a batch with the row count and no columns.
 
-Zone pruning on `start_time` works only if chunks cover narrow time ranges. Files sorted by `trace_id` within a time slice give wide `start_time` zones, so the report states which dataset layout the gain depends on.
+Each visited chunk costs at least one wave. The early stop only helps when `start_time` zones are narrow, that is, when the file is sorted by time. Zone pruning on `start_time` works only if chunks cover narrow time ranges. Files sorted by `trace_id` within a time slice give wide `start_time` zones, so the report states which dataset layout the gain depends on.
 
 ### S10. Merge
 
 ```rust
-pub async fn merge(inputs: &[StrataFile], sort_key: Vec<String>, config: Config, out: impl std::io::Write) -> Result<FileSummary>;
+pub async fn merge(inputs: &[Arc<StrataFile>], sort_key: &[&str], config: Config) -> Result<(Vec<u8>, FileSummary)>;
 ```
 
-1. **Sort key.** K-way merge of the inputs' sort-key columns; ties are broken by input index, then row. This produces a row-source map of one `u8` per output row (≤ 255 inputs).
-2. **Re-decide per output file**, from summed input statistics: payload classification, dictionary eligibility (union of the dictionaries, falling back to `VARBIN` above the caps), and map promotion (summed key counts; a key promoted in one input and residual in another is re-split). A column whose layer differs between inputs (payload in some, narrow in others), or whose layer changes in the output, is decoded fully and re-encoded under the output's decision. Frame copying (step 4) applies only to columns that are payload in the input and the output.
-3. **Narrow columns,** one at a time: replay the row-source map over the decoded input chunks and re-chunk.
-4. **Payload columns.**
+Inputs must share one schema and be sorted by the first sort-key column; both are checked. Empty inputs are skipped. Output is returned as bytes, like the writer. No input count is limited.
+
+1. **Sort key.** K-way merge of the inputs' sort-key columns; ties are broken by input index, then row. This produces a row-source map of one `(input, row)` pair per output row, 16 bytes per row, with no input-count limit. The map is grown by pushing, not pre-sized from the files' claimed row counts.
+2. **Re-decide per output file.** The output is written by the writer's own code (`write_file`) from the merged column arrays, so every per-column decision is taken again on the output data: payload classification, dictionary eligibility, and map promotion and key filters. A column whose layer differs between inputs is decoded fully and re-encoded under the output's decision. Frame copying (step 4) applies only to columns that are payload in the input and the output.
+3. **Narrow columns,** one at a time: each column is decoded from every input, interleaved by the row-source map and encoded again. M6.1 does this for every column.
+4. **Payload columns** (M6.2; until then M6.1 re-encodes them like narrow columns, from the merged arrays).
    - Decompress every input frame and hash its chunks with `xxh3_128` (no hash is stored in the file).
    - Inputs are processed in input order, frame by frame. An input frame is **copied byte for byte** when every chunk in it is new to the output and referenced by at least one output row. Its chunks then get the next consecutive output ids, keeping the S4 invariant, and the frame's raw layout is unchanged. The trigram filter is rebuilt, since boundary pairs change.
    - Every other chunk that is still referenced is re-packed into new frames.
@@ -539,8 +648,8 @@ pub async fn merge(inputs: &[StrataFile], sort_key: Vec<String>, config: Config,
 5. Key filters, the hot tail and the rollups are rebuilt.
 
 Memory:
-- Narrow phase: peak ≤ 2 × the largest single column's decoded Arrow size across the inputs, plus the row-source map. Tested.
-- Payload phase: peak memory is reported, not bounded.
+- Narrow phase: peak ≤ 2 × the largest single column's decoded Arrow size across the inputs, plus the row-source map (16 bytes per row) and the sort-key row format. Tested on 4 inputs of 1,000,000 rows in release (`tests/merge_memory.rs`, M6.1); the test allows 48 bytes per row for the map and keys, and half the largest column for the output and codecs.
+- Payload phase: peak memory is reported, not bounded. The frame copy keeps the merged array plus every input's stored and raw frames of that column in memory.
 
 ## Phases
 
