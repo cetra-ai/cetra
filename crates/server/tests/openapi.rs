@@ -53,6 +53,19 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/auth/email/verify/resend",
         "post_email_verify_resend",
     ),
+    ("post", "/api/auth/device/code", "post_device_code"),
+    ("post", "/api/auth/device/token", "post_device_token"),
+    ("get", "/api/auth/device/{user_code}", "get_device_request"),
+    (
+        "post",
+        "/api/auth/device/{user_code}/approve",
+        "post_device_approve",
+    ),
+    (
+        "post",
+        "/api/auth/device/{user_code}/deny",
+        "post_device_deny",
+    ),
     ("patch", "/api/v1/me", "patch_me"),
     ("post", "/api/v1/me/password", "post_me_password"),
     ("get", "/api/v1/me/tokens", "list_personal_tokens"),
@@ -1221,6 +1234,8 @@ fn document_lint() {
                 | "get_oauth_authorize"
                 | "get_sso_authorize"
                 | "post_sso_discover"
+                | "post_device_code"
+                | "post_device_token"
                 | "get_oauth_callback"
                 | "post_setup"
                 | "post_login"
@@ -1279,6 +1294,9 @@ fn document_lint() {
                 | "put_org_assistant"
                 | "post_org_assistant_test"
                 | "get_project_assistant"
+                | "get_device_request"
+                | "post_device_approve"
+                | "post_device_deny"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1304,6 +1322,12 @@ fn document_lint() {
             expected_errors.extend(["429"]);
         } else if *id == "post_sso_discover" {
             expected_errors.extend(["400", "429"]);
+        } else if *id == "post_device_code" {
+            expected_errors.extend(["400", "429"]);
+        } else if *id == "post_device_token" {
+            expected_errors.extend(["400"]);
+        } else if *id == "post_device_approve" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_oauth_callback" {
             // Failure is a redirect, not a problem response.
         } else if *id == "post_setup" || *id == "post_signup" {
