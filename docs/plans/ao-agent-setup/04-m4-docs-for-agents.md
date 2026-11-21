@@ -93,7 +93,14 @@ The phases run in order. Files per phase:
 **Edit:** `website/scripts/markdown.mjs`, `markdown.test.mjs`, `md-pages.mjs` (new), `md-pages.test.mjs` (new), `website/package.json`.
 
 **Steps.**
-1. **`markdown.mjs` `prepass`.** When a line's trimmed text starts with `<LinkCard` and does not end with `/>`, join it with the following lines, each trimmed and separated by one space, up to and including the first line whose trimmed text ends with `/>`. Then apply the existing one-line `LinkCard` rule to the joined text. If no closing line comes, throw `Error("unclosed <LinkCard> at line <n>")`.
+1. **`markdown.mjs` `prepass`.** Right before the existing `const card = /^<LinkCard…/.exec(trimmed)` line, add a branch:
+   - **When:** `trimmed.startsWith("<LinkCard") && !trimmed.endsWith("/>")`.
+   - **Find the end** as the `<Backing`/`<Image` branch does: `end` is the first index from `i` whose trimmed line ends with `/>`. If there is none, throw `Error(`unclosed <LinkCard> at line ${lineNo}`)`.
+   - **Join:** `const joined = lines.slice(i, end + 1).map((l) => l.trim()).join(" ");`.
+   - **Convert:** run the same `LinkCard` regex on `joined`, and push the same bullet (with the description when present) as the one-line branch. If the regex does not match, push the original lines unchanged; the guard then reports the tag.
+   - **Move on:** `i = end + 1; continue;`.
+
+   Extract the bullet-building into a small local function `linkCardBullet(text)` that returns the bullet or `undefined`, and use it in both branches.
 2. **`md-pages.mjs`.** Header comment: "Writes a Markdown copy of every docs page next to its HTML after `astro build` (D-AO-12): `src/content/docs/docs/<p>.mdx` → `dist/docs/<p>/index.md`."
 
    ```js
@@ -108,8 +115,11 @@ The phases run in order. Files per phase:
      1. If `OUT` does not exist, print `dist/docs is missing: run astro build first` and return 1.
      2. Walk `SOURCE` for `*.md` and `*.mdx` with `readdirSync(SOURCE, { recursive: true })`, as `check-terms.mjs` does.
      3. Convert each file with `toMarkdown`, and write it to `join(OUT, outputPath(rel))`.
-     4. A converter error prints `<rel>: <message>` and makes `main` return 1, after trying every page.
-     5. Print `wrote <n> Markdown pages`.
+     4. Before each write, `mkdirSync(dirname(target), { recursive: true })`.
+     5. A converter error prints `<rel>: <message>` and makes `main` return 1, after trying every page.
+     6. Print `wrote <n> Markdown pages`.
+
+   `main` is exercised by the build, not by a unit test.
    - The entry guard is the usual one.
 3. **`website/package.json`.**
    - `build` becomes `pnpm gen:openapi && pnpm gen:changelog && astro build && node scripts/md-pages.mjs`.
@@ -121,7 +131,9 @@ The phases run in order. Files per phase:
 
 **Done when:**
 - `cd website && node --test scripts/markdown.test.mjs scripts/md-pages.test.mjs` passes;
-- `pnpm --dir website run build` ends with `wrote <n> Markdown pages`, and `dist/docs/index.md`, `dist/docs/get-started/quickstart/index.md` and `dist/docs/index.md`'s "Where to go next" list are bullets with descriptions;
+- `pnpm --dir website run build` ends with `wrote <n> Markdown pages`;
+- `dist/docs/index.md` and `dist/docs/get-started/quickstart/index.md` exist;
+- the "Where to go next" list of `dist/docs/index.md` is bullets with descriptions;
 - `just docs-gen` leaves `skills/cetra/references/` unchanged (the converter change touches no listed page). If it does change one, commit the regenerated files and say so;
 - Biome is clean.
 
@@ -152,7 +164,7 @@ The phases run in order. Files per phase:
    <div class="title-row">
      <Default {...Astro.props} />
      {!generated && path.startsWith("/docs/") && (
-       <div class="page-actions">
+       <div class="page-actions" data-pagefind-ignore>
          <button type="button" class="page-action" data-markdown={markdown}>Copy page</button>
          <a class="page-action" href={markdown}>View as Markdown</a>
        </div>
@@ -185,7 +197,7 @@ The phases run in order. Files per phase:
    </style>
    ```
 
-   - **The import.** If `@astrojs/starlight/components/PageTitle.astro` is not exported by the package (check its `package.json` `exports`), import the path that the package does export, and say which in the report.
+   - **The import.** `@astrojs/starlight/components/PageTitle.astro` is exported (`"./components/*"`). Biome may reformat the snippet; that is fine.
    - **Vertical spacing.** The default `h1` has `margin-top: 1rem`. If the row then sits badly, leave it; do not restyle the `h1`.
 2. **`astro.config.mjs`.** Add `PageTitle: "./src/components/PageTitle.astro",` to the `components` object, with the comment `// Title actions: copy or view the page as Markdown (D-AO-12).`
 3. **`public/_headers`.** Append:
@@ -205,7 +217,7 @@ The phases run in order. Files per phase:
 
 **Done when:**
 - `pnpm --dir website run build` succeeds;
-- `grep -c 'data-markdown' dist/docs/get-started/quickstart/index.html` is 1, and the same grep on `dist/docs/reference/api/index.html` is 0;
+- `grep -c 'data-markdown="' dist/docs/get-started/quickstart/index.html` is 1, and the same grep on `dist/docs/reference/api/index.html` is 0. Grep for the attribute form with its `="`: the script's text, which contains `data-markdown]`, may be inlined on every page;
 - `cd website && pnpm exec astro check` passes.
 
 **Commit:** `Add Copy page and View as Markdown to the docs`
@@ -216,57 +228,92 @@ The phases run in order. Files per phase:
 
 **Goal:** `dist/mcp-index.json` is built with the site, and the Worker answers MCP on `/mcp` with `search_docs` and `get_page`.
 
-**Edit:** `website/scripts/docs-index.mjs`, `docs-index.test.mjs`, `docs-mcp.mjs`, `docs-mcp.test.mjs` (new), `website/worker/index.mjs` (new), `website/wrangler.jsonc`, `website/package.json`, `pnpm-lock.yaml`.
+**Edit:** `website/scripts/docs-search.mjs`, `docs-index.mjs`, `docs-index.test.mjs`, `docs-mcp.mjs`, `docs-mcp.test.mjs` (new), `website/worker/index.mjs` (new), `website/wrangler.jsonc`, `website/package.json`, `pnpm-lock.yaml`.
+
+**The Worker rule.** Nothing the Worker imports, directly or through another module, may import a `node:` module, read `process`, or use `import.meta.url`. Without `nodejs_compat`, wrangler bundles such code without an error, but the Worker then fails when it starts. So:
+- `worker/index.mjs` imports only `scripts/docs-mcp.mjs`;
+- `docs-mcp.mjs` imports only `scripts/docs-search.mjs`, the SDK, `minisearch` and `zod`;
+- `docs-search.mjs` imports only `minisearch`.
+
+`docs-index.mjs`, the build script with `node:fs` and the entry guard, is never imported by the Worker.
 
 **Steps.**
 1. **Dependencies.** Add `"@modelcontextprotocol/sdk": "1.32.2"`, `"minisearch": "7.2.0"` and `"zod": "4.6.7"` to `website/package.json` `dependencies`, in alphabetical order. Run `pnpm install` at the root.
-2. **`docs-index.mjs`** (build time, Node):
+2. **`docs-search.mjs`** (pure; shared by the build and the Worker):
 
    ```js
-   /** The index options, shared with the Worker (loadJSON needs the same ones). */
+   import MiniSearch from "minisearch";
+
+   export const SITE = "https://cetra.sh";
+   /** The index options; loadJSON needs the same ones. A hit's `id` is the page path "/docs/<p>/". */
    export const INDEX_OPTIONS = {
      idField: "url",
      fields: ["title", "headings", "body"],
      storeFields: ["title", "description"],
    };
-   export const SEARCH_OPTIONS = { prefix: true, fuzzy: 0.2, boost: { title: 3, headings: 2 }, combineWith: "AND" };
+   const STRICT = { prefix: true, fuzzy: 0.2, boost: { title: 3, headings: 2 }, combineWith: "AND" };
+   const LOOSE = { ...STRICT, combineWith: "OR" };
+   /** Hits: [{title, url: SITE + hit.id, snippet: hit.description}], best first, at most `limit`.
+    *  All the query's terms first (AND); when that gives fewer than `limit`, the OR hits not
+    *  already listed follow, so a long question still finds the page. */
+   export function search(index, query, limit) {}
+   export function loadIndex(json) { return MiniSearch.loadJSON(json, INDEX_OPTIONS); }
+   ```
+
+   The URL comes from `hit.id`: `url` is the id field, not a stored field, so `hit.url` is `undefined`.
+
+   **`docs-index.mjs`** (build time, Node):
+
+   ```js
    /** One document per Markdown page: url "/docs/<p>/", title (the "# " line), description (the first
-    *  paragraph after it), headings ("##"–"####" lines joined by "\n"), body (the rest). */
+    *  paragraph after it), headings ("##"–"####" lines outside fenced code, joined by "\n"), body (the rest). */
    export function documentFor(url, markdown) {}
    export function main() {} // reads dist/docs/**/index.md, writes dist/mcp-index.json; 0 or 1
    ```
 
+   `documentFor` skips heading-like lines inside fenced code. A line whose trimmed text starts with three backticks opens or closes a fence, the same rule as `markdown.mjs`.
+
    - **Page URLs.** `dist/docs/index.md` gives `/docs/`, and `dist/docs/a/b/index.md` gives `/docs/a/b/`.
-   - **`main`** builds `new MiniSearch(INDEX_OPTIONS)`, calls `addAll`, and writes `JSON.stringify(index)`. It prints `indexed <n> pages (<size> bytes)`.
+   - **`main`** builds `new MiniSearch(INDEX_OPTIONS)` (importing `INDEX_OPTIONS` from `docs-search.mjs`), calls `addAll`, and writes `JSON.stringify(index)`. It prints `indexed <n> pages (<size> bytes)`.
    - **`website/package.json`:** after `node scripts/md-pages.mjs` in both `build` and `check`, add `&& node scripts/docs-index.mjs`.
 3. **`docs-mcp.mjs`** (the Worker's logic, importable by `node --test`):
 
    ```js
    import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
    import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-   import MiniSearch from "minisearch";
    import { z } from "zod";
-   import { INDEX_OPTIONS, SEARCH_OPTIONS } from "./docs-index.mjs";
+   import { loadIndex, search, SITE } from "./docs-search.mjs";
 
-   export const SITE = "https://cetra.sh";
    export const MAX_PAGE_CHARS = 100_000;
 
-   /** "https://cetra.sh/docs/x/", "/docs/x/", "/docs/x", "docs/x" → "/docs/x/"; anything else → undefined. */
+   /** The page path "/docs/<p>/" for a docs URL or path; undefined for anything else. */
    export function pagePath(input) {}
-   /** Search results: [{title, url: SITE + path, snippet: description}], best first, at most `limit`. */
-   export function search(index, query, limit) {}
    /** A page's Markdown cut to MAX_PAGE_CHARS, with a final note line when cut. */
    export function cut(markdown) {}
-   /** Handles one HTTP request. `assets.fetch(request)` reads the static files. */
-   export async function handle(request, assets, loadIndex) {}
+   /** Handles one HTTP request. `assets.fetch(request)` reads the static files. The search
+    *  index is loaded from `/mcp-index.json` once per isolate and kept in a module variable;
+    *  a failed load is not kept. */
+   export async function handle(request, assets) {}
    ```
 
-   - **`pagePath`** accepts only paths made of `[a-z0-9-/]` under `/docs/`. `..` is refused.
+   - **`pagePath`**, in order:
+     1. Trim. If the input starts with `http://` or `https://`, parse it with `new URL`. The host must be `cetra.sh` or `www.cetra.sh`, otherwise `undefined`; then take its `pathname`. Otherwise the input is a path: add a leading `/` if it starts with `docs/`.
+     2. Cut at the first `#` or `?`.
+     3. Remove a trailing `index.md`; add a trailing `/` if missing.
+     4. The result must start with `/docs/`, contain only `[a-z0-9/-]`, and contain no `//`. Otherwise `undefined`. `/docs/` itself is valid: the root page.
+
+     **Test inputs:**
+     - `https://cetra.sh/docs/get-started/quickstart/` → `/docs/get-started/quickstart/`;
+     - `https://cetra.sh/docs/get-started/quickstart/index.md` and `…/quickstart#install` → the same;
+     - `http://www.cetra.sh/docs/x` → `/docs/x/`;
+     - `/docs/x` and `docs/x/` → `/docs/x/`;
+     - `/docs/` → `/docs/`;
+     - `https://evil.example/docs/x/`, `/docs/../x/`, `/docs/X/`, `/blog/` and `` → `undefined`.
    - **`handle`:**
      1. A method other than `POST` answers `405` with `Allow: POST` and an empty body.
      2. Otherwise, build `new McpServer({ name: "cetra-docs", version: "1" }, { instructions: "Search and read the cetra documentation (https://cetra.sh/docs/)." })` and register two tools with `registerTool`. Both have the annotations `{ readOnlyHint: true, openWorldHint: false }`.
         - **`search_docs`.** Description "Search the cetra documentation. Returns pages with a URL and a one-line summary; read one with get_page." Input schema: `{ query: z.string().min(1).max(200), limit: z.number().int().min(1).max(20).optional() }`.
-          - It answers `{ content: [{ type: "text", text: JSON.stringify(search(await loadIndex(), query, limit ?? 8)) }] }`.
+          - It answers `{ content: [{ type: "text", text: JSON.stringify(search(await index(), query, limit ?? 8)) }] }`, where `index()` is the module's cached loader. The loader fetches `new Request(new URL("/mcp-index.json", request.url))` through `assets`. A status other than 200 throws `Error("search index missing")`, which the SDK returns as a tool error. Otherwise it calls `loadIndex(text)`.
           - With no hits, the text is `[]`.
         - **`get_page`.** Description "Read one cetra documentation page as Markdown. `url` is a https://cetra.sh/docs/… URL or a /docs/… path." Input schema: `{ url: z.string().min(1).max(300) }`.
           - `pagePath(url)` → `undefined` answers `{ isError: true, content: [{ type: "text", text: "not a cetra docs page: give a https://cetra.sh/docs/… URL" }] }`.
@@ -283,22 +330,12 @@ The phases run in order. Files per phase:
    // The cetra-site Worker (D-W-3, D-AO-13): /mcp is the docs MCP server; every other path is a
    // static asset and never reaches this script (assets.run_worker_first).
    import { handle } from "../scripts/docs-mcp.mjs";
-   import { INDEX_OPTIONS } from "../scripts/docs-index.mjs";
-   import MiniSearch from "minisearch";
-
-   let index; // loaded once per isolate
 
    export default {
      async fetch(request, env) {
        const url = new URL(request.url);
        if (url.pathname !== "/mcp") return env.ASSETS.fetch(request);
-       return handle(request, env.ASSETS, async () => {
-         if (index === undefined) {
-           const response = await env.ASSETS.fetch(new Request(new URL("/mcp-index.json", request.url)));
-           index = MiniSearch.loadJSON(await response.text(), INDEX_OPTIONS);
-         }
-         return index;
-       });
+       return handle(request, env.ASSETS);
      },
    };
    ```
@@ -308,14 +345,18 @@ The phases run in order. Files per phase:
    - Add `"binding": "ASSETS"` and `"run_worker_first": ["/mcp"]` to `assets`.
    - Update the header comment: "The docs site as a Worker with static assets (D-W-3); its script answers only /mcp, the docs MCP server (D-AO-13)."
    - Add no `compatibility_flags`.
+   - Add `"observability": { "enabled": false }`, so that D-AO-13's "nothing logged" does not depend on a dashboard default.
 6. **`website/package.json` `test:scripts`** stays `node --test scripts/`. The Worker entry has no logic of its own to test.
 
 **Tests:**
 - **`docs-index.test.mjs`:**
   - `documentFor` splits a small Markdown page into its title, description, headings and body;
-  - an index built from three small pages finds `"annotaton queue"` (a typo) on the right page with `SEARCH_OPTIONS`;
-  - `toJSON`, then `loadJSON` with `INDEX_OPTIONS`, finds the same.
-- **`docs-mcp.test.mjs`**, with Node 26's `Request` and `Response` and a fake `assets` whose `fetch` serves a Map of paths:
+  - `documentFor` ignores a `## comment` line inside a bash fence;
+  - an index built from three small pages finds `"annotaton queue"` (a typo) on the right page through `search`;
+  - a long question whose words are not all on one page (`"how do I send traces from langchain"`) still returns the LangChain page, through the OR fallback;
+  - `search` returns `url` `https://cetra.sh/docs/<p>/` and the description as `snippet`;
+  - `JSON.stringify`, then `loadIndex`, finds the same.
+- **`docs-mcp.test.mjs`**, with Node 26's `Request` and `Response` and a fake `assets` whose `fetch` serves a Map of paths, including `/mcp-index.json` built in the test with `docs-search.mjs`'s `INDEX_OPTIONS`. Unknown paths get status 404 and an HTML body, as the real 404 page does:
   - `pagePath` on good input, and on `../`, `/docs/../x` and `https://evil.example/docs/x/`;
   - `search` limits, and fills the snippet from the description;
   - `cut` at the limit;
@@ -335,6 +376,14 @@ The phases run in order. Files per phase:
 - `cd website && node --test scripts/docs-index.test.mjs scripts/docs-mcp.test.mjs` passes;
 - `pnpm --dir website run build` ends with `indexed <n> pages`;
 - `pnpm --dir website exec wrangler deploy --dry-run --outdir /tmp/claude-1000/ao-w3-bundle` succeeds and reports a gzip size under 1 MB. Report the size;
+- the Worker really starts:
+  1. `cd website && pnpm exec wrangler dev --local --port 8798`, in the background;
+  2. wait for it;
+  3. `curl -s -X POST http://127.0.0.1:8798/mcp -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_docs","arguments":{"query":"quick start"}}}'` returns a result containing `get-started/quickstart`;
+  4. `curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8798/mcp` prints `405`;
+  5. **stop the wrangler process you started** (and its `workerd` children).
+
+  If it cannot start, report the error. A dry run alone does not prove the Worker starts;
 - Biome, run from `website/`, is clean.
 
 **Commit:** `Serve a docs MCP server from the site's Worker`
