@@ -243,6 +243,17 @@ pub struct AddQueueItems {
     pub items: Vec<QueueItemTarget>,
 }
 
+/// Body of `POST /api/v1/projects/{project}/issues/{id}/queue-items` (D-IC-30).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IssueQueueItemsRequest {
+    /// The queue: its id. A queue of this project.
+    pub queue: Uuid,
+    /// Most targets to add, 1 to 1 000. Default 100.
+    #[serde(default, deserialize_with = "super::online_rules::present")]
+    pub limit: Option<u32>,
+}
+
 /// A target that was not added, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct SkippedQueueItem {

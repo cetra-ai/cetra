@@ -57,7 +57,7 @@ const MAX_DESCRIPTION_CHARS: usize = 1_000;
 /// Longest queue instructions, in characters after trimming.
 const MAX_INSTRUCTIONS_CHARS: usize = 10_000;
 /// Longest session id, in bytes.
-const MAX_SESSION_ID_BYTES: usize = 255;
+pub(crate) const MAX_SESSION_ID_BYTES: usize = 255;
 
 /// Annotation queue routes (spec 09): the queues and their items.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -541,7 +541,6 @@ async fn add_items(
     error::Json(body): error::Json<AddQueueItems>,
 ) -> Result<(StatusCode, error::Json<AddedQueueItems>), ApiError> {
     let project = access.project.id;
-    let org = access.project.org_id;
     let queue_id = path.id;
     let target = store::get(state.meta.reader(), project, queue_id)
         .await?
@@ -578,7 +577,39 @@ async fn add_items(
         }
     }
 
-    let ctx = open_query(&state, org, project, None).await?;
+    let answer = add_found_targets(
+        &state,
+        access.project.org_id,
+        project,
+        queue_id,
+        target,
+        added_by,
+        fitting,
+        skipped,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, error::Json(answer)))
+}
+
+/// The core of both adds by id (D-AQ-8): looks `fitting` up in storage over the data window
+/// (a trace, a trace and span, or a session, by the queue's `target`), lists what is missing in
+/// `skipped`, then guards and inserts the rest in the writer's transaction (`insert_found`: the
+/// queue is checked again, the deletion guard is asked per target, a queue past 100 000 items is
+/// 422 and nothing is added). `fitting` holds only targets that fit `target`; `skipped` holds the
+/// skips the caller already made. Returns the answer with `skipped` sorted by `index`, and logs
+/// ids and counts.
+#[allow(clippy::too_many_arguments)] // the add's inputs are all distinct
+pub(crate) async fn add_found_targets(
+    state: &AppState,
+    org: OrgId,
+    project: ProjectId,
+    queue_id: Uuid,
+    target: Target,
+    added_by: (store::AddedByKind, Uuid),
+    fitting: Vec<Parsed>,
+    mut skipped: Vec<SkippedQueueItem>,
+) -> Result<AddedQueueItems, ApiError> {
+    let ctx = open_query(state, org, project, None).await?;
     let deadline = Deadline::start();
     let mut candidates = Vec::new();
     match target {
@@ -685,7 +716,7 @@ async fn add_items(
         .into_iter()
         .map(|candidate| (candidate.item, candidate.guard))
         .collect();
-    let inserted = insert_found(&state, project, queue_id, added_by, found).await?;
+    let inserted = insert_found(state, project, queue_id, added_by, found).await?;
     skipped.extend(inserted.blocked.into_iter().filter_map(|position| {
         indexes
             .get(position)
@@ -700,14 +731,11 @@ async fn add_items(
         skipped = skipped.len(),
         "annotation queue items added"
     );
-    Ok((
-        StatusCode::CREATED,
-        error::Json(AddedQueueItems {
-            added: inserted.added,
-            existing: inserted.existing,
-            skipped,
-        }),
-    ))
+    Ok(AddedQueueItems {
+        added: inserted.added,
+        existing: inserted.existing,
+        skipped,
+    })
 }
 
 /// What [`insert_found`] did: the counts, and the positions in `found` the deletion guard blocked.
@@ -1026,7 +1054,7 @@ async fn ensure_queue(state: &AppState, project: ProjectId, id: Uuid) -> Result<
 
 /// Who adds an item (D-AQ-11): the session user, the personal token or the API key. The
 /// control plane never reaches a project route.
-fn added_by_of(principal: &Principal) -> Result<(store::AddedByKind, Uuid), ApiError> {
+pub(crate) fn added_by_of(principal: &Principal) -> Result<(store::AddedByKind, Uuid), ApiError> {
     match principal {
         Principal::Session { user, .. } => Ok((store::AddedByKind::User, user.id)),
         Principal::Pat { token_id, .. } => Ok((store::AddedByKind::Pat, *token_id)),
@@ -1035,12 +1063,13 @@ fn added_by_of(principal: &Principal) -> Result<(store::AddedByKind, Uuid), ApiE
     }
 }
 
-/// One target of an add after the format checks. `index` is its position in the request.
-struct Parsed {
-    index: usize,
-    trace: Option<TraceId>,
-    span: Option<SpanId>,
-    session: Option<String>,
+/// One target of an add after the format checks. `index` is its position in the request
+/// (for the issue route: in the occurrences read, D-IC-29).
+pub(crate) struct Parsed {
+    pub(crate) index: usize,
+    pub(crate) trace: Option<TraceId>,
+    pub(crate) span: Option<SpanId>,
+    pub(crate) session: Option<String>,
 }
 
 /// A target that may be added: its row, and the traces the deletion guard asks about.
@@ -1148,7 +1177,7 @@ fn items_answer(inserted: store::ItemsInsert) -> Result<(u64, u64), ApiError> {
     }
 }
 
-fn skip(index: usize, message: &str) -> SkippedQueueItem {
+pub(crate) fn skip(index: usize, message: &str) -> SkippedQueueItem {
     SkippedQueueItem {
         index: u64::try_from(index).unwrap_or(u64::MAX),
         message: message.to_owned(),

@@ -2,7 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
 import { $api } from "@/api/client";
-import { problemMessage, problemOf } from "@/api/problem";
+import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { projectRef } from "@/api/project-ref";
 import { annotationQueuesInit, annotationQueueWriteKeys } from "@/api/queries-annotation-queues";
 import type { Schema } from "@/api/types";
@@ -123,6 +123,83 @@ export function AddToQueueButton({
   );
 }
 
+export interface QueueTargetDialogProps {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: string;
+  /** The kinds of queue the picker lists. One kind: options show the name only; several: `name · kind`. */
+  kinds: readonly QueueKind[];
+  /** The kind "New queue…" starts with. */
+  defaultKind: QueueKind;
+  /** Adds to the queue `queueId`; resolves with the server's answer. */
+  add: (queueId: string) => Promise<Schema<"AddedQueueItems">>;
+  /** True while that request runs (the caller's mutation `isPending`). */
+  adding: boolean;
+  /** What a `skipped` row's `index` names in the result list. */
+  skippedLabel: (index: number) => string;
+  /** Called once the items are added. */
+  onAdded?: () => void;
+}
+
+/** The dialog shell of every add-to-queue dialog: the picker, the add result and the busy guards. */
+export function QueueTargetDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  kinds,
+  defaultKind,
+  add,
+  adding,
+  skippedLabel,
+  onAdded,
+}: QueueTargetDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && adding) {
+          return;
+        }
+        onOpenChange(next);
+      }}
+    >
+      <DialogContent
+        className="max-h-[90vh] overflow-y-auto"
+        onInteractOutside={(event) => {
+          if (adding) {
+            event.preventDefault();
+          }
+        }}
+        onEscapeKeyDown={(event) => {
+          if (adding) {
+            event.preventDefault();
+          }
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        {open ? (
+          <QueueTargetForm
+            kinds={kinds}
+            defaultKind={defaultKind}
+            add={add}
+            adding={adding}
+            skippedLabel={skippedLabel}
+            onAdded={onAdded}
+            onClose={() => {
+              onOpenChange(false);
+            }}
+          />
+        ) : null}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** Adds the items to one queue of the same kind, or to a new one created here (D-AQ-8). */
 export function AddToQueueDialog({
   open,
@@ -138,72 +215,86 @@ export function AddToQueueDialog({
   /** Called once the items are added. */
   onAdded?: () => void;
 }) {
+  const { org, project } = useProject();
+  const ref = projectRef(org, project);
   const add = useAddItems();
-  const busy = add.isPending;
   const count = items.length;
   const noun = NOUNS[target];
 
   return (
-    <Dialog
+    <QueueTargetDialog
       open={open}
-      onOpenChange={(next) => {
-        if (!next && busy) {
-          return;
-        }
-        onOpenChange(next);
-      }}
-    >
-      <DialogContent
-        className="max-h-[90vh] overflow-y-auto"
-        onInteractOutside={(event) => {
-          if (busy) {
-            event.preventDefault();
-          }
-        }}
-        onEscapeKeyDown={(event) => {
-          if (busy) {
-            event.preventDefault();
-          }
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>{`Add ${count} ${count === 1 ? noun : `${noun}s`} to a queue`}</DialogTitle>
-          <DialogDescription>
-            Reviewers work through the queue in order. An item already in the queue is not added
-            twice.
-          </DialogDescription>
-        </DialogHeader>
-        {open ? (
-          <AddToQueueForm
-            target={target}
-            items={items}
-            add={add}
-            onAdded={onAdded}
-            onClose={() => {
-              onOpenChange(false);
-            }}
-          />
-        ) : null}
-      </DialogContent>
-    </Dialog>
+      onOpenChange={onOpenChange}
+      title={`Add ${count} ${count === 1 ? noun : `${noun}s`} to a queue`}
+      description="Reviewers work through the queue in order. An item already in the queue is not added twice."
+      kinds={[target]}
+      defaultKind={target}
+      add={(queueId) =>
+        add.mutateAsync({
+          params: { path: { project: ref, id: queueId } },
+          body: { items: [...items] },
+        })
+      }
+      adding={add.isPending}
+      skippedLabel={(index) => itemLabel(items[index])}
+      onAdded={onAdded}
+    />
   );
 }
 
-function AddToQueueForm({
-  target,
-  items,
+/** Sends the newest occurrences of an issue to a queue of any kind (D-IC-27). */
+export function SendIssueToQueueDialog({
+  open,
+  onOpenChange,
+  issueId,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** The issue whose newest occurrences are sent. */
+  issueId: string;
+}) {
+  const { org, project } = useProject();
+  const ref = projectRef(org, project);
+  const send = $api.useMutation("post", "/api/v1/projects/{project}/issues/{id}/queue-items");
+
+  return (
+    <QueueTargetDialog
+      open={open}
+      onOpenChange={onOpenChange}
+      title="Send to a queue"
+      description="Adds the issue's newest occurrences (up to 100) to a queue. A trace queue gets their traces, a span queue the spans, a session queue the sessions, each once. An item already in the queue is not added twice."
+      kinds={["trace", "span", "session"]}
+      defaultKind="trace"
+      add={(queueId) =>
+        send.mutateAsync({
+          params: { path: { project: ref, id: issueId } },
+          body: { queue: queueId },
+        })
+      }
+      adding={send.isPending}
+      skippedLabel={(index) => `Occurrence ${index + 1}`}
+    />
+  );
+}
+
+function QueueTargetForm({
+  kinds,
+  defaultKind,
   add,
+  adding,
+  skippedLabel,
   onAdded,
   onClose,
 }: {
-  target: QueueKind;
-  items: readonly QueueItemTarget[];
-  add: ReturnType<typeof useAddItems>;
+  kinds: readonly QueueKind[];
+  defaultKind: QueueKind;
+  add: QueueTargetDialogProps["add"];
+  adding: boolean;
+  skippedLabel: (index: number) => string;
   onAdded: (() => void) | undefined;
   onClose: () => void;
 }) {
   const { org, project } = useProject();
-  const ref = projectRef(org, project);
   const queryClient = useQueryClient();
   const { queues, query } = useProjectQueues();
   const [picked, setPicked] = useState<Queue | undefined>();
@@ -213,7 +304,7 @@ function AddToQueueForm({
     { queue: Queue; answer: Schema<"AddedQueueItems"> } | undefined
   >();
 
-  const listed = queues.filter((queue) => queue.target === target);
+  const listed = queues.filter((queue) => kinds.includes(queue.target));
   // The queue chosen or created here stays listed, even before the refetch shows it.
   const options =
     picked !== undefined && !listed.some((queue) => queue.id === picked.id)
@@ -240,10 +331,7 @@ function AddToQueueForm({
       return;
     }
     try {
-      const answer = await add.mutateAsync({
-        params: { path: { project: ref, id: picked.id } },
-        body: { items: [...items] },
-      });
+      const answer = await add(picked.id);
       for (const key of annotationQueueWriteKeys(org, project, picked.id)) {
         void queryClient.invalidateQueries({ queryKey: key });
       }
@@ -251,7 +339,9 @@ function AddToQueueForm({
       setResult({ queue: picked, answer });
     } catch (caught) {
       setFormError(
-        queueFullMessage(caught) ?? problemMessage(caught, "The items could not be added."),
+        queueFullMessage(caught) ??
+          Object.values(fieldErrors(caught))[0] ??
+          problemMessage(caught, "The items could not be added."),
       );
     }
   }
@@ -272,7 +362,7 @@ function AddToQueueForm({
             <ul className="flex flex-col gap-1 text-body">
               {skipped.map((row) => (
                 <li key={row.index} className="flex gap-2">
-                  <span className="font-mono">{itemLabel(items[row.index])}</span>
+                  <span className="font-mono">{skippedLabel(row.index)}</span>
                   <span className="text-muted-foreground">{row.message}</span>
                 </li>
               ))}
@@ -307,7 +397,7 @@ function AddToQueueForm({
           <SelectContent>
             {options.map((queue) => (
               <SelectItem key={queue.id} value={queue.id}>
-                {queue.name}
+                {kinds.length === 1 ? queue.name : `${queue.name} · ${queue.target}`}
               </SelectItem>
             ))}
             <SelectItem value={NEW_QUEUE}>New queue…</SelectItem>
@@ -315,14 +405,14 @@ function AddToQueueForm({
         </Select>
         <FormError message={message} />
         <DialogFooter>
-          <SubmitButton pending={add.isPending}>Add</SubmitButton>
+          <SubmitButton pending={adding}>Add</SubmitButton>
         </DialogFooter>
       </form>
       {/* Outside the form: a submit of the create form would otherwise reach this form's handler. */}
       <QueueDialog
         open={newOpen}
         onOpenChange={setNewOpen}
-        defaultTarget={target}
+        defaultTarget={defaultKind}
         onCreated={(created) => {
           setPicked(created);
         }}
