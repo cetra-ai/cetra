@@ -113,7 +113,10 @@ function streamingUpdate(
  * The assistant panel: the chat list, the transcript of the selected chat, the composer and the
  * connection notice. Mounted inside the project layout and keyed by project by its caller.
  */
-export function AssistantPanel() {
+/** Where the panel is shown: in a window over the page, or in the narrow window's sheet. */
+export type PanelLayout = "floating" | "sheet";
+
+export function AssistantPanel({ layout }: { layout: PanelLayout }) {
   const { org, project, ref, data: projectData } = useProject();
   const queryClient = useQueryClient();
   const status = useQuery(assistantStatusQuery(org, project));
@@ -292,7 +295,11 @@ export function AssistantPanel() {
           }
         }}
       >
-        <header className="flex h-10 shrink-0 items-center gap-1 border-b px-2">
+        <header
+          // The floating window drags by this header (assistant-window.tsx).
+          data-window-handle=""
+          className={`flex h-10 shrink-0 items-center gap-1 border-b px-2${layout === "floating" ? " cursor-move select-none" : ""}`}
+        >
           <ConversationMenu
             org={org}
             project={project}
