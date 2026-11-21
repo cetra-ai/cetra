@@ -138,6 +138,30 @@ test("accepts a docs link followed by a full stop", () => {
   assert.deepEqual(check(text), []);
 });
 
+test("ignores link-like text inside inline code spans and fenced code", () => {
+  const text = `${valid}Write \`x[0](y)\` here.\n\`\`\`md\n[a](other.md)\n\`\`\`\n`;
+  assert.deepEqual(check(text), []);
+});
+
+test("reads a reference link whose target is followed by a title", () => {
+  const text = valid.replace("references/ok.md", 'references/nope.md "Title"');
+  const errors = check(text);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0].message, /missing reference references\/nope\.md/);
+});
+
+test("accepts a reference link with a #fragment and checks its file name", () => {
+  assert.deepEqual(check(valid.replace("references/ok.md", "references/ok.md#top")), []);
+  const missing = check(valid.replace("references/ok.md", "references/nope.md#top"));
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].message, /missing reference references\/nope\.md/);
+});
+
+test("checks cetra subcommands after a double or single quote in a fence", () => {
+  const text = `${valid}\`\`\`bash\necho "cetra frob"\necho 'cetra frob'\n\`\`\`\n`;
+  assert.equal(check(text).length, 2);
+});
+
 test("checks the real SKILL.md against the real context", () => {
   const text = readFileSync("../skills/cetra/SKILL.md", "utf8");
   assert.deepEqual(checkSkill(text, realContext()), []);

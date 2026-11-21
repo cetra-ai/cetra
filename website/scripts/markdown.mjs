@@ -139,7 +139,7 @@ function postPass(text) {
       previousBlank = false;
       return;
     }
-    if (kind === FENCE || line.trim().startsWith("#")) line = line.trimStart();
+    if (kind === PROSE && line.trim().startsWith("#")) line = line.trimStart();
     if (kind === PROSE && line === "") {
       if (previousBlank) return;
       previousBlank = true;
@@ -162,7 +162,9 @@ function assertNoComponent(text) {
   lines.forEach((line, i) => {
     if (kinds[i] !== PROSE) return;
     const match = /<\/?[A-Z][a-z][A-Za-z]*\b/.exec(line.replace(/`[^`]*`/g, ""));
-    if (match) throw new Error(`line ${i + 1}: unconverted component ${match[0]}`);
+    if (match) {
+      throw new Error(`line ${i + 1} of the converted text: unconverted component ${match[0]}`);
+    }
   });
 }
 
@@ -182,7 +184,8 @@ export function toMarkdown(source) {
   const description = frontmatter?.description;
   if (typeof description === "string" && description.trim() !== "") {
     const lines = body.split("\n");
-    const heading = lines.findIndex((line) => line.startsWith("# "));
+    const kinds = fenceKinds(lines);
+    const heading = lines.findIndex((line, i) => kinds[i] === PROSE && line.startsWith("# "));
     if (heading === -1) {
       lines.unshift(description, "");
     } else {

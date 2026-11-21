@@ -35,6 +35,27 @@ function codeSpans(line) {
   return [...line.matchAll(/`([^`]*)`/g)].map((m) => m[1]);
 }
 
+/**
+ * Each line's text outside code: fenced lines (fences included) become empty, and inline code
+ * spans are removed, so a link is only looked for in prose.
+ */
+function proseLines(lines) {
+  let fence = null;
+  return lines.map((line) => {
+    const trimmed = line.trim();
+    if (fence) {
+      if (trimmed.length >= fence.length && /^`+$/.test(trimmed)) fence = null;
+      return "";
+    }
+    const opening = trimmed.match(/^`{3,}/);
+    if (opening) {
+      fence = opening[0];
+      return "";
+    }
+    return line.replace(/`[^`]*`/g, "");
+  });
+}
+
 /** The frontmatter's errors. When it is missing or unparsable, that is the only error. */
 function checkFrontmatter(text, lines) {
   const errors = [];
@@ -86,10 +107,13 @@ export function checkSkill(text, ctx) {
     errors.push({ line: 1, message: `SKILL.md has ${lineCount} lines; the limit is ${MAX_LINES}` });
   }
 
+  const prose = proseLines(lines);
   lines.forEach((line, index) => {
     const number = index + 1;
-    for (const [, target] of line.matchAll(/\]\(([^)\s]+)\)/g)) {
-      const reference = target.match(/^references\/([a-z0-9-]+)\.md$/);
+    // A target is the part before the first whitespace: `[a](target "title")` has one.
+    for (const [, target] of prose[index].matchAll(/\]\(([^)\s]+)(?:\s[^)]*)?\)/g)) {
+      // `references/<name>.md#fragment` is checked as `references/<name>.md`.
+      const reference = target.replace(/#.*$/, "").match(/^references\/([a-z0-9-]+)\.md$/);
       if (reference) {
         if (!ctx.referenceExists(reference[1])) {
           errors.push({ line: number, message: `missing reference references/${reference[1]}.md` });
@@ -126,7 +150,7 @@ export function checkSkill(text, ctx) {
       codeTexts = codeSpans(line);
     }
     for (const code of codeTexts) {
-      for (const [, name] of code.matchAll(/(?:^|[\s`(])cetra ([a-z][a-z-]*)/g)) {
+      for (const [, name] of code.matchAll(/(?:^|[\s`("'])cetra ([a-z][a-z-]*)/g)) {
         if (!ctx.commands.has(name)) {
           errors.push({ line: index + 1, message: `unknown command \`cetra ${name}\`` });
         }

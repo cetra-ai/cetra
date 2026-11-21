@@ -135,8 +135,18 @@ test("toMarkdown converts an Aside to a bold note", () => {
 test("toMarkdown throws on an unconverted component and names its line", () => {
   assert.throws(
     () => toMarkdown('---\ntitle: T\n---\n\nFirst.\n\n<Widget foo="1" />\n'),
-    /line 5: unconverted component <Widget/,
+    /line 5 of the converted text: unconverted component <Widget/,
   );
+});
+
+test("toMarkdown keeps the indentation of fences nested in a list item", () => {
+  const out = toMarkdown("---\ntitle: T\n---\n\n1. Step\n\n   ```bash\n   ls\n   ```\n2. Next\n");
+  assert.ok(out.includes("1. Step\n\n   ```bash\n   ls\n   ```\n2. Next"));
+});
+
+test("toMarkdown puts the description before a bash fence that holds a # comment", () => {
+  const out = toMarkdown("---\ndescription: D\n---\n\n```bash\n# comment\n```\n");
+  assert.equal(out, "D\n\n```bash\n# comment\n```\n");
 });
 
 test("toMarkdown adds no heading when the source has no front matter", () => {

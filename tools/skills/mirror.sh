@@ -25,6 +25,10 @@ if [ ! -d "$dest" ] || [ ! -e "$dest/.git" ]; then
     echo "mirror.sh: $dest is not a git checkout" >&2
     usage
 fi
+if [ "$(cd "$dest" && pwd -P)" = "$(pwd -P)" ]; then
+    echo "mirror.sh: $dest is the source repository" >&2
+    exit 2
+fi
 if [ ! -d skills/cetra ] || [ ! -d skills/manifests ]; then
     echo "mirror.sh: run from the repository root" >&2
     exit 2

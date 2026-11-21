@@ -468,7 +468,7 @@ docs-gen: js-install
 
 # Copy the agent skill and its plugin manifests into a checkout of cetra-ai/skills (D-AO-9); --push commits and pushes
 skills-mirror dest *flags:
-    tools/skills/mirror.sh {{dest}} {{flags}}
+    tools/skills/mirror.sh "{{dest}}" {{flags}}
 
 # Regenerate fixtures/api responses and manifest
 api-examples:
