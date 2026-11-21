@@ -772,4 +772,111 @@ mod tests {
             Err(CryptoError::Mismatch { .. })
         ));
     }
+
+    /// The public test key of the known-answer tests: bytes 0, 1, …, 31 (D-R-35). It seals
+    /// only fixture values.
+    const GOLDEN_KEY: [u8; 32] = [
+        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
+        25, 26, 27, 28, 29, 30, 31,
+    ];
+
+    /// The key file text of `GOLDEN_KEY`, without its newline.
+    const GOLDEN_KEY_TEXT: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+
+    /// The key id of `GOLDEN_KEY`, hex.
+    const GOLDEN_KEY_ID: &str = "6d1fecb0";
+
+    /// The check value of `GOLDEN_KEY`, hex (computed outside this code).
+    const GOLDEN_CHECK: &str = "85af9b698025f5160a4716c26665293b92c356770b73f759bcfbdad4525f5bea";
+
+    /// Sealed with GOLDEN_KEY, nonce 00 01 … 0b, outside this code (Python `cryptography`
+    /// AESGCM), so a change of the envelope, the AAD text or the key id fails here.
+    const SEALED_V1: &str = "016d1fecb0000102030405060708090a0b206dba7fa08bef68e822e5eec592c7bcf69ecc62ea156d686a259dec42";
+
+    /// The row id bound into `SEALED_V1`.
+    const GOLDEN_ROW: &str = "018f6b4e-7c1a-7c1a-8c1a-0000000000c1";
+
+    #[test]
+    fn the_key_file_format_is_pinned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secret.key");
+        write_key_file(&path, &GOLDEN_KEY).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            format!("{GOLDEN_KEY_TEXT}\n").as_bytes()
+        );
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(read_key(None, dir.path()).unwrap().unwrap().key, GOLDEN_KEY);
+
+        for text in [format!("{GOLDEN_KEY_TEXT}\r\n"), GOLDEN_KEY_TEXT.to_owned()] {
+            std::fs::write(&path, text).unwrap();
+            assert_eq!(read_key(None, dir.path()).unwrap().unwrap().key, GOLDEN_KEY);
+        }
+
+        assert_eq!(decode_key(GOLDEN_KEY_TEXT, "test").unwrap(), GOLDEN_KEY);
+    }
+
+    #[test]
+    fn a_key_file_this_build_does_not_read_is_never_rewritten() {
+        let texts = [
+            "cetra-key:2:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n".to_owned(),
+            format!("{}\n", STANDARD.encode([0u8; 31])),
+            format!("{GOLDEN_KEY_TEXT}\n\n"),
+            format!(" {GOLDEN_KEY_TEXT}"),
+        ];
+        for text in texts {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("secret.key");
+            std::fs::write(&path, &text).unwrap();
+            let before = std::fs::read(&path).unwrap();
+            assert!(matches!(
+                load_key(None, dir.path(), false),
+                Err(CryptoError::BadKey { .. })
+            ));
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+            assert!(!dir.path().join("secret.key.tmp").exists());
+        }
+    }
+
+    #[test]
+    fn the_key_id_and_check_value_are_pinned() {
+        assert_eq!(hex::encode(key_id_of(&GOLDEN_KEY)), GOLDEN_KEY_ID);
+        assert_eq!(SecretBox::new(&GOLDEN_KEY).check_value(), GOLDEN_CHECK);
+    }
+
+    #[test]
+    fn a_sealed_value_of_format_1_opens() {
+        let sealed = hex::decode(SEALED_V1).unwrap();
+        let row = Uuid::parse_str(GOLDEN_ROW).unwrap();
+        let secrets = SecretBox::new(&GOLDEN_KEY);
+        assert_eq!(
+            secrets.open(&sealed, aad_for(&row)).unwrap(),
+            b"golden-secret"
+        );
+
+        let other_row = Uuid::parse_str("018f6b4e-7c1a-7c1a-8c1a-0000000000c2").unwrap();
+        assert!(matches!(
+            secrets.open(&sealed, aad_for(&other_row)),
+            Err(CryptoError::Corrupt)
+        ));
+
+        let mut version_two = sealed;
+        version_two[0] = 0x02;
+        assert!(matches!(
+            secrets.open(&version_two, aad_for(&row)),
+            Err(CryptoError::Corrupt)
+        ));
+    }
+
+    #[test]
+    fn the_sealed_layout_is_pinned() {
+        let row = Uuid::parse_str(GOLDEN_ROW).unwrap();
+        let sealed = SecretBox::new(&GOLDEN_KEY)
+            .seal(b"x", aad_for(&row))
+            .unwrap();
+        assert_eq!(sealed.len(), 1 + 4 + 12 + 1 + 16);
+        assert_eq!(sealed[0], 0x01);
+        assert_eq!(&sealed[1..5], &[0x6d, 0x1f, 0xec, 0xb0]);
+    }
 }

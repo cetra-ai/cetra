@@ -15,6 +15,8 @@ use cetra_storage::{CopyCancel, CopyReport};
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::sqlite::SqliteConnectOptions;
+use sqlx::{ConnectOptions as _, Connection as _};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::crypto;
@@ -25,7 +27,9 @@ const FLUSH_TIMEOUT: Duration = Duration::from_secs(60);
 /// Mode of the backup directory and of the files the backup creates in it.
 const DIR_MODE: u32 = 0o700;
 const KEY_MODE: u32 = 0o600;
-/// `manifest.json`'s `format`.
+/// `manifest.json`'s `format` (D-R-37). Within 1, keys are only added; a removed, renamed or
+/// retyped key, or a changed meaning, is 2. Nothing reads the manifest in the MVP: a newer
+/// backup is refused by the database checks at restore.
 const FORMAT: u32 = 1;
 
 /// What a finished backup reports (also the socket answer, B7).
@@ -328,6 +332,7 @@ async fn write(
         files.push(file_record(dir, "secret.key").await?);
     }
     let created_at = rfc3339(created);
+    let formats = read_formats(dir).await?;
     let manifest = manifest(&ManifestParts {
         created,
         mode,
@@ -341,6 +346,7 @@ async fn write(
         files: &files,
         objects_count: copy.count,
         objects_bytes: copy.bytes,
+        formats,
     });
     write_manifest(dir, &manifest).await?;
 
@@ -436,6 +442,61 @@ async fn file_record(dir: &Path, name: &'static str) -> Result<FileRecord, Backu
     })
 }
 
+/// The database versions of the backup, read from its own copies (D-R-37).
+struct Formats {
+    /// `PRAGMA user_version` of the backup's `meta.db` (META_FORMAT_VERSION).
+    meta_format: i64,
+    /// Highest `_sqlx_migrations.version` of the backup's `meta.db`.
+    meta_schema: i64,
+    /// `PRAGMA user_version` of the backup's `catalog.db` (storage FORMAT_VERSION, D-R-26).
+    storage_format: i64,
+    /// Highest `_sqlx_migrations.version` of the backup's `catalog.db`.
+    catalog_schema: i64,
+}
+
+/// Reads the versions of `dir/meta.db` and `dir/catalog.db`. Both copies are opened
+/// read-only, so reading them writes nothing.
+async fn read_formats(dir: &Path) -> Result<Formats, BackupError> {
+    let (meta_format, meta_schema) = read_versions(&dir.join("meta.db")).await?;
+    let (storage_format, catalog_schema) = read_versions(&dir.join("catalog.db")).await?;
+    Ok(Formats {
+        meta_format,
+        meta_schema,
+        storage_format,
+        catalog_schema,
+    })
+}
+
+/// `PRAGMA user_version` and the highest migration version of one database file.
+async fn read_versions(path: &Path) -> Result<(i64, i64), BackupError> {
+    let mut connection = SqliteConnectOptions::new()
+        .filename(path)
+        .read_only(true)
+        .connect()
+        .await
+        .map_err(|error| sql_error(&error))?;
+    let versions = async {
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await?;
+        let schema: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
+                .fetch_one(&mut connection)
+                .await?;
+        Ok::<_, sqlx::Error>((user_version, schema))
+    }
+    .await;
+    let closed = connection.close().await;
+    let versions = versions.map_err(|error| sql_error(&error))?;
+    closed.map_err(|error| sql_error(&error))?;
+    Ok(versions)
+}
+
+/// A failed read of a copy. The text is sqlx's, which names no row values.
+fn sql_error(error: &sqlx::Error) -> BackupError {
+    BackupError::Io(io::Error::other(error.to_string()))
+}
+
 /// What `manifest.json` records (D-N-19).
 struct ManifestParts<'a> {
     created: DateTime<Utc>,
@@ -449,6 +510,7 @@ struct ManifestParts<'a> {
     files: &'a [FileRecord],
     objects_count: u64,
     objects_bytes: u64,
+    formats: Formats,
 }
 
 /// The manifest of § Backup layout and manifest, as JSON.
@@ -477,6 +539,10 @@ fn manifest(parts: &ManifestParts<'_>) -> Value {
         "restorable_until": restorable_until,
         "files": files,
         "objects": {"count": parts.objects_count, "bytes": parts.objects_bytes},
+        "meta_format": parts.formats.meta_format,
+        "meta_schema": parts.formats.meta_schema,
+        "storage_format": parts.formats.storage_format,
+        "catalog_schema": parts.formats.catalog_schema,
     })
 }
 
@@ -619,6 +685,149 @@ mod tests {
         let again = bind(config(&restored), None).await.unwrap();
         assert_eq!(raw_span_count(&again.state().storage, project).await, 3);
         again.shutdown().await.unwrap();
+    }
+
+    /// `(user_version, highest migration)` of a live database file.
+    async fn live_versions(path: &Path) -> (i64, i64) {
+        let mut connection = SqliteConnectOptions::new()
+            .filename(path)
+            .connect()
+            .await
+            .unwrap();
+        let user_version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        let schema: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM _sqlx_migrations")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        connection.close().await.unwrap();
+        (user_version, schema)
+    }
+
+    #[tokio::test]
+    async fn the_manifest_records_the_database_versions() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        let manifest = read_manifest(&target);
+        assert_eq!(
+            manifest["meta_format"],
+            i64::from(crate::meta::META_FORMAT_VERSION)
+        );
+        assert_eq!(manifest["meta_schema"], crate::meta::expected_version());
+        let (storage_format, catalog_schema) = live_versions(&data.join("catalog.db")).await;
+        assert_eq!(manifest["storage_format"], storage_format);
+        assert_eq!(manifest["catalog_schema"], catalog_schema);
+    }
+
+    #[tokio::test]
+    async fn the_manifest_keys_are_pinned() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        let manifest = read_manifest(&target);
+        let mut keys: Vec<&str> = manifest
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "catalog_schema",
+                "cetra_version",
+                "created_at",
+                "encryption_key",
+                "files",
+                "flushed_seq",
+                "format",
+                "gc_grace_secs",
+                "meta_format",
+                "meta_schema",
+                "mode",
+                "object_store",
+                "objects",
+                "restorable_until",
+                "storage_format",
+            ],
+            "manifest.json format 1 only gains keys (D-R-37): a removed, renamed or retyped key bumps FORMAT"
+        );
+        assert!(manifest["format"].is_u64());
+        assert!(manifest["cetra_version"].is_string());
+        assert!(manifest["created_at"].is_string());
+        assert!(manifest["mode"].is_string());
+        assert!(manifest["object_store"].is_string());
+        assert!(manifest["encryption_key"].is_string());
+        assert!(manifest["flushed_seq"].is_object());
+        assert!(manifest["gc_grace_secs"].is_u64());
+        assert!(manifest["restorable_until"].is_null());
+        assert!(manifest["files"].is_array());
+        assert!(manifest["objects"].is_object());
+        for key in [
+            "meta_format",
+            "meta_schema",
+            "storage_format",
+            "catalog_schema",
+        ] {
+            assert!(manifest[key].is_i64(), "{key} is not an integer");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_newer_backup_is_refused_by_the_first_restore_command() {
+        let root = tempfile::tempdir().unwrap();
+        let running = bind(config(&root.path().join("data")), None).await.unwrap();
+        let project = ProjectId::new_v7();
+        append(&running, project, 3).await;
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        // No journal mode is set, so the copy stays in rollback mode, as it was written.
+        let mut connection = SqliteConnectOptions::new()
+            .filename(target.join("meta.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+
+        // Restore as docs/self-hosting/backup.md § Restore step 3 says.
+        let restored = root.path().join("restored");
+        std::fs::create_dir_all(&restored).unwrap();
+        for name in ["meta.db", "catalog.db", "secret.key"] {
+            std::fs::copy(target.join(name), restored.join(name)).unwrap();
+        }
+        copy_tree(&target.join("objects"), &restored.join("objects"));
+        let before = crate::meta::test_digest::dir_digest(&restored);
+
+        let error = crate::admin::gc_orphans(&config(&restored), Duration::ZERO, false, false)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, crate::admin::AdminError::Database(text) if text.contains("format version 2")),
+            "{error}"
+        );
+        assert_eq!(
+            crate::meta::test_digest::dir_digest(&restored),
+            before,
+            "the refused restore changed the data directory"
+        );
     }
 
     #[tokio::test]
@@ -872,6 +1081,15 @@ mod tests {
         }]
     }
 
+    fn sample_formats() -> Formats {
+        Formats {
+            meta_format: 1,
+            meta_schema: 15,
+            storage_format: 1,
+            catalog_schema: 4,
+        }
+    }
+
     #[test]
     fn a_meta_only_manifest_records_its_restorable_window() {
         let files = sample_files();
@@ -885,8 +1103,13 @@ mod tests {
             files: &files,
             objects_count: 812,
             objects_bytes: 3_221_225_472,
+            formats: sample_formats(),
         });
         assert_eq!(manifest["format"], 1);
+        assert_eq!(manifest["meta_format"], 1);
+        assert_eq!(manifest["meta_schema"], 15);
+        assert_eq!(manifest["storage_format"], 1);
+        assert_eq!(manifest["catalog_schema"], 4);
         assert_eq!(manifest["cetra_version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(manifest["created_at"], "2026-11-14T21:04:05.123456789Z");
         assert_eq!(manifest["mode"], "meta-only");
@@ -924,6 +1147,7 @@ mod tests {
             files: &files,
             objects_count: 0,
             objects_bytes: 0,
+            formats: sample_formats(),
         });
         assert_eq!(manifest["mode"], "full");
         assert!(manifest["restorable_until"].is_null());

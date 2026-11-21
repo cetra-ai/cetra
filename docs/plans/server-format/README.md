@@ -1,4 +1,4 @@
-Status: planned on 2026-11-15; SF1–SF8 not started
+Status: done (SF1–SF8), 2026-11-16
 
 # Server format stability (D185, track R extension)
 
@@ -528,7 +528,7 @@ encryption_check   the stored check value (equals GOLDEN_KEY's)
 - **Speed.** One fresh build per process: `static FRESH: OnceLock<tempfile::TempDir>`, built on first use with its `expected.json` (the M8 pattern). Argon2 makes a password hash cost tens of milliseconds; the scenario has two.
 - `every_table_has_a_golden_row`: in the fresh directory's `meta.db`, every table except `_sqlx_migrations` has at least one row, unless listed in `const EMPTY_TABLES: &[(&str, &str)]` (name, reason), which starts empty. Message: `table {t} has no row in the golden scenario: add one in golden_tests/build.rs`. This keeps the scenario complete while tracks add tables before the release.
 - `write_server_golden_dir`, `#[ignore = "writes a fixtures directory; run by just golden-dir <version>"]`: reads `CETRA_SERVER_GOLDEN_OUT` (absolute, must not exist), runs `build`, then restores a **copy** (SF7's `restore_copy`) to compute the dump, writes `expected.json` (`to_string_pretty`, trailing newline), prints the total size. Refuses when `CARGO_PKG_VERSION` differs from the directory name unless the name starts with `scratch` (as R8.8).
-- **Size**: measure the fresh directory; report total bytes and the largest files. The limit is 1 MiB (`GOLDEN_MAX_BYTES`, SF7). A `meta.db` of about 40 tables and their indexes is a few hundred KB.
+- **Size**: measure the fresh directory; report total bytes and the largest files. The limit is 1 MiB (`GOLDEN_MAX_BYTES`, SF7; raised to 2 MiB by the coordinator when the schema reached 66 tables and 153 indexes). A `meta.db` of about 40 tables and their indexes is a few hundred KB.
 
 ### `justfile`
 

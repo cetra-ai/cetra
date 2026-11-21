@@ -4,6 +4,9 @@
 //! read-only connections serves reads. Migrations run only in [`MetaDb::open`]
 //! (`cetra serve`). [`MetaDb::open_existing`] refuses a file whose latest
 //! migration is not this binary's.
+//!
+//! A migration that has been in a release is never edited; a change is a new migration, and a
+//! migration that does more than add is a format change (spec 04 § Format versions, D-R-34).
 #![cfg_attr(not(test), allow(dead_code))] // `cetra serve` opens this from P5 on
 
 pub(crate) mod agent_contexts;
@@ -42,6 +45,9 @@ pub(crate) mod usage;
 pub(crate) mod users;
 pub(crate) mod web_sessions;
 
+#[cfg(test)]
+mod migration_tests;
+
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -55,6 +61,14 @@ use tokio::sync::Mutex;
 
 /// How long a connection waits for SQLite's write lock (D136).
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The format version of `meta.db` and of what it seals (spec 04 § Format versions, D-R-33).
+///
+/// Stored in `PRAGMA user_version`. It changes when a release writes something an older
+/// release would misread without a migration telling it so: a new value in a TEXT enum
+/// column, a changed JSON shape, a non-additive migration, a new sealed envelope or key
+/// file format (D-R-34). Today a reader accepts exactly this version.
+pub(crate) const META_FORMAT_VERSION: u16 = 1;
 
 /// `meta.db` for one data directory.
 #[derive(Debug)]
@@ -71,6 +85,12 @@ impl MetaDb {
     /// commands use [`Self::open_existing`].
     pub(crate) async fn open(data_dir: &Path) -> Result<Self, MetaError> {
         let path = data_dir.join("meta.db");
+        // Refused files are never switched to WAL, copied or migrated.
+        let marker = if path.is_file() {
+            check_file(&path, false).await?
+        } else {
+            Marker::Unstamped
+        };
         let mut writer = connect(&path, true).await?;
         let applied = applied_version(&mut writer).await?;
         pre_migration_copy(
@@ -84,7 +104,16 @@ impl MetaDb {
         migrator()
             .run(&mut writer)
             .await
-            .map_err(|source| MetaError::Migrate { source })?;
+            .map_err(|source| match source {
+                // Only a race with another writer gets here: the check above refused it.
+                sqlx::migrate::MigrateError::VersionMissing(version) => {
+                    MetaError::SchemaTooNew { version }
+                }
+                source => MetaError::Migrate { source },
+            })?;
+        if marker == Marker::Unstamped {
+            stamp(&mut writer).await?;
+        }
         let readers = reader_pool(&path).await?;
         let db = Self {
             writer: Mutex::new(writer),
@@ -96,9 +125,10 @@ impl MetaDb {
 
     /// Opens an existing `meta.db` without migrating.
     ///
-    /// A missing file is [`MetaError::NotInitialized`]. A latest applied
-    /// migration other than this binary's is [`MetaError::SchemaMismatch`].
-    /// No migration rows counts as version `0`.
+    /// A missing file is [`MetaError::NotInitialized`]. A newer format or an applied
+    /// migration this binary does not have is refused ([`MetaError::FormatTooNew`],
+    /// [`MetaError::SchemaTooNew`]); an older latest migration is
+    /// [`MetaError::SchemaMismatch`]. No migration rows counts as version `0`.
     pub(crate) async fn open_existing(data_dir: &Path) -> Result<Self, MetaError> {
         Self::open_checked(data_dir, false).await
     }
@@ -107,7 +137,8 @@ impl MetaDb {
     /// too. Only for reading a source whose tables this binary knows by column name:
     /// `cetra admin reapply-deletions --from` after a rollback (D-M-9). Migrations only
     /// add, so the columns this binary reads are still there; a missing one fails the
-    /// read with [`MetaError::Database`]. An older schema is still
+    /// read with [`MetaError::Db`]. A newer format is still [`MetaError::FormatTooNew`].
+    /// An older schema is still
     /// [`MetaError::SchemaMismatch`].
     pub(crate) async fn open_existing_or_newer(data_dir: &Path) -> Result<Self, MetaError> {
         Self::open_checked(data_dir, true).await
@@ -118,6 +149,7 @@ impl MetaDb {
         if !path.is_file() {
             return Err(MetaError::NotInitialized);
         }
+        check_file(&path, newer_ok).await?;
         let mut writer = connect(&path, false).await?;
         let found = applied_version(&mut writer).await?;
         let expected = expected_version();
@@ -190,6 +222,18 @@ impl MetaDb {
     }
 }
 
+/// The checks of [`check_marker`] on `<data_dir>/meta.db`, before anything else of the
+/// data directory is opened (spec 04 § Format versions, D-R-33). A missing file passes:
+/// `open` creates it. Writes nothing. `cetra serve`, `admin migrate` and `admin gc-orphans`
+/// call it before storage opens.
+pub(crate) async fn preflight(data_dir: &Path) -> Result<(), MetaError> {
+    let path = data_dir.join("meta.db");
+    if !path.is_file() {
+        return Ok(());
+    }
+    check_file(&path, false).await.map(|_| ())
+}
+
 /// Why opening or using `meta.db` failed.
 ///
 /// Display text names paths, migration versions, and static reasons. It does
@@ -229,6 +273,29 @@ pub enum MetaError {
         /// Highest migration version embedded in this binary.
         expected: i64,
     },
+    /// `meta.db` was written by a newer format (spec 04 § Format versions).
+    #[error(
+        "meta.db has format version {found}, which this build (format {supported}) does not read; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    FormatTooNew {
+        /// `PRAGMA user_version` of the file.
+        found: i64,
+        /// [`META_FORMAT_VERSION`] of this build.
+        supported: u16,
+    },
+    /// `meta.db` has applied a migration this build does not have.
+    #[error(
+        "meta.db has applied migration {version}, which this build does not have; run the newer release, or restore the backup taken before the upgrade"
+    )]
+    SchemaTooNew {
+        /// The unknown migration's version.
+        version: i64,
+    },
+    /// A `meta.db` with data from before format versions existed (pre-release).
+    #[error(
+        "meta.db has no format version: it was written before format versions were introduced; create a new data directory"
+    )]
+    PreFormat,
     /// A query failed.
     #[error("meta.db: {0}")]
     Db(sqlx::Error),
@@ -315,6 +382,51 @@ pub(crate) async fn test_db() -> (tempfile::TempDir, MetaDb) {
     let dir = tempfile::tempdir().unwrap();
     let db = MetaDb::open(dir.path()).await.unwrap();
     (dir, db)
+}
+
+/// Digests of a data directory, for "refused and nothing changed" tests.
+#[cfg(test)]
+pub(crate) mod test_digest {
+    use std::path::Path;
+
+    use sha2::{Digest, Sha256};
+
+    /// Every regular file under `dir` as `(relative path, sha256 hex)`, sorted. The SQLite WAL and
+    /// shared-memory files and `LOCK` are left out: they change with open connections, not with
+    /// the data.
+    pub(crate) fn dir_digest(dir: &Path) -> Vec<(String, String)> {
+        const IGNORED: [&str; 5] = [
+            "meta.db-wal",
+            "meta.db-shm",
+            "catalog.db-wal",
+            "catalog.db-shm",
+            "LOCK",
+        ];
+        let mut out = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in std::fs::read_dir(&current).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                if IGNORED.contains(&name.as_str()) {
+                    continue;
+                }
+                let relative = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let bytes = std::fs::read(&path).unwrap();
+                out.push((relative, hex::encode(Sha256::digest(bytes))));
+            }
+        }
+        out.sort();
+        out
+    }
 }
 
 async fn reader_pool(path: &Path) -> Result<SqlitePool, MetaError> {
@@ -418,13 +530,119 @@ async fn applied_version(connection: &mut SqliteConnection) -> Result<i64, MetaE
     Ok(version.unwrap_or(0))
 }
 
+/// What [`check_marker`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Marker {
+    /// `user_version` is `META_FORMAT_VERSION`.
+    Current,
+    /// `user_version` is 0 and the database holds no user and no org: new, or a crash
+    /// between the migrations and the stamp. It gets stamped.
+    Unstamped,
+}
+
+async fn table_exists(connection: &mut SqliteConnection, name: &str) -> Result<bool, MetaError> {
+    let present: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .bind(name)
+            .fetch_optional(&mut *connection)
+            .await?;
+    Ok(present.is_some())
+}
+
+/// The format and migration checks of spec 04 § Format versions, in this order, writing
+/// nothing: a newer `user_version` is `FormatTooNew`; an applied migration this build does
+/// not embed is `SchemaTooNew` (unless `newer_schema_ok`); `user_version` 0 with a row in
+/// `users` or `orgs` is `PreFormat`.
+async fn check_marker(
+    connection: &mut SqliteConnection,
+    newer_schema_ok: bool,
+) -> Result<Marker, MetaError> {
+    let format: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&mut *connection)
+        .await?;
+    if format != 0 && format != i64::from(META_FORMAT_VERSION) {
+        return Err(MetaError::FormatTooNew {
+            found: format,
+            supported: META_FORMAT_VERSION,
+        });
+    }
+    if table_exists(connection, "_sqlx_migrations").await? {
+        let known: Vec<i64> = migrator()
+            .migrations
+            .iter()
+            .map(|migration| migration.version)
+            .collect();
+        let applied: Vec<i64> = sqlx::query_scalar("SELECT version FROM _sqlx_migrations")
+            .fetch_all(&mut *connection)
+            .await?;
+        let unknown = applied
+            .into_iter()
+            .filter(|version| !known.contains(version))
+            .max();
+        if let (Some(version), false) = (unknown, newer_schema_ok) {
+            return Err(MetaError::SchemaTooNew { version });
+        }
+    }
+    if format != 0 {
+        return Ok(Marker::Current);
+    }
+    for table in ["users", "orgs"] {
+        if table_exists(connection, table).await? {
+            // `table` is one of the two literals above, never input.
+            let has_rows: bool = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "SELECT EXISTS(SELECT 1 FROM {table})"
+            )))
+            .fetch_one(&mut *connection)
+            .await?;
+            if has_rows {
+                return Err(MetaError::PreFormat);
+            }
+        }
+    }
+    Ok(Marker::Unstamped)
+}
+
+/// Runs [`check_marker`] on a connection that does not set `journal_mode`: a restored
+/// backup's `meta.db` is in rollback mode, and setting WAL would rewrite its header
+/// before the check.
+async fn check_file(path: &Path, newer_schema_ok: bool) -> Result<Marker, MetaError> {
+    let mut connection = SqliteConnectOptions::new()
+        .filename(path)
+        .create_if_missing(false)
+        .busy_timeout(BUSY_TIMEOUT)
+        .disable_statement_logging()
+        .connect()
+        .await
+        .map_err(|source| MetaError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    let marker = check_marker(&mut connection, newer_schema_ok).await;
+    let closed = connection.close().await;
+    let marker = marker?;
+    closed?;
+    Ok(marker)
+}
+
+/// Stamps `user_version` with [`META_FORMAT_VERSION`]. A pragma takes no bound parameter.
+/// Outside a transaction: `synchronous=FULL` makes the stamp durable.
+async fn stamp(connection: &mut SqliteConnection) -> Result<(), MetaError> {
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "PRAGMA user_version = {META_FORMAT_VERSION}"
+    )))
+    .execute(&mut *connection)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use sqlx::{Connection, SqliteConnection};
+    use sqlx::{ConnectOptions as _, Connection, SqliteConnection};
 
-    use super::{MetaDb, connect, expected_version, migrator};
+    use super::test_digest::dir_digest;
+    use super::{META_FORMAT_VERSION, MetaDb, connect, expected_version, migrator};
     use crate::meta::MetaError;
 
     async fn pragmas(connection: &mut SqliteConnection) -> (String, i64, i64, i64) {
@@ -614,12 +832,254 @@ mod tests {
 
         let error = MetaDb::open_existing(dir.path()).await.unwrap_err();
         match error {
-            MetaError::SchemaMismatch { found, expected } => {
-                assert_eq!(found, future);
-                assert_eq!(expected, expected_version());
-            }
+            MetaError::SchemaTooNew { version } => assert_eq!(version, future),
             other => panic!("{other}"),
         }
+    }
+
+    /// Reads `PRAGMA user_version` on a plain connection: no WAL switch, nothing written.
+    async fn read_user_version(path: &std::path::Path) -> i64 {
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(false)
+            .connect()
+            .await
+            .unwrap();
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        version
+    }
+
+    async fn set_user_version(path: &std::path::Path, version: i64) {
+        let mut connection = connect(path, false).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA user_version = {version}"
+        )))
+        .execute(&mut connection)
+        .await
+        .unwrap();
+        connection.close().await.unwrap();
+    }
+
+    /// Creates `path` with only the first migration applied (an older binary's database) and
+    /// returns that migration's version.
+    async fn create_with_first_migration_only(path: &std::path::Path) -> i64 {
+        let mut first_only = migrator();
+        let first = first_only.migrations[..1].to_vec();
+        let first_version = first[0].version;
+        first_only.migrations = std::borrow::Cow::Owned(first);
+        let mut older = connect(path, true).await.unwrap();
+        first_only.run(&mut older).await.unwrap();
+        older.close().await.unwrap();
+        first_version
+    }
+
+    #[tokio::test]
+    async fn a_new_meta_db_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert_eq!(
+            read_user_version(&path).await,
+            i64::from(META_FORMAT_VERSION)
+        );
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert_eq!(
+            read_user_version(&path).await,
+            i64::from(META_FORMAT_VERSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_newer_format_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        set_user_version(&path, 2).await;
+        let before = dir_digest(dir.path());
+        assert_newer_format_refused(dir.path()).await;
+        assert_eq!(dir_digest(dir.path()), before);
+    }
+
+    #[tokio::test]
+    async fn a_newer_format_with_pending_migrations_is_refused_before_migrating() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        create_with_first_migration_only(&path).await;
+        set_user_version(&path, 2).await;
+        let before = dir_digest(dir.path());
+        assert_newer_format_refused(dir.path()).await;
+        assert!(pre_copies(dir.path()).is_empty());
+        assert_eq!(dir_digest(dir.path()), before);
+    }
+
+    /// `open`, `open_existing`, `open_existing_or_newer` and `preflight` all refuse a newer format.
+    async fn assert_newer_format_refused(dir: &std::path::Path) {
+        let expected = MetaError::FormatTooNew {
+            found: 2,
+            supported: META_FORMAT_VERSION,
+        }
+        .to_string();
+        let open = MetaDb::open(dir).await.unwrap_err();
+        assert_eq!(open.to_string(), expected);
+        let existing = MetaDb::open_existing(dir).await.unwrap_err();
+        assert_eq!(existing.to_string(), expected);
+        let newer = MetaDb::open_existing_or_newer(dir).await.unwrap_err();
+        assert_eq!(newer.to_string(), expected);
+        let preflight = super::preflight(dir).await.unwrap_err();
+        assert_eq!(preflight.to_string(), expected);
+        assert!(matches!(
+            preflight,
+            MetaError::FormatTooNew {
+                found: 2,
+                supported: 1
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_migration_is_refused_before_anything_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = MetaDb::open(dir.path()).await.unwrap();
+        let future = expected_version() + 1;
+        db.write(move |connection| {
+            Box::pin(async move {
+                sqlx::query(
+                    "INSERT INTO _sqlx_migrations \
+                     (version, description, success, checksum, execution_time) \
+                     VALUES (?, 'future', 1, ?, 0)",
+                )
+                .bind(future)
+                .bind(Vec::<u8>::new())
+                .execute(&mut *connection)
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+        let before = dir_digest(dir.path());
+
+        let open = MetaDb::open(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(open, MetaError::SchemaTooNew { version } if version == future),
+            "{open}"
+        );
+        let existing = MetaDb::open_existing(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(existing, MetaError::SchemaTooNew { version } if version == future),
+            "{existing}"
+        );
+        let preflight = super::preflight(dir.path()).await.unwrap_err();
+        assert!(
+            matches!(preflight, MetaError::SchemaTooNew { version } if version == future),
+            "{preflight}"
+        );
+        // The same format with a newer schema is read by the reapply path.
+        MetaDb::open_existing_or_newer(dir.path())
+            .await
+            .unwrap()
+            .close()
+            .await;
+
+        assert_eq!(dir_digest(dir.path()), before);
+        assert!(pre_copies(dir.path()).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_meta_db_with_data_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let db = MetaDb::open(dir.path()).await.unwrap();
+        insert_org(&db, "org-old").await.unwrap();
+        db.close().await;
+        set_user_version(&path, 0).await;
+        let before = dir_digest(dir.path());
+
+        let error = MetaDb::open(dir.path()).await.unwrap_err();
+        assert!(matches!(error, MetaError::PreFormat), "{error}");
+        assert_eq!(dir_digest(dir.path()), before);
+        assert_eq!(read_user_version(&path).await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_pre_release_meta_db_with_data_and_pending_migrations_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        create_with_first_migration_only(&path).await;
+        let mut connection = connect(&path, false).await.unwrap();
+        insert_org_on(&mut connection, "org-old").await.unwrap();
+        connection.close().await.unwrap();
+        let before = dir_digest(dir.path());
+
+        let error = MetaDb::open(dir.path()).await.unwrap_err();
+        assert!(matches!(error, MetaError::PreFormat), "{error}");
+        assert!(pre_copies(dir.path()).is_empty());
+        assert_eq!(dir_digest(dir.path()), before);
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(false)
+            .connect()
+            .await
+            .unwrap();
+        let migrations: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        assert_eq!(migrations, 1);
+        connection.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_empty_meta_db_without_a_marker_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        set_user_version(&path, 0).await;
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert_eq!(
+            read_user_version(&path).await,
+            i64::from(META_FORMAT_VERSION)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_older_meta_db_without_a_marker_migrates_keeps_its_copy_and_is_stamped() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        let first_version = create_with_first_migration_only(&path).await;
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        assert_eq!(
+            read_user_version(&path).await,
+            i64::from(META_FORMAT_VERSION)
+        );
+        assert_eq!(
+            pre_copies(dir.path()),
+            vec![format!("meta.db.pre-m{first_version:04}")]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_pre_migration_copy_keeps_the_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("meta.db");
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        let copy = dir.path().join("copy.db");
+        let mut connection = connect(&path, false).await.unwrap();
+        sqlx::query("VACUUM INTO ?")
+            .bind(copy.to_str().unwrap())
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        assert_eq!(
+            read_user_version(&copy).await,
+            i64::from(META_FORMAT_VERSION)
+        );
     }
 
     #[tokio::test]

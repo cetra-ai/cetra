@@ -1000,6 +1000,9 @@ fn meta_error_class(error: &MetaError) -> &'static str {
         MetaError::Db(_) => "db",
         MetaError::Conflict(_) => "conflict",
         MetaError::Corrupt { .. } => "corrupt",
+        MetaError::FormatTooNew { .. } => "format_too_new",
+        MetaError::SchemaTooNew { .. } => "schema_too_new",
+        MetaError::PreFormat => "pre_format",
     }
 }
 

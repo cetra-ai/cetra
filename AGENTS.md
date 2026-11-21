@@ -72,6 +72,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - `CETRA_BLESS_SCHEMA=1` makes `catalog::db::tests::the_schema_matches_the_committed_dump` rewrite `crates/storage/src/catalog/schema.txt` instead of comparing it; then update spec 03 § 4 by hand (R M8).
 - `CETRA_DOCS_WRITE=1` makes `cli_reference_is_up_to_date` rewrite the site's CLI reference, and `sql_schema_reference_is_up_to_date` its SQL schema reference (`just docs-gen` runs both); a CLI or schema change commits the regenerated page.
 - `golden_tests` checks the golden data directories against the current build (R M8): the fresh directory is built once per test process by `golden_tests::fresh_golden_dir()`, and every golden test and `read_cache::tests::the_golden_cache_entry_is_served` uses it; `golden_tests::write_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_GOLDEN_OUT`.
+- The server's `golden_tests` (SF6, D-R-38) builds a scenario server's backup once per process (`golden_tests::fresh_golden_dir()`) and `golden_tests::write_server_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_SERVER_GOLDEN_OUT`; a `meta.db` format change (spec 04 § Format versions) bumps `META_FORMAT_VERSION`, and from the first public release the golden backups under `fixtures/server/golden/` must keep restoring.
 - A format change (spec 03 § 12) bumps `FORMAT_VERSION`; from the first public release the golden directories under `fixtures/storage/golden/` must keep opening; `just golden-dir <name>` writes one.
 - `CETRA_CRASH_ITERATIONS=N just test` runs the storage crash harness longer (default 25).
 - `CETRA_CONCURRENT_CASES=N just test` runs more cases of the storage's concurrent model test (default 4 or less, set by measurement). `just stress [secs]` runs its stress test; `CETRA_STRESS_LANES`, `_READERS`, `_WORKERS`, `_REMOTE` and `_SEED` tune it, and the seed is printed so a run's op lists can be repeated (not its interleavings).
@@ -119,6 +120,8 @@ sdks/python/                 Python SDK (uv)                                    
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
 fixtures/storage/golden/     golden data directories, written from the first stable release on (track R M8, spec 03 § 12)
+fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.key, manifest, socket lines), written
+                             from the first stable release on (SF6, D-R-38, spec 04 § Format versions)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
@@ -169,7 +172,7 @@ Run everything through `just`:
 | `just lazyfs` | the storage crash tests and a short ingest on a LazyFS mount, which drops unsynced data at each crash (R2.12, D-R-5); needs FUSE 3 (`tools/lazyfs/README.md`) |
 | `just eval-live` | opt-in live provider tests; ignored by `just check` (D167) |
 | `just stress [secs]` | the storage's concurrent model stress test, release mode (track R M6) |
-| `just golden-dir <name>` | write a golden data directory from the current build into `fixtures/storage/golden/<name>` (track R M8, D-R-29); `scratch` for a look, a version at a release |
+| `just golden-dir <name>` | write a golden data directory from the current build into `fixtures/storage/golden/<name>` (track R M8, D-R-29) and a golden server backup into `fixtures/server/golden/<name>` (SF6, D-R-38); `scratch` for a look, a version at a release |
 | `just check-golden` | fail a branch that deletes a released golden directory or a `RELEASES` line, against `origin/main` (spec 03 § 12, D-R-30); skipped without `origin/main`; in `check-rust` |
 | `just deny` | supply-chain checks (advisories, bans, licences, sources; D-P-3); not in `just check` or CI until the first release (D188) |
 | `just check-ee` | the `ee` licence files and SPDX headers (D-P-2) |

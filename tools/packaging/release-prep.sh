@@ -49,8 +49,8 @@ rm -f Cargo.toml.bak deploy/helm/cetra/Chart.yaml.bak deploy/compose/compose.yam
 
 cargo update --workspace --offline
 tools/packaging/versions-check.sh
-# A stable release writes its golden data directory with this build (spec 03 § 12, D-R-30);
-# a pre-release gets none.
+# A stable release writes its golden data directory (spec 03 § 12, D-R-30) and its golden server
+# backup (spec 04 § Format versions, D-R-38) with this build; a pre-release gets neither.
 if [[ "$new" != *-* ]]; then
   just golden-dir "$new"
 fi

@@ -16,7 +16,9 @@ use std::time::Duration;
 
 use anyhow::Context;
 use cetra_server::admin::{self, EntitlementsReport, UserSummary};
-use cetra_server::admin_socket::{ADMIN_SOCKET, AdminRequest, AdminResponse};
+use cetra_server::admin_socket::{
+    ADMIN_PROTOCOL, ADMIN_SOCKET, AdminEnvelope, AdminRequest, AdminResponse, decode_response,
+};
 use cetra_server::api::entitlements::OrgLimits;
 use cetra_server::backup::BackupMode;
 use cetra_server::config::{LogConfig, LogFormat, ServerConfig};
@@ -657,7 +659,10 @@ async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> an
         }
         Err(error) => return Err(error).context("connecting to the admin socket"),
     };
-    let request = serde_json::to_string(&AdminRequest::Backup { to, meta_only })?;
+    let request = serde_json::to_string(&AdminEnvelope {
+        v: ADMIN_PROTOCOL,
+        request: AdminRequest::Backup { to, meta_only },
+    })?;
     stream
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -670,7 +675,7 @@ async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> an
     if line.is_empty() {
         anyhow::bail!("the server closed the connection without an answer");
     }
-    match serde_json::from_str::<AdminResponse>(&line).context("reading the server's answer")? {
+    match decode_response(&line).context("reading the server's answer")? {
         AdminResponse::Done { report, .. } => {
             let mut stdout = io::stdout().lock();
             writeln!(stdout, "backup written to {}", report.dir.display())?;
@@ -1575,7 +1580,8 @@ mod tests {
             text.contains("the server is running: stop it first"),
             "{text}"
         );
-        // The lock is taken before meta.db is opened, so a refused migrate writes nothing.
+        // The preflight only reads meta.db, and the lock is taken before it is written, so a
+        // refused migrate writes nothing.
         assert_eq!(std::fs::read(&meta).unwrap(), meta_before);
         server.stop().await;
     }

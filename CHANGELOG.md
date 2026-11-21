@@ -113,6 +113,12 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - `cetra admin migrate` migrates `meta.db` and `catalog.db` while the server is stopped, before a
   restore's deletions are re-applied.
 - The server keeps a copy of `meta.db` and `catalog.db` before migrating them.
+- `meta.db` records its format version. `cetra serve`, `admin migrate` and `admin gc-orphans`
+  refuse a `meta.db` written by a newer release before they open storage or change any file.
+- The admin socket (`admin.sock`) carries a protocol version; a CLI and a server of different
+  protocol versions refuse each other with a message naming both.
+- A backup's `manifest.json` records the formats and last migrations of `meta.db` and `catalog.db`
+  (`meta_format`, `meta_schema`, `storage_format`, `catalog_schema`).
 - Helm chart values `extraVolumes` and `extraVolumeMounts` (for example a backup volume).
 - Restore mode (`restore_mode`): the server serves reads and makes no outbound call, for restore drills.
 - Prometheus metrics on a separate listener (`metrics_addr`); the Helm chart's `metrics.enabled`.

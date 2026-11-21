@@ -19,7 +19,8 @@ if [[ "$tag" != "v$version" ]]; then
 fi
 tools/packaging/versions-check.sh
 tools/packaging/release-notes.sh "$version" >/dev/null
-# A stable release has its golden data directory, last in RELEASES (spec 03 § 12, D-R-30).
+# A stable release has its golden data directory, last in RELEASES (spec 03 § 12, D-R-30), and its
+# golden server backup (D-R-38).
 if [[ "$version" != *-* ]]; then
   golden=fixtures/storage/golden
   if [[ ! -f "$golden/$version/expected.json" ]]; then
@@ -28,6 +29,12 @@ if [[ "$version" != *-* ]]; then
   fi
   if [[ "$(grep -v '^#' "$golden/RELEASES" | grep . | tail -n 1)" != "$version" ]]; then
     echo "release-verify: $golden/RELEASES does not end with $version" >&2
+    exit 1
+  fi
+  # And its golden server backup, written by the same recipe (spec 04 § Format versions, D-R-38).
+  server_golden=fixtures/server/golden
+  if [[ ! -f "$server_golden/$version/expected.json" ]]; then
+    echo "release-verify: $server_golden/$version/expected.json is missing: run just golden-dir $version" >&2
     exit 1
   fi
 fi

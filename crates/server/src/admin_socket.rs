@@ -40,6 +40,12 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the accept loop waits after a failed `accept` (for example `EMFILE`).
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
+/// The admin protocol version (D-R-36). Every request and response carries it as `"v"`.
+/// Within version 1 a change only adds: a new command, a new request field with a
+/// default, a new response field, a new error code. Renaming or removing any of them,
+/// or changing a field's meaning, is version 2.
+pub const ADMIN_PROTOCOL: u32 = 1;
+
 /// One request on the socket.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
@@ -52,14 +58,27 @@ pub enum AdminRequest {
     },
 }
 
+/// One request line: the protocol version and the command.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AdminEnvelope {
+    pub v: u32,
+    #[serde(flatten)]
+    pub request: AdminRequest,
+}
+
 /// One response on the socket. The client decides on the variant, not on `ok`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AdminResponse {
     /// The request succeeded (`ok` is `true`).
-    Done { ok: bool, report: BackupReport },
+    Done {
+        v: u32,
+        ok: bool,
+        report: BackupReport,
+    },
     /// The request failed (`ok` is `false`), with a stable `code`.
     Failed {
+        v: u32,
         ok: bool,
         code: String,
         message: String,
@@ -69,11 +88,44 @@ pub enum AdminResponse {
 impl AdminResponse {
     fn failed(code: &str, message: impl Into<String>) -> Self {
         Self::Failed {
+            v: ADMIN_PROTOCOL,
             ok: false,
             code: code.to_owned(),
             message: message.into(),
         }
     }
+}
+
+/// Why a response line could not be read (the client side of D-R-36).
+#[derive(Debug, thiserror::Error)]
+pub enum AdminProtocolError {
+    #[error("the server's answer is not JSON")]
+    NotJson,
+    #[error(
+        "the server speaks admin protocol {found}, this command speaks {ADMIN_PROTOCOL}; run the cetra binary of the server's release"
+    )]
+    OtherProtocol { found: String },
+    #[error("the server's answer has an unknown shape")]
+    Shape,
+}
+
+/// Parses one response line: JSON, then `v`, then the shape.
+pub fn decode_response(line: &str) -> Result<AdminResponse, AdminProtocolError> {
+    let value: Value = serde_json::from_str(line).map_err(|_| AdminProtocolError::NotJson)?;
+    match value.get("v").and_then(Value::as_u64) {
+        Some(version) if version == u64::from(ADMIN_PROTOCOL) => {}
+        Some(version) => {
+            return Err(AdminProtocolError::OtherProtocol {
+                found: version.to_string(),
+            });
+        }
+        None => {
+            return Err(AdminProtocolError::OtherProtocol {
+                found: "none".to_owned(),
+            });
+        }
+    }
+    serde_json::from_value(value).map_err(|_| AdminProtocolError::Shape)
 }
 
 /// Binds `<data_dir>/admin.sock` (replacing a stale file; `LOCK` is held) with mode
@@ -182,7 +234,11 @@ async fn run_backup(state: &AppState, to: PathBuf, meta_only: bool) -> AdminResp
     });
     let _abort = AbortOnDrop(task.abort_handle());
     match task.await {
-        Ok(Ok(report)) => AdminResponse::Done { ok: true, report },
+        Ok(Ok(report)) => AdminResponse::Done {
+            v: ADMIN_PROTOCOL,
+            ok: true,
+            report,
+        },
         Ok(Err(error)) => AdminResponse::failed(error.code(), error.to_string()),
         Err(_join) => AdminResponse::failed("io", "the backup task stopped"),
     }
@@ -220,7 +276,8 @@ async fn read_line(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     Ok(line)
 }
 
-/// Two steps (design § Protocol): first the JSON, then the command.
+/// Four steps: the JSON, then the protocol version (D-R-36), then the command, then its
+/// fields.
 fn parse(line: &[u8]) -> Result<AdminRequest, AdminResponse> {
     if line.len() > MAX_REQUEST {
         return Err(AdminResponse::failed(
@@ -230,13 +287,33 @@ fn parse(line: &[u8]) -> Result<AdminRequest, AdminResponse> {
     }
     let value: Value = serde_json::from_slice(line)
         .map_err(|_| AdminResponse::failed("bad_request", "the request is not JSON"))?;
+    match value.get("v").and_then(Value::as_u64) {
+        Some(version) if version == u64::from(ADMIN_PROTOCOL) => {}
+        Some(version) => {
+            return Err(unsupported_protocol(&format!("version {version}")));
+        }
+        None => return Err(unsupported_protocol("no version")),
+    }
     if let Some(command) = value.get("command").and_then(Value::as_str)
         && command != "backup"
     {
         return Err(AdminResponse::failed("unknown_command", "unknown command"));
     }
-    serde_json::from_value(value)
+    serde_json::from_value::<AdminEnvelope>(value)
+        .map(|envelope| envelope.request)
         .map_err(|_| AdminResponse::failed("bad_request", "the request does not match a command"))
+}
+
+/// The refusal of a request whose `v` is not [`ADMIN_PROTOCOL`]; `found` is `version N`
+/// or `no version`.
+fn unsupported_protocol(found: &str) -> AdminResponse {
+    AdminResponse::failed(
+        "unsupported_protocol",
+        format!(
+            "this server (cetra {}) speaks admin protocol {ADMIN_PROTOCOL}; the request has {found}; run the cetra binary of the server's release",
+            env!("CARGO_PKG_VERSION")
+        ),
+    )
 }
 
 /// Writes the response line, then shuts the connection down. A failed write is not
@@ -260,7 +337,7 @@ mod tests {
     use tokio::net::UnixStream;
 
     use super::*;
-    use crate::backup::BackupMode;
+    use crate::backup::{BackupError, BackupMode};
     use crate::serve::bind;
     use crate::test_support::config;
 
@@ -333,7 +410,7 @@ mod tests {
             .unwrap();
         assert_eq!(refusal_code(&response), "bad_request");
 
-        let next = ask(&socket, "{\"command\":\"restore\"}\n").await;
+        let next = ask(&socket, "{\"v\":1,\"command\":\"restore\"}\n").await;
         assert_eq!(refusal_code(&next), "unknown_command");
         running.shutdown().await.unwrap();
     }
@@ -344,11 +421,19 @@ mod tests {
         let data = root.path().join("data");
         let running = bind(config(&data), None).await.unwrap();
         let target = root.path().join("backup");
-        let request = json!({"command": "backup", "to": target, "meta_only": false});
+        // Built as the CLI builds it (`backup_command`).
+        let request = serde_json::to_string(&AdminEnvelope {
+            v: ADMIN_PROTOCOL,
+            request: AdminRequest::Backup {
+                to: target.clone(),
+                meta_only: false,
+            },
+        })
+        .unwrap();
         let response = ask(&data.join(ADMIN_SOCKET), &format!("{request}\n")).await;
 
-        match serde_json::from_str::<AdminResponse>(&response).unwrap() {
-            AdminResponse::Done { ok, report } => {
+        match decode_response(&response).unwrap() {
+            AdminResponse::Done { ok, report, .. } => {
                 assert!(ok, "{response}");
                 assert_eq!(report.mode, BackupMode::Full);
             }
@@ -373,11 +458,180 @@ mod tests {
         let running = bind(config(dir.path()), None).await.unwrap();
         let response = ask(
             &dir.path().join(ADMIN_SOCKET),
-            "{\"command\":\"restore\"}\n",
+            "{\"v\":1,\"command\":\"restore\"}\n",
         )
         .await;
         assert_eq!(refusal_code(&response), "unknown_command");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_request_without_the_protocol_version_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        let target = root.path().join("backup");
+        let socket = data.join(ADMIN_SOCKET);
+        let cases = [
+            json!({"command": "backup", "to": target}),
+            json!({"v": 2, "command": "backup", "to": target}),
+        ];
+        for request in cases {
+            let response = ask(&socket, &format!("{request}\n")).await;
+            assert_eq!(
+                refusal_code(&response),
+                "unsupported_protocol",
+                "{response}"
+            );
+            let message = serde_json::from_str::<Value>(&response).unwrap()["message"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert!(message.contains("protocol 1"), "{message}");
+            assert!(message.contains(env!("CARGO_PKG_VERSION")), "{message}");
+        }
+        // Refused before the backup starts: nothing was written.
+        assert!(!target.exists());
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_response_carries_the_protocol_version() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        let socket = data.join(ADMIN_SOCKET);
+        let target = root.path().join("backup");
+        let lines = [
+            ask(
+                &socket,
+                &format!(
+                    "{}\n",
+                    json!({"v": 1, "command": "backup", "to": target, "meta_only": false})
+                ),
+            )
+            .await,
+            ask(&socket, "not json\n").await,
+            ask(&socket, "{\"v\":1,\"command\":\"restore\"}\n").await,
+            // `forbidden` cannot be produced from a test (it needs another uid).
+            serde_json::to_string(&AdminResponse::failed("forbidden", "m")).unwrap() + "\n",
+        ];
+        for line in lines {
+            let value: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(value["v"], 1, "{line}");
+        }
+        running.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn the_client_refuses_another_protocol() {
+        assert!(matches!(
+            decode_response("{\"v\":2,\"ok\":true}"),
+            Err(AdminProtocolError::OtherProtocol { found }) if found == "2"
+        ));
+        assert!(matches!(
+            decode_response("{\"ok\":false,\"code\":\"busy\",\"message\":\"m\"}"),
+            Err(AdminProtocolError::OtherProtocol { found }) if found == "none"
+        ));
+        assert!(matches!(
+            decode_response("nope"),
+            Err(AdminProtocolError::NotJson)
+        ));
+        // Additive changes within version 1 are read: an unknown field is ignored.
+        let report = BackupReport {
+            dir: PathBuf::from("/x"),
+            mode: BackupMode::Full,
+            created_at: "2026-11-16T00:00:00Z".to_owned(),
+            objects: 0,
+            object_bytes: 0,
+            linked: 0,
+            copied: 0,
+            duration_ms: 1,
+        };
+        let mut line = serde_json::to_value(AdminResponse::Done {
+            v: ADMIN_PROTOCOL,
+            ok: true,
+            report,
+        })
+        .unwrap();
+        line["later"] = json!(1);
+        assert!(matches!(
+            decode_response(&line.to_string()),
+            Ok(AdminResponse::Done { ok: true, .. })
+        ));
+    }
+
+    #[test]
+    fn the_error_codes_are_stable() {
+        let backup_errors = [
+            BackupError::Busy,
+            BackupError::RelativeTarget,
+            BackupError::TargetNotEmpty,
+            BackupError::TargetInsideDataDir,
+            BackupError::MetaOnlyNeedsS3,
+            BackupError::Flush(cetra_storage::FlushNowError::Timeout {
+                table: "spans",
+                timeout: Duration::from_secs(1),
+            }),
+            BackupError::Meta(sqlx::Error::PoolClosed),
+            BackupError::Snapshot(cetra_storage::SnapshotError::Exists),
+            BackupError::Objects(cetra_storage::CopyObjectsError::RemoteStore),
+            BackupError::Io(io::Error::other("x")),
+        ];
+        // Exhaustive: a new `BackupError` variant stops this test from compiling until its
+        // value is added to `backup_errors` above.
+        for error in &backup_errors {
+            match error {
+                BackupError::Busy
+                | BackupError::RelativeTarget
+                | BackupError::TargetNotEmpty
+                | BackupError::TargetInsideDataDir
+                | BackupError::MetaOnlyNeedsS3
+                | BackupError::Flush(_)
+                | BackupError::Meta(_)
+                | BackupError::Snapshot(_)
+                | BackupError::Objects(_)
+                | BackupError::Io(_) => {}
+            }
+        }
+        // The codes the socket answers without a backup: the refusals of `parse` and the
+        // one of the peer check.
+        let mut codes: Vec<String> = backup_errors
+            .iter()
+            .map(|error| error.code().to_owned())
+            .collect();
+        for request in [
+            "not json",
+            "{\"v\":1,\"command\":\"restore\"}",
+            "{\"command\":\"backup\",\"to\":\"/x\"}",
+            "{\"v\":1,\"command\":\"backup\"}",
+        ] {
+            if let Err(AdminResponse::Failed { code, .. }) = parse(request.as_bytes()) {
+                codes.push(code);
+            }
+        }
+        codes.push("forbidden".to_owned());
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(
+            codes,
+            [
+                "bad_request",
+                "busy",
+                "flush_failed",
+                "forbidden",
+                "io",
+                "meta_copy_failed",
+                "meta_only_needs_s3",
+                "objects_failed",
+                "snapshot_failed",
+                "target_inside_data_dir",
+                "target_not_empty",
+                "unknown_command",
+                "unsupported_protocol",
+            ],
+            "admin protocol error codes are stable (D-R-36): add new codes, never rename one"
+        );
     }
 
     #[tokio::test]

@@ -47,8 +47,9 @@ model cases="500":
 stress secs="300":
     CETRA_STRESS_SECS={{secs}} cargo test --release --workspace --all-features -- --ignored --exact --nocapture model_tests::stress::concurrent_lanes_match_the_model
 
-# Write a golden data directory from the current build (track R M8, D-R-29):
-# `just golden-dir 0.1.0` at a release; `just golden-dir scratch` to look at one.
+# Write a golden data directory from the current build (track R M8, D-R-29) and a golden server
+# backup directory (track SF6, D-R-38): `just golden-dir 0.1.0` at a release; `just golden-dir
+# scratch` to look at both.
 golden-dir name:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -60,14 +61,22 @@ golden-dir name:
         echo "golden-dir: $name is not a golden directory name: use scratch (or scratch-<suffix>) for a look, or a release version X.Y.Z with digits only (no pre-release suffix, no / or ..)" >&2; exit 1
     fi
     out="$root/fixtures/storage/golden/$name"
-    if [ -e "$out" ]; then
-        echo "golden-dir: $out exists; a released directory is never rewritten. If it is a partial write that is not in RELEASES, delete it and run again." >&2; exit 1
-    fi
+    server_out="$root/fixtures/server/golden/$name"
+    for dir in "$out" "$server_out"; do
+        if [ -e "$dir" ]; then
+            echo "golden-dir: $dir exists; a released directory is never rewritten. If it is a partial write that is not in RELEASES, delete it and run again." >&2; exit 1
+        fi
+    done
     CETRA_GOLDEN_OUT="$out" cargo test --workspace --all-features -- --ignored --exact golden_tests::write_golden_dir
+    CETRA_SERVER_GOLDEN_OUT="$server_out" cargo test -p cetra-server --all-features -- --ignored --exact golden_tests::write_server_golden_dir
     case "$name" in
         scratch*) ;;
         *) echo "$name" >> "$root/fixtures/storage/golden/RELEASES" ;;
     esac
+
+# Fetch main into origin/main with its full history, so check-golden finds the merge base (CI's rust-policy job).
+fetch-main:
+    git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
 # Released golden directories and RELEASES lines are never removed (spec 03 § 12, D-R-30).
 # Skipped without origin/main. CETRA_GOLDEN_DROP=1 allows the clean-up at 1.0 (D-R-12).
@@ -77,7 +86,7 @@ check-golden:
     if ! git rev-parse --verify -q origin/main >/dev/null; then echo "check-golden: no origin/main, skipped"; exit 0; fi
     if [ "${CETRA_GOLDEN_DROP:-}" = 1 ]; then exit 0; fi
     base="$(git merge-base origin/main HEAD)" || { echo "check-golden: no merge base with origin/main (shallow clone?), skipped"; exit 0; }
-    gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden || true)"
+    gone="$(git diff --no-renames --name-only --diff-filter=D "$base" -- fixtures/storage/golden fixtures/server/golden || true)"
     lines="$(git diff --no-renames --text "$base" -- fixtures/storage/golden/RELEASES | grep -E '^-[^-]' || true)"
     if [ -n "$gone$lines" ]; then
         echo "check-golden: released golden directories must stay (D-R-12):" >&2

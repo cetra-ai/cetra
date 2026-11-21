@@ -1,1 +1,2 @@
 fixtures/storage/golden/** -text -diff
+fixtures/server/golden/** -text -diff

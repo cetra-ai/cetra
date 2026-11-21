@@ -58,8 +58,10 @@ took: 4.2 s
 The command fails with `backup failed (<code>): <message>` when the server refuses or cannot finish.
 The codes are `bad_request`, `target_not_empty`, `target_inside_data_dir`, `meta_only_needs_s3`,
 `busy`, `flush_failed`, `meta_copy_failed`, `snapshot_failed`, `objects_failed`, `forbidden` (the
-caller is neither the server's user nor root) and `io`. When no server answers, the command
-says so and names the socket.
+caller is neither the server's user nor root), `unknown_command` and `unsupported_protocol` (the
+command and the server are different releases: run the command of the server's release, e.g.
+through `docker compose exec`) and `io`. When no server answers, the command says so and names the
+socket.
 
 What the server does:
 
@@ -175,6 +177,10 @@ For restores older than `gc.grace`, keep bucket versioning, or a copy of the buc
 | `restorable_until` | for `meta-only`, `created_at` plus `gc.grace`; `null` for `full` |
 | `files` | `meta.db`, `catalog.db` and `secret.key`, each with its size and SHA-256 |
 | `objects` | the count and total bytes of the objects the backup lists |
+| `meta_format` | the format of `meta.db` (`PRAGMA user_version`) |
+| `meta_schema` | the last `meta.db` migration |
+| `storage_format` | the format of the data directory (`catalog.db`, `PRAGMA user_version`) |
+| `catalog_schema` | the last `catalog.db` migration |
 
 ## Cold backup
 
@@ -234,6 +240,12 @@ Restore with the server stopped. The steps are the same for an online and a cold
 where the step says so. The order matters: the server must not start before the deletions are
 re-applied.
 
+**A backup from a newer release cannot be restored with an older one.** The first command of step 5
+(`gc-orphans`) or step 6 (`migrate`) refuses it before it changes anything, with a message such as
+`meta.db has format version 2, which this build (format 1) does not read`, or
+`meta.db has applied migration N, which this build does not have`. Restore it with the release in the
+manifest's `cetra_version`, or with a newer one.
+
 **Only one server may use the data.** When you restore onto a new machine, first make sure the old
 server is stopped and cannot start again (stop its service, scale it to 0, or revoke its bucket
 credentials). In S3 mode two servers on one bucket prefix delete each other's objects.
@@ -275,7 +287,8 @@ and data volume, with the server stopped:
    store). In S3 mode the real run also needs `--rollback-bucket`.
 
    The command deletes the objects in `tables/` and `media/` that the restored catalog does not know
-   and that are older than `--min-age` (1 hour by default). It prints the counts:
+   and that are older than `--min-age` (1 hour by default). It checks `meta.db` first and stops on a
+   backup from a newer release. It prints the counts:
 
    ```text
    orphans deleted: 3 (12.5 MiB)

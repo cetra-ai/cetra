@@ -1,7 +1,8 @@
 //! `cetra serve`: open storage, open `meta.db`, bind, and shut down (D137).
 //!
-//! Startup creates `data_dir`, then `Storage::open` (which takes `LOCK`), then
-//! `meta.db`. A second process fails on the lock before `meta.db`.
+//! Startup creates `data_dir`, checks `meta.db` is not newer (`meta::preflight`), then
+//! `Storage::open` (which takes `LOCK`), then `meta.db`. A second process fails on the lock
+//! before `meta.db`.
 //!
 //! Shutdown closes live streams, stops accepting, drains in-flight HTTP for at
 //! most [`DRAIN`], waits at most [`USAGE_STOP_WAIT`] for the usage loop to finish
@@ -293,6 +294,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     if let Err(source) = tokio::fs::create_dir_all(&data_dir).await {
         return Err(directory_error(&data_dir, &source));
     }
+    // Before storage: a newer meta.db stops here, before LOCK, the WAL or the bucket is touched.
+    crate::meta::preflight(&data_dir).await?;
     let storage = Storage::open(config.storage_config()).await?;
     let meta = match MetaDb::open(&data_dir).await {
         Ok(meta) => meta,
@@ -1243,6 +1246,31 @@ mod tests {
             "{logs}"
         );
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_newer_meta_db_stops_serve_before_storage_opens() {
+        use sqlx::{ConnectOptions as _, Connection as _};
+        let dir = tempfile::tempdir().unwrap();
+        MetaDb::open(dir.path()).await.unwrap().close().await;
+        let mut connection = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(dir.path().join("meta.db"))
+            .connect()
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 2")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.close().await.unwrap();
+        let before = crate::meta::test_digest::dir_digest(dir.path());
+
+        let error = bind(config(dir.path()), None).await.unwrap_err();
+        assert!(error.to_string().contains("format version 2"), "{error}");
+        assert!(!dir.path().join("catalog.db").exists());
+        assert!(!dir.path().join("wal").exists());
+        assert!(!dir.path().join("LOCK").exists());
+        assert_eq!(crate::meta::test_digest::dir_digest(dir.path()), before);
     }
 
     #[tokio::test]
