@@ -81,8 +81,8 @@ W1 (converter: multi-line LinkCard; md-pages) ─► W2 (PageTitle actions, _hea
 The phases run in order. Files per phase:
 - W1: `website/scripts/{markdown.mjs, markdown.test.mjs, md-pages.mjs (new), md-pages.test.mjs (new)}`, `website/package.json`.
 - W2: `website/src/components/PageTitle.astro` (new), `website/astro.config.mjs`, `website/public/_headers`.
-- W3: `website/scripts/{docs-index.mjs, docs-index.test.mjs, docs-mcp.mjs, docs-mcp.test.mjs}` (new), `website/worker/index.mjs` (new), `website/wrangler.jsonc`, `website/package.json`, `pnpm-lock.yaml`.
-- W4: `website/src/content/docs/docs/platform/mcp.mdx`, `docs/mvp-decisions.md`, `docs/plans/docs-site/README.md` (the D-W-3 text, if it repeats it), `CHANGELOG.md`, `docs/roadmap.md`.
+- W3: `website/scripts/{docs-search.mjs, docs-index.mjs, docs-index.test.mjs, docs-mcp.mjs, docs-mcp.test.mjs}` (new), `website/worker/index.mjs` (new), `website/wrangler.jsonc`, `website/package.json`, `pnpm-lock.yaml`.
+- W4: `website/src/content/docs/docs/platform/mcp.mdx`, `website/README.md`, `docs/mvp-decisions.md`, `docs/plans/docs-site/README.md` (the D-W-3 text, if it repeats it), `CHANGELOG.md`, `docs/roadmap.md`.
 
 ---
 
@@ -134,7 +134,7 @@ The phases run in order. Files per phase:
 - `pnpm --dir website run build` ends with `wrote <n> Markdown pages`;
 - `dist/docs/index.md` and `dist/docs/get-started/quickstart/index.md` exist;
 - the "Where to go next" list of `dist/docs/index.md` is bullets with descriptions;
-- `just docs-gen` leaves `skills/cetra/references/` unchanged (the converter change touches no listed page). If it does change one, commit the regenerated files and say so;
+- `cd website && node scripts/skill-references.mjs` (check mode) exits 0, and `git status --short skills/` shows nothing: the converter change touches no listed page;
 - Biome is clean.
 
 **Commit:** `Write a Markdown copy of every docs page`
@@ -244,7 +244,10 @@ The phases run in order. Files per phase:
    ```js
    import MiniSearch from "minisearch";
 
+   /** The site origin. A deliberate copy of markdown.mjs's SITE: the Worker cannot import markdown.mjs (it imports tidymd). */
    export const SITE = "https://cetra.sh";
+   /** Common words dropped from a query before searching, unless every term is one of them. */
+   export const STOPWORDS = new Set("how do i can a an the to from of in on for with my me is are it and or what which send".split(" "));
    /** The index options; loadJSON needs the same ones. A hit's `id` is the page path "/docs/<p>/". */
    export const INDEX_OPTIONS = {
      idField: "url",
@@ -254,8 +257,9 @@ The phases run in order. Files per phase:
    const STRICT = { prefix: true, fuzzy: 0.2, boost: { title: 3, headings: 2 }, combineWith: "AND" };
    const LOOSE = { ...STRICT, combineWith: "OR" };
    /** Hits: [{title, url: SITE + hit.id, snippet: hit.description}], best first, at most `limit`.
-    *  All the query's terms first (AND); when that gives fewer than `limit`, the OR hits not
-    *  already listed follow, so a long question still finds the page. */
+    *  The query's words minus STOPWORDS (all of them when every word is a stopword); all the
+    *  remaining terms first (AND); when that gives fewer than `limit`, the OR hits not already
+    *  listed follow, so a long question still finds the page. */
    export function search(index, query, limit) {}
    export function loadIndex(json) { return MiniSearch.loadJSON(json, INDEX_OPTIONS); }
    ```
@@ -282,7 +286,7 @@ The phases run in order. Files per phase:
    import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
    import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
    import { z } from "zod";
-   import { loadIndex, search, SITE } from "./docs-search.mjs";
+   import { loadIndex, search } from "./docs-search.mjs";
 
    export const MAX_PAGE_CHARS = 100_000;
 
@@ -294,12 +298,14 @@ The phases run in order. Files per phase:
     *  index is loaded from `/mcp-index.json` once per isolate and kept in a module variable;
     *  a failed load is not kept. */
    export async function handle(request, assets) {}
+   /** For tests: forget the cached index. */
+   export function resetIndexCache() {}
    ```
 
    - **`pagePath`**, in order:
-     1. Trim. If the input starts with `http://` or `https://`, parse it with `new URL`. The host must be `cetra.sh` or `www.cetra.sh`, otherwise `undefined`; then take its `pathname`. Otherwise the input is a path: add a leading `/` if it starts with `docs/`.
+     1. Trim. If the input starts with `http://` or `https://`, parse it with `new URL`. Its `hostname` must be `cetra.sh` or `www.cetra.sh` (any port), otherwise `undefined`; then take its `pathname`. Otherwise the input is a path: add a leading `/` if it starts with `docs/`.
      2. Cut at the first `#` or `?`.
-     3. Remove a trailing `index.md`; add a trailing `/` if missing.
+     3. Remove a trailing `/index.md` (with its slash, so `/docs/xindex.md` stays as it is and fails step 4); add a trailing `/` if missing.
      4. The result must start with `/docs/`, contain only `[a-z0-9/-]`, and contain no `//`. Otherwise `undefined`. `/docs/` itself is valid: the root page.
 
      **Test inputs:**
@@ -308,7 +314,8 @@ The phases run in order. Files per phase:
      - `http://www.cetra.sh/docs/x` → `/docs/x/`;
      - `/docs/x` and `docs/x/` → `/docs/x/`;
      - `/docs/` → `/docs/`;
-     - `https://evil.example/docs/x/`, `/docs/../x/`, `/docs/X/`, `/blog/` and `` → `undefined`.
+     - `https://cetra.sh:443/docs/x/` → `/docs/x/`;
+     - `https://evil.example/docs/x/`, `/docs/../x/`, `/docs/X/`, `/docs/xindex.md`, `/blog/` and `` → `undefined`.
    - **`handle`:**
      1. A method other than `POST` answers `405` with `Allow: POST` and an empty body.
      2. Otherwise, build `new McpServer({ name: "cetra-docs", version: "1" }, { instructions: "Search and read the cetra documentation (https://cetra.sh/docs/)." })` and register two tools with `registerTool`. Both have the annotations `{ readOnlyHint: true, openWorldHint: false }`.
@@ -353,7 +360,8 @@ The phases run in order. Files per phase:
   - `documentFor` splits a small Markdown page into its title, description, headings and body;
   - `documentFor` ignores a `## comment` line inside a bash fence;
   - an index built from three small pages finds `"annotaton queue"` (a typo) on the right page through `search`;
-  - a long question whose words are not all on one page (`"how do I send traces from langchain"`) still returns the LangChain page, through the OR fallback;
+  - stopwords are dropped (`"how do I"` alone still searches those words);
+  - a long question whose words are not all on one page still returns the right page through the stopwords and the OR fallback;
   - `search` returns `url` `https://cetra.sh/docs/<p>/` and the description as `snippet`;
   - `JSON.stringify`, then `loadIndex`, finds the same.
 - **`docs-mcp.test.mjs`**, with Node 26's `Request` and `Response` and a fake `assets` whose `fetch` serves a Map of paths, including `/mcp-index.json` built in the test with `docs-search.mjs`'s `INDEX_OPTIONS`. Unknown paths get status 404 and an HTML body, as the real 404 page does:
@@ -370,11 +378,14 @@ The phases run in order. Files per phase:
     - for an off-site URL it gives `isError`;
     - an empty `query` gives `isError`.
 
-    Each call is a fresh request with a fresh server, as in production. For the `initialize` handshake, copy the JSON-RPC bodies from the code-facts note § 5.
+    - with assets whose `/mcp-index.json` answers 404, `search_docs` gives a tool error `search index missing`; a following call whose assets serve the index finds hits (a failed load is not kept).
+
+    Each call is a fresh request with a fresh server, as in production. `beforeEach(resetIndexCache)`. For the `initialize` handshake, copy the JSON-RPC bodies from the code-facts note § 5.
 
 **Done when:**
 - `cd website && node --test scripts/docs-index.test.mjs scripts/docs-mcp.test.mjs` passes;
 - `pnpm --dir website run build` ends with `indexed <n> pages`;
+- against the real index: `node -e` importing `docs-search.mjs`, `search(loadIndex(readFileSync("dist/mcp-index.json","utf8")), "how do I send traces from langchain", 8)` contains `https://cetra.sh/docs/integrations/langchain/`. If not, report the top 8 and stop;
 - `pnpm --dir website exec wrangler deploy --dry-run --outdir /tmp/claude-1000/ao-w3-bundle` succeeds and reports a gzip size under 1 MB. Report the size;
 - the Worker really starts:
   1. `cd website && pnpm exec wrangler dev --local --port 8798`, in the background;
@@ -394,7 +405,7 @@ The phases run in order. Files per phase:
 
 **Goal:** users and agents can find the `.md` pages and the docs MCP; the decisions say what changed.
 
-**Edit:** `website/src/content/docs/docs/platform/mcp.mdx`, `docs/mvp-decisions.md`, `docs/plans/docs-site/README.md` (only where it states that the Worker has no script), `CHANGELOG.md`, `docs/roadmap.md`.
+**Edit:** `website/src/content/docs/docs/platform/mcp.mdx`, `website/README.md`, `docs/mvp-decisions.md`, `docs/plans/docs-site/README.md` (only where it states that the Worker has no script), `CHANGELOG.md`, `docs/roadmap.md`.
 
 **Steps.**
 1. **`platform/mcp.mdx`.** Rename the last section, `## For coding agents that read the docs`, to `## Docs for coding agents`. Keep its `llms.txt` sentence, and add:
@@ -410,7 +421,7 @@ The phases run in order. Files per phase:
 2. **`docs/mvp-decisions.md`.**
    - **D-W-3:** append "Amended by D-AO-13: the Worker has a script, `website/worker/index.mjs`, that answers only `/mcp` (`assets.run_worker_first`); every other path is a static asset."
    - **D-W-19:** append "The `.md` copy of each page (D-AO-12) is written by `scripts/md-pages.mjs`."
-   - `grep -n "no Worker script\|no script" docs/plans/docs-site/README.md` and add the same amendment note after each statement found.
+   - `grep -n "no Worker script\|no script" docs/plans/docs-site/README.md website/README.md` and add the same amendment note after each statement found (`website/README.md` says "It has no script"; it becomes "Its script answers only `/mcp`, the docs MCP server (D-AO-13); Cloudflare serves every other path from `dist/`.").
 3. **`CHANGELOG.md` `[Unreleased]` `### Added`:** "Every docs page has a Markdown copy at `<page>/index.md`, with Copy page and View as Markdown actions; `https://cetra.sh/mcp` is a docs MCP server for coding agents (`search_docs`, `get_page`)."
 4. **`docs/roadmap.md`.** The AO row's Status adds `M4 implemented (Markdown pages, Copy page, docs MCP)`.
 
