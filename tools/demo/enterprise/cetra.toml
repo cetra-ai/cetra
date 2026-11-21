@@ -1,0 +1,30 @@
+# cetra configuration for the enterprise demo (docs/testing-locally.md § Enterprise features).
+public_url = "http://localhost:8081"
+data_dir = "/data"
+# Port 8081, so `just demo-serve` can run beside it. OTLP goes to http://localhost:8081/v1/traces.
+http_addr = "127.0.0.1:8081"
+grpc_addr = ""
+otlp_http_addr = ""
+
+[init]
+admin_email = "admin@demo.test"
+admin_password = "demo-password"
+org = "demo"
+project = "demo"
+secret_key = "sk-cetra-demo0000000000000000000000000000"
+
+[security]
+allow_private_network_egress = true
+
+[auth]
+# corp.test must sign in through the instance provider below (licence feature sso_enforcement).
+enforce_sso_domains = ["corp.test"]
+
+[[auth.oidc]]
+name = "corp"
+display_name = "Corp Keycloak"
+issuer = "http://localhost:8180/realms/corp"
+client_id = "cetra"
+client_secret = "corp-demo-secret"
+allowed_domains = ["corp.test"]
+auto_provision = { org = "demo", role = "member" }
