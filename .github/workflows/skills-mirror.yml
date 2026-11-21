@@ -1,0 +1,51 @@
+# Mirrors skills/ to the public cetra-ai/skills repository (D-AO-9). Outside ci-ok.
+# Needs the SKILLS_MIRROR_KEY secret: a deploy key with write access to cetra-ai/skills.
+name: skills-mirror
+
+on:
+  push:
+    branches: [main]
+    paths: ["skills/**", "tools/skills/**", ".github/workflows/skills-mirror.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skills-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - id: key
+        env:
+          KEY: ${{ secrets.SKILLS_MIRROR_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::SKILLS_MIRROR_KEY is not set; nothing mirrored"
+          fi
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.key.outputs.present == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: cetra-ai/skills
+          path: mirror
+          ssh-key: ${{ secrets.SKILLS_MIRROR_KEY }}
+          persist-credentials: true # the push below needs the key; nothing is uploaded
+      - if: steps.key.outputs.present == 'true'
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: just@1.59.0
+      - if: steps.key.outputs.present == 'true'
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+        run: just skills-mirror mirror --push

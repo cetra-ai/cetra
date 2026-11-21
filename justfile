@@ -466,6 +466,10 @@ docs-gen: js-install
     CETRA_DOCS_WRITE=1 cargo test -p cetra-server sql_schema_reference_is_up_to_date
     cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs
 
+# Copy the agent skill and its plugin manifests into a checkout of cetra-ai/skills (D-AO-9); --push commits and pushes
+skills-mirror dest *flags:
+    tools/skills/mirror.sh {{dest}} {{flags}}
+
 # Regenerate fixtures/api responses and manifest
 api-examples:
     CETRA_API_EXAMPLES_WRITE=1 cargo test -p cetra-server --lib api_examples::examples_are_up_to_date
