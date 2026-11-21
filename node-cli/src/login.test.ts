@@ -145,4 +145,37 @@ describe.skipIf(process.platform !== "linux")("cetra-cli login", () => {
     const saved = await readFile(join(config, "cetra", "credentials.toml"), "utf8");
     expect(saved).toBe(`[servers."${server.url}"]\ntoken = "${PAT}"\n`);
   });
+
+  it("on a moved sign-in checks and saves the token on the cell only", async () => {
+    const config = await tempDir();
+    const cell = await startCanned([
+      { status: 200, body: { server: "http://127.0.0.1:8080", token: PAT } },
+      { status: 200, body: { user: {} } },
+    ]);
+    servers.push(cell);
+    const server = await startCanned([
+      { status: 200, body: CODE },
+      { status: 400, body: { code: "moved", server: cell.url } },
+    ]);
+    servers.push(server);
+    const { io, stdout, stderr } = fakeIo({ XDG_CONFIG_HOME: config });
+
+    const code = await login(["--url", server.url, "--no-browser", "--json"], io, fast);
+
+    expect(code).toBe(Exit.Ok);
+    expect(stdout).toEqual([JSON.stringify({ server: cell.url })]);
+    expect(stderr).toContain(`Continuing the sign-in at ${cell.url}`);
+    expect(stderr).toContain(`Signed in to ${cell.url}. The token expires in 90 days.`);
+    expect(server.requests.map((request) => request.path)).toEqual([
+      "/api/auth/device/code",
+      "/api/auth/device/token",
+    ]);
+    expect(cell.requests.map((request) => request.path)).toEqual([
+      "/api/auth/device/token",
+      "/api/auth/me",
+    ]);
+    expect(cell.requests[1]?.headers.authorization).toBe(`Bearer ${PAT}`);
+    const saved = await readFile(join(config, "cetra", "credentials.toml"), "utf8");
+    expect(saved).toBe(`[servers."${cell.url}"]\ntoken = "${PAT}"\n`);
+  });
 });

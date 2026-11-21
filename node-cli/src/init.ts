@@ -31,8 +31,10 @@ const NOTE = "--project is ignored when init starts a local server: a first star
 
 type Target = keyof typeof SKILL_TARGETS;
 
-/** The signed-in result `init` writes: the server the CLI talked to, its grant and the secrets. */
+/** The signed-in result `init` writes: the server that holds the token (the one the CLI talked to,
+ *  or the cell a `moved` sign-in continued on), the grant's server, and the secrets. */
 interface SignedIn {
+  server: string;
   grantServer: string;
   token: string;
   key: string;
@@ -89,8 +91,8 @@ export async function init(args: string[], io: Io, deps: Deps = {}): Promise<Exi
       ? await signInWithPassword(server, started.email, started.password)
       : await signInWithDevice(server, values.project, noBrowser, io, deps);
 
-  // 4. The token, under the URL the CLI talked to.
-  await saveToken(credentialsPath(io.env), server, signedIn.token);
+  // 4. The token, under the server that granted it.
+  await saveToken(credentialsPath(io.env), signedIn.server, signedIn.token);
 
   // 5. The env file and the git ignore line.
   const envName = basename(envPath);
@@ -117,7 +119,7 @@ export async function init(args: string[], io: Io, deps: Deps = {}): Promise<Exi
 
   // 6. The project link.
   const linkPath = await writeLink(dir, {
-    server,
+    server: signedIn.server,
     org: signedIn.org,
     project: signedIn.project,
     project_id: signedIn.projectId,
@@ -265,6 +267,7 @@ async function signInWithPassword(
     );
   }
   return {
+    server,
     grantServer: server,
     token: local.token,
     key: local.key,
@@ -282,7 +285,7 @@ async function signInWithDevice(
   io: Io,
   deps: Deps,
 ): Promise<SignedIn> {
-  const grant = await deviceSignIn({
+  const { grant, server: answering } = await deviceSignIn({
     server,
     purpose: "init",
     noBrowser,
@@ -296,6 +299,7 @@ async function signInWithDevice(
     throw new CliError("the server returned an invalid grant", Exit.SignIn);
   }
   return {
+    server: answering,
     grantServer: grant.server,
     token: grant.token,
     key,

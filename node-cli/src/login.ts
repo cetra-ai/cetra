@@ -40,20 +40,22 @@ export async function login(args: string[], io: Io, deps: Deps = {}): Promise<Ex
   const server =
     flag !== undefined ? serverUrl(flag) : chosenServer(await loadCredentials(credentials));
 
-  const grant = await deviceSignIn({
+  // The server that answered the grant: the typed one, or the cell a `moved` answer named. The
+  // token is checked and saved there only, never sent to the server that answered `moved`.
+  const { grant, server: answering } = await deviceSignIn({
     server,
     purpose: "login",
     noBrowser: values["no-browser"] === true,
     stderr: io.stderr,
     deps,
   });
-  const me = await requestJson("GET", `${server}/api/auth/me`, { token: grant.token });
+  const me = await requestJson("GET", `${answering}/api/auth/me`, { token: grant.token });
   if (me.status < 200 || me.status > 299) {
     throw new CliError("the server rejected the token", Exit.SignIn);
   }
-  await saveToken(credentials, server, grant.token);
-  io.stderr(`Signed in to ${server}. The token expires in 90 days.`);
-  if (values.json === true) io.stdout(JSON.stringify({ server }));
+  await saveToken(credentials, answering, grant.token);
+  io.stderr(`Signed in to ${answering}. The token expires in 90 days.`);
+  if (values.json === true) io.stdout(JSON.stringify({ server: answering }));
   return Exit.Ok;
 }
 

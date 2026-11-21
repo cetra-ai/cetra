@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { openBrowser } from "./browser.js";
 import {
   deviceSignIn,
-  type Grant,
   isPersonalToken,
   isSecretKey,
   isSlug,
@@ -11,6 +10,7 @@ import {
   isUuid,
   MAX_EXPIRES_IN_S,
   type Purpose,
+  type SignInResult,
   step,
 } from "./device.js";
 import { CliError, Exit } from "./errors.js";
@@ -74,7 +74,7 @@ function signIn(
   lines: string[],
   deps: ReturnType<typeof fast>,
   project?: string,
-): Promise<Grant> {
+): Promise<SignInResult> {
   return deviceSignIn({
     server,
     purpose,
@@ -98,6 +98,14 @@ describe("step", () => {
     }
     expect(step(500, { code: "authorization_pending" })).toEqual({ failed: 500 });
     expect(step(401, undefined)).toEqual({ failed: 401 });
+  });
+
+  it("reads a moved answer's server, and fails one without a string server", () => {
+    expect(step(400, { code: "moved", server: "https://eu1.example" })).toEqual({
+      moved: "https://eu1.example",
+    });
+    expect(step(400, { code: "moved" })).toEqual({ failed: 400 });
+    expect(step(400, { code: "moved", server: 5 })).toEqual({ failed: 400 });
   });
 });
 
@@ -153,9 +161,10 @@ describe("deviceSignIn", () => {
       { status: 200, body: GRANT },
     ]);
     const lines: string[] = [];
-    const grant = await signIn(server.url, "login", lines, fast());
+    const { grant, server: answered } = await signIn(server.url, "login", lines, fast());
 
     expect(grant).toEqual({ server: SERVER, token: PAT });
+    expect(answered).toBe(server.url);
     expect(lines).toEqual([
       "Open http://127.0.0.1:9/device?code=BCDF-GHJK in your browser and approve the code.",
       "Code: BCDF-GHJK",
@@ -271,7 +280,7 @@ describe("deviceSignIn", () => {
       CODE,
       { status: 200, body: { ...GRANT, project: INIT_PROJECT, ingest_key: KEY } },
     ]);
-    const grant = await signIn(server.url, "init", [], fast(), "acme/demo");
+    const { grant } = await signIn(server.url, "init", [], fast(), "acme/demo");
     expect(grant).toEqual({ server: SERVER, token: PAT, project: INIT_PROJECT, ingest_key: KEY });
     expect(server.requests[0]?.body).toMatchObject({ purpose: "init" });
   });
@@ -326,7 +335,7 @@ describe("deviceSignIn", () => {
         body: { ...GRANT, project: { ...INIT_PROJECT, name: "De\u001b[2Jmo\n" }, ingest_key: KEY },
       },
     ]);
-    const grant = await signIn(server.url, "init", [], fast());
+    const { grant } = await signIn(server.url, "init", [], fast());
     expect(grant.project?.name).toBe("De[2Jmo");
   });
 
@@ -344,14 +353,14 @@ describe("deviceSignIn", () => {
       CODE,
       { status: 200, body: { ...GRANT, server: "https://eu1.example/" } },
     ]);
-    const grant = await signIn(server.url, "login", [], fast());
+    const { grant } = await signIn(server.url, "login", [], fast());
     expect(grant.server).toBe("https://eu1.example");
   });
 
   it("checks the server as an env value for init, and not for login", async () => {
     const odd = "https://h.example/a~b";
     const login = await canned([CODE, { status: 200, body: { ...GRANT, server: odd } }]);
-    expect((await signIn(login.url, "login", [], fast())).server).toBe(odd);
+    expect((await signIn(login.url, "login", [], fast())).grant.server).toBe(odd);
 
     const init = await canned([
       CODE,
@@ -381,9 +390,105 @@ describe("deviceSignIn", () => {
       { status: 502, body: {} },
       { status: 200, body: GRANT },
     ]);
-    const grant = await signIn(server.url, "login", [], fast());
+    const { grant } = await signIn(server.url, "login", [], fast());
     expect(grant.token).toBe(PAT);
     expect(server.requests).toHaveLength(4);
+  });
+
+  describe("a moved answer", () => {
+    it("follows one moved answer to the cell, which grants with the same device code", async () => {
+      const b = await canned([{ status: 200, body: GRANT }]);
+      const a = await canned([
+        CODE,
+        PROBLEM("authorization_pending"),
+        { status: 400, body: { code: "moved", server: b.url } },
+      ]);
+      const lines: string[] = [];
+      const result = await signIn(a.url, "login", lines, fast());
+
+      expect(result).toEqual({ grant: { server: SERVER, token: PAT }, server: b.url });
+      expect(a.requests.map((request) => request.path)).toEqual([
+        "/api/auth/device/code",
+        "/api/auth/device/token",
+        "/api/auth/device/token",
+      ]);
+      expect(b.requests).toHaveLength(1);
+      expect(b.requests[0]?.path).toBe("/api/auth/device/token");
+      expect(b.requests[0]?.body).toEqual({ device_code: DEVICE_CODE });
+      expect(b.requests[0]?.headers.authorization).toBeUndefined();
+    });
+
+    it("fails a second moved answer, from the cell", async () => {
+      const b = await canned([
+        { status: 400, body: { code: "moved", server: "http://127.0.0.1:9" } },
+      ]);
+      const a = await canned([CODE, { status: 400, body: { code: "moved", server: b.url } }]);
+      const error = await failureOf(signIn(a.url, "login", [], fast()));
+
+      expect(error).toMatchObject({
+        message: "sign-in failed: the server moved the sign-in twice",
+        code: Exit.SignIn,
+      });
+      expect(b.requests).toHaveLength(1);
+    });
+
+    it("refuses a moved answer to a server that is not https or loopback", async () => {
+      const a = await canned([
+        CODE,
+        { status: 400, body: { code: "moved", server: "http://example.com" } },
+      ]);
+      const lines: string[] = [];
+      const error = await failureOf(signIn(a.url, "login", lines, fast()));
+
+      expect(error).toMatchObject({
+        message: "the server sent an invalid sign-in server",
+        code: Exit.SignIn,
+      });
+      expect(a.requests).toHaveLength(2);
+      expect(lines.join("\n")).not.toContain("Continuing");
+    });
+
+    it("refuses a moved answer whose server is not a URL with http or https", async () => {
+      const a = await canned([
+        CODE,
+        { status: 400, body: { code: "moved", server: "javascript:alert(1)" } },
+      ]);
+      const error = await failureOf(signIn(a.url, "login", [], fast()));
+      expect(error).toMatchObject({
+        message: "the server sent an invalid sign-in server",
+        code: Exit.SignIn,
+      });
+    });
+
+    it("polls the origin of the moved server only, and never its path or query", async () => {
+      const b = await canned([{ status: 200, body: GRANT }]);
+      const a = await canned([
+        CODE,
+        { status: 400, body: { code: "moved", server: `${b.url}/some/path?x=1` } },
+      ]);
+      const result = await signIn(a.url, "login", [], fast());
+
+      expect(result.server).toBe(b.url);
+      expect(b.requests[0]?.path).toBe("/api/auth/device/token");
+    });
+
+    it("names the cell's origin on stderr", async () => {
+      const b = await canned([{ status: 200, body: GRANT }]);
+      const a = await canned([
+        CODE,
+        { status: 400, body: { code: "moved", server: `${b.url}/x?y=1` } },
+      ]);
+      const lines: string[] = [];
+      await signIn(a.url, "login", lines, fast());
+
+      expect(lines).toContain(`Continuing the sign-in at ${b.url}`);
+    });
+
+    it("fails with HTTP 400 when the moved answer has no server", async () => {
+      const a = await canned([CODE, { status: 400, body: { code: "moved" } }]);
+      const error = await failureOf(signIn(a.url, "login", [], fast()));
+      expect(error).toMatchObject({ message: "sign-in failed (HTTP 400)", code: Exit.SignIn });
+    });
   });
 });
 

@@ -180,6 +180,51 @@ describe.skipIf(process.platform !== "linux")("cetra-cli init", () => {
     expect(server.requests[2]?.path).toBe("/api/auth/device/token");
   });
 
+  it("on a moved sign-in saves the token and the link under the cell, and never the typed server", async () => {
+    const cell = await canned([{ status: 200, body: GRANT }]);
+    const server = await canned([
+      { status: 200, body: { status: "ready" } },
+      { status: 200, body: DEVICE_CODE },
+      { status: 400, body: { code: "authorization_pending" } },
+      { status: 400, body: { code: "moved", server: cell.url } },
+    ]);
+    const { config, dir } = await setup();
+    const { io, stdout } = capture({ XDG_CONFIG_HOME: config }, dir);
+
+    const code = await init(
+      ["--url", server.url, "--dir", dir, "--yes", "--no-browser", "--no-skill", "--json"],
+      io,
+      deps,
+    );
+
+    expect(code).toBe(Exit.Ok);
+    const out = JSON.parse(stdout[0] ?? "") as Record<string, unknown>;
+    expect(out).toMatchObject({
+      server: GRANT_SERVER,
+      traces_url: `${GRANT_SERVER}/acme/demo/traces`,
+    });
+    expect(await readFile(join(dir, ".env"), "utf8")).toBe(
+      `# cetra (npx @cetra-ai/cli init)\nCETRA_BASE_URL=${GRANT_SERVER}\nCETRA_API_KEY=${KEY}\n`,
+    );
+    const link = JSON.parse(await readFile(join(dir, ".cetra", "project.json"), "utf8"));
+    expect(link).toEqual({
+      server: cell.url,
+      org: "acme",
+      project: "demo",
+      project_id: PROJECT_ID,
+    });
+    const saved = await loadCredentials(credentialsPath({ XDG_CONFIG_HOME: config }));
+    expect([...saved.keys()]).toEqual([cell.url]);
+    expect(saved.get(cell.url)).toBe(PAT);
+
+    expect(server.requests.slice(1).map((request) => request.path)).toEqual([
+      "/api/auth/device/code",
+      "/api/auth/device/token",
+      "/api/auth/device/token",
+    ]);
+    expect(cell.requests.map((request) => request.path)).toEqual(["/api/auth/device/token"]);
+  });
+
   it("replaces an existing key for the same server with --yes and keeps the other lines", async () => {
     const server = await canned(deviceAnswers());
     const { config, dir } = await setup();

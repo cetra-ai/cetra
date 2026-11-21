@@ -1,5 +1,5 @@
 import { openBrowser } from "./browser.js";
-import { serverUrl } from "./credentials.js";
+import { checkServerUrl, serverUrl } from "./credentials.js";
 import { setVariables } from "./envfile.js";
 import { CliError, CONTROL, type Deps, Exit } from "./errors.js";
 import { localHost } from "./host.js";
@@ -28,15 +28,24 @@ const MAX_INTERVAL_MS = MAX_EXPIRES_IN_S * 1000;
 
 const EXPIRED = "the sign-in code expired; run the command again";
 const INVALID_URL = "the server sent an invalid sign-in URL";
+const INVALID_SERVER = "the server sent an invalid sign-in server";
+const MOVED_TWICE = "sign-in failed: the server moved the sign-in twice";
 const INVALID_CODE = "the server sent an invalid sign-in code";
 /** The message for every grant the CLI cannot use, here and in the local password sign-in. */
 export const INVALID_GRANT = "the server returned an invalid grant";
 
-/** What one poll answer means for the loop. */
-export type Step = "wait" | "slow_down" | "denied" | "expired" | { failed: number };
+/** What one poll answer means for the loop. `moved` names the cell the sign-in continues on. */
+export type Step =
+  | "wait"
+  | "slow_down"
+  | "denied"
+  | "expired"
+  | { moved: string }
+  | { failed: number };
 
 /** The meaning of one poll answer. 429 and 502 to 504 keep the code alive; a 400 carries an
- *  RFC 8628 code in its problem body; anything else fails the sign-in. */
+ *  RFC 8628 code in its problem body; a 400 `moved` names the cell in its `server` member; anything
+ *  else fails the sign-in. */
 export function step(status: number, body: unknown): Step {
   if ([429, 502, 503, 504].includes(status)) return "wait";
   if (status !== 400) return { failed: status };
@@ -50,6 +59,10 @@ export function step(status: number, body: unknown): Step {
       return "denied";
     case "expired_token":
       return "expired";
+    case "moved": {
+      const server = isRecord(body) ? body.server : undefined;
+      return typeof server === "string" ? { moved: server } : { failed: status };
+    }
     default:
       return { failed: status };
   }
@@ -89,8 +102,16 @@ function clampInterval(ms: number): number {
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** A finished sign-in: the grant, and the server that answered it (the typed server, or the cell a
+ *  `moved` answer named). */
+export interface SignInResult {
+  grant: Grant;
+  server: string;
+}
+
 /** Requests a code, prints the URL and the code on stderr, opens the browser unless `noBrowser`,
- *  and polls until the grant arrives, the user denies, or the code expires. */
+ *  and polls until the grant arrives, the user denies, or the code expires. One `moved` answer
+ *  moves the polling to the cell it names (D-AO-14); a second one fails the sign-in. */
 export async function deviceSignIn(options: {
   server: string;
   purpose: Purpose;
@@ -98,7 +119,7 @@ export async function deviceSignIn(options: {
   project?: string;
   stderr: (line: string) => void;
   deps?: Deps;
-}): Promise<Grant> {
+}): Promise<SignInResult> {
   const { server, purpose, noBrowser, project, stderr } = options;
   const deps = options.deps ?? {};
   const sleep = deps.sleep ?? defaultSleep;
@@ -137,12 +158,15 @@ export async function deviceSignIn(options: {
   const lifetimeMs = Math.min(answer.expires_in, MAX_EXPIRES_IN_S) * 1000;
   const deadline = now() + lifetimeMs + DEADLINE_SLACK_MS;
   let warned = false;
+  // The server the polls go to: the typed one, then the cell of the one `moved` answer.
+  let pollServer = server;
+  let moved = false;
   for (;;) {
     await sleep(intervalMs);
     if (now() >= deadline) throw new CliError(EXPIRED, Exit.SignIn);
     let poll: JsonAnswer;
     try {
-      poll = await requestJson("POST", `${server}/api/auth/device/token`, {
+      poll = await requestJson("POST", `${pollServer}/api/auth/device/token`, {
         body: { device_code: deviceCode },
       });
     } catch (error) {
@@ -153,7 +177,9 @@ export async function deviceSignIn(options: {
       }
       continue;
     }
-    if (poll.status === 200) return checkGrant(poll.body, purpose);
+    if (poll.status === 200) {
+      return { grant: checkGrant(poll.body, purpose), server: pollServer };
+    }
     const next = step(poll.status, poll.body);
     if (next === "wait") continue;
     if (next === "slow_down") {
@@ -162,8 +188,45 @@ export async function deviceSignIn(options: {
     }
     if (next === "denied") throw new CliError("sign-in denied in the browser", Exit.SignIn);
     if (next === "expired") throw new CliError(EXPIRED, Exit.SignIn);
+    if ("moved" in next) {
+      if (moved) throw new CliError(MOVED_TWICE, Exit.SignIn);
+      pollServer = movedOrigin(next.moved, server);
+      moved = true;
+      stderr(`Continuing the sign-in at ${pollServer}`);
+      continue;
+    }
     throw new CliError(`sign-in failed (HTTP ${next.failed})`, Exit.SignIn);
   }
+}
+
+/** The origin a `moved` answer names. Only an https origin, or a loopback http origin when the
+ *  typed server is loopback too (tests), is followed; the path, query and fragment are dropped.
+ *  Loopback is tested here, not with `local.ts`, which imports this module. */
+function movedOrigin(value: string, typed: string): string {
+  const invalid = () => new CliError(INVALID_SERVER, Exit.SignIn);
+  let target: URL;
+  let typedHost: string;
+  try {
+    checkServerUrl(value);
+    target = new URL(value);
+    typedHost = new URL(typed).hostname;
+  } catch {
+    throw invalid();
+  }
+  if (target.protocol === "https:") return target.origin;
+  if (target.protocol === "http:" && isLoopbackHost(target.hostname) && isLoopbackHost(typedHost)) {
+    return target.origin;
+  }
+  throw invalid();
+}
+
+/** `localhost`, `127.0.0.0/8` and `[::1]`, as `URL.hostname` spells them. */
+function isLoopbackHost(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "[::1]" ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)
+  );
 }
 
 /** The sign-in URL the server sent, with `project` added when given. Only http and https. */
