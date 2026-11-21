@@ -81,7 +81,7 @@ use super::deletions::{
 };
 use super::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
-    DevicePurpose, DeviceRequest, DeviceTokenRequest,
+    DevicePurpose, DeviceRequest, DeviceTokenRequest, InternalDeviceCode,
 };
 use super::entitlements::{
     Feature, OrgEntitlements, OrgLimits, OrgMonthUsage, OrgPlan, PlanSource, PlanStatus,
@@ -266,6 +266,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<DeviceGrant>();
     set.insert::<DeviceRequest>();
     set.insert::<DeviceApproveRequest>();
+    set.insert::<InternalDeviceCode>();
     set.insert::<OrgPlan>();
     set.insert::<PlanSource>();
     set.insert::<PlanStatus>();
@@ -1989,6 +1990,27 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 429],
     ))
     .build();
+    let post_internal_device_code = operation(
+        "post_internal_device_code",
+        "internal",
+        "Register a device code the control plane issued",
+    )
+    .description(Some(
+        "Needs a `control_plane` bearer token with the `device` scope (D-AO-14). The control plane sends the lowercase hex SHA-256 of a device code it issued, its user code, purpose, host and expiry; the cell then answers that code as if it had issued it. An identical retry of a pending code answers 204 again. Any other clash with a registered code (the same hash or the same user code, with other details) answers 409. A malformed field answers 400. Registered codes count against the same 10 000 pending codes as issued ones: a full cell answers 503.",
+    ))
+    .securities(Some(vec![SecurityRequirement::new(
+        "bearer",
+        [] as [&str; 0],
+    )]))
+    .request_body(Some(json_body("InternalDeviceCode")))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The code is registered, or the identical registration was already there.")
+            .build(),
+        &[400, 401, 403, 409, 503],
+    ))
+    .build();
     let internal_user_security = || vec![SecurityRequirement::new("bearer", [] as [&str; 0])];
     let post_internal_user_revoke = operation(
         "post_internal_user_revoke",
@@ -2154,6 +2176,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/internal/v1/orgs/{org_id}/members",
             PathItem::new(HttpMethod::Get, list_internal_org_members),
+        )
+        .path(
+            "/api/internal/v1/device/codes",
+            PathItem::new(HttpMethod::Post, post_internal_device_code),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
         .path("/api/v1/projects/{project}", project)

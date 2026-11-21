@@ -146,3 +146,24 @@ pub struct DeviceApproveRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<ProjectId>,
 }
+
+/// `POST /api/internal/v1/device/codes` body: the control plane registers a code it issued
+/// (D-AO-14). `Debug` is derived: the hash is not a secret, since the device code cannot be
+/// recovered from it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InternalDeviceCode {
+    /// The lowercase hex SHA-256 of the device code: 64 characters.
+    pub device_code_sha256: String,
+    /// The user code the user types, `XXXX-XXXX`.
+    pub user_code: String,
+    /// What the code is for.
+    pub purpose: DevicePurpose,
+    /// The machine's name the CLI reported. Sanitised as `DeviceCodeRequest.host` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    /// When the code expires. JSON is RFC 3339.
+    #[serde(with = "time_serde")]
+    #[schema(value_type = String, format = DateTime)]
+    pub expires_at: i64,
+}

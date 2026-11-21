@@ -168,6 +168,7 @@ The device flow (RFC 8628) signs a CLI in on the cell: the CLI shows a code and 
 - **Bounds.** 10 code requests a minute per client network (an IPv6 address counts by its /64). 30 lookups, approvals and denials a minute per user. An approval that is not finished within 60 seconds falls back to pending, so a closed tab does not hold a code.
 - **Phishing and CSRF.** The approval page shows the purpose and host and warns that approving gives the command access to the account; the CLI prints the code, and the user compares them. The two CLI calls carry no cookie and no `Origin`, so the origin check exempts exactly those two paths (D141). Approve and deny are session calls and keep the check.
 - **Logs.** Device codes, user codes, tokens and keys are never logged; the audit log names the token's and key's ids.
+- **Registration by the control plane (D-AO-14).** `POST /api/internal/v1/device/codes` lets the control plane register a code it issued on this cell. It takes a control-plane token with scope `device` (D-P-28) and no `Origin`, and the body `{device_code_sha256, user_code, purpose, host?, expires_at}`, where the hash is the lowercase hex SHA-256 of the device code. The cell checks that the hash is 64 hex characters, that the user code is in the alphabet (either spelling), and that `expires_at` is after now and at most 10 minutes plus 30 seconds of clock skew ahead; a failed check answers 400 naming the field. It sanitises `host` as above and stores the code as if it had issued it, so a registered code is polled, approved, denied and expired exactly like an issued one. Registered codes count against the 10 000 pending codes. A registration identical to a pending code (same hash, user code, purpose, host and expiry) answers 204 again; another code with the same hash or the same user code answers 409. A full cell answers 503.
 
 | Method & path | Access | Answer |
 |---|---|---|
@@ -176,6 +177,7 @@ The device flow (RFC 8628) signs a CLI in on the cell: the CLI shows a code and 
 | `GET /api/auth/device/{user_code}` | session only | 200 `{purpose, host?, created_at}`; 404 |
 | `POST /api/auth/device/{user_code}/approve` | session only | 204; 400 `project_id` (missing for `init`, refused for `login`); 403; 404 |
 | `POST /api/auth/device/{user_code}/deny` | session only | 204; 404 |
+| `POST /api/internal/v1/device/codes` | control-plane token, scope `device`, no `Origin` | 204; 400 (a malformed field); 401; 403; 409 (a clash); 503 `busy` when full |
 
 ## Email
 

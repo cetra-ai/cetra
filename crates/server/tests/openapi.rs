@@ -154,6 +154,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/internal/v1/orgs/{org_id}/members",
         "list_internal_org_members",
     ),
+    (
+        "post",
+        "/api/internal/v1/device/codes",
+        "post_internal_device_code",
+    ),
     ("patch", "/api/v1/orgs/{org}", "patch_org"),
     ("get", "/api/v1/orgs/{org}/members", "list_org_members"),
     (
@@ -1223,6 +1228,7 @@ fn document_lint() {
                 | "post_internal_user_delete"
                 | "post_internal_membership_lookup"
                 | "list_internal_org_members"
+                | "post_internal_device_code"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1337,6 +1343,9 @@ fn document_lint() {
             expected_errors.extend(["400", "404", "409", "429"]);
         } else if *id == "post_internal_org" {
             expected_errors.extend(["400", "401", "403", "409", "422", "429"]);
+        } else if *id == "post_internal_device_code" {
+            // The handler never answers 429; the 503 is left out, as the lint compares 4xx only.
+            expected_errors.extend(["400", "401", "403", "409"]);
         } else if *id == "list_internal_usage"
             || *id == "list_internal_deletions"
             || *id == "post_internal_user_delete"

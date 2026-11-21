@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::api::common::ProblemCode;
 use crate::api::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
-    DevicePurpose, DeviceRequest, DeviceTokenRequest,
+    DevicePurpose, DeviceRequest, DeviceTokenRequest, InternalDeviceCode,
 };
 use crate::auth::device::{
     DeviceError, Grant, GrantProject, POLL_INTERVAL_S, Pending, Poll, Purpose,
@@ -73,6 +73,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             access: Access::User { session_only: true },
             documented: true,
             handler: post(deny),
+        },
+        RouteDef {
+            method: Method::POST,
+            path: "/api/internal/v1/device/codes",
+            access: Access::ControlPlane { scope: "device" },
+            documented: true,
+            handler: post(register_code),
         },
     ]
 }
@@ -359,6 +366,39 @@ async fn deny(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /api/internal/v1/device/codes`: the control plane registers a code it issued (D-AO-14),
+/// with a control-plane token of scope `device`. An identical retry answers 204 again.
+async fn register_code(
+    State(state): State<AppState>,
+    error::Json(body): error::Json<InternalDeviceCode>,
+) -> Result<StatusCode, ApiError> {
+    let now = state.clock.now_ns();
+    let host = body.host.as_deref().and_then(sanitise_host);
+    let purpose = purpose_in(body.purpose);
+    state
+        .device
+        .register(
+            &body.device_code_sha256,
+            &body.user_code,
+            purpose,
+            host,
+            body.expires_at,
+            now,
+        )
+        .map_err(|error| match error {
+            DeviceError::Invalid(field) => field_error(field, "invalid"),
+            DeviceError::Taken => ApiError::Conflict {
+                detail: "device code already registered",
+            },
+            DeviceError::Full => ApiError::Unavailable {
+                detail: "too many pending device codes",
+            },
+            other => internal(other),
+        })?;
+    tracing::info!(target: "audit", purpose = ?purpose, "device code registered by the control plane");
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Thirty lookups, approvals and denials a minute per user (D-AO-3).
 fn check_lookup(state: &AppState, user_id: Uuid, now: i64) -> Result<(), ApiError> {
     state
@@ -421,6 +461,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     use axum::http::{Method, header};
+    use chrono::{DateTime, SecondsFormat, Utc};
     use serde_json::{Value, json};
 
     use super::EXPIRES_IN_S;
@@ -428,6 +469,7 @@ mod tests {
     use crate::api::device::{DeviceCodeResponse, DeviceGrant, DevicePurpose, DeviceRequest};
     use crate::api::keys::PersonalToken;
     use crate::auth::roles::OrgRole;
+    use crate::auth::secret::hash_token;
     use crate::meta::projects::insert_project;
     use crate::test_support::{TestApp, TestResponse, capture_logs, second_org};
 
@@ -847,5 +889,148 @@ mod tests {
         assert!(!logs.contains(&grant.token));
         assert!(!logs.contains(key));
         assert!(!logs.contains(&code.device_code));
+    }
+
+    const SECOND_NS: i64 = 1_000_000_000;
+    const INTERNAL_PATH: &str = "/api/internal/v1/device/codes";
+
+    /// A registration body with a `login` purpose.
+    fn registration(device_code: &str, user_code: &str, host: &str, expires_at: i64) -> Value {
+        json!({
+            "device_code_sha256": hash_token(device_code),
+            "user_code": user_code,
+            "purpose": "login",
+            "host": host,
+            "expires_at": rfc3339(expires_at),
+        })
+    }
+
+    fn rfc3339(ns: i64) -> String {
+        let nanos = u32::try_from(ns.rem_euclid(1_000_000_000)).unwrap_or(0);
+        DateTime::<Utc>::from_timestamp(ns.div_euclid(1_000_000_000), nanos)
+            .expect("the instant is in range")
+            .to_rfc3339_opts(SecondsFormat::Nanos, true)
+    }
+
+    /// `POST /api/internal/v1/device/codes` with a control-plane token of `scope`.
+    async fn register(app: &TestApp, scope: &str, body: &Value) -> TestResponse {
+        app.request(Method::POST, INTERNAL_PATH)
+            .control_plane(scope)
+            .json(body)
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn a_registered_code_shows_on_the_approval_page() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let body = registration(
+            "device-code-a",
+            "BCDF-GHJK",
+            "dev-laptop",
+            now + 600 * SECOND_NS,
+        );
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+
+        let shown = lookup(&app, &seeded.cookie, "BCDF-GHJK").await;
+        assert_eq!(shown.status, 200);
+        let shown: DeviceRequest = shown.json();
+        assert_eq!(shown.purpose, DevicePurpose::Login);
+        assert_eq!(shown.host.as_deref(), Some("dev-laptop"));
+        assert_eq!(shown.created_at, now);
+    }
+
+    #[tokio::test]
+    async fn only_a_device_token_may_register_and_a_session_may_not() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let body = registration(
+            "device-code-b",
+            "BCDF-GHJK",
+            "dev-laptop",
+            now + 600 * SECOND_NS,
+        );
+
+        assert_eq!(register(&app, "orgs", &body).await.status, 403);
+        let session = app
+            .request(Method::POST, INTERNAL_PATH)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&body)
+            .send()
+            .await;
+        assert_eq!(session.status, 403);
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+    }
+
+    #[tokio::test]
+    async fn a_clash_gets_409_and_an_identical_retry_gets_204() {
+        let app = TestApp::new().await;
+        let now = app.state.clock.now_ns();
+        let expires = now + 600 * SECOND_NS;
+        let body = registration("device-code-c", "BCDF-GHJK", "dev-laptop", expires);
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+
+        let other_host = registration("device-code-c", "BCDF-GHJK", "other-host", expires);
+        assert_eq!(register(&app, "device", &other_host).await.status, 409);
+
+        let other_hash = registration("device-code-d", "BCDF-GHJK", "dev-laptop", expires);
+        assert_eq!(register(&app, "device", &other_hash).await.status, 409);
+    }
+
+    #[tokio::test]
+    async fn bad_input_gets_400_and_a_long_host_is_sanitised() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let expires = now + 600 * SECOND_NS;
+
+        let mut bad_hash = registration("device-code-e", "BCDF-GHJK", "dev-laptop", expires);
+        bad_hash["device_code_sha256"] = json!("xyz");
+        let refused = register(&app, "device", &bad_hash).await;
+        assert_eq!(refused.status, 400);
+        let problem: Value = refused.json();
+        assert_eq!(problem["errors"][0]["field"], "device_code_sha256");
+
+        let bad_user = registration("device-code-e", "BCDA-GHJK", "dev-laptop", expires);
+        assert_eq!(register(&app, "device", &bad_user).await.status, 400);
+
+        let mut extra = registration("device-code-e", "BCDF-GHJK", "dev-laptop", expires);
+        extra["extra"] = json!(1);
+        assert_eq!(register(&app, "device", &extra).await.status, 400);
+
+        let long = "h".repeat(100);
+        let body = registration("device-code-f", "BCDF-GHJK", &long, expires);
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+        let shown: DeviceRequest = lookup(&app, &seeded.cookie, "BCDF-GHJK").await.json();
+        let kept = "h".repeat(64);
+        assert_eq!(shown.host.as_deref(), Some(kept.as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_registered_code_is_approved_and_granted_like_an_issued_one() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let now = app.state.clock.now_ns();
+        let device_code = "device-code-end-to-end";
+        let body = registration(
+            device_code,
+            "BCDF-GHJK",
+            "dev-laptop",
+            now + 600 * SECOND_NS,
+        );
+        assert_eq!(register(&app, "device", &body).await.status, 204);
+
+        let approved = approve(&app, &seeded.cookie, "BCDF-GHJK", json!({})).await;
+        assert_eq!(approved.status, 204);
+
+        let polled = poll(&app, device_code).await;
+        assert_eq!(polled.status, 200);
+        let grant: DeviceGrant = polled.json();
+        assert_eq!(grant.server, app.state.config.public_url.origin());
+        assert!(grant.token.starts_with("pat-cetra-"));
     }
 }

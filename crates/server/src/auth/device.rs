@@ -21,6 +21,9 @@ pub(crate) const SLOW_DOWN_STEP_S: u64 = 5;
 pub(crate) const APPROVING_TTL_NS: i64 = 60 * 1_000_000_000;
 /// At most this many codes at once (pending, being approved or approved and not collected).
 pub(crate) const MAX_CODES: usize = 10_000;
+/// How far past `CODE_TTL_NS` a registered code may expire: the clock skew between the control
+/// plane that issued it and this cell.
+const REGISTER_SKEW_NS: i64 = 30 * 1_000_000_000;
 /// The user-code letters: no vowels, so a code never spells a word (RFC 8628 § 6.1).
 pub(crate) const USER_CODE_ALPHABET: &[u8; 20] = b"BCDFGHJKLMNPQRSTVWXZ";
 
@@ -104,6 +107,12 @@ pub(crate) enum DeviceError {
     /// The code is unknown, expired, or not in the state the call needs.
     #[error("device code not found")]
     NotFound,
+    /// A registration's field is malformed; the name is the field's.
+    #[error("{0}")]
+    Invalid(&'static str),
+    /// The registration's device code or user code is already registered, with other details.
+    #[error("device code already registered")]
+    Taken,
     #[error(transparent)]
     Auth(#[from] AuthError),
 }
@@ -164,6 +173,64 @@ impl DeviceStore {
             device_code: token.plaintext,
             user_code: format!("{}-{}", &letters[..4], &letters[4..]),
         })
+    }
+
+    /// A code the control plane issued (D-AO-14): stored as if this cell had issued it.
+    /// `device_code_sha256` is the lowercase hex SHA-256 of the device code, 64 characters.
+    /// An identical retry of a pending registration is `Ok`; any other clash is `Taken`.
+    pub(crate) fn register(
+        &self,
+        device_code_sha256: &str,
+        user_code: &str,
+        purpose: Purpose,
+        host: Option<String>,
+        expires_at: i64,
+        now: i64,
+    ) -> Result<(), DeviceError> {
+        if !is_sha256_hex(device_code_sha256) {
+            return Err(DeviceError::Invalid("device_code_sha256"));
+        }
+        let letters = normalize_user_code(user_code).ok_or(DeviceError::Invalid("user_code"))?;
+        let latest = now
+            .saturating_add(CODE_TTL_NS)
+            .saturating_add(REGISTER_SKEW_NS);
+        if now >= expires_at || expires_at > latest {
+            return Err(DeviceError::Invalid("expires_at"));
+        }
+        let mut inner = lock(&self.inner);
+        inner.sweep(now);
+        if let Some(existing) = inner.by_device.get(device_code_sha256) {
+            let identical = matches!(existing.state, State::Pending)
+                && existing.user_code == letters
+                && existing.purpose == purpose
+                && existing.host == host
+                && existing.expires_at == expires_at;
+            return if identical {
+                Ok(())
+            } else {
+                Err(DeviceError::Taken)
+            };
+        }
+        if inner.by_user.contains_key(&letters) {
+            return Err(DeviceError::Taken);
+        }
+        // Only a new entry counts against the cap, so an identical retry at the cap is still `Ok`.
+        if inner.by_device.len() >= MAX_CODES {
+            return Err(DeviceError::Full);
+        }
+        let entry = Entry {
+            user_code: letters.clone(),
+            purpose,
+            host,
+            created_at: now,
+            expires_at,
+            interval_s: POLL_INTERVAL_S,
+            last_poll: None,
+            state: State::Pending,
+        };
+        inner.by_user.insert(letters, device_code_sha256.to_owned());
+        inner.by_device.insert(device_code_sha256.to_owned(), entry);
+        Ok(())
     }
 
     /// A pending, unexpired code; `None` otherwise.
@@ -291,6 +358,14 @@ pub(crate) fn normalize_user_code(raw: &str) -> Option<String> {
     let upper = letters.to_ascii_uppercase();
     let all_letters = upper.bytes().all(|byte| USER_CODE_ALPHABET.contains(&byte));
     all_letters.then_some(upper)
+}
+
+/// 64 lowercase hexadecimal characters: the SHA-256 that `hash_token` writes.
+fn is_sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// One code's state and its bookkeeping.
@@ -746,5 +821,258 @@ mod tests {
         assert!(!shown.contains("pat-cetra-DEBUGSECRET"), "{shown}");
         assert!(!shown.contains("sk-cetra-DEBUGKEY"), "{shown}");
         assert!(shown.contains("<redacted>"), "{shown}");
+    }
+
+    const SKEW_NS: i64 = 30 * 1_000_000_000;
+
+    /// The hash a control plane registers for `device_code`.
+    fn registered(device_code: &str) -> String {
+        hash_token(device_code)
+    }
+
+    #[test]
+    fn a_registered_code_is_pending_and_a_lower_case_user_code_is_normalized() {
+        let store = DeviceStore::new();
+        store
+            .register(
+                &registered("device-code-one"),
+                "bcdf-ghjk",
+                Purpose::Login,
+                Some("laptop".to_owned()),
+                at(600),
+                at(0),
+            )
+            .expect("registered");
+        let pending = store.pending("BCDF-GHJK", at(1)).expect("pending");
+        assert_eq!(pending.purpose, Purpose::Login);
+        assert_eq!(pending.host.as_deref(), Some("laptop"));
+        assert_eq!(pending.created_at, at(0));
+        assert!(store.pending("bcdf-ghjk", at(1)).is_some());
+    }
+
+    #[test]
+    fn the_same_registration_twice_is_ok_and_counts_once() {
+        let store = DeviceStore::new();
+        let hash = registered("device-code-two");
+        store
+            .register(
+                &hash,
+                "BCDF-GHJK",
+                Purpose::Init,
+                Some("laptop".to_owned()),
+                at(600),
+                at(0),
+            )
+            .expect("first");
+        store
+            .register(
+                &hash,
+                "BCDF-GHJK",
+                Purpose::Init,
+                Some("laptop".to_owned()),
+                at(600),
+                at(1),
+            )
+            .expect("the retry is identical");
+        assert_eq!(entries(&store), 1);
+    }
+
+    #[test]
+    fn a_retry_that_differs_in_purpose_host_or_expiry_is_taken() {
+        let store = DeviceStore::new();
+        let hash = registered("device-code-three");
+        store
+            .register(&hash, "BCDF-GHJK", Purpose::Login, None, at(600), at(0))
+            .expect("first");
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJK", Purpose::Init, None, at(600), at(1)),
+            Err(DeviceError::Taken)
+        ));
+        assert!(matches!(
+            store.register(
+                &hash,
+                "BCDF-GHJK",
+                Purpose::Login,
+                Some("other".to_owned()),
+                at(600),
+                at(1)
+            ),
+            Err(DeviceError::Taken)
+        ));
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJK", Purpose::Login, None, at(601), at(1)),
+            Err(DeviceError::Taken)
+        ));
+    }
+
+    #[test]
+    fn the_same_hash_with_another_user_code_is_taken() {
+        let store = DeviceStore::new();
+        let hash = registered("device-code-four");
+        store
+            .register(&hash, "BCDF-GHJK", Purpose::Login, None, at(600), at(0))
+            .expect("first");
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJL", Purpose::Login, None, at(600), at(0)),
+            Err(DeviceError::Taken)
+        ));
+    }
+
+    #[test]
+    fn the_same_user_code_with_another_hash_is_taken() {
+        let store = DeviceStore::new();
+        store
+            .register(
+                &registered("device-code-five"),
+                "BCDF-GHJK",
+                Purpose::Login,
+                None,
+                at(600),
+                at(0),
+            )
+            .expect("first");
+        assert!(matches!(
+            store.register(
+                &registered("device-code-six"),
+                "bcdf-ghjk",
+                Purpose::Login,
+                None,
+                at(600),
+                at(0)
+            ),
+            Err(DeviceError::Taken)
+        ));
+    }
+
+    #[test]
+    fn an_expired_unswept_code_does_not_block_a_registration_eleven_minutes_later() {
+        let store = DeviceStore::new();
+        store
+            .register(
+                &registered("device-code-seven"),
+                "BCDF-GHJK",
+                Purpose::Login,
+                None,
+                at(600),
+                at(0),
+            )
+            .expect("first");
+        store
+            .register(
+                &registered("device-code-eight"),
+                "BCDF-GHJK",
+                Purpose::Login,
+                None,
+                at(1260),
+                at(660),
+            )
+            .expect("the expired code is swept first");
+        assert_eq!(entries(&store), 1);
+    }
+
+    #[test]
+    fn expires_at_must_be_after_now_and_at_most_the_ttl_plus_the_skew() {
+        let store = DeviceStore::new();
+        let hash = registered("device-code-nine");
+        let now = at(0);
+        let latest = now + CODE_TTL_NS + SKEW_NS;
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJK", Purpose::Login, None, now, now),
+            Err(DeviceError::Invalid("expires_at"))
+        ));
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJK", Purpose::Login, None, latest + 1, now),
+            Err(DeviceError::Invalid("expires_at"))
+        ));
+        assert!(matches!(
+            store.register(&hash, "BCDF-GHJK", Purpose::Login, None, at(660), now),
+            Err(DeviceError::Invalid("expires_at"))
+        ));
+        store
+            .register(&hash, "BCDF-GHJK", Purpose::Login, None, latest, now)
+            .expect("the latest allowed expiry");
+        assert_eq!(entries(&store), 1);
+    }
+
+    #[test]
+    fn a_malformed_hash_or_user_code_is_invalid_and_stores_nothing() {
+        let store = DeviceStore::new();
+        let now = at(0);
+        let expires = at(600);
+        let good = registered("device-code-ten");
+        for hash in [
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            String::new(),
+        ] {
+            assert!(
+                matches!(
+                    store.register(&hash, "BCDF-GHJK", Purpose::Login, None, expires, now),
+                    Err(DeviceError::Invalid("device_code_sha256"))
+                ),
+                "{hash}"
+            );
+        }
+        assert!(matches!(
+            store.register(&good, "BCDA-GHJK", Purpose::Login, None, expires, now),
+            Err(DeviceError::Invalid("user_code"))
+        ));
+        assert!(matches!(
+            store.register(&good, "BCDF-GHJ", Purpose::Login, None, expires, now),
+            Err(DeviceError::Invalid("user_code"))
+        ));
+        assert_eq!(entries(&store), 0);
+    }
+
+    #[test]
+    fn a_registered_code_is_approved_and_granted_to_its_device_code() {
+        let store = DeviceStore::new();
+        let device_code = "device-code-eleven";
+        store
+            .register(
+                &registered(device_code),
+                "BCDF-GHJK",
+                Purpose::Init,
+                Some("laptop".to_owned()),
+                at(600),
+                at(0),
+            )
+            .expect("registered");
+        let (_, ticket) = store.claim("BCDF-GHJK", at(1)).expect("claimed");
+        store
+            .complete("BCDF-GHJK", ticket, grant("pat-cetra-registered"))
+            .expect("completed");
+        let Poll::Granted(collected) = store.poll(device_code, at(2)) else {
+            panic!("the registered code is granted");
+        };
+        assert_eq!(collected.token, "pat-cetra-registered");
+        assert!(matches!(store.poll(device_code, at(3)), Poll::Expired));
+    }
+
+    #[test]
+    fn a_full_store_refuses_a_new_registration_but_not_an_identical_retry() {
+        let store = DeviceStore::new();
+        let hash = registered("device-code-twelve");
+        store
+            .register(&hash, "BCDF-GHJK", Purpose::Login, None, at(600), at(0))
+            .expect("registered");
+        for _ in 1..MAX_CODES {
+            issue_at(&store, at(0));
+        }
+        assert!(matches!(
+            store.register(
+                &registered("device-code-thirteen"),
+                "BCDF-GHJL",
+                Purpose::Login,
+                None,
+                at(600),
+                at(0)
+            ),
+            Err(DeviceError::Full)
+        ));
+        store
+            .register(&hash, "BCDF-GHJK", Purpose::Login, None, at(600), at(0))
+            .expect("the identical retry is ok at the cap");
     }
 }
