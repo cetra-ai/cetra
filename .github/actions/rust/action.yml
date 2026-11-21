@@ -45,7 +45,7 @@ runs:
       with:
         version: "2.0.0"
         s3-bucket: kache
-        s3-endpoint: https://s3.chapu.is
+        s3-endpoint: https://s3.chapu.is:8443
         s3-region: us-east-1
         s3-prefix: kache-v2
         s3-access-key-id: ${{ inputs.s3-access-key-id }}
