@@ -801,7 +801,10 @@ mod tests {
             assert_eq!(span.span_id, span_id(trace, *index));
             assert_eq!(span.service_name.as_deref(), Some(environment::EVAL));
             assert_eq!(span.scope_name.as_deref(), Some("cetra-eval"));
-            assert_eq!(span.scope_version.as_deref(), Some("0.0.0"));
+            assert_eq!(
+                span.scope_version.as_deref(),
+                Some(env!("CARGO_PKG_VERSION"))
+            );
         }
         let ids: Vec<_> = normalized.spans.iter().map(|span| span.span_id).collect();
         let mut unique = ids.clone();
@@ -823,11 +826,18 @@ mod tests {
             !text.contains("SECRET-PAYLOAD"),
             "span json contains a planted payload"
         );
+        // The scope version is the crate version, which every release changes.
+        let mut spans = normalized.spans.clone();
+        for span in &mut spans {
+            if span.scope_version.as_deref() == Some(env!("CARGO_PKG_VERSION")) {
+                span.scope_version = Some("[version]".to_owned());
+            }
+        }
         insta::with_settings!({
             snapshot_path => "snapshots",
             prepend_module_to_snapshot => false,
         }, {
-            insta::assert_json_snapshot!(name, &normalized.spans);
+            insta::assert_json_snapshot!(name, &spans);
         });
     }
 
