@@ -19,7 +19,7 @@ Commands:
   admin     Admin operations on this data directory (users, encryption key, deletions)
   version   Print the cetra version
   health    Exit 0 if the server answers `GET <url>/readyz` with 200 (the container healthcheck)
-  login     Save a personal access token for a server
+  login     Sign in with a code you approve in the browser, and save a personal access token for a server
   logout    Revoke the saved personal access token
   query     Run a SQL query on a project
   traces    List and show traces
@@ -353,7 +353,7 @@ Options:
 ### `cetra login`
 
 ```text
-Save a personal access token for a server.
+Sign in with a code you approve in the browser, and save a personal access token for a server.
 
 The token expires after 90 days. Run `cetra login` again when it does.
 
@@ -364,7 +364,7 @@ Options:
           Server URL, for example `http://127.0.0.1:8080`
 
       --no-browser
-          Print the login URL and do not open a browser
+          Print the sign-in URL and code, and do not open a browser
 
   -h, --help
           Print help (see a summary with '-h')

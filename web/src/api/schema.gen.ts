@@ -61,6 +61,106 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/auth/device/code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a device sign-in
+         * @description Issues a device code for `cetra login` or `cetra-cli init` (RFC 8628, D-AO-3). The CLI shows `user_code`, opens `verification_uri_complete` and polls `POST /api/auth/device/token` every `interval` seconds. The codes expire after `expires_in` seconds. No cookie and no `Origin` are needed. Ten codes a minute per client network (an IPv6 address counts by its /64); over that is 429.
+         */
+        post: operations["post_device_code"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/device/token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll for a device grant
+         * @description Answers the grant once the user approved the code, and only once; a second poll answers `expired_token`. Until then it answers 400 with an RFC 8628 code in `code`: `authorization_pending` (poll again after `interval`), `slow_down` (poll less often; the interval grew by 5 seconds), `access_denied` (the user denied the code) or `expired_token` (the code expired, was already collected, or is unknown). The answer carries `Cache-Control: no-store`.
+         */
+        post: operations["post_device_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/device/{user_code}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read a pending device code
+         * @description What the approval page shows for a pending code: its purpose and the host the CLI reported. Session only. 404 for an unknown, expired or decided code. Thirty lookups, approvals and denials a minute per user.
+         */
+        get: operations["get_device_request"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/device/{user_code}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a device code
+         * @description Mints the grant for the signed-in user: a `read, write` personal access token for `login`; for `init`, a `read` token and an `ingest` key for `project_id`, a project on which the user may manage settings (an admin there). A project the user cannot see is 404; one the user can see with a lower role is 403. The CLI receives the secrets on its next poll. Session only: a session approval needs the `Origin` header. A failed approval leaves the code pending.
+         */
+        post: operations["post_device_approve"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/device/{user_code}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deny a device code
+         * @description Denies a pending code. The CLI's next poll answers `access_denied`. Session only. 404 for a code that is not pending.
+         */
+        post: operations["post_device_deny"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/auth/email/verify": {
         parameters: {
             query?: never;
@@ -5671,6 +5771,89 @@ export interface components {
          */
         DeliveryStatus: "pending" | "sent" | "failed";
         /**
+         * @description `POST /api/auth/device/{user_code}/approve` body. `project_id` is required for `init` and
+         *     refused for `login`.
+         */
+        DeviceApproveRequest: {
+            /** @description The project the `init` grant is for; the caller needs the admin role on it. */
+            project_id?: components["schemas"]["ProjectId"];
+        };
+        /** @description `POST /api/auth/device/code` body. */
+        DeviceCodeRequest: {
+            /** @description The machine's name as the CLI reports it. Shown on the approval page. */
+            host?: string;
+            /** @description What the code is for. */
+            purpose: components["schemas"]["DevicePurpose"];
+        };
+        /** @description `POST /api/auth/device/code` answer. `Debug` prints `device_code` as `<redacted>`. */
+        DeviceCodeResponse: {
+            /** @description The secret the CLI polls with. Shown only in this answer. */
+            device_code: string;
+            /**
+             * Format: int64
+             * @description Seconds until the code expires.
+             */
+            expires_in: number;
+            /**
+             * Format: int64
+             * @description Seconds between polls.
+             */
+            interval: number;
+            /** @description The code the user types, `XXXX-XXXX`. */
+            user_code: string;
+            /** @description The approval page, without the code. */
+            verification_uri: string;
+            /** @description The approval page with the code filled in. */
+            verification_uri_complete: string;
+        };
+        /**
+         * @description `POST /api/auth/device/token` answer once the user approved. The answer is the only place
+         *     the secrets appear. `Debug` prints `token` and `ingest_key` as `<redacted>`.
+         */
+        DeviceGrant: {
+            /** @description A secret key with the `ingest` scope only, `sk-cetra-…`. Present for `init`. */
+            ingest_key?: string;
+            /** @description The project of an `init` grant. Absent for `login`. */
+            project?: components["schemas"]["DeviceGrantProject"];
+            /** @description The server's public URL origin: what the CLI and the SDKs talk to. */
+            server: string;
+            /** @description A personal access token, `pat-cetra-…`, valid for 90 days. */
+            token: string;
+        };
+        /** @description The project an `init` grant is for. */
+        DeviceGrantProject: {
+            /** @description Project id. */
+            id: components["schemas"]["ProjectId"];
+            /** @description Project name. */
+            name: string;
+            /** @description Slug of the project's org. */
+            org_slug: string;
+            /** @description Project slug. */
+            slug: string;
+        };
+        /**
+         * @description Who asks for a code: `cetra login`, or `cetra-cli init` (or `cetra-cli login`).
+         * @enum {string}
+         */
+        DevicePurpose: "login" | "init";
+        /** @description `GET /api/auth/device/{user_code}` answer: what the approval page shows. */
+        DeviceRequest: {
+            /**
+             * Format: date-time
+             * @description When the code was issued. JSON is RFC 3339.
+             */
+            created_at: string;
+            /** @description The machine's name the CLI reported, when it reported one. */
+            host?: string;
+            /** @description What the code is for. */
+            purpose: components["schemas"]["DevicePurpose"];
+        };
+        /** @description `POST /api/auth/device/token` body. `Debug` prints `device_code` as `<redacted>`. */
+        DeviceTokenRequest: {
+            /** @description The `device_code` of `POST /api/auth/device/code`. */
+            device_code: string;
+        };
+        /**
          * @description Whether the org has proved the domain.
          * @enum {string}
          */
@@ -8512,7 +8695,7 @@ export interface components {
          *     Spec 09 § Conventions. Later endpoints add codes.
          * @enum {string}
          */
-        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "too_many_items" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "quota_exceeded" | "rate_limited" | "internal";
+        ProblemCode: "bad_request" | "invalid_filter" | "query_failed" | "query_timeout" | "query_too_large" | "too_many_traces" | "too_many_items" | "busy" | "restore_mode" | "unauthorized" | "forbidden" | "sso_required" | "email_not_verified" | "plan_limit" | "plan_required" | "owner_not_allowed" | "not_found" | "method_not_allowed" | "payload_too_large" | "unsupported_media_type" | "range_not_satisfiable" | "conflict" | "authorization_pending" | "slow_down" | "access_denied" | "expired_token" | "quota_exceeded" | "rate_limited" | "internal";
         /**
          * @description A project the caller can see.
          *
@@ -11194,6 +11377,276 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["AuthConfig"];
+                };
+            };
+        };
+    };
+    post_device_code: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceCodeRequest"];
+            };
+        };
+        responses: {
+            /** @description The codes, the approval page's URLs and the polling interval. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceCodeResponse"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_device_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceTokenRequest"];
+            };
+        };
+        responses: {
+            /** @description The grant: the server origin, the token and, for `init`, the project and the ingest key. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceGrant"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_device_request: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The code shown by the CLI, `XXXX-XXXX`. */
+                user_code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pending code's purpose and host. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeviceRequest"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_device_approve: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The code shown by the CLI, `XXXX-XXXX`. */
+                user_code: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeviceApproveRequest"];
+            };
+        };
+        responses: {
+            /** @description The code is approved. The CLI receives the grant on its next poll. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_device_deny: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The code shown by the CLI, `XXXX-XXXX`. */
+                user_code: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The code is denied. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
                 };
             };
         };

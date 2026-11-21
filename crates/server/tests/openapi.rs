@@ -1323,7 +1323,7 @@ fn document_lint() {
         } else if *id == "post_sso_discover" {
             expected_errors.extend(["400", "429"]);
         } else if *id == "post_device_code" {
-            expected_errors.extend(["400", "429"]);
+            expected_errors.extend(["400", "429", "503"]);
         } else if *id == "post_device_token" {
             expected_errors.extend(["400"]);
         } else if *id == "post_device_approve" {

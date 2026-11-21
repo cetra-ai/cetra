@@ -137,6 +137,352 @@
         "security": []
       }
     },
+    "/api/auth/device/code": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start a device sign-in",
+        "description": "Issues a device code for `cetra login` or `cetra-cli init` (RFC 8628, D-AO-3). The CLI shows `user_code`, opens `verification_uri_complete` and polls `POST /api/auth/device/token` every `interval` seconds. The codes expire after `expires_in` seconds. No cookie and no `Origin` are needed. Ten codes a minute per client network (an IPv6 address counts by its /64); over that is 429.",
+        "operationId": "post_device_code",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceCodeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The codes, the approval page's URLs and the polling interval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceCodeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The server is busy or a dependency is unavailable. Retry later.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/device/token": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Poll for a device grant",
+        "description": "Answers the grant once the user approved the code, and only once; a second poll answers `expired_token`. Until then it answers 400 with an RFC 8628 code in `code`: `authorization_pending` (poll again after `interval`), `slow_down` (poll less often; the interval grew by 5 seconds), `access_denied` (the user denied the code) or `expired_token` (the code expired, was already collected, or is unknown). The answer carries `Cache-Control: no-store`.",
+        "operationId": "post_device_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The grant: the server origin, the token and, for `init`, the project and the ingest key.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceGrant"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/auth/device/{user_code}": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Read a pending device code",
+        "description": "What the approval page shows for a pending code: its purpose and the host the CLI reported. Session only. 404 for an unknown, expired or decided code. Thirty lookups, approvals and denials a minute per user.",
+        "operationId": "get_device_request",
+        "parameters": [
+          {
+            "name": "user_code",
+            "in": "path",
+            "description": "The code shown by the CLI, `XXXX-XXXX`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pending code's purpose and host.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeviceRequest"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/auth/device/{user_code}/approve": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Approve a device code",
+        "description": "Mints the grant for the signed-in user: a `read, write` personal access token for `login`; for `init`, a `read` token and an `ingest` key for `project_id`, a project on which the user may manage settings (an admin there). A project the user cannot see is 404; one the user can see with a lower role is 403. The CLI receives the secrets on its next poll. Session only: a session approval needs the `Origin` header. A failed approval leaves the code pending.",
+        "operationId": "post_device_approve",
+        "parameters": [
+          {
+            "name": "user_code",
+            "in": "path",
+            "description": "The code shown by the CLI, `XXXX-XXXX`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceApproveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "The code is approved. The CLI receives the grant on its next poll."
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/auth/device/{user_code}/deny": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Deny a device code",
+        "description": "Denies a pending code. The CLI's next poll answers `access_denied`. Session only. 404 for a code that is not pending.",
+        "operationId": "post_device_deny",
+        "parameters": [
+          {
+            "name": "user_code",
+            "in": "path",
+            "description": "The code shown by the CLI, `XXXX-XXXX`.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The code is denied."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/auth/email/verify": {
       "post": {
         "tags": [
@@ -29529,6 +29875,176 @@
           "failed"
         ]
       },
+      "DeviceApproveRequest": {
+        "type": "object",
+        "description": "`POST /api/auth/device/{user_code}/approve` body. `project_id` is required for `init` and\nrefused for `login`.",
+        "properties": {
+          "project_id": {
+            "$ref": "#/components/schemas/ProjectId",
+            "description": "The project the `init` grant is for; the caller needs the admin role on it."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeviceCodeRequest": {
+        "type": "object",
+        "description": "`POST /api/auth/device/code` body.",
+        "required": [
+          "purpose"
+        ],
+        "properties": {
+          "host": {
+            "type": "string",
+            "description": "The machine's name as the CLI reports it. Shown on the approval page."
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/DevicePurpose",
+            "description": "What the code is for."
+          }
+        },
+        "additionalProperties": false
+      },
+      "DeviceCodeResponse": {
+        "type": "object",
+        "description": "`POST /api/auth/device/code` answer. `Debug` prints `device_code` as `<redacted>`.",
+        "required": [
+          "device_code",
+          "user_code",
+          "verification_uri",
+          "verification_uri_complete",
+          "expires_in",
+          "interval"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "description": "The secret the CLI polls with. Shown only in this answer."
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds until the code expires.",
+            "minimum": 0
+          },
+          "interval": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds between polls.",
+            "minimum": 0
+          },
+          "user_code": {
+            "type": "string",
+            "description": "The code the user types, `XXXX-XXXX`."
+          },
+          "verification_uri": {
+            "type": "string",
+            "description": "The approval page, without the code."
+          },
+          "verification_uri_complete": {
+            "type": "string",
+            "description": "The approval page with the code filled in."
+          }
+        }
+      },
+      "DeviceGrant": {
+        "type": "object",
+        "description": "`POST /api/auth/device/token` answer once the user approved. The answer is the only place\nthe secrets appear. `Debug` prints `token` and `ingest_key` as `<redacted>`.",
+        "required": [
+          "server",
+          "token"
+        ],
+        "properties": {
+          "ingest_key": {
+            "type": "string",
+            "description": "A secret key with the `ingest` scope only, `sk-cetra-…`. Present for `init`."
+          },
+          "project": {
+            "$ref": "#/components/schemas/DeviceGrantProject",
+            "description": "The project of an `init` grant. Absent for `login`."
+          },
+          "server": {
+            "type": "string",
+            "description": "The server's public URL origin: what the CLI and the SDKs talk to."
+          },
+          "token": {
+            "type": "string",
+            "description": "A personal access token, `pat-cetra-…`, valid for 90 days."
+          }
+        }
+      },
+      "DeviceGrantProject": {
+        "type": "object",
+        "description": "The project an `init` grant is for.",
+        "required": [
+          "id",
+          "org_slug",
+          "slug",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ProjectId",
+            "description": "Project id."
+          },
+          "name": {
+            "type": "string",
+            "description": "Project name."
+          },
+          "org_slug": {
+            "type": "string",
+            "description": "Slug of the project's org."
+          },
+          "slug": {
+            "type": "string",
+            "description": "Project slug."
+          }
+        }
+      },
+      "DevicePurpose": {
+        "type": "string",
+        "description": "Who asks for a code: `cetra login`, or `cetra-cli init` (or `cetra-cli login`).",
+        "enum": [
+          "login",
+          "init"
+        ]
+      },
+      "DeviceRequest": {
+        "type": "object",
+        "description": "`GET /api/auth/device/{user_code}` answer: what the approval page shows.",
+        "required": [
+          "purpose",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the code was issued. JSON is RFC 3339."
+          },
+          "host": {
+            "type": "string",
+            "description": "The machine's name the CLI reported, when it reported one."
+          },
+          "purpose": {
+            "$ref": "#/components/schemas/DevicePurpose",
+            "description": "What the code is for."
+          }
+        }
+      },
+      "DeviceTokenRequest": {
+        "type": "object",
+        "description": "`POST /api/auth/device/token` body. `Debug` prints `device_code` as `<redacted>`.",
+        "required": [
+          "device_code"
+        ],
+        "properties": {
+          "device_code": {
+            "type": "string",
+            "description": "The `device_code` of `POST /api/auth/device/code`."
+          }
+        },
+        "additionalProperties": false
+      },
       "DomainStatus": {
         "type": "string",
         "description": "Whether the org has proved the domain.",
@@ -34751,6 +35267,10 @@
           "unsupported_media_type",
           "range_not_satisfiable",
           "conflict",
+          "authorization_pending",
+          "slow_down",
+          "access_denied",
+          "expired_token",
           "quota_exceeded",
           "rate_limited",
           "internal"
