@@ -154,6 +154,48 @@ jobs:
         run: node node_modules/vitest/vitest.mjs run
       - run: just assert-clean
 
+  cli-js:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - run: just check-cli-js
+      - run: just assert-clean
+
+  cli-js-min-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - run: just js-install
+      - run: pnpm --dir node-cli run build
+      - run: pnpm --dir node-cli pack --pack-destination "$RUNNER_TEMP"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.12.0
+      - name: Load the packed CLI on Node 22.12
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          tarballs=("$RUNNER_TEMP"/cetra-ai-cli-*.tgz)
+          if (( ${#tarballs[@]} != 1 )); then
+            printf 'expected one tarball, found %s\n' "${#tarballs[@]}"
+            exit 1
+          fi
+          just cli-smoke "${tarballs[0]}"
+      # pnpm 11 requires Node >= 22.13. vitest 5.1.0 allows Node ^22.12.0.
+      - name: Test the CLI on Node 22.12
+        working-directory: node-cli
+        run: node node_modules/vitest/vitest.mjs run
+      - run: just assert-clean
+
   python-sdk:
     name: python-sdk (${{ matrix.python }})
     runs-on: ubuntu-latest
@@ -252,6 +294,8 @@ jobs:
         docs,
         ts-sdk,
         ts-sdk-min-node,
+        cli-js,
+        cli-js-min-node,
         python-sdk,
         workflows,
         e2e,

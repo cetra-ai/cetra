@@ -48,6 +48,10 @@ Errors use the problem-details format (RFC 7807) with the content type `applicat
 | `bad_request` | 400 | The request is malformed or a value is out of range. |
 | `invalid_filter` | 400 | The filter or SQL text does not parse. |
 | `query_failed` | 400 | The query failed while it ran. |
+| `authorization_pending` | 400 | Device sign-in: the code is not approved or denied yet. Poll again after the interval. |
+| `slow_down` | 400 | Device sign-in: polled too fast. The interval grew by 5 seconds. |
+| `access_denied` | 400 | Device sign-in: the user denied the code. |
+| `expired_token` | 400 | Device sign-in: the code expired or was already used. Start again. |
 | `unauthorized` | 401 | No credential, or an invalid one. |
 | `quota_exceeded` | 402 | The org's monthly units cap is reached. |
 | `forbidden` | 403 | The credential may not do this. |

@@ -42,5 +42,9 @@ fn must_check(request: &Request) -> bool {
         .get::<Option<Principal>>()
         .and_then(Option::as_ref)
         .is_some_and(|principal| matches!(principal, Principal::Session { .. }));
-    session || request.uri().path().starts_with("/api/auth/")
+    // The device flow's CLI calls carry no cookie and no Origin (D-AO-3). A session request to
+    // them is still checked, because `session` is true.
+    let path = request.uri().path();
+    let device_cli = path == "/api/auth/device/code" || path == "/api/auth/device/token";
+    session || (path.starts_with("/api/auth/") && !device_cli)
 }

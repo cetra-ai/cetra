@@ -14,6 +14,7 @@ pub(crate) mod connections;
 pub(crate) mod dashboards;
 pub(crate) mod datasets;
 pub(crate) mod deletions;
+pub(crate) mod device;
 pub(crate) mod entitlements;
 pub(crate) mod eval_jobs;
 pub(crate) mod evaluators;

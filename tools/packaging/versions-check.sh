@@ -4,7 +4,8 @@
 # deploy/compose/compose.yaml, the commented image of deploy/compose/.env.example, `info.version` of
 # crates/server/openapi.json (written by `just openapi` from the crate version), and the SDK
 # versions (D-N-37): sdks/typescript/package.json and VERSION in its src/index.ts, and
-# sdks/python/pyproject.toml and its uv.lock, in PEP 440 form (pep440.sh).
+# sdks/python/pyproject.toml and its uv.lock, in PEP 440 form (pep440.sh); and the cetra-cli
+# package (D-AO-2): node-cli/package.json and VERSION in its src/version.ts.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -31,6 +32,8 @@ if [[ "$info_version" != "    \"version\": \"$version\"" ]]; then
 fi
 expect sdks/typescript/package.json "  \"version\": \"$version\","
 expect sdks/typescript/src/index.ts "export const VERSION = \"$version\";"
+expect node-cli/package.json "  \"version\": \"$version\","
+expect node-cli/src/version.ts "export const VERSION = \"$version\";"
 if py_version="$(tools/packaging/pep440.sh "$version")"; then
   expect sdks/python/pyproject.toml "version = \"$py_version\""
   locked="$(awk '/^name = "cetra-sdk"$/ { getline; print; exit }' sdks/python/uv.lock)"

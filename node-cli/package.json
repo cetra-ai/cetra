@@ -1,0 +1,41 @@
+{
+  "name": "@cetra-ai/cli",
+  "version": "0.1.0-rc.1",
+  "description": "Set up cetra tracing with one command and one prompt to your coding agent.",
+  "license": "MIT",
+  "homepage": "https://cetra.sh/docs/get-started/coding-agent/",
+  "bugs": "https://github.com/cetra-ai/cetra/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cetra-ai/cetra.git",
+    "directory": "node-cli"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "bin": {
+    "cetra-cli": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "build": "tsdown",
+    "test": "vitest run",
+    "check:package": "publint",
+    "check": "biome check . && pnpm typecheck && pnpm build && pnpm test && pnpm check:package"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "publint": "0.3.25",
+    "smol-toml": "1.9.1",
+    "tsdown": "0.23.7",
+    "typescript": "5.9.3",
+    "vitest": "5.1.0"
+  }
+}
