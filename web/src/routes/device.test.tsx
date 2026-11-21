@@ -136,7 +136,7 @@ it("asks for a code when the field is empty", async () => {
   const { router, user } = await renderApp("/device");
   await user.click(await screen.findByRole("button", { name: "Continue" }));
 
-  expect(await screen.findByText("Enter the code that the terminal shows.")).toBeInTheDocument();
+  expect(await screen.findByText("Enter a code first.")).toBeInTheDocument();
   expect(router.state.location.search).toEqual({});
 });
 
@@ -183,7 +183,7 @@ it("shows that the computer did not report a name", async () => {
 
   await renderApp("/device?code=BCDF-GHJK");
 
-  expect(await screen.findByText("not reported")).toBeInTheDocument();
+  expect(await screen.findByText(/not reported/)).toBeInTheDocument();
 });
 
 it("approves a login code with an empty body and reports it", async () => {

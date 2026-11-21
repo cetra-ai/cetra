@@ -93,7 +93,7 @@ function CodeEntry({ project }: { project: string | undefined }) {
     event.preventDefault();
     const trimmed = value.trim();
     if (trimmed.length === 0) {
-      setError("Enter the code that the terminal shows.");
+      setError("Enter a code first.");
       return;
     }
     setError(undefined);
