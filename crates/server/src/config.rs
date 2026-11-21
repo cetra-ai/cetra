@@ -66,6 +66,7 @@ const ALIASES: &[(&str, &str)] = &[
     ("CETRA_INIT_ORG", "init.org"),
     ("CETRA_INIT_PROJECT", "init.project"),
     ("CETRA_INIT_SECRET_KEY", "init.secret_key"),
+    ("CETRA_INIT_READ_KEY", "init.read_key"),
     ("CETRA_LOG", "log.level"),
 ];
 
@@ -347,7 +348,8 @@ pub struct AutoProvision {
 /// Values that create the first admin, org, and project when the database is empty.
 ///
 /// The four `admin_email`, `admin_password`, `org`, and `project` fields are
-/// all set or all unset. `secret_key` is independent.
+/// all set or all unset. `secret_key` and `read_key` are independent and used
+/// only with them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct InitConfig {
@@ -359,8 +361,10 @@ pub struct InitConfig {
     pub org: Option<String>,
     /// Name of the first project.
     pub project: Option<String>,
-    /// Instance secret used to seal sessions. Optional in this group.
+    /// The project's `sk-cetra-` key with scopes `ingest, read, write`. Optional.
     pub secret_key: Option<Secret<String>>,
+    /// The project's `sk-cetra-` key with scope `read` only (D-N-38). Optional.
+    pub read_key: Option<Secret<String>>,
 }
 
 /// Log format. Absent means the CLI chooses from `isatty`.
@@ -800,7 +804,7 @@ pub enum ConfigError {
     /// Figment could not parse or deserialize a value.
     ///
     /// The message names the key. Errors on `smtp_url`, `init.admin_password`,
-    /// `init.secret_key`, and any `client_secret` are [`Self::Invalid`]
+    /// `init.secret_key`, `init.read_key`, and any `client_secret` are [`Self::Invalid`]
     /// instead, because figment's type error includes the rejected value. The
     /// error is boxed so [`Result`] stays small.
     #[error(transparent)]
@@ -1002,6 +1006,7 @@ fn secret_key(path: &[String]) -> Option<&'static str> {
         [key] if key == "smtp_url" => Some("smtp_url"),
         [parent, key] if parent == "init" && key == "admin_password" => Some("init.admin_password"),
         [parent, key] if parent == "init" && key == "secret_key" => Some("init.secret_key"),
+        [parent, key] if parent == "init" && key == "read_key" => Some("init.read_key"),
         [section, provider, key]
             if section == "auth" && provider == "github" && key == "client_secret" =>
         {
@@ -1893,7 +1898,12 @@ fn env_value(dotted: &str, raw: &str) -> Value {
 fn is_secret_path(dotted: &str) -> bool {
     matches!(
         dotted,
-        "encryption_key" | "license_key" | "smtp_url" | "init.admin_password" | "init.secret_key"
+        "encryption_key"
+            | "license_key"
+            | "smtp_url"
+            | "init.admin_password"
+            | "init.secret_key"
+            | "init.read_key"
     ) || dotted.ends_with(".client_secret")
 }
 
@@ -2302,10 +2312,18 @@ mod tests {
                 secret_key = "sk-cetra-EXAMPLEKEYEXAMPLEKEYEXAMPLE"
                 "#,
             ),
-            &[],
+            &[(
+                "CETRA_INIT_READ_KEY",
+                "sk-cetra-READKEYREADKEYREADKEYREADKEY",
+            )],
         )
         .unwrap();
+        assert_eq!(
+            config.init.read_key.as_ref().unwrap().expose(),
+            "sk-cetra-READKEYREADKEYREADKEYREADKEY"
+        );
         let text = format!("{config:?}");
+        assert!(!text.contains("READKEYREADKEY"), "{text}");
         assert!(text.contains("Secret(***)"), "{text}");
         assert!(!text.contains("hunter2hunter2"), "{text}");
         assert!(

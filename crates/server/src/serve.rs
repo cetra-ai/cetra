@@ -1293,6 +1293,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_init_read_key_on_a_used_data_dir_is_ignored() {
+        use crate::auth::secret::{KeyKind, new_key};
+        let dir = tempfile::tempdir().unwrap();
+        let init = serde_json::json!({
+            "admin_email": "ada@example.com",
+            "admin_password": "cetra-ok-1",
+            "org": "Acme",
+            "project": "Support bot",
+        });
+        let mut first = config(dir.path());
+        first.init = serde_json::from_value(init.clone()).unwrap();
+        bind(first, None).await.unwrap().shutdown().await.unwrap();
+
+        let read = new_key(KeyKind::Secret).unwrap();
+        let mut later = config(dir.path());
+        let mut with_key = init;
+        with_key["read_key"] = serde_json::Value::String(read.plaintext.clone());
+        later.init = serde_json::from_value(with_key).unwrap();
+        let running = bind(later, None).await.unwrap();
+        let state = running.state.as_ref().unwrap().clone();
+        let keys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_keys")
+            .fetch_one(state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(keys, 0);
+        drop(state);
+        running.shutdown().await.unwrap();
+
+        // A malformed value is not checked either: init does not run.
+        let mut bad = config(dir.path());
+        bad.init = serde_json::from_value(serde_json::json!({
+            "admin_email": "ada@example.com",
+            "admin_password": "cetra-ok-1",
+            "org": "Acme",
+            "project": "Support bot",
+            "read_key": "not-a-key",
+        }))
+        .unwrap();
+        bind(bad, None).await.unwrap().shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn a_wrong_encryption_key_fails_startup() {
         let dir = tempfile::tempdir().unwrap();
         let mut first = config(dir.path());

@@ -7,6 +7,11 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Added
+
+- `CETRA_INIT_READ_KEY` creates a read-only API key of the first project, with a value you choose,
+  when the installation first starts, for example to read traces in a restore drill.
+
 ### Fixed
 
 - Shutdown closes `catalog.db` before it releases the data directory lock, so the SQLite
