@@ -804,6 +804,30 @@ impl CompactionError {
             Self::DiskFull => "disk_full",
         }
     }
+
+    /// For [`Self::Read`], the variant of the DataFusion error under its
+    /// wrappers, in snake case; `None` otherwise. Never the text: it can quote
+    /// the literals of the covered-row predicate (spec 03 §7).
+    pub(crate) fn read_source(&self) -> Option<&'static str> {
+        use datafusion::error::DataFusionError as E;
+        let Self::Read { source } = self else {
+            return None;
+        };
+        Some(match crate::query_error::root(source) {
+            E::ResourcesExhausted(_) => "resources_exhausted",
+            E::ParquetError(_) => "parquet",
+            E::ArrowError(..) => "arrow",
+            E::IoError(_) => "io",
+            E::ObjectStore(_) => "object_store",
+            E::External(_) => "external",
+            E::Execution(_) | E::ExecutionJoin(_) => "execution",
+            E::Internal(_) => "internal",
+            E::Plan(_) => "plan",
+            E::SchemaError(..) => "schema",
+            E::NotImplemented(_) => "not_implemented",
+            _ => "other",
+        })
+    }
 }
 
 /// Why [`crate::Storage::snapshot_catalog`] failed.
@@ -884,7 +908,27 @@ impl OrphanError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ObjectError, OrphanError};
+    use super::{CompactionError, ObjectError, OrphanError};
+    use datafusion::error::DataFusionError;
+
+    #[test]
+    fn a_read_failure_names_its_datafusion_variant_and_no_text() {
+        let wrapped = CompactionError::Read {
+            source: DataFusionError::Context(
+                "merge".to_owned(),
+                Box::new(DataFusionError::ResourcesExhausted(
+                    "secret-literal".to_owned(),
+                )),
+            ),
+        };
+        assert_eq!(wrapped.read_source(), Some("resources_exhausted"));
+        let io = CompactionError::Read {
+            source: DataFusionError::IoError(std::io::Error::other("x")),
+        };
+        assert_eq!(io.read_source(), Some("io"));
+        assert_eq!(CompactionError::DiskFull.read_source(), None);
+        assert_eq!(CompactionError::Task.read_source(), None);
+    }
 
     #[test]
     fn an_orphan_delete_error_does_not_show_the_object_key() {

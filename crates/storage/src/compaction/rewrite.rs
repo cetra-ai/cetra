@@ -414,6 +414,7 @@ async fn check_and_rewrite(
                     kind = "rewrite",
                     inputs = 1,
                     error = error.label(),
+                    source = error.read_source(),
                     "compaction job failed"
                 );
             }
