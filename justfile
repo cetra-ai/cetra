@@ -25,23 +25,27 @@ crash_tests := "test(=crash_tests::every_flush_hook_aborts_safely) | test(=crash
 
 # Run all Rust tests: cargo-nextest runs the unit and integration tests and the crash harness,
 # cargo test the doctests
-test: (test-nextest "") test-doc
+test: (test-nextest "") test-crash test-doc
 
-# The nextest part of `just test`. `partition` is empty for every test, or one CI shard as a
-# nextest slice, e.g. `slice:2/4`. Both runs use the workspace feature set: `-p cetra-storage`
-# resolves different features and rebuilds every dependency from scratch.
+# The unit and integration tests with nextest. `partition` is empty for every test, or one CI
+# shard as a nextest slice, e.g. `slice:2/4`. The Rust test recipes use the workspace feature
+# set: `-p cetra-storage` resolves different features and rebuilds every dependency.
 test-nextest partition:
     cargo nextest run --workspace --all-features {{ if partition == "" { "" } else { "--partition " + partition } }}
-    cargo nextest run --workspace --all-features --no-tests=pass --run-ignored only {{ if partition == "" { "" } else { "--partition " + partition } }} -E '{{crash_tests}}'
 
-# The doctests (nextest does not run them)
+# The storage crash harness (ignored tests, run in parallel)
+test-crash:
+    cargo nextest run --workspace --all-features --run-ignored only -E '{{crash_tests}}'
+
+# The doctests (nextest does not run them); CI runs them in rust-lint
 test-doc:
     cargo test --workspace --all-features --doc
 
-# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests); the last
-# shard also runs the doctests
+# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests): a slice of
+# the unit and integration tests; the last shard also runs the crash harness. The doctests run
+# in rust-lint.
 test-shard shard total: (test-nextest "slice:" + shard + "/" + total)
-    {{ if shard == total { "just test-doc" } else { "true" } }}
+    {{ if shard == total { "just test-crash" } else { "true" } }}
 
 # Upload the build's compiled crates to the kache remote now, failing on any failed upload. CI
 # runs it on main pushes: kache-action's own upload only warns, so a full bucket would go unseen

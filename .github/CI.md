@@ -143,11 +143,16 @@ dry-run `prune` on the Garage host, then `prune --delete`, or raise the quota
 `just test-shard <k> 4`:
 
 - cargo-nextest 0.9.151 (installed by `actions/rust` with `nextest: "true"`) runs
-  slice `k/4` of the unit and integration tests, then slice `k/4` of the ignored
-  storage crash tests that `just test` names (`crash_tests` in the `justfile`).
-  A slice deals the tests round-robin across all test binaries, after filtering.
-- The last shard also runs the doctests with `cargo test --doc` (nextest does not
-  run them).
+  slice `k/4` of the unit and integration tests. A slice deals the tests
+  round-robin across all test binaries, after filtering.
+- The last shard also runs the storage crash harness (`just test-crash`: the
+  ignored crash tests named by `crash_tests` in the `justfile`), all 13 in one
+  parallel nextest run of about a minute. Its longest test takes about 45 s, so
+  slicing it would only spread that minute over the shards.
+
+The doctests (`just test-doc`, `cargo test --doc`; nextest does not run them) run
+in `rust-lint`, which finishes well before the shards: on a shard their
+compilation alone added 1.5 minutes.
 
 `NEXTEST_PROFILE=ci` selects the `ci` profile of `.config/nextest.toml`: no
 fail-fast, no retries (a flaky test fails its shard instead of passing on a
@@ -158,9 +163,13 @@ Each shard compiles the same test binaries; with the cache warm they come from
 kache. Only shard 1 saves to the cache (`save-cache` input of `actions/rust`), so
 the shards do not upload the same crates four times. Standard runners have 4
 CPUs and larger runners are not available to the organisation, so the shards are
-the only way to run more tests at once. Test time, measured on PR #219: about 38
-thread-minutes in all, 1.5 to 3 minutes per shard; the slowest test takes about
-50 s. Add shards when a shard's test time grows past compile time.
+the only way to run more tests at once. Measured on PR #219 with the cache warm
+(the test binaries from kache): each shard compiles for about 3 minutes and
+tests for 2 to 3 (about 38 thread-minutes of tests in all; the slowest test
+takes about 50 s), 6 to 8.5 minutes per shard, down from 21 minutes for one
+job. A PR that changes `cetra-server` recompiles its test binary on every
+shard, about 5 minutes. Add shards when a shard's test time grows past its
+compile time.
 
 ## Release workflow
 

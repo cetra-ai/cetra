@@ -50,7 +50,8 @@ jobs:
           cache: ${{ env.CI_CACHE_ALLOWED }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
-      - run: just fmt-check lint
+      # The doctests run here, off the rust-test shards (.github/CI.md § Rust tests).
+      - run: just fmt-check lint test-doc
       - run: just assert-clean
 
   # `just test` in parallel shards (.github/CI.md § Rust tests). Each shard compiles the same

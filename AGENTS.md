@@ -171,7 +171,7 @@ Run everything through `just`:
 | `just fmt` | format Rust, the web and TypeScript SDK (Biome), and the Python SDK (ruff) |
 | `just lint` | clippy, warnings as errors |
 | `just test` | all Rust tests: cargo-nextest for the unit and integration tests and the crash harness, `cargo test --doc` for the doctests |
-| `just test-shard <k> <n>` | shard `k` of `n` of `just test` (nextest `slice:` partition); CI's `rust-test` matrix runs one per job |
+| `just test-shard <k> <n>` | shard `k` of `n` of the nextest tests (`slice:` partition), the last with the crash harness; CI's `rust-test` matrix runs one per job, and `rust-lint` runs `just test-doc` |
 | `just model [cases]` | the storage model test with more cases, in release mode (D-R-14) |
 | `just model-s3 [cases]` | the storage model test on a remote store with injected S3 faults, in release mode (R M4) |
 | `just s3-chaos` | the S3 fault tests through toxiproxy in front of an S3 endpoint (R M4) |
