@@ -25,7 +25,7 @@ The comparison with screenshots is in the Artifact https://claude.ai/artifact/G8
 - A blog, newsletter, changelog page or customer stories. The docs already have a changelog (track W). Stories come after the first customers.
 - Sign-up, login or any form on cetra.sh. Those live on the cloud. The site only links to them.
 - Localisation: English only.
-- A no-signup public demo instance. The demo is the cloud demo org (D187). See §9 for what the homepage shows instead.
+- A public demo instance with real data. Since §9.6 "Try the demo" opens the web demo on sample data (D-C-22), not the cloud demo org (D187).
 - Building the benchmark itself. The site shows its results once they exist (§8, §10 M6).
 
 ## 2. Decisions already made (inputs to this design)
@@ -38,12 +38,13 @@ The comparison with screenshots is in the Artifact https://claude.ai/artifact/G8
 | Analytics | Cloudflare Web Analytics only: no cookies, no consent banner | D-W-10 |
 | Theme | **Dark** | User 2026-11-19 |
 | References | **Bun** (selling structure), **Braintrust** (visual style and rhythm), **Linear** (how the product is shown) | User 2026-11-19 |
-| Main hero action | **"Try the demo"** opens the cloud demo org (`/demo`, sign-in required, D187), labelled as needing a free account. Second: "Start free" (cloud sign-up). Below: the self-host install command | User 2026-11-19 (§9) |
+| Main hero action | **"Try the demo"** opens the web demo: the real UI on sample data, no sign-in (D-C-22), at `https://demo.cetra.sh`. Second: "Start free" (cloud sign-up). Below: the self-host install command. The cloud demo org (D187) is not linked from the site | User 2026-11-22 (§9.6), replacing 2026-11-19 |
 | Headline direction | "Run it yourself, in a minute" (candidate A in `positioning.md` §7). Final wording reviewed in M2 | User 2026-11-19 |
 | Comparison pages | **Yes, one per competitor, honest and dated** | User 2026-11-19 |
 | Launch | **Everything at once**, except `/benchmarks/` (M6, after the benchmark exists). The holding page stays until every launch page is ready | User 2026-11-19 (§9) |
 | Licence and plans | Open core, MIT core plus `ee/` under ELv2. Plans Free / Starter $30 / Pro $150 / Teams add-on $300 / Enterprise. Units = spans + scores | D172–D178 |
 | Audiences | Developers are the way in; companies pay | User 2026-11-13, `positioning.md` §5 |
+| Product scope sold | **The whole MVP**, including what main added on 2026-11-20/21: prompts and playground (D191), annotation queues (D192), the in-app assistant (D193), issue clustering (D194), coding-agent tracing (D195), `cetra-cli` and the docs MCP (track AO). The site sells hard, and never past what the docs state | User 2026-11-22 (§9.7) |
 
 ## 3. Architecture
 
@@ -81,7 +82,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - **One coded scene:** a terminal transcript of a coding agent using the MCP server.
   - *Changed in the M2 plan (2026-11-20):* coded HTML scenes of every screen were dropped. Real screens stay true with no hand-built UI, and one command refreshes them when the UI changes.
 - **Links out:**
-  - the cloud (demo `/demo`, sign-up, log in), using URLs from one config constant;
+  - the cloud (sign-up, log in) and the web demo (§9.6), using URLs from one config constant;
   - GitHub;
   - the docs.
 - **No client framework.** Astro pages with small vanilla scripts for the few interactive bits (copy buttons, tabs, the stack diagram toggle). This keeps the pages fast; site speed is part of the pitch.
@@ -120,7 +121,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
 | Compare | `/compare/` + `/compare/<x>/` | One page per competitor: Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar, MLflow. TL;DR, a table by area, "when to choose them", migration notes, sources, "checked on" date | Langfuse vs LangSmith, PostHog, Supabase |
 | Benchmarks | `/benchmarks/` | Named competitors on the same machine, method, tradeoffs, reproduction script (M6) | PlanetScale, Relax, Bun |
 | Docs | `/docs/` | Existing (track W) | — |
-| Demo | (cloud) `/demo` | The demo org (D187) | — |
+| Demo | `https://demo.cetra.sh` | The web demo on sample data (D-C-22, §9.6) | — |
 
 The header holds Product (anchors on the homepage), Pricing, Docs, Compare, GitHub with its star count, Log in, and the "Try the demo" button. The footer holds every page, the licence, the status page if one exists, and contact.
 
@@ -144,8 +145,9 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    3. Evaluate (online judges, checks, datasets, experiments, presented as "when you're ready");
    4. Get alerted (error rate, cost, latency, score).
 
-   Each shows a dark screenshot of that screen.
-6. **Your agents can read it too.** MCP and SQL: a coding agent querying production traces, shown as a terminal next to the UI. This uses the user's earlier idea, as a section, not the hero.
+   Each shows a dark screenshot of that screen. **Since M8 (§9.7) there are six:** Trace; Explore, with the in-app assistant as its screenshot; Issues (problems find you); Evaluate, with annotation queues as its screenshot; Prompts and the playground; Alert.
+5b. **Coding agents** *(M8)*. "See what your coding agents cost": Claude Code, Codex, Gemini CLI and Copilot traced with one `cetra agents setup` command, cost per person, repository and branch. A terminal visual, like §6.6.
+6. **Your agents can read it too.** MCP and SQL: a coding agent querying production traces, shown as a terminal next to the UI. This uses the user's earlier idea, as a section, not the hero. Since M8 it also offers `cetra-cli init` and the docs MCP.
 7. **Integrations.** A logo grid of frameworks and SDKs, each linking to its docs page; "and anything that speaks OpenTelemetry".
 8. **Your data, your rules.** Self-host by default, no telemetry (to confirm in the code before stating it), retention and GDPR deletion, open Parquet files. Links to Security.
 9. **Cloud or self-hosted.** Two cards, the audience routing. **Cloud:** start free, plans from $30, the demo. **Self-hosted:** free with no limits, licence key for SSO and audit, "talk to us". Links to Pricing and Self-hosting.
@@ -171,8 +173,8 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 | Dark UI screenshots (trace view, trace list, SQL, evaluators, alerts) and the agent transcript | M2 | No | This track |
 | Real screenshots from the MSW mocks | M2–M4 | Yes (track W tooling) | Track W tooling |
 | Install command that works on a clean machine | M2 | Packaging done (track N); exact command to confirm | N |
-| Cloud URLs: demo, sign-up, log in | M2 | Cloud exists; URLs to confirm | Cloud track |
-| Demo org populated | Launch | Planned (`docs/plans/demo-org/`) | Demo-org track |
+| Cloud URLs: sign-up, log in; the web demo domain | M2; M8 | Cloud exists; URLs to confirm | Cloud track |
+| `demo.cetra.sh` attached to the `cetra-web-demo` Worker | Launch | Not done | User |
 | GitHub star count | M2 | Build-time fetch | This track |
 | Integration list with fixtures | M4 | Yes (docs matrix) | Track W |
 | Facts per competitor, sourced and dated | M5 | Partly (`docs/research/competitors.md`, `evidence/`) | This track |
@@ -181,11 +183,17 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 
 ## 9. Answers to the open questions (user, 2026-11-19)
 
-1. **The demo needs sign-in** (D187). Keep **"Try the demo"** as the main button, labelled honestly as needing a free account. The homepage's screenshots show the product with no sign-up.
+1. *(Replaced by §9.6 on 2026-11-22.)* **The demo needs sign-in** (D187). Keep **"Try the demo"** as the main button, labelled honestly as needing a free account. The homepage's screenshots show the product with no sign-up.
 2. **Benchmarks:** launch **without** `/benchmarks/` and without engine numbers. M6 adds them when the benchmark is measured.
 3. **Compare pages: all nine at launch**: Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar, MLflow.
 4. **Cloud region: named** (today `eu1`) on Security, Pricing and the "Cloud or self-hosted" cards, with more added as regions open. The exact cloud URLs (demo, sign-up, log in) come from the cloud track before M2. This is a lookup, not a decision.
 5. **Fact checking:** a Sonnet agent verifies every comparison fact against its source before a page is published, with no separate user approval per page. The **"checked on" date is shown** on each page.
+
+Answers of 2026-11-22, after main gained the features of D191–D195:
+
+6. **"Try the demo" opens the web demo** (D-C-22): the real UI on sample data, with no sign-in. It replaces §9.1. The link is `https://demo.cetra.sh`; that custom domain must be attached to the `cetra-web-demo` Worker before launch (the domain name is the planner's choice, to confirm at launch).
+7. **Sell the full product story:** the hero names the breadth, the "one binary" box lists all of it, six product chapters, a coding-agents section, and the compare table, pricing and FAQ updated (§6).
+8. **One pull request** for the whole site, from `claude/website`, replacing the stack #174–#180.
 
 ## 10. Milestones
 
@@ -199,6 +207,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M4 Integrations** | `/integrations/` generated from the docs matrix, logos, links to the docs pages | M1; the docs matrix | — |
 | **M5 Compare** | `/compare/` and nine competitor pages (§9.3), facts in data files with sources and visible "checked on" dates, each fact verified by a Sonnet agent against its source, the staleness check | M1 | Benchmark numbers |
 | **M6 Benchmarks** *(after launch, §9.2)* | `/benchmarks/` from a results file: machines, versions, dates, named competitors, tradeoffs, reproduction script; engine numbers added to the homepage proof strip | The benchmark itself (D23) | — |
+| **M8 Main sync** | The site matches main as of 2026-11-22: rebased onto it, the integrations parser takes the coding-agent rows, the web demo link (§9.6), six chapters and the coding-agents section, new compare rows (annotation queues, issue detection, coding-agent tracing, in-app assistant) with sourced facts, pricing and self-hosting updated | M1–M5, M7; main's D191–D195 | Benchmarks (M6) |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks
