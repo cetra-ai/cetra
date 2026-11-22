@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Instance-wide SSO enforcement, `auth.enforce_sso_domains` (spec 08, D-P-4, D-P-8).
 //!
-//! It applies when the configured key is a genuine licence that lists `sso_enforcement`,
-//! expired or not: a lapse never re-opens password login for those domains.
+//! It applies when the instance's key (configured or installed) is a genuine licence that lists
+//! `sso_enforcement`, expired or not: a lapse never re-opens password login for those domains.
 
 use crate::entitlements::Feature;
 use crate::http::AppState;
@@ -18,6 +18,7 @@ pub(crate) fn applies(state: &AppState) -> bool {
     state
         .entitlements
         .license()
+        .state
         .listed_features()
         .contains(Feature::SsoEnforcement)
 }
@@ -286,5 +287,21 @@ mod tests {
             .await;
         assert_eq!(reset.status, 403);
         assert_eq!(reset.problem().code, ProblemCode::SsoRequired);
+    }
+
+    #[tokio::test]
+    async fn an_installed_licence_turns_enforcement_on() {
+        let app = TestApp::with_config(sso_config).await;
+        assert!(!super::applies(&app.state));
+
+        app.state
+            .entitlements
+            .set_license(crate::ee::license::InstanceLicense {
+                state: crate::ee::license::LicenseState::from_key(Some(&license_key(&[
+                    "sso_enforcement",
+                ]))),
+                source: crate::ee::license::LicenseSource::Stored,
+            });
+        assert!(super::applies(&app.state));
     }
 }

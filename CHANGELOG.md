@@ -9,6 +9,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Instance admins install a licence key from the admin settings, and it applies without a restart. A key in `CETRA_LICENSE_KEY` still wins.
+- The licence card links to the licence store to buy or renew a licence.
 - `CETRA_INIT_READ_KEY` creates a read-only API key of the first project, with a value you choose,
   when the installation first starts, for example to read traces in a restore drill.
 

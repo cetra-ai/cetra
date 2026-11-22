@@ -2296,6 +2296,90 @@
             "session": []
           }
         ]
+      },
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Install a licence key",
+        "operationId": "put_admin_license",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallLicenseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The licence now in force. The key itself is never returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdminLicense"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/admin/settings": {
@@ -26269,6 +26353,14 @@
             "type": "string",
             "description": "Why the key was refused. Only with `invalid`."
           },
+          "renew_url": {
+            "type": "string",
+            "description": "Where to buy or renew a licence (D-P-74). Omitted when `entitlements.upgrade_url` is set."
+          },
+          "source": {
+            "$ref": "#/components/schemas/LicenseKeySource",
+            "description": "Where the key comes from. Omitted with `none`."
+          },
           "status": {
             "$ref": "#/components/schemas/LicenseStatus",
             "description": "The status now."
@@ -32128,6 +32220,19 @@
           }
         }
       },
+      "InstallLicenseRequest": {
+        "type": "object",
+        "description": "`PUT /api/v1/admin/license`.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The licence key (`cetra1.…`). Surrounding whitespace is ignored."
+          }
+        }
+      },
       "InternalDeviceCode": {
         "type": "object",
         "description": "`POST /api/internal/v1/device/codes` body: the control plane registers a code it issued\n(D-AO-14).",
@@ -33376,6 +33481,14 @@
           }
         },
         "additionalProperties": false
+      },
+      "LicenseKeySource": {
+        "type": "string",
+        "description": "Where the licence key comes from (D-P-75).",
+        "enum": [
+          "config",
+          "stored"
+        ]
       },
       "LicenseStatus": {
         "type": "string",

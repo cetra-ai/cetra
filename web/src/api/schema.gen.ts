@@ -637,7 +637,8 @@ export interface paths {
         };
         /** Read the instance licence */
         get: operations["get_admin_license"];
-        put?: never;
+        /** Install a licence key */
+        put: operations["put_admin_license"];
         post?: never;
         delete?: never;
         options?: never;
@@ -3873,6 +3874,10 @@ export interface components {
             id?: string;
             /** @description Why the key was refused. Only with `invalid`. */
             reason?: string;
+            /** @description Where to buy or renew a licence (D-P-74). Omitted when `entitlements.upgrade_url` is set. */
+            renew_url?: string;
+            /** @description Where the key comes from. Omitted with `none`. */
+            source?: components["schemas"]["LicenseKeySource"];
             /** @description The status now. */
             status: components["schemas"]["LicenseStatus"];
         };
@@ -6932,6 +6937,11 @@ export interface components {
              */
             row: number;
         };
+        /** @description `PUT /api/v1/admin/license`. */
+        InstallLicenseRequest: {
+            /** @description The licence key (`cetra1.…`). Surrounding whitespace is ignored. */
+            key: string;
+        };
         /**
          * @description `POST /api/internal/v1/device/codes` body: the control plane registers a code it issued
          *     (D-AO-14).
@@ -7646,6 +7656,11 @@ export interface components {
              */
             y: number;
         };
+        /**
+         * @description Where the licence key comes from (D-P-75).
+         * @enum {string}
+         */
+        LicenseKeySource: "config" | "stored";
         /**
          * @description Where the instance licence stands (D-P-7).
          * @enum {string}
@@ -13115,6 +13130,75 @@ export interface operations {
             };
             /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_admin_license: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallLicenseRequest"];
+            };
+        };
+        responses: {
+            /** @description The licence now in force. The key itself is never returned. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AdminLicense"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

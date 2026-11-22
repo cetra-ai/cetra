@@ -31,7 +31,7 @@ use super::account::{
 };
 use super::admin::{
     AdminLicense, AdminResetLink, AdminSettings, AdminUser, CreateAdminUserRequest,
-    CreatedAdminUser, UpdateAdminUserRequest,
+    CreatedAdminUser, InstallLicenseRequest, LicenseKeySource, UpdateAdminUserRequest,
 };
 use super::agent_context::AgentContextBody;
 use super::alerts::{
@@ -243,6 +243,8 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AdminResetLink>();
     set.insert::<AdminSettings>();
     set.insert::<AdminLicense>();
+    set.insert::<InstallLicenseRequest>();
+    set.insert::<LicenseKeySource>();
     set.insert::<OrgEntitlements>();
     set.insert::<OrgMonthUsage>();
     set.insert::<UsageNotice>();
@@ -1109,6 +1111,15 @@ fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
             &[401, 403, 429],
         ))
         .build();
+    let install = operation("put_admin_license", "admin", "Install a licence key")
+        .securities(session.clone())
+        .request_body(Some(json_body("InstallLicenseRequest")))
+        .responses(responses(
+            "200",
+            json_of::<AdminLicense>("The licence now in force. The key itself is never returned."),
+            &[400, 401, 403, 409, 429],
+        ))
+        .build();
     let test_email = operation(
         "post_admin_settings_test_email",
         "admin",
@@ -1125,6 +1136,8 @@ fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
     .build();
     let mut users = PathItem::new(HttpMethod::Get, list);
     users.post = Some(create);
+    let mut license_item = PathItem::new(HttpMethod::Get, license);
+    license_item.put = Some(install);
     paths
         .path("/api/v1/admin/users", users)
         .path(
@@ -1139,10 +1152,7 @@ fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
             "/api/v1/admin/settings",
             PathItem::new(HttpMethod::Get, settings),
         )
-        .path(
-            "/api/v1/admin/license",
-            PathItem::new(HttpMethod::Get, license),
-        )
+        .path("/api/v1/admin/license", license_item)
         .path(
             "/api/v1/admin/settings/test-email",
             PathItem::new(HttpMethod::Post, test_email),

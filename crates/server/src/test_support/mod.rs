@@ -352,9 +352,12 @@ impl TestApp {
             &config.media,
             Arc::new(crate::prices::Prices::new(prices)),
         );
-        let license = crate::ee::license::LicenseState::from_key(
+        let license = crate::ee::license::load_license(
+            meta.reader(),
             config.license_key.as_ref().map(|key| key.expose().as_str()),
-        );
+        )
+        .await
+        .expect("licence loads");
         let defaults = crate::entitlements::Defaults::from_config(&config.entitlements.defaults);
         let entitlements = crate::entitlements::EntitlementsState::load(
             &meta,

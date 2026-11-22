@@ -37,7 +37,7 @@ pub(crate) enum InvalidLicense {
     Fields,
 }
 
-/// The configured licence, read once at startup.
+/// A licence key, verified.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LicenseState {
     /// `license_key` is unset.
@@ -61,6 +61,61 @@ pub(crate) enum LicenseStatus {
     Grace,
     /// From `grace_ends_at` on: features off.
     Expired,
+}
+
+/// Where self-hosted admins buy and renew licences (D-P-74). The only copy of this URL.
+pub(crate) const LICENSE_STORE_URL: &str = "https://app.cetra.sh/licenses";
+
+/// Where the instance's licence key comes from (D-P-75).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LicenseSource {
+    /// `license_key` (`CETRA_LICENSE_KEY`). Wins over an installed key.
+    Config,
+    /// Installed by an instance admin, in `instance_settings['license.key']`.
+    Stored,
+    /// No key anywhere.
+    Missing,
+}
+
+/// The instance licence and where its key comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstanceLicense {
+    /// The verified key.
+    pub(crate) state: LicenseState,
+    /// Where it comes from.
+    pub(crate) source: LicenseSource,
+}
+
+/// The licence in force: `configured` when set, else the installed key, else none (D-P-75).
+///
+/// # Errors
+///
+/// Returns [`crate::meta::MetaError::Db`] when reading the installed key fails.
+pub(crate) async fn load_license(
+    pool: &sqlx::SqlitePool,
+    configured: Option<&str>,
+) -> Result<InstanceLicense, crate::meta::MetaError> {
+    if let Some(key) = configured {
+        return Ok(InstanceLicense {
+            state: LicenseState::from_key(Some(key)),
+            source: LicenseSource::Config,
+        });
+    }
+    match crate::meta::instance_settings::get_setting(
+        pool,
+        crate::meta::instance_settings::LICENSE_KEY,
+    )
+    .await?
+    {
+        Some(key) => Ok(InstanceLicense {
+            state: LicenseState::from_key(Some(&key)),
+            source: LicenseSource::Stored,
+        }),
+        None => Ok(InstanceLicense {
+            state: LicenseState::Absent,
+            source: LicenseSource::Missing,
+        }),
+    }
 }
 
 impl LicenseState {
@@ -287,5 +342,71 @@ mod tests {
             assert!(!text.contains("cetra1."), "{text}");
             assert!(!text.contains("Example"), "{text}");
         }
+    }
+
+    async fn store_installed(key: &str) -> (tempfile::TempDir, crate::meta::MetaDb) {
+        let (dir, db) = crate::meta::test_db().await;
+        let key = key.to_owned();
+        db.write(move |conn| {
+            Box::pin(async move {
+                crate::meta::instance_settings::put_setting(
+                    conn,
+                    crate::meta::instance_settings::LICENSE_KEY,
+                    &key,
+                )
+                .await
+            })
+        })
+        .await
+        .unwrap();
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn load_license_prefers_the_configured_key() {
+        let (_dir, db) =
+            store_installed(&crate::test_support::license_key(&["sso_enforcement"])).await;
+        let configured = crate::test_support::license_key(&["project_roles"]);
+        let loaded = load_license(db.reader(), Some(&configured)).await.unwrap();
+        assert_eq!(loaded.source, LicenseSource::Config);
+        let listed = loaded.state.listed_features();
+        assert!(listed.contains(crate::entitlements::Feature::ProjectRoles));
+        assert!(!listed.contains(crate::entitlements::Feature::SsoEnforcement));
+    }
+
+    #[tokio::test]
+    async fn load_license_reads_the_installed_key() {
+        let (_dir, db) =
+            store_installed(&crate::test_support::license_key(&["sso_enforcement"])).await;
+        let loaded = load_license(db.reader(), None).await.unwrap();
+        assert_eq!(loaded.source, LicenseSource::Stored);
+        assert!(matches!(loaded.state, LicenseState::Valid(_)));
+        assert!(
+            loaded
+                .state
+                .listed_features()
+                .contains(crate::entitlements::Feature::SsoEnforcement)
+        );
+    }
+
+    #[tokio::test]
+    async fn load_license_without_a_key_is_absent() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let loaded = load_license(db.reader(), None).await.unwrap();
+        assert_eq!(
+            loaded,
+            InstanceLicense {
+                state: LicenseState::Absent,
+                source: LicenseSource::Missing,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_installed_key_is_invalid() {
+        let (_dir, db) = store_installed("garbage").await;
+        let loaded = load_license(db.reader(), None).await.unwrap();
+        assert_eq!(loaded.source, LicenseSource::Stored);
+        assert!(matches!(loaded.state, LicenseState::Invalid(_)));
     }
 }

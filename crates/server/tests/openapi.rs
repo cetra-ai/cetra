@@ -39,6 +39,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/admin/settings", "get_admin_settings"),
     ("get", "/api/v1/admin/license", "get_admin_license"),
+    ("put", "/api/v1/admin/license", "put_admin_license"),
     (
         "post",
         "/api/v1/admin/settings/test-email",
@@ -1278,6 +1279,7 @@ fn document_lint() {
                 | "post_admin_user_reset_link"
                 | "get_admin_settings"
                 | "get_admin_license"
+                | "put_admin_license"
                 | "post_admin_settings_test_email"
                 | "get_org_sso"
                 | "put_org_sso_provider"
@@ -1396,7 +1398,7 @@ fn document_lint() {
             expected_errors.extend(["400", "401", "403", "429"]);
         } else if *id == "get_admin_settings" || *id == "get_admin_license" {
             expected_errors.extend(["401", "403", "429"]);
-        } else if *id == "post_admin_user" {
+        } else if *id == "post_admin_user" || *id == "put_admin_license" {
             expected_errors.extend(["400", "401", "403", "409", "429"]);
         } else if *id == "patch_admin_user" || *id == "post_admin_user_reset_link" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);

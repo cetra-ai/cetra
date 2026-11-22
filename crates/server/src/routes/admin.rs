@@ -5,7 +5,7 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
@@ -13,12 +13,13 @@ use uuid::Uuid;
 
 use crate::api::admin::{
     AdminLicense, AdminResetLink, AdminSettings, AdminUser, CreateAdminUserRequest,
-    CreatedAdminUser, LicenseStatus, UpdateAdminUserRequest,
+    CreatedAdminUser, InstallLicenseRequest, LicenseKeySource, LicenseStatus,
+    UpdateAdminUserRequest,
 };
 use crate::api::common::{FieldError, Page, PageParams, Problem, ProblemCode};
 use crate::auth::principal::{self, Principal};
 use crate::auth::reset::{self, ResetError};
-use crate::ee::license::LicenseState;
+use crate::ee::license::{InstanceLicense, LICENSE_STORE_URL, LicenseSource, LicenseState};
 use crate::email::Email;
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
@@ -26,6 +27,7 @@ use crate::http::error::{self, ApiError, problem_response};
 use crate::http::restore::refuse_outbound;
 use crate::meta::MetaError;
 use crate::meta::identities;
+use crate::meta::instance_settings::{LICENSE_KEY, put_setting};
 use crate::meta::members;
 use crate::meta::password_resets::insert_reset;
 use crate::meta::users::EmailVerifiedVia;
@@ -76,6 +78,13 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             access: Access::InstanceAdmin,
             documented: true,
             handler: get(get_license),
+        },
+        RouteDef {
+            method: axum::http::Method::PUT,
+            path: "/api/v1/admin/license",
+            access: Access::InstanceAdmin,
+            documented: true,
+            handler: put(put_license),
         },
         RouteDef {
             method: axum::http::Method::POST,
@@ -302,14 +311,101 @@ async fn get_settings(
 async fn get_license(
     axum::extract::State(state): axum::extract::State<AppState>,
 ) -> error::Json<AdminLicense> {
+    error::Json(admin_license(&state))
+}
+
+/// `PUT /api/v1/admin/license` (D-P-75): stores the key and applies it at once.
+async fn put_license(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    error::Json(body): error::Json<InstallLicenseRequest>,
+) -> Result<error::Json<AdminLicense>, ApiError> {
+    if state.config.license_key.is_some() {
+        return Err(ApiError::Conflict {
+            detail: "the licence key is set in the configuration",
+        });
+    }
+    let key = body.key.trim().to_owned();
+    if key.is_empty() {
+        return Err(key_rejected(
+            "enter a licence key".to_owned(),
+            "enter a licence key".to_owned(),
+        ));
+    }
+    let license = match LicenseState::from_key(Some(&key)) {
+        LicenseState::Valid(license) => license,
+        LicenseState::Invalid(reason) => {
+            return Err(key_rejected(
+                format!("the licence key was refused: {reason}"),
+                reason.to_string(),
+            ));
+        }
+        // `from_key(Some(_))` is never `Absent`; refuse it like a malformed key.
+        LicenseState::Absent => {
+            return Err(key_rejected(
+                format!(
+                    "the licence key was refused: {}",
+                    cetra_token::TokenError::Malformed
+                ),
+                cetra_token::TokenError::Malformed.to_string(),
+            ));
+        }
+    };
+    if state.clock.now_ns() >= license.grace_ends_at {
+        return Err(key_rejected(
+            "the licence has expired".to_owned(),
+            "the licence has expired".to_owned(),
+        ));
+    }
+    let _guard = state.entitlements.lock_license_writes().await;
+    state
+        .meta
+        .write(move |conn| Box::pin(async move { put_setting(conn, LICENSE_KEY, &key).await }))
+        .await?;
+    tracing::info!(
+        license_id = %license.id,
+        kid = %license.kid,
+        "licence key installed"
+    );
+    state.entitlements.set_license(InstanceLicense {
+        state: LicenseState::Valid(license),
+        source: LicenseSource::Stored,
+    });
+    Ok(error::Json(admin_license(&state)))
+}
+
+/// A refused key: a 400 whose detail and `key` field error never echo the key.
+fn key_rejected(detail: String, message: String) -> ApiError {
+    ApiError::BadRequest {
+        detail: Some(detail),
+        errors: vec![FieldError {
+            field: "key".to_owned(),
+            message,
+            position: None,
+        }],
+    }
+}
+
+/// The licence as the admin API shows it. Never the key.
+fn admin_license(state: &AppState) -> AdminLicense {
     let license = state.entitlements.license();
-    let status = match license.status(state.clock.now_ns()) {
+    let status = match license.state.status(state.clock.now_ns()) {
         crate::ee::license::LicenseStatus::Absent => LicenseStatus::None,
         crate::ee::license::LicenseStatus::Invalid => LicenseStatus::Invalid,
         crate::ee::license::LicenseStatus::Active => LicenseStatus::Active,
         crate::ee::license::LicenseStatus::Grace => LicenseStatus::Grace,
         crate::ee::license::LicenseStatus::Expired => LicenseStatus::Expired,
     };
+    let source = match license.source {
+        LicenseSource::Config => Some(LicenseKeySource::Config),
+        LicenseSource::Stored => Some(LicenseKeySource::Stored),
+        LicenseSource::Missing => None,
+    };
+    let renew_url = state
+        .config
+        .entitlements
+        .upgrade_url
+        .is_none()
+        .then(|| LICENSE_STORE_URL.to_owned());
     let none = AdminLicense {
         status,
         reason: None,
@@ -318,8 +414,10 @@ async fn get_license(
         features: Vec::new(),
         expires_at: None,
         grace_ends_at: None,
+        source,
+        renew_url,
     };
-    error::Json(match license {
+    match &license.state {
         LicenseState::Absent => none,
         LicenseState::Invalid(reason) => AdminLicense {
             reason: Some(reason.to_string()),
@@ -333,7 +431,7 @@ async fn get_license(
             grace_ends_at: Some(valid.grace_ends_at),
             ..none
         },
-    })
+    }
 }
 
 async fn send_test_email(
@@ -449,6 +547,8 @@ mod tests {
     use crate::api::common::{Page, Problem};
     use crate::bootstrap;
     use crate::config::{Secret, SmtpUrl, Tls};
+    use crate::ee::license::LicenseSource;
+    use crate::meta::instance_settings::{LICENSE_KEY, get_setting};
     use crate::test_support::{
         TestApp, TestResponse, assert_logs_clean, capture_logs, license_key, license_key_until,
     };
@@ -599,6 +699,12 @@ mod tests {
                 None,
             ),
             (Method::GET, "/api/v1/admin/settings".to_owned(), None),
+            (Method::GET, "/api/v1/admin/license".to_owned(), None),
+            (
+                Method::PUT,
+                "/api/v1/admin/license".to_owned(),
+                Some(serde_json::json!({ "key": "x" })),
+            ),
             (
                 Method::POST,
                 "/api/v1/admin/settings/test-email".to_owned(),
@@ -1042,7 +1148,11 @@ mod tests {
         let (app, cookie, _) = admin().await;
         assert_eq!(
             license(&app, &cookie).await,
-            json!({ "status": "none", "features": [] })
+            json!({
+                "status": "none",
+                "features": [],
+                "renew_url": "https://app.cetra.sh/licenses",
+            })
         );
     }
 
@@ -1062,6 +1172,8 @@ mod tests {
                 "features": ["project_roles"],
                 "expires_at": "2099-01-01T00:00:00.000000000Z",
                 "grace_ends_at": "2099-01-01T00:00:00.000000000Z",
+                "source": "config",
+                "renew_url": "https://app.cetra.sh/licenses",
             })
         );
     }
@@ -1115,8 +1227,260 @@ mod tests {
                 "status": "invalid",
                 "reason": "the token is malformed",
                 "features": [],
+                "source": "config",
+                "renew_url": "https://app.cetra.sh/licenses",
             })
         );
+    }
+
+    async fn install(app: &TestApp, cookie: &str, key: &str) -> TestResponse {
+        app.request(Method::PUT, "/api/v1/admin/license")
+            .header("cookie", cookie)
+            .json(&json!({ "key": key }))
+            .send()
+            .await
+    }
+
+    #[tokio::test]
+    async fn install_license_needs_an_instance_admin() {
+        let (app, cookie, _) = admin().await;
+        let created = create_account(&app, &cookie, "bob@example.com", false).await;
+        set_password(&app, &created.reset_url, REPLACEMENT).await;
+        let bob = login(&app, "bob@example.com", REPLACEMENT).await;
+        let key = license_key(&["project_roles"]);
+        let denied = install(&app, &session_cookie(&bob), &key).await;
+        assert_eq!(denied.status, 403);
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_applies_without_a_restart() {
+        let (app, cookie, _) = admin().await;
+        let key = license_key(&["project_roles"]);
+        let response = install(&app, &cookie, &key).await;
+        assert_eq!(response.status, 200);
+        let body: serde_json::Value = response.json();
+        assert_eq!(body["status"], "active");
+        assert_eq!(body["source"], "stored");
+        assert_eq!(body["features"], json!(["project_roles"]));
+        assert_eq!(license(&app, &cookie).await, body);
+        assert!(
+            crate::entitlements::of(&app.state, cetra_core::ids::OrgId::new_v7())
+                .allows(crate::entitlements::Feature::ProjectRoles)
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_stores_the_key() {
+        let (app, cookie, _) = admin().await;
+        let key = license_key(&["project_roles"]);
+        assert_eq!(install(&app, &cookie, &key).await.status, 200);
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            Some(key)
+        );
+        let loaded = crate::ee::license::load_license(app.state.meta.reader(), None)
+            .await
+            .unwrap();
+        assert_eq!(loaded.source, LicenseSource::Stored);
+    }
+
+    #[tokio::test]
+    async fn install_license_trims_the_key() {
+        let (app, cookie, _) = admin().await;
+        let key = license_key(&["project_roles"]);
+        let padded = format!("  {key}\n");
+        assert_eq!(install(&app, &cookie, &padded).await.status, 200);
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            Some(key)
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_refuses_an_empty_key() {
+        let (app, cookie, _) = admin().await;
+        let response = install(&app, &cookie, "  ").await;
+        assert_eq!(response.status, 400);
+        let problem = response.problem();
+        assert_eq!(problem.errors.len(), 1);
+        assert_eq!(problem.errors[0].field, "key");
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_refuses_a_bad_key() {
+        let (app, cookie, _) = admin().await;
+        let response = install(&app, &cookie, "garbage").await;
+        assert_eq!(response.status, 400);
+        let problem = response.problem();
+        assert!(
+            problem
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.starts_with("the licence key was refused")),
+            "{problem:?}"
+        );
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        assert!(!text.contains("garbage"), "{text}");
+        assert_eq!(license(&app, &cookie).await["status"], "none");
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_refuses_an_expired_key() {
+        let (app, cookie, _) = admin().await;
+        let expired = license_key_until(
+            &["project_roles"],
+            "2025-11-01T00:00:00Z",
+            "2025-12-01T00:00:00Z",
+        );
+        let response = install(&app, &cookie, &expired).await;
+        assert_eq!(response.status, 400);
+        assert_eq!(
+            response.problem().detail.as_deref(),
+            Some("the licence has expired")
+        );
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_accepts_a_key_in_grace() {
+        let (app, cookie, _) = admin().await;
+        let grace = license_key_until(
+            &["project_roles"],
+            "2025-12-01T00:00:00Z",
+            "2026-02-01T00:00:00Z",
+        );
+        let response = install(&app, &cookie, &grace).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(response.json::<serde_json::Value>()["status"], "grace");
+    }
+
+    #[tokio::test]
+    async fn install_license_replaces_the_installed_key() {
+        let (app, cookie, _) = admin().await;
+        let first = license_key(&["project_roles"]);
+        assert_eq!(install(&app, &cookie, &first).await.status, 200);
+        let second = license_key(&["sso_enforcement"]);
+        let response = install(&app, &cookie, &second).await;
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            response.json::<serde_json::Value>()["features"],
+            json!(["sso_enforcement"])
+        );
+        assert!(
+            !crate::entitlements::of(&app.state, cetra_core::ids::OrgId::new_v7())
+                .allows(crate::entitlements::Feature::ProjectRoles)
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_conflicts_with_the_configured_key() {
+        let configured = license_key(&["project_roles"]);
+        let (app, cookie, _) = admin_with(move |config| {
+            config.license_key = Some(Secret::new(configured));
+        })
+        .await;
+        let response = install(&app, &cookie, &license_key(&["sso_enforcement"])).await;
+        assert_eq!(response.status, 409);
+        assert_eq!(license(&app, &cookie).await["source"], "config");
+        assert_eq!(
+            get_setting(app.state.meta.reader(), LICENSE_KEY)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn install_license_turns_sso_enforcement_on() {
+        let (app, cookie, _) = admin_with(|config| {
+            config.auth.enforce_sso_domains = vec!["sso.example".to_owned()];
+        })
+        .await;
+        let settings = |app: &TestApp| {
+            app.request(Method::GET, "/api/v1/admin/settings")
+                .header("cookie", &cookie)
+                .send()
+        };
+        let before = settings(&app).await.json::<AdminSettings>();
+        assert!(!before.enforce_sso_applied);
+        let key = license_key(&["sso_enforcement"]);
+        assert_eq!(install(&app, &cookie, &key).await.status, 200);
+        let after = settings(&app).await.json::<AdminSettings>();
+        assert!(after.enforce_sso_applied);
+    }
+
+    #[tokio::test]
+    async fn install_license_never_logs_the_key() {
+        let (app, cookie, _) = admin().await;
+        let key = license_key(&["project_roles"]);
+        let response = assert_logs_clean(
+            &[key.as_str(), "Test Customer"],
+            install(&app, &cookie, &key),
+        )
+        .await;
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn license_omits_the_store_link_with_an_upgrade_url() {
+        let (app, cookie, _) = admin_with(|config| {
+            config.entitlements.upgrade_url = Some("https://up.example/{org}".to_owned());
+        })
+        .await;
+        assert!(license(&app, &cookie).await.get("renew_url").is_none());
+    }
+
+    #[tokio::test]
+    async fn install_license_serializes_concurrent_installs() {
+        let (app, cookie, _) = admin().await;
+        let one = license_key(&["project_roles"]);
+        let two = license_key(&["sso_enforcement"]);
+        let (first, second) =
+            tokio::join!(install(&app, &cookie, &one), install(&app, &cookie, &two),);
+        assert_eq!(first.status, 200);
+        assert_eq!(second.status, 200);
+        let stored = crate::ee::license::load_license(app.state.meta.reader(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.state.listed_features(),
+            app.state.entitlements.license().state.listed_features()
+        );
+    }
+
+    #[test]
+    fn install_license_request_debug_hides_the_key() {
+        let request = crate::api::admin::InstallLicenseRequest {
+            key: "cetra1.secret".to_owned(),
+        };
+        assert!(!format!("{request:?}").contains("cetra1.secret"));
     }
 
     #[tokio::test]

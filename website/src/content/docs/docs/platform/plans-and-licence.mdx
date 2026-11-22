@@ -19,6 +19,20 @@ A locked feature answers with `403 plan_required`.
 
 ## Add a licence key
 
+You can add a key in two ways. A key set in the configuration wins over a key installed from the admin settings.
+
+### From the admin settings
+
+1. Open **Admin**, then **Settings**.
+2. Paste the key under **Install a licence key**.
+3. Click **Install**.
+
+The key applies at once. You do not restart cetra. cetra keeps the key in its database, so backups carry it.
+
+To renew, follow **Buy or renew a licence** on the licence card, then install the new key the same way. The new key replaces the installed one.
+
+### In the configuration
+
 Set the key in the environment of `cetra serve`:
 
 ```bash
@@ -26,6 +40,8 @@ export CETRA_LICENSE_KEY='<YOUR_LICENCE_KEY>'
 ```
 
 Keep it in the same secret file as your other secrets. See [Configuration](/docs/self-hosting/configuration/).
+
+A key set here wins, and the licence card then shows no install form. Changing it needs a restart.
 
 A key is active before its expiry date, then in a grace period where features keep working and the server warns, then expired. If cetra refuses a key, it logs the reason and runs without a licence. When a licence lapses, restrictions you already set, such as role overrides and enforcement, keep applying. You can no longer set up new ones.
 
