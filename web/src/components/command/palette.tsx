@@ -163,16 +163,19 @@ export function CommandPalette() {
       <Button
         type="button"
         variant="outline"
-        className="h-7 w-56 justify-between px-2 text-caption font-normal text-muted-foreground"
+        className="h-7 w-60 justify-between gap-3 px-2 font-normal text-muted-foreground"
         aria-label="Command palette"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={() => setPalette(true)}
       >
-        <span className="inline-flex items-center gap-1.5">
+        {/* The size sits on the children: `cn` drops `text-caption` next to a colour class. */}
+        <span className="inline-flex min-w-0 items-center gap-1.5 text-caption">
           <Search />
-          Search or jump to…
+          <span className="truncate">Search or jump to…</span>
         </span>
-        <kbd className="font-mono text-caption">{shortcutLabel("⌘K", navigator.userAgent)}</kbd>
+        <kbd className="shrink-0 rounded border bg-muted px-1.5 py-0.5 font-mono text-caption leading-none">
+          {shortcutLabel("⌘K", navigator.userAgent)}
+        </kbd>
       </Button>
       <CommandDialog
         open={palette}
