@@ -17,6 +17,7 @@ use datafusion::datasource::physical_plan::ParquetSource;
 use datafusion::error::DataFusionError;
 use datafusion::execution::TaskContext;
 use datafusion::execution::context::SessionConfig;
+use datafusion::execution::memory_pool::MemoryLimit;
 use datafusion::execution::object_store::ObjectStoreUrl;
 use datafusion::execution::runtime_env::RuntimeEnv;
 use datafusion::logical_expr::Operator;
@@ -46,8 +47,12 @@ use crate::partials::partials_from_spans;
 pub(crate) struct MergeContext {
     /// Memory pool `compaction.max_memory` and the object store (`Objects::register`).
     pub(crate) runtime: Arc<RuntimeEnv>,
-    /// Rows per batch read from the inputs.
+    /// Rows per batch read from the inputs, at most. A merge of large rows reads
+    /// fewer ([`batch_rows`]).
     pub(crate) batch_size: usize,
+    /// Jobs that may merge at the same time (`compaction.threads`): each gets
+    /// an equal share of the pool when its batch rows are chosen.
+    pub(crate) jobs: usize,
 }
 
 /// What `merge_slice` produced.
@@ -87,7 +92,7 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
     let plan = merge_plan(table, &files, slice)?;
     let task = Arc::new(
         TaskContext::default()
-            .with_session_config(SessionConfig::new().with_batch_size(ctx.batch_size))
+            .with_session_config(SessionConfig::new().with_batch_size(batch_rows(ctx, &files)))
             .with_runtime(Arc::clone(&ctx.runtime)),
     );
     let mut stream = execute_stream(Arc::clone(&plan), task).map_err(read_error)?;
@@ -142,6 +147,42 @@ pub(crate) async fn merge_slice<W: Write + Send + 'static>(
         partials,
         rows,
     })
+}
+
+/// Fewest rows per input batch. Below it the per-batch overhead dominates.
+const MIN_BATCH_ROWS: usize = 64;
+/// Decoded bytes per stored byte assumed for a row. Text compresses about 4×
+/// with zstd (track R M7); twice that leaves room for Arrow's offsets and buffers.
+const DECODED_PER_STORED: u64 = 8;
+/// Batches of each input the merge may hold at once (the current batch and the
+/// one being read), plus the output it builds.
+const BATCHES_PER_INPUT: u64 = 4;
+
+/// Rows per batch read from each input of one merge. The merge holds a batch
+/// per input, so with large rows `ctx.batch_size` rows of every input can pass
+/// the compaction pool, and the job fails every pass (soak finding M7-1). This
+/// lowers the rows so that `BATCHES_PER_INPUT` batches of every input fit in
+/// the job's share of the pool (`limit / ctx.jobs`), estimating a row's decoded
+/// size from the largest stored bytes per row among the inputs. Between
+/// `MIN_BATCH_ROWS` and `ctx.batch_size`; `ctx.batch_size` without a finite pool.
+fn batch_rows(ctx: &MergeContext, inputs: &[&Arc<FileMeta>]) -> usize {
+    let MemoryLimit::Finite(limit) = ctx.runtime.memory_pool.memory_limit() else {
+        return ctx.batch_size;
+    };
+    let stored_per_row = inputs
+        .iter()
+        .filter(|file| file.rows > 0)
+        .map(|file| file.size.div_ceil(file.rows))
+        .max()
+        .unwrap_or(1)
+        .max(1);
+    let share = u64::try_from(limit / ctx.jobs.max(1)).unwrap_or(u64::MAX);
+    let per_batch = stored_per_row
+        .saturating_mul(DECODED_PER_STORED)
+        .saturating_mul(BATCHES_PER_INPUT)
+        .saturating_mul(u64::try_from(inputs.len().max(1)).unwrap_or(u64::MAX));
+    let rows = usize::try_from(share / per_batch).unwrap_or(usize::MAX);
+    rows.clamp(MIN_BATCH_ROWS, ctx.batch_size.max(MIN_BATCH_ROWS))
 }
 
 /// The streaming plan of one slice: one file group per input, a Parquet scan
@@ -481,6 +522,7 @@ mod tests {
         MergeContext {
             runtime,
             batch_size,
+            jobs: 1,
         }
     }
 
@@ -634,6 +676,120 @@ mod tests {
             lower: None,
             upper: None,
         }
+    }
+
+    /// `rows` spans of trace block `block`, each with `len` bytes of
+    /// incompressible printable input (SplitMix64, as `big_span_batch`).
+    fn big_spans(block: u16, rows: u16, len: usize) -> RecordBatch {
+        let mut state = 0x5eed_u64.wrapping_add(u64::from(block));
+        let spans: Vec<_> = (0..rows)
+            .map(|row| {
+                let input: String = (0..len)
+                    .map(|_| {
+                        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+                        let mut z = state;
+                        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                        z ^= z >> 31;
+                        char::from(b'!' + u8::try_from(z % 94).unwrap())
+                    })
+                    .collect();
+                let start = 1_000 + i64::from(row);
+                let mut span = span_row(block * rows + row, 0, start, start);
+                span.input = Some(input);
+                span
+            })
+            .collect();
+        span_rows(&spans)
+    }
+
+    fn sized(size: u64, rows: u64) -> Arc<FileMeta> {
+        Arc::new(FileMeta {
+            id: crate::catalog::FileId(Uuid::now_v7()),
+            table: FileTable::Spans,
+            project: project(),
+            day: day(),
+            level: 0,
+            path: String::new(),
+            size,
+            footer_size: 0,
+            rows,
+            min_time: 0,
+            max_time: 0,
+            min_ingest_time: 0,
+            max_ingest_time: 0,
+            fully_merged: false,
+            deletions_applied_seq: 0,
+        })
+    }
+
+    #[test]
+    fn batch_rows_follow_the_pool_share_and_the_row_size() {
+        let pool = |bytes: usize| {
+            RuntimeEnvBuilder::new()
+                .with_memory_pool(Arc::new(GreedyMemoryPool::new(bytes)))
+                .build_arc()
+                .unwrap()
+        };
+        let ctx = MergeContext {
+            runtime: pool(1 << 30),
+            batch_size: 8192,
+            jobs: 3,
+        };
+        // Small rows: the configured batch size.
+        let small = sized(100 << 20, 1_000_000);
+        assert_eq!(super::batch_rows(&ctx, &[&small, &small]), 8192);
+        // The soak's day close: 17 inputs of about 1.1 KB stored per row.
+        let soak = sized(1_150 << 20, 1 << 20);
+        let inputs: Vec<&Arc<FileMeta>> = std::iter::repeat_n(&soak, 17).collect();
+        let rows = super::batch_rows(&ctx, &inputs);
+        assert!((512..=1024).contains(&rows), "{rows}");
+        // Huge rows: never below the floor.
+        let huge = sized(1 << 30, 10);
+        assert_eq!(
+            super::batch_rows(&ctx, &[&huge, &huge]),
+            super::MIN_BATCH_ROWS
+        );
+        // A file without rows does not divide by zero.
+        let empty = sized(0, 0);
+        assert_eq!(super::batch_rows(&ctx, &[&empty]), 8192);
+        // No finite pool: the configured batch size.
+        let unbounded = MergeContext {
+            runtime: RuntimeEnvBuilder::new().build_arc().unwrap(),
+            batch_size: 8192,
+            jobs: 3,
+        };
+        assert_eq!(super::batch_rows(&unbounded, &inputs), 8192);
+    }
+
+    /// Soak finding M7-1: a day close of 17 inputs of realistic spans failed
+    /// every pass with `ResourcesExhausted`, because each input's batch of
+    /// 8,192 rows passed its share of the compaction pool. The batch rows now
+    /// follow the inputs' bytes per row, so the same shape fits a small pool.
+    #[tokio::test]
+    async fn a_merge_of_large_rows_fits_the_compaction_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = objects(&dir).await;
+        let runtime = RuntimeEnvBuilder::new()
+            .with_memory_pool(Arc::new(GreedyMemoryPool::new(16 << 20)))
+            .build_arc()
+            .unwrap();
+        objects.register(&runtime);
+        let ctx = MergeContext {
+            runtime,
+            batch_size: 8192,
+            jobs: 1,
+        };
+        let mut inputs = Vec::new();
+        for block in 0..8 {
+            inputs.push(
+                write_input(&objects, FileTable::Spans, big_spans(block, 512, 8 << 10)).await,
+            );
+        }
+
+        let (output, _) = merge_read(&ctx, FileTable::Spans, &inputs, open_slice(), true).await;
+
+        assert_eq!(output.num_rows(), 8 * 512, "every span is merged once");
     }
 
     #[tokio::test]
