@@ -14,7 +14,7 @@ import { debug, warn, warnOnce } from "./log.js";
 import { applyMask } from "./mask.js";
 import { QuotaState } from "./quota.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
-import { currentRuntime, type Runtime } from "./runtime.js";
+import { currentRuntime, type Runtime, userAgent } from "./runtime.js";
 import { serialize } from "./serialize.js";
 import { uuid7 } from "./uuid.js";
 import { type FetchLike, getFetch, runtimeGlobals, timeoutSignal } from "./web.js";
@@ -413,6 +413,7 @@ export class ScoreQueue {
               headers: {
                 "Content-Type": "application/json",
                 Authorization: `Bearer ${this.apiKey}`,
+                "User-Agent": userAgent(),
               },
               body: JSON.stringify({ scores: batch }),
               signal: timeoutSignal(ATTEMPT_TIMEOUT_MILLIS),

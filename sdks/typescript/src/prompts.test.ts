@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, Client, type RestFetch } from "./client.js";
+import { VERSION } from "./index.js";
 import { Prompt, PromptNotAvailable } from "./prompt.js";
 import { getPrompt, PromptCache, parsePrompt, setPromptCacheForTests } from "./prompts.js";
 import { BASE, FakeRest, inOrder } from "./rest.test-helpers.js";
@@ -112,6 +113,7 @@ describe("getPrompt caching", () => {
     expect(rest.requests[0]?.url).toBe(`${BASE}/prompts/${NAME}/resolve?label=production`);
     expect(rest.requests[0]?.method).toBe("GET");
     expect(rest.requests[0]?.headers.Authorization).toBe("Bearer sk-cetra-test");
+    expect(rest.requests[0]?.headers["User-Agent"]).toBe(`cetra-sdk-js/${VERSION}`);
     expect(rest.requests[0]?.headers["If-None-Match"]).toBeUndefined();
   });
 

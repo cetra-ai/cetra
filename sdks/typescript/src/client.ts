@@ -11,6 +11,7 @@ import { ConfigError, resolveConfig } from "./config.js";
 import { Datasets } from "./datasets.js";
 import { Prompts } from "./prompts.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
+import { userAgent } from "./runtime.js";
 import { getFetch, timeoutSignal } from "./web.js";
 
 const REQUEST_TIMEOUT_MILLIS = 30_000;
@@ -121,7 +122,10 @@ export class Client {
     const url = this.#url(path, options.query);
     const retry = options.retry ?? (method === "GET" || method === "DELETE");
     const attempts = retry ? MAX_ATTEMPTS : 1;
-    const headers: Record<string, string> = { Authorization: `Bearer ${this.#apiKey}` };
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.#apiKey}`,
+      "User-Agent": userAgent(),
+    };
     let body: string | undefined;
     if (options.body !== undefined) {
       headers["Content-Type"] = "application/json";

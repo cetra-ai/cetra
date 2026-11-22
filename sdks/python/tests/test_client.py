@@ -6,7 +6,7 @@ from typing import Protocol
 
 import pytest
 
-from cetra import ApiError, Client, ConfigError, Dataset
+from cetra import ApiError, Client, ConfigError, Dataset, __version__
 
 TEST_API_KEY = "sk-cetra-test"
 DEAD_URL = "http://127.0.0.1:9"  # nothing listens here: connection refused at once
@@ -60,6 +60,7 @@ def test_request_sends_the_bearer_and_json(
     assert (method, path) == ("POST", "/api/v1/projects/current/datasets")
     assert headers["Authorization"] == f"Bearer {TEST_API_KEY}"
     assert headers["Content-Type"] == "application/json"
+    assert headers["User-Agent"] == f"cetra-sdk-python/{__version__}"
     assert json.loads(body) == {"name": "faq"}
 
 

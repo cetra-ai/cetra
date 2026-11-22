@@ -123,6 +123,7 @@ def test_get_prompt_fetches_and_caches(served: HttpRecorderLike, seams: Seams) -
     assert method == "GET"
     assert path == PROMPT_PATH + "?label=production"
     assert headers["Authorization"] == f"Bearer {TEST_API_KEY}"
+    assert headers["User-Agent"] == f"cetra-sdk-python/{cetra.__version__}"
 
 
 def test_version_entries_never_expire(served: HttpRecorderLike, seams: Seams) -> None:

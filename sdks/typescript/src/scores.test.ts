@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveConfig } from "./config.js";
 import { withContext } from "./context.js";
 import { FetchTraceExporter } from "./exporter.js";
+import { VERSION } from "./index.js";
 import { QuotaState } from "./quota.js";
 import { flush, installRuntime, Runtime, resetForTests, shutdown } from "./runtime.js";
 import { type ScoreBody, type ScoreOptions, ScoreQueue, score } from "./scores.js";
@@ -101,6 +102,7 @@ describe("score()", () => {
     expect(calls[0]?.headers).toEqual({
       "Content-Type": "application/json",
       Authorization: "Bearer sk-cetra-test",
+      "User-Agent": `cetra-sdk-js/${VERSION}`,
     });
     expect(bodies(calls[0])).toEqual([
       {

@@ -13,6 +13,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http import Compression
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.http.version import __version__ as otlp_version
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
@@ -21,6 +22,7 @@ from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from opentelemetry.trace import NoOpTracerProvider, ProxyTracerProvider
 
 from cetra import __version__
+from cetra._client import USER_AGENT
 from cetra._config import Config, ConfigError, resolve_config
 from cetra._instrument import enable_for, resolve
 from cetra._log import logger, reset_warnings, warn_once
@@ -29,6 +31,9 @@ from cetra._processor import CetraSpanProcessor
 from cetra._quota import QuotaPauseExporter, QuotaState, quota_session
 from cetra._scores import ScoreQueue
 
+# The OTLP exporter's own User-Agent, spelled as the exporter spells it; the SDK
+# appends its token after it (spec 10 § Lifecycle, User agent). A test checks it still matches.
+_OTLP_USER_AGENT = f"OTel-OTLP-Exporter-Python/{otlp_version}"
 _INIT_TWICE_WARNING = "cetra: init() was already called; this call is ignored"
 _GLOBAL_SAMPLE_RATE_WARNING = (
     "cetra: sample_rate is ignored with use_global_provider=True and an existing provider"
@@ -64,7 +69,10 @@ class Runtime:
         if exporter is None:
             exporter = OTLPSpanExporter(
                 endpoint=f"{config.base_url}/v1/traces",
-                headers={"Authorization": f"Bearer {config.api_key}"},
+                headers={
+                    "Authorization": f"Bearer {config.api_key}",
+                    "User-Agent": f"{_OTLP_USER_AGENT} {USER_AGENT}",
+                },
                 timeout=10,
                 compression=Compression.Gzip,
                 session=quota_session(quota),

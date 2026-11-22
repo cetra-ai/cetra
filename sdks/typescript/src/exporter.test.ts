@@ -9,6 +9,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 import { FetchTraceExporter } from "./exporter.js";
+import { VERSION } from "./index.js";
 import { resetWarningsForTests } from "./log.js";
 import { QuotaState } from "./quota.js";
 import { type FetchLike, type ResponseLike, runtimeGlobals } from "./web.js";
@@ -129,6 +130,7 @@ describe("FetchTraceExporter", () => {
       "Content-Type": "application/x-protobuf",
       Authorization: `Bearer ${API_KEY}`,
       "Content-Encoding": "gzip",
+      "User-Agent": `cetra-sdk-js/${VERSION}`,
     });
     expect(calls[0]?.keepalive).toBe(false);
     expect(calls[0]?.signal).toBeDefined();

@@ -15,6 +15,7 @@ import type { ReadableSpan, SpanExporter } from "@opentelemetry/sdk-trace";
 import { warnOnce } from "./log.js";
 import { QuotaState } from "./quota.js";
 import { defaultSleep, MAX_ATTEMPTS, waitMillis } from "./retry.js";
+import { userAgent } from "./runtime.js";
 import { type FetchLike, getFetch, gzip, timeoutSignal } from "./web.js";
 
 const DEFAULT_TIMEOUT_MILLIS = 10_000;
@@ -118,6 +119,7 @@ export class FetchTraceExporter implements SpanExporter {
     const headers: Record<string, string> = {
       "Content-Type": "application/x-protobuf",
       Authorization: `Bearer ${this.apiKey}`,
+      "User-Agent": userAgent(),
     };
     let payload = body;
     // Gzip only when the runtime returns bytes; otherwise send the raw body.

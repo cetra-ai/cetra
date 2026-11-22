@@ -4,6 +4,7 @@ Unlike tracing and scoring, these calls raise on failure: they are explicit call
 the user makes to get data (plan M4 § Two kinds of failure).
 """
 
+import importlib.metadata
 import time
 import urllib.parse
 from collections.abc import Callable, Mapping, Sequence
@@ -19,6 +20,11 @@ if TYPE_CHECKING:
     from cetra._datasets import Datasets
     from cetra._prompts import Prompts
 
+# The User-Agent of every request the SDK sends with its own HTTP client
+# (spec 10 § Lifecycle, User agent).
+# Read from the package metadata like ``cetra.__version__``: importing that from
+# ``cetra`` here would be an import cycle.
+USER_AGENT: Final = f"cetra-sdk-python/{importlib.metadata.version('cetra-sdk')}"
 _PROJECT_PATH: Final = "/api/v1/projects/current"
 _TIMEOUT_S: Final = 30
 # Retries after the first attempt: 4 attempts in all (D-J-16).
@@ -125,7 +131,7 @@ class Client:
         """
         retrying = method in _RETRYABLE_METHODS if retry is None else retry
         url = f"{self._base_url}{_PROJECT_PATH}{path}"
-        headers = {"Authorization": f"Bearer {self._api_key}"}
+        headers = {"Authorization": f"Bearer {self._api_key}", "User-Agent": USER_AGENT}
         if body is not None:
             headers["Content-Type"] = "application/json"
         attempt = 0
