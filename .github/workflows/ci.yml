@@ -82,6 +82,9 @@ jobs:
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
       - run: just test-shard ${{ matrix.shard }} 4
+      # Fails main when uploads fail (a full bucket); kache-action's post step only warns.
+      - if: matrix.shard == 1 && github.event_name == 'push' && env.CI_CACHE_ALLOWED == 'true'
+        run: just cache-push
       - run: just assert-clean
 
   rust-policy:

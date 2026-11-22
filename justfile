@@ -43,6 +43,12 @@ test-doc:
 test-shard shard total: (test-nextest "slice:" + shard + "/" + total)
     {{ if shard == total { "just test-doc" } else { "true" } }}
 
+# Upload the build's compiled crates to the kache remote now, failing on any failed upload. CI
+# runs it on main pushes: kache-action's own upload only warns, so a full bucket would go unseen
+# (.github/CI.md § Cache cleanup).
+cache-push:
+    kache sync --push
+
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":
     CETRA_MODEL_CASES={{cases}} cargo test --release --workspace --all-features -- model_tests::storage_matches_the_model
