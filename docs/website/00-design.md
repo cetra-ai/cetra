@@ -138,7 +138,7 @@ Copy here is **direction**, not final wording; M2 drafts it and reviews it with 
    - under them, a copyable **install command** with OS tabs and a "what does this run?" link;
    - a dark **screenshot of the trace view** (an agent trace's span tree, LLM messages, cost) that bleeds off the fold.
 3. **Proof strip.** Until we have logos: open-source facts that are true at launch, such as the licence (MIT core), GitHub stars, OpenTelemetry-native, the number of integrations backed by fixtures. Engine numbers join only once measured (M6).
-4. **"Nothing else to run."** The stack contrast as a diagram: a typical self-hosted stack (Web, Worker, Postgres, Redis, ClickHouse, S3) against one cetra box. The "replaces X" framing comes from Bun. Each competitor is named only on its compare page, not here.
+4. **"Nothing else to run."** The stack contrast as a diagram: a typical self-hosted stack (Web, Worker, Postgres, Redis, ClickHouse, S3) against one cetra box. The "replaces X" framing comes from Bun. Each competitor is named only on its compare page, not here. Since 2026-11-23 (user) it is a 1:1 replacement: each service, labelled "What most alternatives make you run", points to the part of the one cetra box that replaces it (web UI and API, evaluations and alerts, embedded SQLite, built-in job queue, storage engine, local disk with S3 optional), and the caption links to `/compare/`.
 5. **Product chapters** (Linear's repeated layout, Braintrust's bands):
    1. Trace every LLM call (OTel from any framework; sessions, users, cost);
    2. Find problems fast (filters, full-text search, the SQL console);

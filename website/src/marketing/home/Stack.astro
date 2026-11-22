@@ -1,6 +1,16 @@
 ---
 import Section from "../components/Section.astro";
 import SectionHeading from "../components/SectionHeading.astro";
+
+/** Each service of a typical self-hosted stack, and the part of cetra that replaces it. */
+const ROWS = [
+  ["Web app", "Web UI and API"],
+  ["Worker", "Evaluations and alerts"],
+  ["Postgres", "Embedded SQLite"],
+  ["Redis", "Built-in job queue"],
+  ["ClickHouse", "Storage engine"],
+  ["Object storage", "Local disk, S3 optional"],
+] as const;
 ---
 
 <Section tone="ink" divider labelledby="stack-title">
@@ -10,108 +20,121 @@ import SectionHeading from "../components/SectionHeading.astro";
     id="stack-title"
     lede="Most LLM observability platforms you can self-host are a stack of services to install, upgrade and back up. cetra is one process and one data folder."
   />
-  <div class="compare">
-    <figure class="column">
-      <div class="box box--stack">
-        <p class="eyebrow box-label">A typical self-hosted stack</p>
-        <ul class="tiles">
-          <li class="tile">Web app</li>
-          <li class="tile">Worker</li>
-          <li class="tile">Postgres</li>
-          <li class="tile">Redis</li>
-          <li class="tile">ClickHouse</li>
-          <li class="tile">Object storage</li>
-        </ul>
-      </div>
-      <figcaption>Six services. Each one to install, size, upgrade, monitor and back up.</figcaption>
-    </figure>
-    <figure class="column">
-      <div class="box box--cetra">
-        <p class="eyebrow box-label">cetra</p>
-        <div class="tile tile--big">cetra</div>
-        <ul class="tiles">
-          <li class="tile">OTLP ingestion</li>
-          <li class="tile">Storage engine</li>
-          <li class="tile">SQL and search</li>
-          <li class="tile">Evaluations</li>
-          <li class="tile">Annotation queues</li>
-          <li class="tile">Prompts and playground</li>
-          <li class="tile">Issues</li>
-          <li class="tile">Alerts</li>
-          <li class="tile">AI assistant</li>
-          <li class="tile">Web UI</li>
-        </ul>
-      </div>
-      <figcaption>One binary and one data folder. Upgrading means replacing a file; backing up is one command.</figcaption>
-    </figure>
+  <div class="stack">
+    <div class="heads" aria-hidden="true">
+      <p class="eyebrow muted">What most alternatives make you run</p>
+      <span></span>
+      <p class="eyebrow accent">cetra · one process</p>
+    </div>
+    <ul class="rows">
+      {
+        ROWS.map(([service, part]) => (
+          <li class="row">
+            <span class="service">{service}</span>
+            <span class="arrow" aria-hidden="true">→</span>
+            <span class="visually-hidden">is replaced in cetra by</span>
+            <span class="part">{part}</span>
+          </li>
+        ))
+      }
+    </ul>
+    <div class="caps">
+      <p class="cap">
+        Six services to install, size, upgrade, monitor and back up. <a href="/compare/">Compare the stacks →</a>
+      </p>
+      <span></span>
+      <p class="cap">One binary and one data folder. Upgrading means replacing a file; backing up is one command.</p>
+    </div>
   </div>
 </Section>
 
 <style>
-  .compare {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--space-6);
+  .stack {
+    --cols: minmax(0, 1fr) 2rem minmax(0, 1.15fr);
     margin-top: var(--space-7);
   }
-  .column {
-    margin: 0;
+  .heads,
+  .row,
+  .caps {
     display: grid;
-    gap: var(--space-4);
-    align-content: start;
+    grid-template-columns: var(--cols);
+    column-gap: var(--space-3);
   }
-  figcaption {
-    font-size: var(--text-sm);
+  .heads {
+    margin-bottom: var(--space-3);
+  }
+  .muted {
     color: var(--fg-muted);
   }
-  .box {
-    padding: var(--space-5);
-    border-radius: var(--radius-lg);
-  }
-  .box--stack {
-    border: 1px dashed var(--line-strong);
-  }
-  .box--cetra {
-    border: 1px solid var(--accent);
-    background: color-mix(in srgb, var(--accent) 6%, transparent);
-  }
-  .box-label {
-    color: var(--fg-muted);
-  }
-  .box--cetra .box-label {
+  .accent {
     color: var(--accent);
   }
-  .tiles {
+  .rows {
     list-style: none;
+    margin: 0;
     padding: 0;
-    margin: var(--space-3) 0 0;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: var(--space-3);
   }
-  .tile {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: var(--space-3) var(--space-4);
+  .service,
+  .part {
     font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    padding: var(--space-3) var(--space-4);
+    overflow-wrap: anywhere;
+  }
+  /* The stack: one dashed tile per service, with a gap between rows. */
+  .service {
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius);
+    color: var(--fg-muted);
+    margin-block: var(--space-1);
+    display: flex;
+    align-items: center;
+  }
+  .arrow {
+    align-self: center;
+    justify-self: center;
+    color: var(--fg-muted);
+  }
+  /* cetra: the parts join into one box, drawn across the rows. */
+  .part {
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    border-inline: 1px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .row:first-child .part {
+    border-top: 1px solid var(--accent);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+  .row:last-child .part {
+    border-bottom: 1px solid var(--accent);
+    border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  }
+  .caps {
+    margin-top: var(--space-4);
+  }
+  .cap {
     font-size: var(--text-sm);
     color: var(--fg-muted);
   }
-  .tile--big {
-    margin-top: var(--space-3);
-    padding: var(--space-6);
-    font-family: var(--font-display);
-    font-size: var(--text-xl);
-    color: var(--fg);
-  }
-  @media (min-width: 1100px) {
-    .box--cetra .tiles {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+  @media (max-width: 640px) {
+    .stack {
+      --cols: minmax(0, 1fr) 1.25rem minmax(0, 1fr);
     }
-  }
-  @media (max-width: 860px) {
-    .compare {
+    .heads,
+    .row,
+    .caps {
+      column-gap: var(--space-2);
+    }
+    .service,
+    .part {
+      padding: var(--space-2) var(--space-3);
+      font-size: var(--text-xs);
+    }
+    .caps {
       grid-template-columns: minmax(0, 1fr);
+      row-gap: var(--space-3);
     }
   }
 </style>
