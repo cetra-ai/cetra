@@ -1,6 +1,6 @@
 {
   "name": "@cetra-ai/cli",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "description": "Set up cetra tracing with one command and one prompt to your coding agent.",
   "license": "MIT",
   "homepage": "https://cetra.sh/docs/get-started/coding-agent/",
