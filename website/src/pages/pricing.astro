@@ -3,6 +3,7 @@ import Button from "../marketing/components/Button.astro";
 import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
+import Tabs from "../marketing/components/Tabs.astro";
 import { EVERY_PLAN, formatMoney, SELF_HOSTED } from "../marketing/data/pricing.mjs";
 import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
 import Calculator from "../marketing/pricing/Calculator.astro";
@@ -28,6 +29,14 @@ import { CONTACT_EMAIL } from "../marketing/site";
     />
   </Section>
 
+  <Tabs
+    id="hosting"
+    class="hosting"
+    label="Where cetra runs"
+    labels={["cetra Cloud (we host)", "Self-hosted (you host)"]}
+    hashes={["cloud", "self-hosted"]}
+  >
+    <div data-tab-panel>
   <Section tone="ink" pad="md" labelledby="plans-title">
     <PlanCards />
   </Section>
@@ -53,8 +62,10 @@ import { CONTACT_EMAIL } from "../marketing/site";
     />
     <Calculator />
   </Section>
+    </div>
+    <div data-tab-panel>
 
-  <Section tone="teal" divider labelledby="self-title">
+  <Section tone="ink" pad="md" labelledby="self-title">
     <SectionHeading
       eyebrow="Self-hosted"
       title="Run it yourself, free."
@@ -83,11 +94,33 @@ import { CONTACT_EMAIL } from "../marketing/site";
       </Card>
     </div>
   </Section>
+    </div>
+  </Tabs>
 
   <PricingFaq />
 </MarketingLayout>
 
 <style>
+  /* The switcher: one centred pill under the page title, like a segmented control. */
+  .hosting :global(> .tablist) {
+    width: fit-content;
+    max-width: calc(100% - 2 * var(--gutter));
+    margin: 0 auto var(--space-5);
+    padding: var(--space-1);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+  }
+  .hosting :global(> .tablist [role="tab"]) {
+    border-radius: 999px;
+    padding: var(--space-2) var(--space-4);
+  }
+  @media (max-width: 480px) {
+    .hosting :global(> .tablist [role="tab"]) {
+      font-size: var(--text-xs);
+      padding: var(--space-2) var(--space-3);
+    }
+  }
   .cards {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

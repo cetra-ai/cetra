@@ -2,20 +2,29 @@
 interface Props {
   id: string;
   labels: string[];
+  /** The tab list's accessible name. */
+  label?: string;
+  /**
+   * One URL hash per tab, without "#". With them, each tab's id is its hash, so a link to
+   * `#<hash>` scrolls to the tab list and shows that tab, and selecting a tab writes its hash to
+   * the URL.
+   */
+  hashes?: string[];
+  class?: string;
 }
-const { id, labels } = Astro.props;
+const { id, labels, label, hashes, class: className } = Astro.props;
 ---
-<div class="tabs-root" data-tabs data-tabs-id={id}>
-  <div class="tablist" role="tablist">
-    {labels.map((label, i) => (
+<div class:list={["tabs-root", className]} data-tabs data-tabs-id={id} data-tabs-hashes={hashes?.join(" ")}>
+  <div class="tablist" role="tablist" aria-label={label}>
+    {labels.map((text, i) => (
       <button
         type="button"
         role="tab"
-        id={`${id}-tab-${i}`}
+        id={hashes?.[i] ?? `${id}-tab-${i}`}
         aria-selected={i === 0 ? "true" : "false"}
         tabindex={i === 0 ? 0 : -1}
       >
-        {label}
+        {text}
       </button>
     ))}
   </div>
@@ -42,10 +51,20 @@ const { id, labels } = Astro.props;
     panels.forEach((panel, i) => {
       panel.id = `${id}-panel-${i}`;
       panel.setAttribute("role", "tabpanel");
-      panel.setAttribute("aria-labelledby", `${id}-tab-${i}`);
+      panel.setAttribute("aria-labelledby", tabs[i].id);
       panel.hidden = i !== 0;
       tabs[i].setAttribute("aria-controls", panel.id);
     });
     wireTabs(tabs, panels);
+
+    const hashes = root.dataset.tabsHashes?.split(" ") ?? [];
+    if (hashes.length !== tabs.length) return;
+    const initial = hashes.indexOf(window.location.hash.slice(1));
+    if (initial > 0) tabs[initial].click();
+    tabs.forEach((tab, i) => {
+      tab.addEventListener("click", () => {
+        history.replaceState(null, "", `#${hashes[i]}`);
+      });
+    });
   });
 </script>
