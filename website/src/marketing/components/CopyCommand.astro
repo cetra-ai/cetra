@@ -7,6 +7,14 @@ interface Props {
   id: string;
 }
 const { commands, note, noteHref, id } = Astro.props;
+
+/**
+ * Splits a command for display: a long one wraps after a "/" or at a space, never inside a word
+ * such as "cetra-ai". The text content stays the command, so the copy button copies it as is.
+ */
+function tokens(command: string): string[] {
+  return command.split(/(\/|\s+)/).filter((token) => token !== "");
+}
 ---
 <div class="copy" data-copy>
   {commands.length > 1 && (
@@ -33,7 +41,7 @@ const { commands, note, noteHref, id } = Astro.props;
       aria-labelledby={commands.length > 1 ? `${id}-tab-${i}` : undefined}
       hidden={i !== 0}
     >
-      <pre tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{c.command}</span></code></pre>
+      <pre tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{tokens(c.command).map((t) => (t === "/" ? <>/<wbr /></> : /^\s+$/.test(t) ? t : <span class="tok">{t}</span>))}</span></code></pre>
       <button type="button" class="copy-btn" aria-label="Copy command" data-copy-target={`${id}-panel-${i}`}>Copy</button>
     </div>
   ))}
@@ -68,12 +76,20 @@ const { commands, note, noteHref, id } = Astro.props;
   .panel[hidden] {
     display: none;
   }
+  /* The whole command stays visible: it wraps instead of scrolling, with the wrapped lines
+     indented past the "$ " prompt. The copy button copies it unwrapped. */
   pre {
     margin: 0;
-    overflow-x: auto;
+    white-space: pre-wrap;
+    padding-left: 2ch;
+    text-indent: -2ch;
+    min-width: 0;
     flex: 1;
     font-size: var(--text-sm);
     color: var(--c-paper);
+  }
+  .tok {
+    white-space: nowrap;
   }
   .prompt {
     color: var(--c-teal-light);
