@@ -959,6 +959,14 @@ async fn measure(loc: &Location, label: &str, r: &Runner, queries: &[Query], ids
             }
             if run == 0 {
                 io = Some(read_io(loc, r, per));
+                // FMT_TIMELINE=1: every request of the first measured run.
+                let events = loc.store.timeline();
+                if !events.is_empty() {
+                    println!("timeline {label} {}: {:.1} ms; kind, object, KiB, start, first byte, end (ms)", q.name, el * per);
+                    for e in &events {
+                        println!("  {:6} {:24} {:>8.1} {:>7.1} {:>7.1} {:>7.1}", e.kind, e.name, e.bytes as f64 / 1024.0, e.start, e.first, e.end);
+                    }
+                }
             }
         }
         if let Some(e) = failed {
