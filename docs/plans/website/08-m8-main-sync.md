@@ -198,7 +198,7 @@ S4 replaces both alt texts.
       - eyebrow `Issues`; title `Problems find you.`;
       - lede `cetra groups recurring errors, bad scores and unhappy users into issues. Fix the cause once instead of reading traces one by one.`;
       - features `Errors grouped by fingerprint, with no LLM call`, `Bad scores and feedback clustered by meaning`, `A fixed issue that comes back reopens`, `Alert on it, queue it for review or turn it into a dataset`;
-      - image `marketing-issue.png`, label `Issues`, alt `An issue page: its title, state, a daily chart of occurrences and example traces.`
+      - image `marketing-issue.png`, label `Issues`, alt `An issue page: its state and actions, a daily chart of occurrences, example traces and its history.`
    4. **Evaluate**:
       - eyebrow `Evaluate`; title `Measure quality, with judges and people.`;
       - lede `Score production traffic with LLM judges and checks, send traces to annotation queues for human review, and turn real traces into datasets and experiments.`;
@@ -208,7 +208,7 @@ S4 replaces both alt texts.
       - eyebrow `Prompts`; title `Change a prompt without a deploy.`;
       - lede `Version your prompts in cetra and point a label such as production at the one to serve. Your app fetches it through the SDK, with a cache and a fallback. Try changes in the playground first.`;
       - features `Versions and labels`, `SDK fetch with a cache and a fallback`, `Up to four models side by side in the playground`, `Cost, latency and scores per prompt version`;
-      - image `marketing-playground.png`, label `Playground`, alt `The playground running one prompt version on several models side by side, with each model's answer, tokens and cost.`
+      - image `marketing-playground.png`, label `Playground`, alt `The playground with a prompt version's messages and variables, and a model's answer with its tokens, cost and latency.`
    6. **Alert**:
       - title unchanged;
       - lede `Get told when the error rate, the cost, the latency, a score or an issue crosses your line, in Slack, by email or on a webhook.`;
@@ -222,7 +222,7 @@ S4 replaces both alt texts.
    - `evaluation/annotation-queues.mdx`;
    - `platform/assistant.mdx`: drafts filters, SQL and dashboards, on the org's connection;
    - `platform/alerts.mdx`: the issue-occurrences condition.
-4. Open the S3 PNGs and compare them with the alt texts above. Where an image shows something else, write an alt text that describes what it shows, in the same style, and report it.
+4. The S3 PNGs were checked by the coordinator and these alt texts match them. Still open each PNG and compare. Where an image shows something else, write an alt text that describes what it shows, in the same style, and report it.
 5. Build; screenshot `/` at 1440 and 390. Fix overflow or broken layout.
 
 **Done when** `just check-docs` passes.
