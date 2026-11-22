@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Prepares release <version> (D-N-5): sets the workspace version, Cargo.lock, the chart's version
-# and appVersion, the compose image, `info.version` of crates/server/openapi.json, and the SDK
-# versions (D-N-37; PEP 440 form for Python, and its uv.lock), and turns CHANGELOG.md's Unreleased
-# section into `## [<version>] - <today, UTC>` under a new empty Unreleased section. Commit the
-# result, merge it to main, then tag that commit `v<version>`.
+# and appVersion, the compose image, `info.version` of crates/server/openapi.json, the SDK
+# versions (D-N-37; PEP 440 form for Python, and its uv.lock) and the cetra-cli version (D-AO-2), and
+# turns CHANGELOG.md's Unreleased section into `## [<version>] - <today, UTC>` under a new empty
+# Unreleased section. Commit the result, merge it to main, then tag that commit `v<version>`.
 #
 # Usage: release-prep.sh <version>, e.g. 0.1.0 or 0.1.0-rc.1
 set -euo pipefail
@@ -47,6 +47,8 @@ sed -i.bak "s|^#CETRA_IMAGE=ghcr.io/cetra-ai/cetra:$old$|#CETRA_IMAGE=ghcr.io/ce
 sed -i.bak "s/^  \"version\": \".*\",$/  \"version\": \"$new\",/" sdks/typescript/package.json
 sed -i.bak "s/^export const VERSION = \".*\";$/export const VERSION = \"$new\";/" \
   sdks/typescript/src/index.ts
+sed -i.bak "s/^  \"version\": \".*\",$/  \"version\": \"$new\",/" node-cli/package.json
+sed -i.bak "s/^export const VERSION = \".*\";$/export const VERSION = \"$new\";/" node-cli/src/version.ts
 sed -i.bak "/^\[project\]/,/^\[/{s/^version = \".*\"$/version = \"$py_new\"/;}" sdks/python/pyproject.toml
 sed -i.bak "/^  \"info\": {$/,/^  },$/{s/^    \"version\": \".*\"$/    \"version\": \"$new\"/;}" \
   crates/server/openapi.json
@@ -54,7 +56,8 @@ today="$(date -u +%Y-%m-%d)"
 sed -i.bak "s/^## \[Unreleased\]$/## [Unreleased]\n\n## [$new] - $today/" CHANGELOG.md
 rm -f Cargo.toml.bak deploy/helm/cetra/Chart.yaml.bak deploy/compose/compose.yaml.bak \
   deploy/compose/.env.example.bak CHANGELOG.md.bak sdks/typescript/package.json.bak \
-  sdks/typescript/src/index.ts.bak sdks/python/pyproject.toml.bak crates/server/openapi.json.bak
+  sdks/typescript/src/index.ts.bak node-cli/package.json.bak node-cli/src/version.ts.bak \
+  sdks/python/pyproject.toml.bak crates/server/openapi.json.bak
 
 cargo update --workspace --offline
 (cd sdks/python && uv lock)

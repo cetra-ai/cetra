@@ -71,6 +71,7 @@ If the code has to deviate from the spec, update the spec **in the same change**
 - Storage needs crash-recovery and concurrency tests.
 - `CETRA_BLESS_SCHEMA=1` makes `catalog::db::tests::the_schema_matches_the_committed_dump` rewrite `crates/storage/src/catalog/schema.txt` instead of comparing it; then update spec 03 § 4 by hand (R M8).
 - `CETRA_DOCS_WRITE=1` makes `cli_reference_is_up_to_date` rewrite the site's CLI reference, and `sql_schema_reference_is_up_to_date` its SQL schema reference (`just docs-gen` runs both); a CLI or schema change commits the regenerated page.
+- `skills/cetra/references/` is generated from the docs pages that `skills/references.json` lists. A docs change that touches one of them runs `just docs-gen` and commits the result; `just check-docs` fails otherwise (`skill-references.mjs`). `check-skill.mjs` checks `SKILL.md`'s frontmatter, links and `cetra` subcommands.
 - `golden_tests` checks the golden data directories against the current build (R M8): the fresh directory is built once per test process by `golden_tests::fresh_golden_dir()`, and every golden test and `read_cache::tests::the_golden_cache_entry_is_served` uses it; `golden_tests::write_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_GOLDEN_OUT`.
 - The server's `golden_tests` (SF6, D-R-38) builds a scenario server's backup once per process (`golden_tests::fresh_golden_dir()`) and `golden_tests::write_server_golden_dir` (ignored; `just golden-dir <name>`) writes one into `CETRA_SERVER_GOLDEN_OUT`; a `meta.db` format change (spec 04 § Format versions) bumps `META_FORMAT_VERSION`, and from the first public release the golden backups under `fixtures/server/golden/` must keep restoring.
 - A format change (spec 03 § 12) bumps `FORMAT_VERSION`; from the first public release the golden directories under `fixtures/storage/golden/` must keep opening; `just golden-dir <name>` writes one.
@@ -118,6 +119,8 @@ web/                         React UI (Vite, TanStack, shadcn/ui, pnpm)         
 website/                     docs site and landing page (Astro, Starlight)            (docs/plans/docs-site)
 sdks/python/                 Python SDK (uv)                                           (spec 10)
 sdks/typescript/             TypeScript SDK (pnpm)                                     (spec 10)
+node-cli/                     the cetra-cli package (npx @cetra-ai/cli): init, query, login (D-AO-2)
+skills/                      the cetra agent skill (skills/cetra/), its reference list and plugin manifests; mirrored to cetra-ai/skills (D-AO-9)
 fixtures/otlp/               OTLP fixtures shared by Rust golden tests and SDK tests  (spec 02 § Testing)
 fixtures/storage/golden/     golden data directories, written from the first stable release on (track R M8, spec 03 § 12)
 fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.key, manifest, socket lines), written
@@ -156,13 +159,15 @@ Run everything through `just`:
 
 | Command | What it does |
 |---|---|
-| `just check` | Rust, web, Python SDK, TypeScript SDK and the docs site (D79); **must pass before every commit** |
+| `just check` | Rust, web, Python SDK, TypeScript SDK, cetra-cli and the docs site (D79); **must pass before every commit** |
 | `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories, cargo-deny's bans, licences and sources (D196) |
 | `just check-web` | web lint, types, tests, production build |
 | `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
 | `just check-ts` | TypeScript SDK lint, types, tests, package exports |
+| `just check-cli-js` | cetra-cli: lint, types, build, tests, package lint |
+| `just cli-smoke <tarball>` | install a packed cetra-cli and run --version |
 | `just fmt` | format Rust, the web and TypeScript SDK (Biome), and the Python SDK (ruff) |
 | `just lint` | clippy, warnings as errors |
 | `just test` | all Rust tests |
@@ -182,7 +187,8 @@ Run everything through `just`:
 | `just ts-smoke <tarball>` | load a packed TS SDK from ESM and CommonJS |
 | `just check-workflows` | lint and audit GitHub Actions workflows (actionlint, zizmor) |
 | `just openapi` | regenerate `crates/server/openapi.json` and `web/src/api/schema.gen.ts` |
-| `just docs-gen` | regenerate the site's generated pages (the CLI reference, D-W-7) |
+| `just docs-gen` | regenerate the site's generated pages (the CLI reference, D-W-7) and the skill references (D-AO-8) |
+| `just skills-mirror <dir> [--push]` | copy the agent skill and its manifests into a checkout of cetra-ai/skills; `--push` commits and pushes (D-AO-9) |
 | `just web-dev` | web dev server with the API mocked from `fixtures/api` |
 | `just web-dev-server` | web dev server proxied at the real API |
 | `just docs-dev` | docs site dev server on http://localhost:4321 |

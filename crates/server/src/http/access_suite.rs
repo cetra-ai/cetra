@@ -404,6 +404,7 @@ fn concrete_path(route: &RouteDef, world: &World) -> String {
         .replace("{id}", id)
         .replace("{token}", TOKEN)
         .replace("{provider}", PROVIDER)
+        .replace("{user_code}", "BCDF-GHJK")
 }
 
 async fn call(app: &TestApp, route: &RouteDef, path: &str, caller: &Caller) -> TestResponse {

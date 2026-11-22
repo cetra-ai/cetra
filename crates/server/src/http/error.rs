@@ -74,6 +74,12 @@ pub(crate) enum ApiError {
         /// Which 403 this is.
         code: ProblemCode,
     },
+    /// A device-flow poll that has no grant yet, or never will (400 with an RFC 8628 code).
+    #[error("device grant")]
+    DeviceGrant {
+        /// One of `AuthorizationPending`, `SlowDown`, `AccessDenied`, `ExpiredToken`.
+        code: ProblemCode,
+    },
     /// The org's plan limit is reached (D178).
     #[error("plan limit")]
     PlanLimit {
@@ -206,6 +212,7 @@ impl ApiError {
             }
             Self::Unauthorized => Problem::new(ProblemCode::Unauthorized, None),
             Self::Forbidden { code } => Problem::new(*code, None),
+            Self::DeviceGrant { code } => Problem::new(*code, None),
             Self::PlanLimit { detail } => {
                 Problem::new(ProblemCode::PlanLimit, Some(detail.clone()))
             }
@@ -756,6 +763,17 @@ mod tests {
             .await
             .unwrap();
         (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_device_grant_answer_is_a_400_problem_with_its_code() {
+        let (status, problem) = problem_of(ApiError::DeviceGrant {
+            code: ProblemCode::SlowDown,
+        })
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(problem.code, ProblemCode::SlowDown);
+        assert_eq!(serde_json::to_value(problem.code).unwrap(), "slow_down");
     }
 
     #[tokio::test]

@@ -68,9 +68,6 @@ function recordNavigation() {
     replace: (url) => {
       replaced.push(url);
     },
-    submit: () => {
-      throw new Error("the login page never posts a form");
-    },
   });
   return { replaced, navigated };
 }
@@ -414,9 +411,6 @@ it("sends an SSO email to its org's identity provider", async () => {
     },
     replace: () => {
       throw new Error("the SSO login never replaces the page");
-    },
-    submit: () => {
-      throw new Error("the SSO login never posts a form");
     },
   });
   const { user } = await renderApp("/login?redirect=%2Facme");

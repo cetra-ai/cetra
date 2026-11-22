@@ -16,6 +16,7 @@ pub(crate) mod convert;
 pub mod dashboards;
 pub mod datasets;
 pub mod deletions;
+pub mod device;
 pub mod entitlements;
 pub mod eval_jobs;
 pub mod evaluators;

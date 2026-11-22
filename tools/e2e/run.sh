@@ -42,6 +42,7 @@ base="http://127.0.0.1:${http_port}"
 
 CETRA_DATA_DIR="$dir/data" \
 CETRA_HTTP_ADDR="127.0.0.1:${http_port}" \
+CETRA_PUBLIC_URL="$base" \
 CETRA_OTLP_HTTP_ADDR="127.0.0.1:${otlp_port}" \
 CETRA_GRPC_ADDR="127.0.0.1:${grpc_port}" \
 CETRA_INIT_ADMIN_EMAIL="ada@example.com" \
@@ -73,3 +74,6 @@ export CETRA_E2E_BASE_URL="$base"
 export CETRA_E2E_API_KEY="$key"
 uv run --locked --directory sdks/python pytest -m e2e tests/test_e2e.py
 pnpm --dir sdks/typescript exec vitest run src/e2e.test.ts
+export CETRA_E2E_ADMIN_EMAIL=ada@example.com CETRA_E2E_ADMIN_PASSWORD=cetra-e2e-1
+pnpm --dir node-cli run build
+pnpm --dir node-cli exec vitest run src/e2e.test.ts

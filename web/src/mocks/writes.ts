@@ -81,6 +81,14 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/auth/email/verify/resend",
   },
   { operationId: "post_invite_accept", method: "post", path: "/api/auth/invites/{token}/accept" },
+  { operationId: "post_device_code", method: "post", path: "/api/auth/device/code" },
+  { operationId: "post_device_token", method: "post", path: "/api/auth/device/token" },
+  {
+    operationId: "post_device_approve",
+    method: "post",
+    path: "/api/auth/device/{user_code}/approve",
+  },
+  { operationId: "post_device_deny", method: "post", path: "/api/auth/device/{user_code}/deny" },
   { operationId: "patch_me", method: "patch", path: "/api/v1/me" },
   { operationId: "post_me_password", method: "post", path: "/api/v1/me/password" },
   { operationId: "post_personal_token", method: "post", path: "/api/v1/me/tokens" },
@@ -550,6 +558,18 @@ const RESPONSES: Record<string, Respond> = {
   post_email_verify: () => noContent(),
   post_email_verify_resend: () => noContent(),
   post_invite_accept: () => HttpResponse.json(orgDocument),
+  post_device_code: () =>
+    HttpResponse.json({
+      device_code: "mock-device-code-0000000000000000000000000000",
+      user_code: "BCDF-GHJK",
+      verification_uri: "http://localhost:5173/device",
+      verification_uri_complete: "http://localhost:5173/device?code=BCDF-GHJK",
+      expires_in: 600,
+      interval: 5,
+    }),
+  post_device_token: () => problem(400, "authorization_pending"),
+  post_device_approve: () => noContent(),
+  post_device_deny: () => noContent(),
 
   patch_me: ({ body }) => {
     const { name: _name, ...unnamed } = meDocument.user;

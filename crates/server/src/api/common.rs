@@ -190,6 +190,14 @@ pub enum ProblemCode {
     RangeNotSatisfiable,
     /// The request conflicts with the current state.
     Conflict,
+    /// Device flow: the user has not approved or denied the code yet (RFC 8628 § 3.5).
+    AuthorizationPending,
+    /// Device flow: polled faster than the interval; the interval grew by 5 s.
+    SlowDown,
+    /// Device flow: the user denied the code.
+    AccessDenied,
+    /// Device flow: the code expired, was already used, or is unknown.
+    ExpiredToken,
     /// The org reached its monthly units cap (D-P-17).
     QuotaExceeded,
     /// Too many requests.
@@ -202,7 +210,13 @@ impl ProblemCode {
     /// HTTP status for this code.
     pub fn status(self) -> u16 {
         match self {
-            Self::BadRequest | Self::InvalidFilter | Self::QueryFailed => 400,
+            Self::BadRequest
+            | Self::InvalidFilter
+            | Self::QueryFailed
+            | Self::AuthorizationPending
+            | Self::SlowDown
+            | Self::AccessDenied
+            | Self::ExpiredToken => 400,
             Self::Unauthorized => 401,
             Self::Forbidden
             | Self::SsoRequired
@@ -230,7 +244,13 @@ impl ProblemCode {
     /// Canonical HTTP reason phrase of [`Self::status`].
     fn reason_phrase(self) -> &'static str {
         match self {
-            Self::BadRequest | Self::InvalidFilter | Self::QueryFailed => "Bad Request",
+            Self::BadRequest
+            | Self::InvalidFilter
+            | Self::QueryFailed
+            | Self::AuthorizationPending
+            | Self::SlowDown
+            | Self::AccessDenied
+            | Self::ExpiredToken => "Bad Request",
             Self::Unauthorized => "Unauthorized",
             Self::Forbidden
             | Self::SsoRequired
@@ -541,6 +561,23 @@ mod tests {
             "Unsupported Media Type"
         );
         assert_eq!(Problem::new(ProblemCode::Conflict, None).title, "Conflict");
+    }
+
+    #[test]
+    fn device_problem_codes_are_bad_requests() {
+        for code in [
+            ProblemCode::AuthorizationPending,
+            ProblemCode::SlowDown,
+            ProblemCode::AccessDenied,
+            ProblemCode::ExpiredToken,
+        ] {
+            assert_eq!(code.status(), 400);
+            assert_eq!(Problem::new(code, None).title, "Bad Request");
+        }
+        assert_eq!(
+            serde_json::to_value(ProblemCode::SlowDown).unwrap(),
+            "slow_down"
+        );
     }
 
     #[test]

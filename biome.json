@@ -9,6 +9,7 @@
     "includes": [
       "web/**",
       "sdks/typescript/**",
+      "node-cli/**",
       "tools/capture/ts/**",
       "tools/packaging/**",
       "website/**",

@@ -1,0 +1,82 @@
+---
+title: Set up with your coding agent
+description: Set an app up for cetra with one command, then give your coding agent the prompt it prints.
+---
+
+Use this page to set an app up for cetra with one command, then give your coding agent the prompt it prints.
+
+## Run the one-liner
+
+Run this in the directory of your app:
+
+```bash
+npx @cetra-ai/cli@latest init
+```
+
+`init` opens a sign-in page in your browser. If it cannot open a browser, it prints the URL. Sign in, choose the project, and approve the code that the terminal shows. The code has the form `ABCD-EFGH`. The command needs Node.js 22.12 or later.
+
+With no `--url`, `init` signs you in at `app.cetra.sh`, and the sign-in continues on your organization's region.
+
+## What it changes
+
+`init` writes these files in your app. Each one is also described in the [cetra-cli reference](/docs/reference/cetra-cli/).
+
+- `.env` gets `CETRA_BASE_URL` and `CETRA_API_KEY`. It is created with mode 0600. Existing lines stay as they are.
+- `.gitignore` gets a line for `.env`, if git does not ignore that file yet.
+- `.cetra/project.json` links the directory to the project. It holds no secret, so you can commit it.
+- The credentials file holds a read-only token for the server. It is kept in your config directory, with the tokens for your other servers. If you ran `cetra-cli login` for the same server, this token replaces that one.
+- `.claude/skills/cetra/` and `.agents/skills/cetra/` hold the cetra skill. Your coding agent reads it to add tracing.
+
+## The prompt
+
+After it writes the files, `init` prints a prompt. Paste it into your coding agent:
+
+```text
+Add cetra tracing to this app.
+
+1. Read the cetra skill (.claude/skills/cetra or .agents/skills/cetra). If it is not there, read https://cetra.sh/llms.txt.
+2. Find the app's language and LLM libraries, and install the cetra SDK with the matching extras or instrumentations. Call init once at startup. The API key and URL are CETRA_API_KEY and CETRA_BASE_URL in .env: load that file the way the app loads its settings. Never paste the key into code or chat.
+3. Run the app, or its tests, once so that it makes at least one LLM call. Flush before exit in short scripts.
+4. Check that traces arrived:
+   npx @cetra-ai/cli query "SELECT trace_id, name, start_time, span_count, llm_count, error_count FROM traces ORDER BY start_time DESC LIMIT 5" --since 15m --json
+   If it returns no rows, follow the troubleshooting steps of the skill.
+5. Tell me what you changed, and give me this link: <TRACES_URL>
+```
+
+`<TRACES_URL>` is the traces page of your project, for example `https://app.cetra.sh/<ORG>/<PROJECT>/traces`. With `--no-skill`, step 1 reads only https://cetra.sh/llms.txt.
+
+## Self-hosted
+
+The default server is the cloud, `https://app.cetra.sh`. For a self-hosted server, pass its URL:
+
+```bash
+npx @cetra-ai/cli@latest init --url http://localhost:8080
+```
+
+If nothing answers at a `localhost` URL, `init` starts a local server. It uses `cetra serve` when `cetra` is on your PATH, and Docker otherwise. It asks before it starts one, unless you pass `--yes`. The local server listens on 127.0.0.1 only.
+
+On its first start, the local server creates an admin account. Its email is `admin@cetra.local` unless you type another one, and `init` generates the password. The password is printed in the terminal once. If the output is not a terminal, `init` does not print it. Reset it with `cetra admin reset-password <EMAIL>`.
+
+With Docker, the admin email and password are in the container's configuration, because Docker keeps the `CETRA_INIT_*` variables there. `docker inspect cetra-local` shows them.
+
+## Without the CLI
+
+You can set an app up by hand:
+
+1. Install the skill with `npx skills add cetra-ai/skills`.
+2. Create a secret key on the [API keys and tokens](/docs/platform/api-keys/) page. Set `CETRA_API_KEY` to the key (`sk-cetra-…`) and `CETRA_BASE_URL` to the server URL, in your env file.
+3. Paste the [prompt](#the-prompt) into your coding agent. Replace `<TRACES_URL>` with the traces page of your project.
+
+## Check it yourself
+
+Run the check query from the prompt in the app's directory:
+
+```bash
+npx @cetra-ai/cli query "SELECT trace_id, name, start_time, span_count, llm_count, error_count FROM traces ORDER BY start_time DESC LIMIT 5" --since 15m
+```
+
+The command prints the traces of the last 15 minutes. It prints no rows until the app has sent a trace. If it exits with code 4, run `npx @cetra-ai/cli login`. The [cetra-cli reference](/docs/reference/cetra-cli/) lists every exit code.
+
+## Tracing the coding agent itself is different
+
+This page sets up tracing for your app. To trace the coding agent itself, see [Claude Code](/docs/integrations/claude-code/).

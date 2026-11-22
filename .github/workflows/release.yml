@@ -2,8 +2,8 @@ name: Release
 
 # A tag v<version> on main publishes that version (D-N-5, D-N-6): archives, checksums, SBOMs and
 # install.sh on a GitHub release, the multi-arch image and the chart on GHCR, and build
-# provenance attestations (D-N-7), then the Python SDK on PyPI and the TypeScript SDK on npm through
-# OIDC trusted publishing (D-N-37). A version with a pre-release part (v0.1.0-rc.1) makes a draft
+# provenance attestations (D-N-7), then the Python SDK on PyPI and the TypeScript SDK and the
+# cetra-cli on npm through OIDC trusted publishing (D-N-37, D-AO-2). A version with a pre-release part (v0.1.0-rc.1) makes a draft
 # pre-release, only the exact image tag, a PyPI pre-release (0.1.0rc1) and the npm dist-tag
 # `next`. docs/plans/n-packaging/README.md § Releasing.
 on:
@@ -188,6 +188,7 @@ jobs:
           tool: just@1.59.0
       - run: just check-py
       - run: just check-ts
+      - run: just check-cli-js
       - name: Build the SDK packages
         run: |
           set -euo pipefail
@@ -196,8 +197,11 @@ jobs:
           (cd sdks/python && uv build --no-sources --out-dir "$out/python")
           pnpm --dir sdks/typescript run build
           pnpm --dir sdks/typescript pack --pack-destination "$out/npm"
+          pnpm --dir node-cli run build
+          pnpm --dir node-cli pack --pack-destination "$out/npm"
           ls "$out/python/cetra_sdk-$py_version-py3-none-any.whl" "$out/python/cetra_sdk-$py_version.tar.gz"
           ls "$out/npm/cetra-ai-sdk-$VERSION.tgz"
+          ls "$out/npm/cetra-ai-cli-$VERSION.tgz"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sdk-python
@@ -371,7 +375,9 @@ jobs:
         with:
           name: sdk-npm
           path: ${{ runner.temp }}/npm
-      - name: Publish to npm
+      # One step per package. A step first asks npm whether this exact version is already there and
+      # skips the publish if so, so a re-run after a partial publish reaches the step that failed.
+      - name: Publish @cetra-ai/sdk to npm
         run: |
           set -euo pipefail
           # Trusted publishing needs npm >= 11.5.1; Node's bundled npm is used, not installed.
@@ -387,4 +393,30 @@ jobs:
           if [[ "$PRERELEASE" == "true" ]]; then
             tag=next
           fi
+          published="$(npm view "@cetra-ai/sdk@$VERSION" version 2>/dev/null || true)"
+          if [[ "$published" == "$VERSION" ]]; then
+            echo "@cetra-ai/sdk $VERSION is already on npm; not publishing it again"
+            exit 0
+          fi
           npm publish "$RUNNER_TEMP/npm/cetra-ai-sdk-$VERSION.tgz" --provenance --access public --tag "$tag"
+      - name: Publish @cetra-ai/cli to npm
+        run: |
+          set -euo pipefail
+          npm_version="$(npm --version)"
+          if ! node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            process.exit(a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1))) ? 0 : 1);
+          ' "$npm_version"; then
+            echo "npm $npm_version is older than 11.5.1, which trusted publishing needs" >&2
+            exit 1
+          fi
+          tag=latest
+          if [[ "$PRERELEASE" == "true" ]]; then
+            tag=next
+          fi
+          published="$(npm view "@cetra-ai/cli@$VERSION" version 2>/dev/null || true)"
+          if [[ "$published" == "$VERSION" ]]; then
+            echo "@cetra-ai/cli $VERSION is already on npm; not publishing it again"
+            exit 0
+          fi
+          npm publish "$RUNNER_TEMP/npm/cetra-ai-cli-$VERSION.tgz" --provenance --access public --tag "$tag"
