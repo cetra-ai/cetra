@@ -3,7 +3,7 @@
 ## Bootstrapping
 
 - On first start with an empty `users` table, the UI shows a **setup page** at `/setup?token=…`. While no user exists, `cetra serve` generates a random setup token at startup and logs that URL once at `warn` (D144). This is the only secret that is ever logged. `POST /api/auth/setup` requires the token. The first user signs up with email/password (or via a configured OIDC provider), becomes `is_instance_admin`, and creates the first org + project (owner role). An API key is shown at the end with copy-paste OTel/SDK snippets.
-- Headless alternative: `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD`, `CETRA_INIT_ORG`, `CETRA_INIT_PROJECT`, `CETRA_INIT_SECRET_KEY` (optional: a pre-chosen `sk` value, for IaC). It runs once, in one transaction, only when `users` is empty, and does not need the setup token. When `CETRA_INIT_SECRET_KEY` is set, it must be `sk-cetra-` plus 32 base62 characters, or startup fails.
+- Headless alternative: `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD`, `CETRA_INIT_ORG`, `CETRA_INIT_PROJECT`, `CETRA_INIT_SECRET_KEY` (optional: a pre-chosen `sk` value, for IaC). It runs once, in one transaction, only when `users` is empty, and does not need the setup token. When `CETRA_INIT_SECRET_KEY` is set, it must be `sk-cetra-` plus 32 base62 characters, or startup fails. `CETRA_INIT_READ_KEY` (optional) is a second pre-chosen `sk` value of the same project, created in the same transaction with scope `read` only and the name `init-read`, so an operator can read the project at once, also in restore mode (D-N-38). It has the same format check, must differ from `CETRA_INIT_SECRET_KEY`, and either failure stops startup with an error that names the variable, never the value. On a database that already has a user, every `CETRA_INIT_*` value is ignored, these keys included, and not checked.
 
 ## Sign-up policy
 
@@ -148,7 +148,7 @@ API keys are project-bound and their scopes map onto permissions: `ingest` (OTLP
 
 | Kind | Format | Scopes | Use |
 |---|---|---|---|
-| Secret | `sk-cetra-` + 32 base62 chars | default `ingest, read, write`; can be `ingest` only | OTel exporters, SDK, CI |
+| Secret | `sk-cetra-` + 32 base62 chars | default `ingest, read, write`; any non-empty subset of them (`ingest` only for exporters, `read` only for readers such as `CETRA_INIT_READ_KEY`) | OTel exporters, SDK, CI |
 | Public | `pk-cetra-` + 24 base62 chars | `feedback` | browsers (end-user feedback) |
 | Personal access token | `pat-cetra-` + 32 base62 chars | `read` or `read, write`; acts as the user | CLI, MCP (the only credential `/mcp` accepts, D-H-3) |
 

@@ -42,6 +42,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `init.org` | `CETRA_INIT_ORG` | unset |
 | `init.project` | `CETRA_INIT_PROJECT` | unset |
 | `init.secret_key` | `CETRA_INIT_SECRET_KEY` | unset (optional `sk-cetra-` key for headless init) |
+| `init.read_key` | `CETRA_INIT_READ_KEY` | unset (optional `sk-cetra-` key with scope `read` only, for headless init; 08 § Bootstrapping, D-N-38) |
 | `ingest.max_request_bytes` | | `"10MiB"` (before and after decompression) |
 | `ingest.max_spans_per_request` | | `50000` |
 | `ingest.max_inflight_bytes` | | `"256MiB"` (request bytes held at once, D-G-5) |

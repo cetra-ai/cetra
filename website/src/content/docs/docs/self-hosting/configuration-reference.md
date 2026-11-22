@@ -194,6 +194,7 @@ These settings create the first admin, organization and project on a database th
 | `init.org` | `CETRA_INIT_ORG` | string | unset | Name of the first organization. |
 | `init.project` | `CETRA_INIT_PROJECT` | string | unset | Name of the first project. |
 | `init.secret_key` | `CETRA_INIT_SECRET_KEY` | secret | unset | The project's ingest key, `sk-cetra-` followed by 32 letters or digits, so you know it in advance. Optional. |
+| `init.read_key` | `CETRA_INIT_READ_KEY` | secret | unset | A second key of the project with scope `read` only, in the same format and different from `init.secret_key`. It reads traces and cannot ingest or write. Optional. |
 
 ## `[log]`
 
