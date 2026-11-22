@@ -84,10 +84,8 @@ shows cache hits and misses. Each caching job has its own prefetch manifest
 (`manifest-key: github.job`) within the appropriate main or PR prefix. Selective
 warming is enabled; the entire remote is not downloaded before each build.
 
-The remote bucket is not bounded by kache's local cache limit. Garage has no
-built-in object lifecycle rules; if the bucket grows too large, delete old
-objects under `kache-v2/` and `kache-pr-v2/` with a script and a temporary
-broad key. Deleted entries are rebuilt on demand.
+The remote bucket is not bounded by kache's local cache limit; see
+[Cache cleanup](#cache-cleanup).
 
 Port 8443 of `s3.chapu.is` goes straight to Garage through Caddy, not through
 Cloudflare's proxy, so Cloudflare's 100 MB cap on a request body does not apply to
@@ -97,6 +95,81 @@ Encrypt through the Cloudflare DNS challenge.
 References:
 [kache action](https://github.com/kunobi-ninja/kache-action/tree/ad7317540dcdd71c904f7a60a87b620a0c0e67ed),
 [kache CI write policy](https://ninja.kunobi.com/docs/kache/remote-cache/ci#who-may-write).
+
+## Cache cleanup
+
+The bucket has a 100 GiB Garage quota. kache 2.0 cannot prune a remote, and
+Garage records when an object was written, not when it was last read, so two
+rules keep the bucket under the quota:
+
+- **PR builds expire after 2 days**: a lifecycle rule on the bucket
+  (`kache-pr-expiry`) expires `kache-pr-v2/` objects 2 days after they are
+  written, and incomplete multipart uploads after 1 day. Garage applies it once
+  a day. An owner PR idle for longer rebuilds its own crates once.
+- **Main builds keep what a job still uses**: a nightly cron job on the Garage
+  host (03:30, `~/kache-prune/kache_prune.py prune --delete`, log in
+  `~/kache-prune/prune.log`) reads every kache manifest
+  (`<prefix>/_manifests/**`, which lists the `cache_key` of each crate the
+  latest build of a job used) and deletes, from `kache-v2/v3/packs/<crate>/`,
+  each `<cache_key>.tar.zst` that no manifest names, that is older than 48
+  hours and that is not among the 2 newest of its crate: old commits' builds of
+  the workspace crates, and dependency builds no job uses any more. Write time
+  alone is not a rule: Garage records when an object was written, not when it
+  was read, and a dependency written two weeks ago may be hit on every run (a
+  first version that kept the 16 newest objects per crate deleted DataFusion
+  builds `rust-test` still used). If the manifests name fewer than 200 keys
+  (missing, or a new kache manifest format), the script deletes nothing in
+  `kache-v2/`. Crates named `llmobs_*` (before the D46 rename) are deleted;
+  `_manifests/` and unknown keys are never deleted.
+
+The script uses its own Garage key, `kache-prune` (read, write and owner on
+`kache`, for the lifecycle rule), from `~/kache-prune/credentials.json` (mode
+600). Without `--delete`, `prune` is a dry run; `inventory` shows the size by
+prefix, by day written and by crate; `lifecycle --apply` sets the PR rule.
+
+A full bucket makes every upload fail with `AccessDenied: Forbidden: Bucket size
+quota is reached`. kache-action's post step only warns (`kache sync --push exited
+with code 1`, `Failed uploads` in its job summary), so on main pushes
+`rust-test (1/4)` runs `just cache-push` first, which fails the job. It
+happened once: from 2026-11-21 to 2026-11-22 nothing was cached, and every run
+recompiled the workspace crates. If it happens again, run `inventory` and a
+dry-run `prune` on the Garage host, then `prune --delete`, or raise the quota
+(`garage bucket set-quotas kache --max-size …`).
+
+## Rust tests
+
+`rust-test` runs `just test` in four parallel shards, `rust-test (1/4)` to
+`rust-test (4/4)`, and `ci-ok` needs every shard. Each shard runs
+`just test-shard <k> 4`:
+
+- cargo-nextest 0.9.151 (installed by `actions/rust` with `nextest: "true"`) runs
+  slice `k/4` of the unit and integration tests. A slice deals the tests
+  round-robin across all test binaries, after filtering.
+- The last shard also runs the storage crash harness (`just test-crash`: the
+  ignored crash tests named by `crash_tests` in the `justfile`), all 13 in one
+  parallel nextest run of about a minute. Its longest test takes about 45 s, so
+  slicing it would only spread that minute over the shards.
+
+The doctests (`just test-doc`, `cargo test --doc`; nextest does not run them) run
+in `rust-lint`, which finishes well before the shards: on a shard their
+compilation alone added 1.5 minutes.
+
+`NEXTEST_PROFILE=ci` selects the `ci` profile of `.config/nextest.toml`: no
+fail-fast, no retries (a flaky test fails its shard instead of passing on a
+retry), and tests slower than 60 s are named in the log. The log gives each
+test's time.
+
+Each shard compiles the same test binaries; with the cache warm they come from
+kache. Only shard 1 saves to the cache (`save-cache` input of `actions/rust`), so
+the shards do not upload the same crates four times. Standard runners have 4
+CPUs and larger runners are not available to the organisation, so the shards are
+the only way to run more tests at once. Measured on PR #219 with the cache warm
+(the test binaries from kache): each shard compiles for about 3 minutes and
+tests for 2 to 3 (about 38 thread-minutes of tests in all; the slowest test
+takes about 50 s), 6 to 8.5 minutes per shard, down from 21 minutes for one
+job. A PR that changes `cetra-server` recompiles its test binary on every
+shard, about 5 minutes. Add shards when a shard's test time grows past its
+compile time.
 
 ## Release workflow
 

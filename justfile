@@ -19,24 +19,39 @@ lint:
     # `--all-targets` skips the storage `test = false` targets (benchmarks, S3 probes); name them.
     cargo clippy --workspace --all-targets --all-features --test ingest_bench --test trace_bench --test s3_chaos --test s3_probe -- -D warnings
 
-# Run all Rust tests
-test:
-    cargo test --workspace --all-features
-    # The crash tests must reuse the workspace feature set: `-p cetra-storage`
-    # resolves different features and rebuilds every dependency from scratch.
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_retention_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows
+# The ignored tests that `just test` runs too, as a nextest filterset: the storage crash harness
+# (each crash test re-runs its own test binary as the child it kills).
+crash_tests := "test(=crash_tests::every_flush_hook_aborts_safely) | test(=crash_tests::every_compaction_hook_aborts_safely) | test(=crash_tests::every_deletion_hook_aborts_safely) | test(=crash_tests::every_media_hook_aborts_safely) | test(=crash_tests::every_drop_hook_aborts_safely) | test(=crash_tests::every_flush_hook_survives_a_lossy_crash) | test(=crash_tests::every_compaction_hook_survives_a_lossy_crash) | test(=crash_tests::every_deletion_hook_survives_a_lossy_crash) | test(=crash_tests::every_media_hook_survives_a_lossy_crash) | test(=crash_tests::every_drop_hook_survives_a_lossy_crash) | test(=model_tests::hook_crash::every_model_hook_crash_reads_back) | test(=crash_tests::every_retention_hook_aborts_safely) | test(=crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows)"
+
+# Run all Rust tests: cargo-nextest runs the unit and integration tests and the crash harness,
+# cargo test the doctests
+test: (test-nextest "") test-crash test-doc
+
+# The unit and integration tests with nextest. `partition` is empty for every test, or one CI
+# shard as a nextest slice, e.g. `slice:2/4`. The Rust test recipes use the workspace feature
+# set: `-p cetra-storage` resolves different features and rebuilds every dependency.
+test-nextest partition:
+    cargo nextest run --workspace --all-features {{ if partition == "" { "" } else { "--partition " + partition } }}
+
+# The storage crash harness (ignored tests, run in parallel)
+test-crash:
+    cargo nextest run --workspace --all-features --run-ignored only -E '{{crash_tests}}'
+
+# The doctests (nextest does not run them); CI runs them in rust-lint
+test-doc:
+    cargo test --workspace --all-features --doc
+
+# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests): a slice of
+# the unit and integration tests; the last shard also runs the crash harness. The doctests run
+# in rust-lint.
+test-shard shard total: (test-nextest "slice:" + shard + "/" + total)
+    {{ if shard == total { "just test-crash" } else { "true" } }}
+
+# Upload the build's compiled crates to the kache remote now, failing on any failed upload. CI
+# runs it on main pushes: kache-action's own upload only warns, so a full bucket would go unseen
+# (.github/CI.md § Cache cleanup).
+cache-push:
+    kache sync --push
 
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":

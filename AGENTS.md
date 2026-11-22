@@ -170,7 +170,8 @@ Run everything through `just`:
 | `just cli-smoke <tarball>` | install a packed cetra-cli and run --version |
 | `just fmt` | format Rust, the web and TypeScript SDK (Biome), and the Python SDK (ruff) |
 | `just lint` | clippy, warnings as errors |
-| `just test` | all Rust tests |
+| `just test` | all Rust tests: cargo-nextest for the unit and integration tests and the crash harness, `cargo test --doc` for the doctests |
+| `just test-shard <k> <n>` | shard `k` of `n` of the nextest tests (`slice:` partition), the last with the crash harness; CI's `rust-test` matrix runs one per job, and `rust-lint` runs `just test-doc` |
 | `just model [cases]` | the storage model test with more cases, in release mode (D-R-14) |
 | `just model-s3 [cases]` | the storage model test on a remote store with injected S3 faults, in release mode (R M4) |
 | `just s3-chaos` | the S3 fault tests through toxiproxy in front of an S3 endpoint (R M4) |
@@ -220,6 +221,7 @@ Required tools:
 - `rustup` (the toolchain is pinned in `rust-toolchain.toml`)
 - `just`
 - `cargo-deny` (`cargo install cargo-deny --locked`)
+- `cargo-nextest` 0.9.127 or later (`cargo install cargo-nextest --locked`); `just test` runs the tests with it
 - Node (version in `.node-version`)
 - `pnpm` (version in the root `package.json` `packageManager`)
 - `uv`

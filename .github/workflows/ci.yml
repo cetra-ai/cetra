@@ -50,15 +50,25 @@ jobs:
           cache: ${{ env.CI_CACHE_ALLOWED }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
-      - run: just fmt-check lint
+      # The doctests run here, off the rust-test shards (.github/CI.md § Rust tests).
+      - run: just fmt-check lint test-doc
       - run: just assert-clean
 
+  # `just test` in parallel shards (.github/CI.md § Rust tests). Each shard compiles the same
+  # test binaries (from the cache when they are in it) and runs its slice of the tests.
   rust-test:
+    name: rust-test (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     environment:
       name: s3-cache
       deployment: false
-    timeout-minutes: 45
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      NEXTEST_PROFILE: ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,10 +76,16 @@ jobs:
       - uses: ./.github/actions/rust # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
         with:
           mold: "true"
+          nextest: "true"
           cache: ${{ env.CI_CACHE_ALLOWED }}
+          # The shards compile the same crates: one saves them.
+          save-cache: ${{ matrix.shard == 1 }}
           s3-access-key-id: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_ACCESS_KEY_ID || '' }}
           s3-secret-access-key: ${{ env.CI_CACHE_ALLOWED == 'true' && secrets.S3_CACHE_SECRET_ACCESS_KEY || '' }}
-      - run: just test
+      - run: just test-shard ${{ matrix.shard }} 4
+      # Fails main when uploads fail (a full bucket); kache-action's post step only warns.
+      - if: matrix.shard == 1 && github.event_name == 'push' && env.CI_CACHE_ALLOWED == 'true'
+        run: just cache-push
       - run: just assert-clean
 
   rust-policy:
