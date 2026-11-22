@@ -16,6 +16,16 @@ describe("stripBlocks", () => {
   it("removes a block revealed by removing another", () => {
     assert.equal(stripBlocks("a<scr<!-- c -->ipt>x</script>b"), "ab");
   });
+  it("removes an end tag with attributes-like text before >", () => {
+    assert.equal(stripBlocks("a<script>x</script\t\n bar>b"), "ab");
+  });
+  it("matches tags in any case and keeps lookalike tags", () => {
+    assert.equal(stripBlocks("a<SCRIPT type='m'>x</Script>b<scripts>c"), "ab<scripts>c");
+  });
+  it("drops an unclosed block or comment to the end", () => {
+    assert.equal(stripBlocks("a<style>x"), "a");
+    assert.equal(stripBlocks("a<!-- x"), "a");
+  });
 });
 
 // A valid page built from parts. Each part can be replaced by a test.

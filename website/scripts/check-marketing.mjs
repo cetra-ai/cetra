@@ -38,12 +38,47 @@ export function stripBlocks(html) {
   let previous;
   do {
     previous = out;
-    out = out
-      .replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi, "")
-      .replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi, "")
-      .replace(/<!--[\s\S]*?-->/g, "");
+    out = stripOnce(out);
   } while (out !== previous);
   return out;
+}
+
+/**
+ * One left-to-right pass: drops each `<script…>…</script…>`, `<style…>…</style…>` and
+ * `<!--…-->`. An end tag runs to the next ">", whatever comes between. An unclosed block runs to
+ * the end. Plain string search, no regular expression.
+ */
+function stripOnce(html) {
+  const lower = html.toLowerCase();
+  let out = "";
+  let i = 0;
+  while (i < html.length) {
+    const lt = lower.indexOf("<", i);
+    if (lt === -1) break;
+    let end = -1;
+    if (lower.startsWith("<!--", lt)) {
+      const close = lower.indexOf("-->", lt + 4);
+      end = close === -1 ? html.length : close + 3;
+    } else {
+      for (const tag of ["script", "style"]) {
+        const next = lower.charAt(lt + 1 + tag.length);
+        if (lower.startsWith(tag, lt + 1) && (next === "" || /[\s>/]/.test(next))) {
+          const close = lower.indexOf(`</${tag}`, lt);
+          const gt = close === -1 ? -1 : lower.indexOf(">", close);
+          end = gt === -1 ? html.length : gt + 1;
+          break;
+        }
+      }
+    }
+    if (end === -1) {
+      out += html.slice(i, lt + 1);
+      i = lt + 1;
+    } else {
+      out += html.slice(i, lt);
+      i = end;
+    }
+  }
+  return out + html.slice(i);
 }
 
 /** Parses an attribute string into a Map. Names are lower-cased; a bare attribute is "". */
