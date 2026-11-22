@@ -38,11 +38,10 @@ test-nextest partition:
 test-doc:
     cargo test --workspace --all-features --doc
 
-# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests); the first
+# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests); the last
 # shard also runs the doctests
-test-shard shard total:
-    just test-nextest slice:{{shard}}/{{total}}
-    {{ if shard == "1" { "just test-doc" } else { "true" } }}
+test-shard shard total: (test-nextest "slice:" + shard + "/" + total)
+    {{ if shard == total { "just test-doc" } else { "true" } }}
 
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":

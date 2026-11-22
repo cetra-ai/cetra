@@ -89,6 +89,15 @@ built-in object lifecycle rules; if the bucket grows too large, delete old
 objects under `kache-v2/` and `kache-pr-v2/` with a script and a temporary
 broad key. Deleted entries are rebuilt on demand.
 
+A full bucket fails silently: the jobs stay green, but every upload gets
+`AccessDenied: Forbidden: Bucket size quota is reached`, the kache post step warns
+`kache sync --push exited with code 1`, and its job summary shows
+`Failed uploads` with `Uploaded 0 B`. Nothing new is cached, so every run
+recompiles the workspace crates (the `cetra_server` test binary alone takes
+about 5 minutes on a standard runner). When the summary shows failed uploads,
+check the bucket's quota (`garage bucket info kache`) and raise it or prune old
+objects.
+
 Port 8443 of `s3.chapu.is` goes straight to Garage through Caddy, not through
 Cloudflare's proxy, so Cloudflare's 100 MB cap on a request body does not apply to
 the large cached executables kache uploads. Caddy gets its certificate from Let's
@@ -97,6 +106,32 @@ Encrypt through the Cloudflare DNS challenge.
 References:
 [kache action](https://github.com/kunobi-ninja/kache-action/tree/ad7317540dcdd71c904f7a60a87b620a0c0e67ed),
 [kache CI write policy](https://ninja.kunobi.com/docs/kache/remote-cache/ci#who-may-write).
+
+## Rust tests
+
+`rust-test` runs `just test` in four parallel shards, `rust-test (1/4)` to
+`rust-test (4/4)`, and `ci-ok` needs every shard. Each shard runs
+`just test-shard <k> 4`:
+
+- cargo-nextest 0.9.151 (installed by `actions/rust` with `nextest: "true"`) runs
+  slice `k/4` of the unit and integration tests, then slice `k/4` of the ignored
+  storage crash tests that `just test` names (`crash_tests` in the `justfile`).
+  A slice deals the tests round-robin across all test binaries, after filtering.
+- The last shard also runs the doctests with `cargo test --doc` (nextest does not
+  run them).
+
+`NEXTEST_PROFILE=ci` selects the `ci` profile of `.config/nextest.toml`: no
+fail-fast, no retries (a flaky test fails its shard instead of passing on a
+retry), and tests slower than 60 s are named in the log. The log gives each
+test's time.
+
+Each shard compiles the same test binaries; with the cache warm they come from
+kache. Only shard 1 saves to the cache (`save-cache` input of `actions/rust`), so
+the shards do not upload the same crates four times. Standard runners have 4
+CPUs and larger runners are not available to the organisation, so the shards are
+the only way to run more tests at once. Test time, measured on PR #219: about 38
+thread-minutes in all, 1.5 to 3 minutes per shard; the slowest test takes about
+50 s. Add shards when a shard's test time grows past compile time.
 
 ## Release workflow
 
