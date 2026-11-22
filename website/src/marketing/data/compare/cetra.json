@@ -50,8 +50,8 @@
       "sources": ["/docs/"]
     },
     "alerts": {
-      "value": "Error rate, cost, latency and scores, to Slack, email or a signed webhook",
-      "sources": ["/docs/platform/alerts/"]
+      "value": "Error rate, cost, latency, scores and issue occurrences, to Slack, email or a signed webhook",
+      "sources": ["/docs/platform/alerts/", "/docs/evaluation/issues/"]
     },
     "issueDetection": {
       "value": "Errors grouped by fingerprint; bad scores, feedback and topics clustered on your LLM connection",

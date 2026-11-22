@@ -245,7 +245,7 @@ S4 replaces both alt texts.
 
 1. `CodingAgents.astro` copies `Agents.astro`'s structure and styles: the two-column `.agents` grid, `.text`, `.features`, `.docs-link`. Rename the class prefix to `.coding`. Its content:
    - `Section tone="teal" divider labelledby="coding-title"`;
-   - `SectionHeading` with eyebrow `Coding agents`, title `See what your coding agents cost.`, `id="coding-title"`, and lede `Trace Claude Code, Codex, Gemini CLI and GitHub Copilot. Every prompt, model call and tool call, with tokens and API-equivalent cost per person, and per repository and branch where the agent reports them.`;
+   - `SectionHeading` with eyebrow `Coding agents`, title `See what your coding agents cost.`, `id="coding-title"`, and lede `Trace Claude Code, Codex, Gemini CLI and GitHub Copilot. Every turn, model call and tool call, with tokens and API-equivalent cost per person, and per repository and branch where the agent reports them.`;
    - a `ul.features.bullets` with `One cetra agents setup command for Claude Code, Codex and Gemini CLI`, `A ready-made Coding agents dashboard`, `Claude Code: leave prompts and tool output out with --no-content`, `API-equivalent cost, to compare people, repositories and sessions`;
    - `.docs-link` with `Button href="/docs/integrations/claude-code/" variant="ghost"` `Set up Claude Code →`;
    - the visual, a `Terminal` with `title="terminal"` and these lines:
@@ -319,7 +319,7 @@ export const EVERY_PLAN = [
 
    Before writing, check the exact wording in the file and adapt the substrings to it.
 3. `pricing.astro`: a new `Section tone="teal" divider labelledby="every-title"` right after the plans section (before the calculator). It has:
-   - a `SectionHeading` with eyebrow `Every plan`, title `The whole product, on every plan.`, `id="every-title"`, and lede `Free included. Plans differ in volume, history, seats and how many rules you set up. Retention controls come with Pro, and single sign-on with the Teams add-on.`;
+   - a `SectionHeading` with eyebrow `Every plan`, title `The whole product, on every plan.`, `id="every-title"`, and lede `Free included. Plans differ in volume, history, seats and how many rules you set up. Retention controls come with Pro, and single sign-on and project roles with the Teams add-on.`;
    - a `ul.bullets` of `EVERY_PLAN` in two columns at ≥ 860 px and one below.
 
    Check "Retention controls come with Pro" against the Pro plan's `blurb` and D177 ("data retention management").
