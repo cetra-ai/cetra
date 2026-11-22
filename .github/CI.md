@@ -106,14 +106,21 @@ rules keep the bucket under the quota:
   (`kache-pr-expiry`) expires `kache-pr-v2/` objects 2 days after they are
   written, and incomplete multipart uploads after 1 day. Garage applies it once
   a day. An owner PR idle for longer rebuilds its own crates once.
-- **Main builds keep the 16 newest objects per crate**: a nightly cron job on
-  the Garage host (03:30, `~/kache-prune/kache_prune.py prune --delete`, log in
-  `~/kache-prune/prune.log`) deletes, in each `kache-v2/v3/packs/<crate>/`,
-  everything but the 16 newest objects and anything younger than 48 hours.
-  Workspace crates get a new hash on every commit and churn; dependencies keep
-  theirs for weeks and stay. `build_script_build` (the shared name of every
-  build script), `_manifests/` and unknown keys are never pruned; crates named
-  `llmobs_*` (before the D46 rename) are deleted.
+- **Main builds keep what a job still uses**: a nightly cron job on the Garage
+  host (03:30, `~/kache-prune/kache_prune.py prune --delete`, log in
+  `~/kache-prune/prune.log`) reads every kache manifest
+  (`<prefix>/_manifests/**`, which lists the `cache_key` of each crate the
+  latest build of a job used) and deletes, from `kache-v2/v3/packs/<crate>/`,
+  each `<cache_key>.tar.zst` that no manifest names, that is older than 48
+  hours and that is not among the 2 newest of its crate: old commits' builds of
+  the workspace crates, and dependency builds no job uses any more. Write time
+  alone is not a rule: Garage records when an object was written, not when it
+  was read, and a dependency written two weeks ago may be hit on every run (a
+  first version that kept the 16 newest objects per crate deleted DataFusion
+  builds `rust-test` still used). If the manifests name fewer than 200 keys
+  (missing, or a new kache manifest format), the script deletes nothing in
+  `kache-v2/`. Crates named `llmobs_*` (before the D46 rename) are deleted;
+  `_manifests/` and unknown keys are never deleted.
 
 The script uses its own Garage key, `kache-prune` (read, write and owner on
 `kache`, for the lifecycle rule), from `~/kache-prune/credentials.json` (mode
