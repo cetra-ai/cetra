@@ -245,6 +245,9 @@ pub struct StrataFile {
     /// Chunk dictionaries of the narrow columns read so far, by the offset of the column's
     /// first chunk segment: the end of its last chunk segment, and the dictionary.
     chunk_dicts: Mutex<BTreeMap<u64, (u64, Arc<Dict>)>>,
+    /// Largest gap and largest range a point read merges (`Config::point_gap`,
+    /// `Config::point_max_range`).
+    point_merge: (u64, u64),
     /// Ranged GET requests issued by `fetch`.
     requests: AtomicU64,
     /// Bytes fetched by `fetch`.
@@ -456,6 +459,7 @@ impl StrataFile {
             payload_headers: Mutex::new(HashMap::new()),
             payload_stores: Mutex::new(HashMap::new()),
             chunk_dicts: Mutex::new(BTreeMap::new()),
+            point_merge: (config.point_gap, config.point_max_range),
             requests: AtomicU64::new(0),
             bytes: AtomicU64::new(0),
             waves: AtomicU64::new(0),
@@ -672,7 +676,7 @@ impl StrataFile {
             ranges.push(r.offset..end);
             kept.push(slice);
         }
-        let (merged, owner) = coalesce(&remote, kind);
+        let (merged, owner) = coalesce(&remote, kind, self.point_merge);
         // Up to the process's limit in flight, which `get_range` enforces across waves; one
         // wave of a common search on S3 makes about a thousand requests, and 64 at a time cost
         // 16 latencies (`real-data.md` § Simulated S3). `buffered` keeps the order.

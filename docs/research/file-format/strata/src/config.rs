@@ -37,6 +37,17 @@ pub struct Config {
     /// Largest metadata section an open reads with the hot tail. Default 4 MiB. A larger one is
     /// read column by column, as queries need it, which costs a wave of requests the first time.
     pub open_metadata_max: u64,
+    /// Largest gap between two segments that one point read (a lookup's or a metadata request)
+    /// merges; searches keep 4 KiB ([`ScanKind::Sparse`](crate::ScanKind)).
+    /// Default 4 KiB, for local disk. On an object store a request costs a first-byte latency,
+    /// in which one connection transfers megabytes, and a wave waits for its slowest request, so
+    /// a larger gap (hundreds of KiB) makes fewer requests per wave (`real-data.md` § Real S3).
+    /// Read-side only: the file is the same for any value.
+    pub point_gap: u64,
+    /// Largest range one point read merges into, unless a single segment is larger. Default
+    /// unbounded. With a large `point_gap` it keeps one request from carrying megabytes, which
+    /// on an object store take longer to transfer than a request's latency. Read-side only.
+    pub point_max_range: u64,
     /// Threads the writer compresses and indexes payload frames on. Default: the number of
     /// cores. The file is the same for any value; 1 writes on the calling thread only.
     pub write_threads: usize,
@@ -71,6 +82,8 @@ impl Default for Config {
             key_filter_columns: vec!["user_id".into(), "session_id".into()],
             open_default_suffix: 1024 * 1024,
             open_metadata_max: 4 * 1024 * 1024,
+            point_gap: crate::io::POINT_GAP,
+            point_max_range: u64::MAX,
         }
     }
 }

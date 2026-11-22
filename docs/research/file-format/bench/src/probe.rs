@@ -12,7 +12,8 @@
 //! gives the simulator's first-byte latency and per-connection throughput.
 //!
 //! `fmtbench upload <dir> s3://bucket/key [variant...]` copies a local dataset directory under
-//! the key, skipping objects that already exist with the same size.
+//! the key, skipping objects that already exist with the same size. `fmtbench download
+//! s3://bucket/key <dir>` copies them back, skipping files that already exist with the same size.
 
 use std::path::Path as FsPath;
 use std::sync::Arc;
@@ -306,6 +307,60 @@ pub async fn upload(dir: &FsPath, url: &str, only: &[String]) -> R<()> {
         "uploaded {} files, {} MiB in {:.0} s; {skipped} already there",
         results.len() - skipped,
         sent >> 20,
+        t.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Copies every object under `url` into `dir`, at its path relative to the key.
+pub async fn download(url: &str, dir: &FsPath) -> R<()> {
+    let (bucket, key) = split_url(url)?;
+    let store = crate::s3_store(&bucket)?;
+    let prefix = Path::parse(&key)?;
+    let objects: Vec<object_store::ObjectMeta> = store.list(Some(&prefix)).try_collect().await?;
+    let t = Instant::now();
+    let results: Vec<(u64, bool)> = futures::stream::iter(objects)
+        .map(|meta| {
+            let store = Arc::clone(&store);
+            let rel: Vec<String> = meta.location.prefix_match(&prefix).map(|parts| parts.map(|p| p.as_ref().to_owned()).collect()).unwrap_or_default();
+            async move {
+                if rel.is_empty() {
+                    return Err::<_, Box<dyn std::error::Error + Send + Sync>>(format!("{} is not under the key", meta.location).into());
+                }
+                let file = rel.iter().fold(dir.to_path_buf(), |p, part| p.join(part));
+                if std::fs::metadata(&file).is_ok_and(|m| m.len() == meta.size) {
+                    return Ok((meta.size, false));
+                }
+                if let Some(parent) = file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let mut part = file.clone().into_os_string();
+                part.push(".part");
+                let mut out = std::fs::File::create(&part)?;
+                let mut stream = store.get(&meta.location).await?.into_stream();
+                let mut got = 0u64;
+                while let Some(chunk) = stream.try_next().await? {
+                    std::io::Write::write_all(&mut out, &chunk)?;
+                    got += chunk.len() as u64;
+                }
+                if got != meta.size {
+                    return Err(format!("{}: got {got} of {} bytes", meta.location, meta.size).into());
+                }
+                out.sync_all()?;
+                std::fs::rename(&part, &file)?;
+                println!("  {} ({} KiB)", rel.join("/"), meta.size >> 10);
+                Ok((meta.size, true))
+            }
+        })
+        .buffer_unordered(8)
+        .try_collect()
+        .await?;
+    let got: u64 = results.iter().filter(|r| r.1).map(|r| r.0).sum();
+    let skipped = results.iter().filter(|r| !r.1).count();
+    println!(
+        "downloaded {} files, {} MiB in {:.0} s; {skipped} already there",
+        results.len() - skipped,
+        got >> 20,
         t.elapsed().as_secs_f64()
     );
     Ok(())

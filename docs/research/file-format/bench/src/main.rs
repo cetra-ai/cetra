@@ -9,6 +9,7 @@
 mod counting;
 mod payload;
 mod pqfast;
+mod hedge;
 mod probe;
 mod profile;
 mod series;
@@ -112,6 +113,7 @@ async fn run() -> R<()> {
             let reps: usize = args.get(3).map(|s| s.parse()).transpose()?.unwrap_or(50);
             probe::probe(args.get(2).ok_or(USAGE)?, reps).await
         }
+        Some("download") => probe::download(args.get(2).ok_or(USAGE)?, Path::new(args.get(3).ok_or(USAGE)?)).await,
         Some("upload") => probe::upload(Path::new(args.get(2).ok_or(USAGE)?), args.get(3).ok_or(USAGE)?, args.get(4..).unwrap_or_default()).await,
         Some("series") => {
             let runs: usize = args.get(4).map(|s| s.parse()).transpose()?.unwrap_or(5);
@@ -143,7 +145,7 @@ async fn run() -> R<()> {
     }
 }
 
-const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | probe <s3://bucket/key> [reps] | upload <dir> <s3://bucket/key> [variant...] | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (R2: auto), and AWS_ALLOW_HTTP=true for a plain-HTTP endpoint";
+const USAGE: &str = "usage: fmtbench gen <dir> <traces> <files> [--swe <max_trajectories> <shard>... | --convo <max_conversations> <file>...] | query <dir|s3://bucket/key> [runs] [only] | profile <dir|s3://bucket/key> [runs] | probe <s3://bucket/key> [reps] | upload <dir> <s3://bucket/key> [variant...] | download <s3://bucket/key> <dir> | merge <dir> (local only) | restrata <dir> [out] (local only) | series <data> <out> [runs] [datasets...] (local only) | fineweb <dir> <spans> <spans_per_file> <fineweb.parquet>... (local only; FMT_QUERYSET=braintrust for its queries)\n  s3 needs AWS_ENDPOINT, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_DEFAULT_REGION (R2: auto), and AWS_ALLOW_HTTP=true for a plain-HTTP endpoint";
 
 // ------------------------------------------------------------------ generate
 
@@ -611,8 +613,14 @@ fn s3_store(bucket: &str) -> R<Arc<dyn ObjectStore>> {
 fn location(dir: &str) -> R<Location> {
     if dir.starts_with("s3://") {
         let (bucket, key) = probe::split_url(dir)?;
+        let mut store = s3_store(&bucket)?;
+        // FMT_HEDGE_MS=n: a GET still running after n ms gets a second copy (hedge.rs).
+        if let Some(ms) = std::env::var("FMT_HEDGE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+            store = Arc::new(hedge::Hedge::new(store, std::time::Duration::from_millis(ms)));
+            println!("hedged GETs after {ms} ms");
+        }
         return Ok(Location {
-            store: Arc::new(counting::Counting::new(s3_store(&bucket)?)),
+            store: Arc::new(counting::Counting::new(store)),
             url: url::Url::parse(&format!("s3://{bucket}/"))?,
             prefix: ObjPath::parse(&key)?,
         });
@@ -666,14 +674,44 @@ async fn has_files(loc: &Location, variant: &str) -> R<bool> {
     Ok(objects.try_next().await?.is_some())
 }
 
-/// The `.strata` files of a variant, sorted by path, opened concurrently.
+/// Each file's tail length from its first open, given back as the open's hint when
+/// `FMT_OPEN_HINT` is set, as a catalog would (`FileSummary::tail_len`).
+static TAIL_HINTS: std::sync::Mutex<Option<std::collections::HashMap<ObjPath, u64>>> = std::sync::Mutex::new(None);
+
+/// The `.strata` files of a variant, sorted by path, opened concurrently. `FMT_OPEN_SUFFIX`
+/// sets the first read's length when there is no hint (default `Config::open_default_suffix`),
+/// `FMT_POINT_GAP` and `FMT_POINT_MAX_RANGE` how a lookup's reads merge.
 async fn open_strata(loc: &Location, variant: &str) -> R<Vec<Arc<StrataFile>>> {
     let mut metas: Vec<ObjectMeta> = loc.store.list(Some(&loc.prefix.clone().join(variant))).try_collect().await?;
     metas.retain(|m| m.location.to_string().ends_with(".strata"));
     metas.sort_by(|a, b| a.location.cmp(&b.location));
-    let cfg = Config::default();
+    let mut cfg = Config::default();
+    if let Some(n) = std::env::var("FMT_OPEN_SUFFIX").ok().and_then(|v| v.parse().ok()) {
+        cfg.open_default_suffix = n;
+    }
+    // FMT_POINT_GAP: the largest gap a lookup's read merges (`Config::point_gap`).
+    if let Some(n) = std::env::var("FMT_POINT_GAP").ok().and_then(|v| v.parse().ok()) {
+        cfg.point_gap = n;
+    }
+    // FMT_POINT_MAX_RANGE: the largest range a lookup's read merges into.
+    if let Some(n) = std::env::var("FMT_POINT_MAX_RANGE").ok().and_then(|v| v.parse().ok()) {
+        cfg.point_max_range = n;
+    }
+    let use_hints = std::env::var_os("FMT_OPEN_HINT").is_some();
+    let hint = |p: &ObjPath| {
+        let hints = TAIL_HINTS.lock().unwrap_or_else(|e| e.into_inner());
+        if use_hints { hints.as_ref().and_then(|h| h.get(p).copied()) } else { None }
+    };
     let store: Arc<dyn ObjectStore> = loc.store.clone();
-    let files = try_join_all(metas.into_iter().map(|m| StrataFile::open(store.clone(), m.location, None, &cfg))).await?;
+    let paths: Vec<ObjPath> = metas.into_iter().map(|m| m.location).collect();
+    let files = try_join_all(paths.iter().map(|p| StrataFile::open(store.clone(), p.clone(), hint(p), &cfg))).await?;
+    if use_hints {
+        let mut hints = TAIL_HINTS.lock().unwrap_or_else(|e| e.into_inner());
+        let map = hints.get_or_insert_with(std::collections::HashMap::new);
+        for (p, f) in paths.iter().zip(&files) {
+            map.entry(p.clone()).or_insert_with(|| f.tail_len());
+        }
+    }
     Ok(files.into_iter().map(Arc::new).collect())
 }
 
@@ -1267,7 +1305,12 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
         base.push(t.elapsed().as_secs_f64() * 1e3);
     }
     println!("SELECT 1 in a fresh context: mean {:.2} ms over {} runs", base.iter().sum::<f64>() / n, base.len());
-    println!("trace_lookup_cold: {} ids, {runs} passes; reqs exclude HEAD and LIST; waves = open + lookup (st, st_fast); local disk: OS page cache warm", ids.len());
+    // FMT_OPEN_HINT: learn each file's tail length before timing, as a catalog would hold it.
+    if std::env::var_os("FMT_OPEN_HINT").is_some() && has_files(loc, "st").await? {
+        open_strata(loc, "st").await?;
+        println!("Strata opens with each file's tail length as the hint");
+    }
+    println!("trace_lookup_cold: {} ids, {runs} passes; reqs exclude HEAD and LIST and count ranges (object_store merges ranges under 1 MiB apart on S3); waves = open + lookup (st, st_fast); local disk: OS page cache warm", ids.len());
     println!("{:16} {:>10} {:>10} {:>10} {:>8} {:>8}", "variant", "mean ms", "KiB", "reqs", "waves", "rows");
     let mut plan: Vec<(String, String)> = PQ_VARIANTS.iter().chain(VX_VARIANTS).map(|v| (v.to_string(), v.to_string())).collect();
     plan.push(("st".into(), "st".into()));
@@ -1280,6 +1323,8 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
         }
         let (mut ms, mut kib, mut reqs, mut waves, mut rows) = (0.0, 0.0, 0.0, None::<u64>, 0usize);
         let mut failed = None;
+        let mut shown = false;
+        hedge::HEDGED.store(0, std::sync::atomic::Ordering::Relaxed);
         'passes: for _ in 0..runs {
             for id in ids {
                 loc.store.reset();
@@ -1287,6 +1332,15 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
                 match cold_one(loc, label, id).await {
                     Ok((r, w)) => {
                         ms += t.elapsed().as_secs_f64() * 1e3;
+                        // FMT_TIMELINE=1: every request of the variant's first lookup.
+                        let events = loc.store.timeline();
+                        if !shown && !events.is_empty() {
+                            shown = true;
+                            println!("timeline {label}: {:.1} ms; kind, object, KiB, start, first byte, end (ms)", t.elapsed().as_secs_f64() * 1e3);
+                            for e in &events {
+                                println!("  {:6} {:24} {:>8.1} {:>7.1} {:>7.1} {:>7.1}", e.kind, e.name, e.bytes as f64 / 1024.0, e.start, e.first, e.end);
+                            }
+                        }
                         let (q, b) = loc.store.stats();
                         reqs += q as f64;
                         kib += b as f64 / 1024.0;
@@ -1305,6 +1359,10 @@ async fn trace_lookup_cold(loc: &Location, ids: &[[u8; 16]], runs: usize) -> R<(
         if let Some(e) = failed {
             println!("{label:16} ERROR {e}");
             continue;
+        }
+        let hedged = hedge::HEDGED.swap(0, std::sync::atomic::Ordering::Relaxed);
+        if hedged > 0 {
+            println!("{label:16} hedged {:.1} GETs per lookup", hedged as f64 / n);
         }
         let w = waves.map_or("-".to_owned(), |w| format!("{:.1}", w as f64 / n));
         println!("{label:16} {:>10.2} {:>10.1} {:>10.1} {w:>8} {:>8}", ms / n, kib / n, reqs / n, rows / runs);

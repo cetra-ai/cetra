@@ -585,6 +585,65 @@ The cold lookups ran on a real object store, to check the simulator (2026-11-21)
 - **Still not modelled: queueing.** `pq_fast` makes 250–4,400 requests per lookup; R2 took 1.6–2.4 s for it, 1.0–2.1× the simulator's estimate, as the link and the store queue them. Connection set-up (20–25 ms on a new client) is also left out: the benchmark's store reuses its connections.
 - For estimates of R2 from this machine: `FMT_SIM_S3=1 FMT_SIM_LATENCY_MS=60 FMT_SIM_CONN_MBPS=115 FMT_SIM_LINK_GBPS=0.9 FMT_SIM_LATENCY_SIGMA=0.35`. The defaults (30 ms, 90 MB/s, 10 Gbit/s) remain AWS's in-region figures, unmeasured here.
 
+## Real S3 from Virginia
+
+The same tests from a second machine, closer to its bucket (2026-11-21 and 22): ovh-us, a bare-metal server in Virginia (8 cores, about 1 Gbit/s of link, Cloudflare's IAD colo), reading an R2 bucket in Eastern North America (`cetra-fmtbench-us`). `fmtbench download` copied the datasets from the EU bucket and `fmtbench upload` put them in the US one. The machine was otherwise idle: `sar` shows a 1-minute load of at most 1.4 and the CPU 93% idle over the night run.
+
+**The store** (`fmtbench probe`): 44–50 ms to the first byte (median), 101–113 MB/s per request, about 115 MB/s in total; HEAD and LIST 41–43 ms. The fit is 53 ms + size / 113 MB/s: 10–15 ms closer than from Helsinki, with the same link.
+
+**Every query, two rounds in alternating order** (ms, mean of the two rounds' medians, night of 21–22 November; Strata through SQL except the cold lookup, which is `st_fast`; best Parquet of `pq_default`, `pq_tuned` and `pq_cetra`; the two rounds differ by 7% at the median):
+
+| Query | light | payload | swe | openswe | toucan | wildchat |
+|---|---|---|---|---|---|---|
+| `list_llm_1h`: Strata / Parquet / Vortex | **227** / 577 / 393 | **289** / 309 / 397 | 249 / 218 / **193** | 258 / 239 / **185** | **183** / 309 / 290 | **235** / 318 / 316 |
+| `model_rollup_day` | **215** / 327 / 451 | 166 / 176 / **160** | **130** / 140 / 156 | 141 / **138** / 150 | 188 / **156** / 157 | 273 / **207** / 222 |
+| `trace_lookup_full` | **140** / 263 / 807 | **212** / 227 / 823 | 168 / **151** / 360 | 195 / **151** / 910 | 214 / **181** / 524 | **200** / 226 / 1,002 |
+| `substring_input` | – | **369** / 1,273 / 1,119 | **285** / 497 / 390 | **237** / 564 / 1,658 | **444** / 913 / 1,100 | **436** / 2,161 / 2,233 |
+| `scan_all_payload` | – | **1,810** / 2,558 / 2,431 | 513 / 551 / **474** | **507** / 677 / 1,708 | **1,411** / 1,805 / 1,766 | 5,247 / 4,372 / **4,070** |
+| cold lookup | **383** / 412 / 897 | 402 / **384** / 926 | 382 / **325** / 525 | 368 / **299** / 1,151 | 388 / **341** / 777 | 440 / **354** / 1,214 |
+
+- On S3, Strata leads every search (2–5× ahead of Parquet on agent and chat data) and most scans; Strata's wildchat scan took 3.5 s in one round and 7.0 s in the other, while every other format stayed within 6%.
+- Cold lookups were Strata's weak point: from Virginia the best Parquet was ahead on five datasets, where from Helsinki Strata led on four. Parquet's time fell by 50–240 ms with the shorter latency, Strata's by 10–40 ms.
+- Vortex compact is 2–6× slower on lookups; `metadata_filter` fails on it (a Utf8 against Utf8View comparison in its DataFusion integration).
+
+**Where a cold lookup spends its time** (`FMT_TIMELINE=1`: each request's start, first byte and end). On swe both formats take a LIST and three waves:
+
+| Step | Parquet (`pq_default`) | Strata |
+|---|---|---|
+| LIST | done at 42 ms | done at 32 ms |
+| open | 4 footers of 512 KiB, done at 115 ms | 4 tails of 1 MiB, done at 108 ms |
+| second wave | 4 batched reads (page index), done at 176 ms | 18 GETs of 1–38 KiB in one file, the last done at 180 ms |
+| third wave | 1 batch of 1.4 MB, done at 234 ms | 4 GETs of 7–31 KiB, the last done at 275 ms |
+
+The waves are the same; the requests are not. A wave ends with its slowest GET, and Strata's waves send many small ones (about 45 on wildchat). Parquet sends few: it reads through object_store's `get_ranges`, which merges ranges under 1 MiB apart and runs 10 merged GETs at a time. The `reqs` column counts those ranges, so Parquet's 75–110 "requests" per lookup are about ten HTTP requests.
+
+**Three changes for object storage**, all read-side (the files do not change) and off by default:
+- **The open's exact tail length**, as cetra's catalog would keep it (`FileSummary::tail_len`; `FMT_OPEN_HINT`): 15–55 ms faster per cold lookup. A 64 KiB first read is slower than 1 MiB: most tails are longer, so it costs a wave.
+- **A wider gap for lookup reads** (`Config::point_gap`, `FMT_POINT_GAP`), capped by `Config::point_max_range`. Cold lookups with the hint, ms, mean of two rounds:
+
+| Gap | light | payload | swe | openswe | toucan | wildchat |
+|---|---|---|---|---|---|---|
+| 4 KiB (default) | 285 | 324 | 280 | 291 | 318 | 331 |
+| 64 KiB | 273 | 311 | 278 | 254 | 290 | 306 |
+| 256 KiB | 270 | 317 | 260 | 283 | 295 | 316 |
+| 1 MiB | 332 | 336 | 267 | 264 | 299 | 329 |
+| 4 MiB | 519 | 400 | 336 | 276 | 383 | 363 |
+| `pq_cetra` | 356 | 328 | 335 | 300 | 349 | 327 |
+
+  Without a cap a 1 MiB gap made one 5.6 MB read on wildchat, which alone took 118 ms.
+- **Searches keep 4 KiB** (`ScanKind::Sparse`). Searches had read their scattered candidate frames as point reads, and a 256 KiB gap made them up to 2.8× slower (wildchat 378 → 1,054 ms), even with a 256 KiB cap: the merged gaps cost more bytes on a 1 Gbit link than the requests they save. Index pages and sparse frames now always merge at 4 KiB.
+
+**Tried and dropped: hedged GETs** (a second copy of a GET still running after 50, 70 or 100 ms; in the store for every format, `FMT_HEDGE_MS`, and inside Strata). Neither beat no hedging: every result moved within ±10% for Strata and both Parquets, either way. The slow GETs of a wave are not slow enough, or not independent enough, for a copy to finish first; the Strata version was removed.
+
+**The remote profile** (tail hint, 256 KiB lookup gap, 1 MiB cap, searches at 4 KiB) against Strata's defaults, every query, two alternating rounds (22 November, 15:28–16:51 UTC, a noisier afternoon: the rounds differ by 8% at the median and 53% at the 90th percentile):
+- **Lookups** are 8–32% faster: `trace_lookup_full` 0.79–0.91×, `trace_lookup_light` 0.68–0.98×, cold lookups 0.78–0.92×.
+- **Searches, scans and rollups** move within the noise (0.87–1.05×). `list_llm_1h` is noisy (light took 258 and 724 ms by default); only openswe is slower in both rounds (+20%).
+- **Cold lookups against Parquet** (ms, mean of two rounds; Strata default → remote / `pq_cetra` / `pq_default`): light 365 → **285** / 397 / 418, payload 380 → **350** / 372 / 359, swe 336 → 294 / 310 / **280**, openswe 341 → **294** / 335 / 299, toucan 358 → **330** / 383 / 371, wildchat 435 → 376 / **365** / 388. Strata now leads on four datasets and is within 5% on swe and wildchat.
+
+**The simulator** at this machine's numbers (53 ms, 113 MB/s, 0.9 Gbit/s, σ 0.35) matched Strata and Vortex within 3% on cold lookups, and full scans and searches mostly within 10%, but put Parquet's lookups 60–120 ms too high: it sent one GET per range of a `get_ranges` batch. It now merges them as object_store does; Parquet's estimate falls to within 1–14% of R2 for `pq_default` (still 15–23% high for `pq_cetra`), and Strata's stays within 3%.
+
+**What it means for cetra:** on object storage Strata should open with the catalog's tail length and merge lookup reads across 256 KiB (at most 1 MiB per request); on local disk the defaults stay. The next gain is fewer waves: a lookup's frames still wait for its references, one wave later.
+
 ## Narrow chunks
 
 **Where `light` loses size** (MiB, the four files; Strata's narrow columns against `pq_default`'s column chunks):
@@ -629,4 +688,8 @@ fmtbench probe s3://<bucket>/fmtbench 50
 fmtbench upload ~/bench8/light s3://<bucket>/bench8/light
 fmtbench query s3://<bucket>/bench8/light 3 trace_lookup_cold
 FMT_SIM_S3=1 FMT_SIM_LATENCY_MS=60 FMT_SIM_CONN_MBPS=115 FMT_SIM_LINK_GBPS=0.9 FMT_SIM_LATENCY_SIGMA=0.35 fmtbench query ~/bench8/light 3 trace_lookup_cold
+fmtbench download s3://<bucket>/bench8 ~/bench8
+FMT_TIMELINE=1 FMT_VARIANTS=st_fast,pq_default fmtbench query s3://<bucket>/bench8/swe 1 trace_lookup_cold
+FMT_OPEN_HINT=1 FMT_POINT_GAP=262144 FMT_POINT_MAX_RANGE=1048576 fmtbench query s3://<bucket>/bench8/swe 3
+FMT_HEDGE_MS=70 fmtbench query s3://<bucket>/bench8/swe 3 trace_lookup_cold
 ```

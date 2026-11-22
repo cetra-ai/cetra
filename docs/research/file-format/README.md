@@ -588,6 +588,13 @@ Two gaps remain:
 
 - **Real S3:** on Cloudflare R2 (EU, read from Helsinki: 60 ms to the first byte, 100–118 MB/s per request, about 1 Gbit/s of link), a cold trace lookup takes 383–481 ms with Strata, 12–20% under the best Parquet on four datasets and level on swe and openswe; Vortex takes 2–3× as long. The simulator gave half these times: it charged nothing for the LIST and no slow requests. It now draws each latency from a lognormal (`FMT_SIM_LATENCY_SIGMA`, 0.35 on R2) and charges the LIST, and lands within ±15% of R2.
 
+- **Real S3 from Virginia:**
+  - From a server next to its R2 bucket (45–50 ms to the first byte), Strata leads every search (2–5× ahead of Parquet) and most scans, but Parquet led cold lookups on five of six datasets.
+  - Request timelines show why. Both formats take three waves, but Strata's send up to 45 small GETs each, and a wave waits for its slowest; Parquet reads through object_store's `get_ranges`, which merges ranges under 1 MiB apart.
+  - Three read-side settings, off by default, fix it on object storage: the catalog's exact tail length at open, a 256 KiB merge gap for lookups (`Config::point_gap`) capped at 1 MiB (`Config::point_max_range`), and searches kept at 4 KiB (`ScanKind::Sparse`), since wider gaps made them up to 2.8× slower.
+  - Together they make lookups 8–32% faster, leave searches and scans unchanged, and put Strata ahead of Parquet on cold lookups on four datasets and within 5% on the other two.
+  - Hedged GETs (a second copy of a slow request) gained nothing and were dropped.
+
 Details in [real-data.md](real-data.md).
 
 ## What each format gets right and wrong

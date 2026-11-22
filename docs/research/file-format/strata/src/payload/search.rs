@@ -91,7 +91,7 @@ async fn candidate_frames(
             _ => frames.extend(store.run_frames(r)),
         }
     }
-    let bodies = file.fetch(&segments, ScanKind::Point).await?;
+    let bodies = file.fetch(&segments, ScanKind::Sparse).await?;
     for (r, rows) in wanted {
         let (Some(run), frame_range) = (store.runs.get(r), store.run_frames(r)) else {
             continue;
@@ -136,7 +136,7 @@ const DENSE_FRAMES: u64 = 4;
 
 /// How to coalesce a wave of frames: [`ScanKind::Dense`] when the frames hold at least a quarter
 /// of the bytes from the first to the last, so that a common needle makes fewer requests without
-/// reading much more; else like point reads.
+/// reading much more; else [`ScanKind::Sparse`].
 fn frames_kind(segments: &[(SegmentRef, Kind)]) -> ScanKind {
     let start = segments.iter().map(|(s, _)| s.offset).min();
     let end = segments
@@ -144,14 +144,14 @@ fn frames_kind(segments: &[(SegmentRef, Kind)]) -> ScanKind {
         .map(|(s, _)| s.offset.saturating_add(u64::from(s.len)))
         .max();
     let (Some(start), Some(end)) = (start, end) else {
-        return ScanKind::Point;
+        return ScanKind::Sparse;
     };
     let span = end.saturating_sub(start);
     let wanted: u64 = segments.iter().map(|(s, _)| u64::from(s.len)).sum();
     if wanted.saturating_mul(DENSE_FRAMES) >= span {
         ScanKind::Dense
     } else {
-        ScanKind::Point
+        ScanKind::Sparse
     }
 }
 
@@ -517,11 +517,11 @@ mod tests {
     #[test]
     fn frames_are_read_dense_when_they_fill_a_quarter_of_their_span() {
         let seg = |offset: u64, len: u32| (SegmentRef { offset, len }, Kind::PayloadFrame);
-        assert_eq!(frames_kind(&[]), ScanKind::Point);
+        assert_eq!(frames_kind(&[]), ScanKind::Sparse);
         assert_eq!(frames_kind(&[seg(100, 10)]), ScanKind::Dense);
         // 2 × 25 bytes over 200: exactly a quarter.
         assert_eq!(frames_kind(&[seg(0, 25), seg(175, 25)]), ScanKind::Dense);
-        assert_eq!(frames_kind(&[seg(0, 25), seg(176, 25)]), ScanKind::Point);
+        assert_eq!(frames_kind(&[seg(0, 25), seg(176, 25)]), ScanKind::Sparse);
         // The order of the segments does not matter.
         assert_eq!(frames_kind(&[seg(175, 25), seg(0, 25)]), ScanKind::Dense);
     }

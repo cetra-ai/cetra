@@ -145,8 +145,10 @@ impl ObjectStore for SimS3 {
         Ok(GetResult { payload: GetResultPayload::Stream(Box::pin(stream)), meta, range, attributes })
     }
     async fn get_ranges(&self, l: &Path, ranges: &[Range<u64>]) -> Result<Vec<Bytes>> {
-        // As the default implementation: one GET per range, all at once.
-        futures::future::try_join_all(ranges.iter().map(|r| self.get_range(l, r.clone()))).await
+        // As object_store's S3 client: ranges under 1 MiB apart merged, 10 GETs at a time. One GET
+        // per range charged Parquet, which reads through here, 60–120 ms too much per cold
+        // lookup on R2 (`real-data.md` § Real S3 from Virginia).
+        object_store::coalesce_ranges(ranges, |r| self.get_range(l, r), object_store::OBJECT_STORE_COALESCE_DEFAULT).await
     }
     fn delete_stream(&self, s: BoxStream<'static, Result<Path>>) -> BoxStream<'static, Result<Path>> {
         self.inner.delete_stream(s)
