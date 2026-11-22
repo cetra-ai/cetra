@@ -10,6 +10,7 @@ test("parses the real page", () => {
   const items = loadIntegrations();
   assert.ok(items.length >= 1);
   assert.deepEqual(groups(items), [
+    "Coding agents",
     "Providers",
     "Frameworks",
     "Instrumentation libraries",
@@ -53,8 +54,15 @@ test("every href has a docs page", () => {
 
 test("order follows the page", () => {
   const items = loadIntegrations();
-  assert.equal(items[0].title, "OpenAI");
+  assert.equal(items[0].title, "Claude Code");
   assert.equal(items.at(-1).title, "From Laminar");
+});
+
+test("a hand-written test cell is parsed", () => {
+  const copilot = loadIntegrations().find((item) => item.title === "GitHub Copilot");
+  assert.equal(copilot.python, false);
+  assert.equal(copilot.typescript, false);
+  assert.deepEqual(copilot.tests, [{ kind: "handwritten", lang: null }]);
 });
 
 test("a card without a row throws", () => {

@@ -12,7 +12,7 @@ const items = loadIntegrations().filter((item) => item.group !== MIGRATING_GROUP
     eyebrow="Integrations"
     title="Works with your stack."
     id="integrations-title"
-    lede="OpenTelemetry in, from any framework. Each of these is covered by tests in the repository:"
+    lede="OpenTelemetry in, from any framework or coding agent. Each of these is covered by recorded or hand-written traces, or SDK tests, in the repository:"
   />
   <div class="pills">
     {items.map((item) => <a class="pill" href={item.href}>{item.title}</a>)}

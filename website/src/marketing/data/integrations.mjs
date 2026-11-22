@@ -5,7 +5,7 @@ export const MIGRATING_GROUP = "Migrating";
 
 /**
  * @typedef {object} Test
- * @property {"recorded" | "sdk"} kind "recorded": spans captured from the real library; "sdk": an SDK test
+ * @property {"recorded" | "sdk" | "handwritten"} kind "recorded": spans captured from the real library; "sdk": an SDK test; "handwritten": spans written by hand
  * @property {"Python" | "TypeScript" | null} lang the language the test covers, or null for both
  */
 
@@ -23,7 +23,14 @@ export const MIGRATING_GROUP = "Migrating";
 const ROW =
   /^\| \[([^\]]+)\]\((\/docs\/integrations\/[a-z0-9-]+\/)\) \| (✓|—) \| (✓|—) \| (.*?) \| (.*?) \|\s*$/;
 const CARD = /<LinkCard title="([^"]+)" description="([^"]+)" href="([^"]+)" \/>\s*$/;
-const TEST = /^(captured|SDK test)(?: \((Python|TypeScript)\))?$/;
+const TEST = /^(captured|SDK test|hand-written)(?: \((Python|TypeScript)\))?$/;
+
+/** The "Tested against" wording in the docs table, mapped to `Test.kind`. */
+const KIND = {
+  captured: "recorded",
+  "SDK test": "sdk",
+  "hand-written": "handwritten",
+};
 
 /**
  * @param {string} tested the "Tested against" cell without backticks, e.g. "captured (Python), SDK test (TypeScript)"
@@ -34,7 +41,7 @@ function parseTested(tested, where) {
   return tested.split(", ").map((part) => {
     const match = TEST.exec(part);
     if (!match) throw new Error(`integrations: unknown test wording "${part}" at ${where}`);
-    return { kind: match[1] === "captured" ? "recorded" : "sdk", lang: match[2] ?? null };
+    return { kind: KIND[match[1]], lang: match[2] ?? null };
   });
 }
 

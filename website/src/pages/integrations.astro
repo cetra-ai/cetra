@@ -14,8 +14,16 @@ const sections = groups(items).map((group) => ({
 }));
 
 /** One test badge, e.g. "Recorded traces · Python". The docs page has the detail. */
-function testLabel(test: { kind: "recorded" | "sdk"; lang: string | null }): string {
-  const kind = test.kind === "recorded" ? "Recorded traces" : "SDK test";
+function testLabel(test: {
+  kind: "recorded" | "sdk" | "handwritten";
+  lang: string | null;
+}): string {
+  const kind =
+    test.kind === "recorded"
+      ? "Recorded traces"
+      : test.kind === "handwritten"
+        ? "Hand-written traces"
+        : "SDK test";
   return test.lang ? `${kind} · ${test.lang}` : kind;
 }
 ---
@@ -31,7 +39,7 @@ function testLabel(test: { kind: "recorded" | "sdk"; lang: string | null }): str
       eyebrow="Integrations"
       title="Works with your stack."
       id="integrations-title"
-      lede="cetra reads OpenTelemetry. These libraries are tested against recorded traces or SDK tests; anything else that speaks OpenTelemetry works too."
+      lede="cetra reads OpenTelemetry. Each of these is tested against recorded or hand-written traces, or SDK tests; anything else that speaks OpenTelemetry works too."
     />
   </Section>
 
