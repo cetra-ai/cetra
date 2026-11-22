@@ -64,6 +64,25 @@
     "alerts": {
       "value": "Log, time-window and environment alerts to webhook, Slack or PagerDuty",
       "sources": ["https://docs.braintrust.dev/admin/automations/alerts"]
+    },
+    "issueDetection": {
+      "value": "Topics: classifies logs by task, sentiment and issues, then clusters them into topics; daily regeneration",
+      "sources": ["https://docs.braintrust.dev/observe/topics.md"]
+    },
+    "annotationQueues": {
+      "value": "Assign logs, experiment or dataset rows to members; a Review page with Kanban columns and email notifications",
+      "sources": ["https://docs.braintrust.dev/annotate/human-review/manage-review-work.md"]
+    },
+    "assistant": {
+      "value": "Loop: agent in the app; queries data with SQL, writes scorers, edits prompts and builds dashboards, asks before changes",
+      "sources": ["https://docs.braintrust.dev/observe/loop.md"]
+    },
+    "codingAgents": {
+      "value": "Integration pages for Claude Code (plugin or OpenTelemetry), Codex, Cursor, OpenCode, Pi and Antigravity",
+      "sources": [
+        "https://docs.braintrust.dev/llms.txt",
+        "https://docs.braintrust.dev/integrations/developer-tools/claude-code.md"
+      ]
     }
   },
   "chooseThem": [
@@ -71,7 +90,7 @@
     "Online scoring, alerts, dashboards and a hosted MCP server, with LLM-as-judge scorers and prompt environments",
     "Enterprise options: BYOC or self-hosted data plane, RBAC and premium support"
   ],
-  "notes": "Pricing page does not itself say self-hosted data plane needs Enterprise; it lists 'on-prem or hosted deployment' under Enterprise. Docs deployment page states BYOC requires Enterprise and is silent on plan for self-hosted; a search summary of docs pages said both are Enterprise-only, treat 'Enterprise' for self-hosting as likely but only pricing-page wording is confirmed. Docs self-hosting page says new organisations are directed to BYOC. Control plane (UI, auth, metadata) stays hosted by Braintrust. Platform source is not public (GitHub org lists only data-plane infra, SDK, proxy repos); pricing may change. Autoevals repo licence not confirmed. OTLP: gRPC not mentioned in docs read; trace protocol not explicitly stated on page (logs endpoint accepts JSON or protobuf). SQL feature is called BTQL/SQL in docs. Verified 2026-11-20: selfHostStack 'Enterprise only' unsupported (self-hosting page states no plan; BYOC needs Enterprise per deployment page; pricing lists on-prem under Enterprise) so removed; Pro 30-day retention added from pricing; otel conventions now confirmed (gen_ai, OpenInference), protocol for traces not stated; 'experiments immutable snapshots' unsupported, removed; chooseThem: 'unlimited users on every plan' narrowed to Starter, vague 'large teams' item dropped. Others (licences, SQL, MCP, alerts, gateway preview, online scoring, prompts) confirmed.",
+  "notes": "Pricing page does not itself say self-hosted data plane needs Enterprise; it lists 'on-prem or hosted deployment' under Enterprise. Docs deployment page states BYOC requires Enterprise and is silent on plan for self-hosted; a search summary of docs pages said both are Enterprise-only, treat 'Enterprise' for self-hosting as likely but only pricing-page wording is confirmed. Docs self-hosting page says new organisations are directed to BYOC. Control plane (UI, auth, metadata) stays hosted by Braintrust. Platform source is not public (GitHub org lists only data-plane infra, SDK, proxy repos); pricing may change. Autoevals repo licence not confirmed. OTLP: gRPC not mentioned in docs read; trace protocol not explicitly stated on page (logs endpoint accepts JSON or protobuf). SQL feature is called BTQL/SQL in docs. Verified 2026-11-20: selfHostStack 'Enterprise only' unsupported (self-hosting page states no plan; BYOC needs Enterprise per deployment page; pricing lists on-prem under Enterprise) so removed; Pro 30-day retention added from pricing; otel conventions now confirmed (gen_ai, OpenInference), protocol for traces not stated; 'experiments immutable snapshots' unsupported, removed; chooseThem: 'unlimited users on every plan' narrowed to Starter, vague 'large teams' item dropped. Others (licences, SQL, MCP, alerts, gateway preview, online scoring, prompts) confirmed. Added 2026-11-22: four new rows. The Topics page names no fully self-hosted option (BYOC calls Braintrust-hosted models); it has a header line telling AI agents to fetch llms.txt, ignored. The Topics page and the cookbook were read; the coding-agent list comes from the docs index.",
   "chooseUs": [
     "You want to self-host the whole product, with no vendor-hosted control plane",
     "You want an open-source core you can read and run"

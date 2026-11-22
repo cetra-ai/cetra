@@ -76,6 +76,35 @@
       "sources": [
         "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/resources/frequently-asked-questions/what-is-the-difference-between-phoenix-and-arize.mdx"
       ]
+    },
+    "issueDetection": {
+      "value": "Unknown",
+      "sources": [
+        "https://arize.com/docs/phoenix/pxi",
+        "https://arize.com/docs/phoenix/cookbook/tracing/identify-high-signal-traces",
+        "https://arize.com/docs/phoenix/llms.txt"
+      ]
+    },
+    "annotationQueues": {
+      "value": "Unknown",
+      "sources": [
+        "https://arize.com/docs/phoenix/resources/frequently-asked-questions/langfuse-alternative-arize-phoenix-vs-langfuse-key-differences",
+        "https://arize.com/docs/phoenix/tracing/how-to-tracing/feedback-and-annotations"
+      ]
+    },
+    "assistant": {
+      "value": "PXI (beta): assistant on every page; investigates failing traces, edits playground prompts, queries your data",
+      "sources": ["https://arize.com/docs/phoenix/pxi"]
+    },
+    "codingAgents": {
+      "value": "Plugin traces Claude Code sessions; guides for Codex, GitHub Copilot, Cursor and Gemini CLI",
+      "sources": [
+        "https://arize.com/docs/phoenix/integrations/coding-agents/claude-code",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/codex",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/copilot",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/cursor",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/gemini"
+      ]
     }
   },
   "chooseThem": [
@@ -84,7 +113,7 @@
     "Pre-built evaluators, dataset evaluators and experiments",
     "Arize AX offers a managed option that uses the same OpenTelemetry/OpenInference instrumentation"
   ],
-  "notes": "Phoenix (open source) and Arize AX (managed, commercial) are separate products; cloudFree/cloudPaidFrom partly describe AX. Phoenix Cloud limits not found. Negative claims (no online evals, alerts, gateway, SQL) are based on Phoenix docs, which defer these to AX; wording kept as 'per its docs'. Docs read from local checkout (docs/phoenix, commit dated 2026-11-07) and cited by GitHub URL; some arize.com pages fetched live. Ports from configuration.mdx. A WebFetch of /self-hosting/license on arize.com was not completed. Verified 2026-11-20: selfHostStack, licence (ELv2, 'no feature gates' per docs), AX pricing, otel ports, MCP confirmed against local checkout/arize.com. Absence claims reworded to 'Not documented'; onlineEvals was overstated since Phoenix docs say evals can run on production traces; chooseThem 'Deep'/'Strong' removed.",
+  "notes": "Phoenix (open source) and Arize AX (managed, commercial) are separate products; cloudFree/cloudPaidFrom partly describe AX. Phoenix Cloud limits not found. Negative claims (no online evals, alerts, gateway, SQL) are based on Phoenix docs, which defer these to AX; wording kept as 'per its docs'. Docs read from local checkout (docs/phoenix, commit dated 2026-11-07) and cited by GitHub URL; some arize.com pages fetched live. Ports from configuration.mdx. A WebFetch of /self-hosting/license on arize.com was not completed. Verified 2026-11-20: selfHostStack, licence (ELv2, 'no feature gates' per docs), AX pricing, otel ports, MCP confirmed against local checkout/arize.com. Absence claims reworded to 'Not documented'; onlineEvals was overstated since Phoenix docs say evals can run on production traces; chooseThem 'Deep'/'Strong' removed. Added 2026-11-22: four new rows. issueDetection is Unknown: PXI investigates failures on request and the cookbook describes manual failure clustering, but no page describes automatic grouping. annotationQueues is Unknown: a Phoenix FAQ says Phoenix and Arize AX include annotation queues, but its comparison table links the queue docs to Arize AX, and the Phoenix annotation pages describe annotating through the client, REST API or UI. The PXI page has a line telling AI agents to fetch another docs index (a different host); ignored. Docs were read from the project's checkout, which mirrors arize.com/docs/phoenix (its llms.txt lists these URLs).",
   "chooseUs": [
     "You want LLM judges on live traffic and alerts in the open-source product",
     "You want an MIT-licensed core",

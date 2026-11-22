@@ -67,6 +67,26 @@
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/genai/governance/ai-gateway/budget-alerts-limits.mdx",
         "https://github.com/mlflow/mlflow/blob/master/docs/docs/self-hosting/webhooks/index.mdx"
       ]
+    },
+    "issueDetection": {
+      "value": "Issue Detection groups findings from experiment traces, using a model you choose, into issues; on demand or scheduled",
+      "sources": ["https://mlflow.org/docs/latest/genai/eval-monitor/ai-insights/detect-issues/"]
+    },
+    "annotationQueues": {
+      "value": "Review queues: traces assigned to reviewers with questions; experimental, added in MLflow 3.14.0",
+      "sources": ["https://mlflow.org/docs/latest/genai/assessments/review-queues/"]
+    },
+    "assistant": {
+      "value": "AI Assistant: chat panel on experiment pages, run by a local coding-agent CLI such as Claude Code; debugs traces",
+      "sources": ["https://mlflow.org/docs/latest/genai/getting-started/try-assistant/"]
+    },
+    "codingAgents": {
+      "value": "Tracing for Claude Code (hooks), Codex (notify hook) and Gemini CLI (OpenTelemetry)",
+      "sources": [
+        "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/claude_code/",
+        "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/codex/",
+        "https://mlflow.org/docs/latest/genai/tracing/integrations/listing/gemini_cli/"
+      ]
     }
   },
   "chooseThem": [
@@ -75,7 +95,7 @@
     "Runs on a database you already operate (PostgreSQL, MySQL) with object storage for artifacts",
     "Managed MLflow is available through Databricks"
   ],
-  "notes": "cloudPaidFrom Unknown: mlflow.org does not list managed MLflow prices; managed MLflow is offered by Databricks, whose pricing I did not fetch. The Databricks trial page gives no duration or credit amount. 'sql' and 'alerts' are absence-style claims ('not documented'/'not found'), based on the docs I read, not an exhaustive search. Automatic-evaluation page does not state whether OSS or Databricks only. Some docs pages (MCP, AI Gateway, mcp-registry) are in the master docs; the mlflow.org/latest web versions may lag the repo (checkout dated 2026-11-09). Stars/downloads figures from the site were not used. GitHub sources (gateway index, budget alerts, webhooks, attribute-mapping, docker-compose) were read in a local checkout, not on the web. Verified 2026-11-20: OTLP (HTTP only, SQL backend), MCP (experimental), automatic evaluation, prompt registry, architecture, gateway and webhooks confirmed (live pages/local docs). sql/alerts reworded to 'not documented'. chooseThem: removed unverified 'large community'; 'Linux Foundation' kept only in oneLine (not re-verified here; check before publishing); removed unverified 'many built-in judge scorers'. LICENSE.txt is Apache-licensed per local checkout header 'Copyright 2018 Databricks'.",
+  "notes": "cloudPaidFrom Unknown: mlflow.org does not list managed MLflow prices; managed MLflow is offered by Databricks, whose pricing I did not fetch. The Databricks trial page gives no duration or credit amount. 'sql' and 'alerts' are absence-style claims ('not documented'/'not found'), based on the docs I read, not an exhaustive search. Automatic-evaluation page does not state whether OSS or Databricks only. Some docs pages (MCP, AI Gateway, mcp-registry) are in the master docs; the mlflow.org/latest web versions may lag the repo (checkout dated 2026-11-09). Stars/downloads figures from the site were not used. GitHub sources (gateway index, budget alerts, webhooks, attribute-mapping, docker-compose) were read in a local checkout, not on the web. Verified 2026-11-20: OTLP (HTTP only, SQL backend), MCP (experimental), automatic evaluation, prompt registry, architecture, gateway and webhooks confirmed (live pages/local docs). sql/alerts reworded to 'not documented'. chooseThem: removed unverified 'large community'; 'Linux Foundation' kept only in oneLine (not re-verified here; check before publishing); removed unverified 'many built-in judge scorers'. LICENSE.txt is Apache-licensed per local checkout header 'Copyright 2018 Databricks'. Added 2026-11-22: four new rows.",
   "chooseUs": [
     "You want built-in alerts on error rate, cost, latency and scores",
     "You want OTLP over gRPC as well as HTTP"

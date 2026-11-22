@@ -62,6 +62,25 @@
     "alerts": {
       "value": "Alerts to Slack, PagerDuty or any webhook on trace errors, cost, latency, feedback scores, prompt and experiment events",
       "sources": ["https://www.comet.com/docs/opik/production/alerts"]
+    },
+    "issueDetection": {
+      "value": "Unknown",
+      "sources": [
+        "https://www.comet.com/docs/opik/ollie",
+        "https://github.com/comet-ml/opik/blob/main/apps/opik-documentation/documentation/fern/docs-v2/changelog/2026-10-19.mdx"
+      ]
+    },
+    "annotationQueues": {
+      "value": "Queues of traces or threads for reviewers, with instructions and feedback scores; labels can align LLM judges",
+      "sources": ["https://www.comet.com/docs/opik/evaluation/annotation_queues"]
+    },
+    "assistant": {
+      "value": "Ollie: chat next to traces, datasets, experiments and prompts; with opik connect it reads and edits your code",
+      "sources": ["https://www.comet.com/docs/opik/ollie"]
+    },
+    "codingAgents": {
+      "value": "Guides for Claude Code (plugin or OpenTelemetry), Cursor, GitHub Copilot and OpenAI Codex sessions",
+      "sources": ["https://www.comet.com/docs/opik/integrations/coding-agents"]
     }
   },
   "chooseThem": [
@@ -70,7 +89,7 @@
     "Kubernetes Helm deployment with ClickHouse, and a Comet enterprise deployment option",
     "Flat $19/month Pro cloud price and a free cloud tier with 10 team members"
   ],
-  "notes": "The url field is the docs root (opened); no product homepage was opened. Docs claim 'self-hosted has no user management features' (self-host overview) while the README says full platform with no Enterprise conversation; treat user management as an Enterprise/cloud-only gap but only the quoted docs wording is confirmed. Compose runs many services (MySQL, Redis, ClickHouse, ZooKeeper, MinIO, backend, python-backend, frontend); guardrails are optional profiles. MCP read/write scope not confirmed from the page (tools reference page not fetched; local copy exists). SQL: only OQL filter language found, so 'no SQL' is based on absence in docs read, not an explicit statement. Pricing and 'Enterprise' details from comet.com/site/pricing (comet-wide page, Opik section). Prompt-versioning live URL returned 404; cited the repo's docs file, which is the source of the live docs. Verified 2026-11-20: pricing, otel (HTTP only, GenAI+OpenInference), alerts, online evals, MCP, gateway beta, prompt versions, Apache-2.0, 'no user management' confirmed (live pages/local docs). sql reworded to 'Not documented'; MCP read/write scope not stated on page so 'read' wording kept to listed capabilities. Self-host component list taken from local compose (Jaeger also present, optional). Architecture page not re-fetched.",
+  "notes": "The url field is the docs root (opened); no product homepage was opened. Docs claim 'self-hosted has no user management features' (self-host overview) while the README says full platform with no Enterprise conversation; treat user management as an Enterprise/cloud-only gap but only the quoted docs wording is confirmed. Compose runs many services (MySQL, Redis, ClickHouse, ZooKeeper, MinIO, backend, python-backend, frontend); guardrails are optional profiles. MCP read/write scope not confirmed from the page (tools reference page not fetched; local copy exists). SQL: only OQL filter language found, so 'no SQL' is based on absence in docs read, not an explicit statement. Pricing and 'Enterprise' details from comet.com/site/pricing (comet-wide page, Opik section). Prompt-versioning live URL returned 404; cited the repo's docs file, which is the source of the live docs. Verified 2026-11-20: pricing, otel (HTTP only, GenAI+OpenInference), alerts, online evals, MCP, gateway beta, prompt versions, Apache-2.0, 'no user management' confirmed (live pages/local docs). sql reworded to 'Not documented'; MCP read/write scope not stated on page so 'read' wording kept to listed capabilities. Self-host component list taken from local compose (Jaeger also present, optional). Architecture page not re-fetched. Added 2026-11-22: four new rows. issueDetection is Unknown: a changelog line mentions Agent Insights and the backend has Agent Insights issue types, but no docs page describes the feature. The Ollie page does not say whether it is on Opik Cloud or self-hosted.",
   "chooseUs": [
     "You want to self-host without ClickHouse, MySQL, Redis and ZooKeeper",
     "You want members and roles in the self-hosted version",

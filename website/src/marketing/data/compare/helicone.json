@@ -68,6 +68,34 @@
     "alerts": {
       "value": "Alerts on error rate, cost, latency, tokens, request count to email and Slack; webhooks not mentioned in docs",
       "sources": ["https://docs.helicone.ai/features/alerts.md"]
+    },
+    "issueDetection": {
+      "value": "Unknown",
+      "sources": [
+        "https://github.com/Helicone/helicone/blob/main/docs/features/reports.mdx",
+        "https://github.com/Helicone/helicone/blob/main/docs/docs.json"
+      ]
+    },
+    "annotationQueues": {
+      "value": "Unknown",
+      "sources": [
+        "https://github.com/Helicone/helicone/blob/main/docs/features/advanced-usage/feedback.mdx",
+        "https://github.com/Helicone/helicone/blob/main/docs/docs.json"
+      ]
+    },
+    "assistant": {
+      "value": "Unknown",
+      "sources": [
+        "https://github.com/Helicone/helicone/blob/main/docs/introduction.mdx",
+        "https://github.com/Helicone/helicone/blob/main/docs/docs.json"
+      ]
+    },
+    "codingAgents": {
+      "value": "Logs Claude Code through a base-URL proxy and Codex CLI through the AI Gateway",
+      "sources": [
+        "https://docs.helicone.ai/integrations/anthropic/claude-code",
+        "https://docs.helicone.ai/gateway/integrations/codex"
+      ]
     }
   },
   "chooseThem": [
@@ -76,7 +104,7 @@
     "Request-level cost and latency tracking and prompt deployment to environments through the gateway",
     "Entry plan at $79/month plus a free Hobby tier for small projects"
   ],
-  "notes": "STATUS: Helicone's own site (homepage and pricing page, read 2026-11-20) shows a banner: 'Helicone is now part of Experiential Labs. Details to come soon.' The GitHub repo page shows no archive or maintenance-mode notice; no statement of maintenance mode found on official sources. Keep this in notes, not a fact. Local checkout's last commit is dated 2026-10-28. Docs say the all-in-one self-host image does not include LLM proxying (Jawn proxy routes removed) and has no email service; README still says 'five services' while compose also lists Redis, Kafka, Zookeeper and workers; compose file's own README says it is being updated. OTel: only found the OpenLLMetry-based async SDK; direct OTLP ingestion docs not found, so value is hedged. HQL access limited to selected workspaces. Docs pricing page's check marks for Scores/Datasets per plan not readable. Gateway 'self-hostable' not stated in docs. Verified 2026-11-20: selfHostStack/licence/Helm (local README, compose), pricing, HQL, scores, experiments deprecation, alerts confirmed. otel and alerts absence wording softened to 'not documented/mentioned'; MCP 'read-only' not stated by docs, reworded; gateway: docs say run AI Gateway separately alongside Jawn, so wording adjusted; 'cost and latency dashboards' chooseThem reworded to tracking. Site banner 'now part of Experiential Labs' confirmed on pricing page; consider noting this before publishing.",
+  "notes": "STATUS: Helicone's own site (homepage and pricing page, read 2026-11-20) shows a banner: 'Helicone is now part of Experiential Labs. Details to come soon.' The GitHub repo page shows no archive or maintenance-mode notice; no statement of maintenance mode found on official sources. Keep this in notes, not a fact. Local checkout's last commit is dated 2026-10-28. Docs say the all-in-one self-host image does not include LLM proxying (Jawn proxy routes removed) and has no email service; README still says 'five services' while compose also lists Redis, Kafka, Zookeeper and workers; compose file's own README says it is being updated. OTel: only found the OpenLLMetry-based async SDK; direct OTLP ingestion docs not found, so value is hedged. HQL access limited to selected workspaces. Docs pricing page's check marks for Scores/Datasets per plan not readable. Gateway 'self-hostable' not stated in docs. Verified 2026-11-20: selfHostStack/licence/Helm (local README, compose), pricing, HQL, scores, experiments deprecation, alerts confirmed. otel and alerts absence wording softened to 'not documented/mentioned'; MCP 'read-only' not stated by docs, reworded; gateway: docs say run AI Gateway separately alongside Jawn, so wording adjusted; 'cost and latency dashboards' chooseThem reworded to tracking. Site banner 'now part of Experiential Labs' confirmed on pricing page; consider noting this before publishing. Added 2026-11-22: four new rows. issueDetection, annotationQueues and assistant are Unknown: the docs in the repository describe weekly reports, user feedback ratings and sessions only. The web app source has an agent chat component (web/components/templates/agent), not described in the docs. The Claude Code page is marked legacy by Helicone.",
   "chooseUs": [
     "You want LLM judges on live traffic",
     "You want to self-host without ClickHouse, Kafka and Redis",

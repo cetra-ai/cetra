@@ -12,8 +12,12 @@ export const AREAS = [
   ["sql", "SQL over your data"],
   ["mcp", "MCP server"],
   ["onlineEvals", "Evaluations on live traffic"],
+  ["issueDetection", "Automatic issue detection"],
+  ["annotationQueues", "Annotation queues"],
   ["datasetsExperiments", "Datasets and experiments"],
   ["promptManagement", "Prompt management"],
+  ["assistant", "In-app AI assistant"],
+  ["codingAgents", "Coding-agent tracing"],
   ["gateway", "LLM gateway"],
   ["alerts", "Alerts"],
 ];
