@@ -163,7 +163,7 @@ export function CommandPalette() {
       <Button
         type="button"
         variant="outline"
-        className="h-7 w-60 justify-between gap-3 px-2 font-normal text-muted-foreground"
+        className="h-7 w-64 justify-between gap-3 px-2 font-normal text-muted-foreground"
         aria-label="Command palette"
         aria-keyshortcuts="Meta+K Control+K"
         onClick={() => setPalette(true)}
