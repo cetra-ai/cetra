@@ -47,5 +47,5 @@ CETRA_INSTALL_DIR="$dir/bin" \
 CETRA_DOWNLOAD_BASE="http://127.0.0.1:$port" \
   sh deploy/install.sh
 
-"$dir/bin/cetra" version | grep -qx "cetra $version"
+grep -qx "cetra $version" <<<"$("$dir/bin/cetra" version)"
 echo "install-smoke: install.sh installed cetra $version"
