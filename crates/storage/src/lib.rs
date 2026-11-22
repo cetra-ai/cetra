@@ -528,6 +528,7 @@ impl Storage {
                 compaction::merge::MergeContext {
                     runtime,
                     batch_size: 8192,
+                    jobs: config.compaction.threads,
                 },
                 compaction::plan::Policy::from(&config.compaction),
                 compaction::job::CompactorLimits {
