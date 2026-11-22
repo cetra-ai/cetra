@@ -35,6 +35,14 @@ test("Free matches D177", () => {
   assert.equal(free.dataAccess, "30 days");
 });
 
+test("the Free plan's new limits match the decisions", () => {
+  const line = (id) => decisions.split("\n").find((l) => l.startsWith(`| ${id} |`));
+  assert.ok(line("D-AQ-10")?.includes("Free 1 queue per org"), "D-AQ-10 has no Free queue limit");
+  assert.ok(line("D-IC-13")?.includes("Free 1"), "D-IC-13 has no Free issue source limit");
+  assert.ok(free.rules.includes("1 annotation queue"));
+  assert.ok(free.rules.includes("1 issue source"));
+});
+
 test("seats and projects match D177", () => {
   assert.ok(d177.includes("1 seat, 1 project"));
   assert.ok(d177.includes("unlimited seats"));

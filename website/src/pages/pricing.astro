@@ -3,7 +3,7 @@ import Button from "../marketing/components/Button.astro";
 import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
-import { formatMoney, SELF_HOSTED } from "../marketing/data/pricing.mjs";
+import { EVERY_PLAN, formatMoney, SELF_HOSTED } from "../marketing/data/pricing.mjs";
 import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
 import Calculator from "../marketing/pricing/Calculator.astro";
 import PlanCards from "../marketing/pricing/PlanCards.astro";
@@ -30,6 +30,18 @@ import { CONTACT_EMAIL } from "../marketing/site";
 
   <Section tone="ink" pad="md" labelledby="plans-title">
     <PlanCards />
+  </Section>
+
+  <Section tone="teal" divider labelledby="every-title">
+    <SectionHeading
+      eyebrow="Every plan"
+      title="The whole product, on every plan."
+      id="every-title"
+      lede="Free included. Plans differ in volume, history, seats and how many rules you set up. Retention controls come with Pro, and single sign-on with the Teams add-on."
+    />
+    <ul class="every bullets">
+      {EVERY_PLAN.map((item) => <li>{item}</li>)}
+    </ul>
   </Section>
 
   <Section tone="raised" divider labelledby="calc-title">
@@ -84,6 +96,15 @@ import { CONTACT_EMAIL } from "../marketing/site";
   }
   .points {
     margin: var(--space-5) 0 0;
+  }
+  .every {
+    margin-top: var(--space-7);
+  }
+  @media (min-width: 860px) {
+    .every {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      column-gap: var(--space-7);
+    }
   }
   .licence-note {
     margin-top: var(--space-4);

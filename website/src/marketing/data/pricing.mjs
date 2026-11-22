@@ -39,7 +39,7 @@ export const PLANS = [
     dataAccess: "30 days",
     seats: "1 seat",
     projects: "1 project",
-    rules: "1 alert rule and 1 online evaluation rule",
+    rules: "1 alert rule, 1 online evaluation rule, 1 annotation queue and 1 issue source",
     support: null,
     cta: "Start free",
     blurb: "For trying cetra on a side project.",
@@ -72,6 +72,20 @@ export const PLANS = [
     cta: "Start free",
     blurb: "For production apps: long history, retention controls, higher ingest limits.",
   },
+];
+
+/** What every cloud plan includes, Free too (D191–D194; limits per plan in PLANS[].rules). */
+export const EVERY_PLAN = [
+  "Tracing, sessions and users",
+  "Full-text search and a SQL console",
+  "MCP server for your agents",
+  "LLM judges and checks on live traffic",
+  "Annotation queues",
+  "Datasets and experiments",
+  "Prompts and a playground",
+  "Issue detection",
+  "Alerts to Slack, email and webhooks",
+  "The AI assistant, on your own LLM connection",
 ];
 
 export const TEAMS_ADDON = {
