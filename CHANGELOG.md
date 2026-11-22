@@ -34,6 +34,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Compaction no longer fails on every pass for a partition of large spans (LLM prompts and
   completions): a merge reads fewer rows per batch when its rows are large, so its batches fit
   `compaction.max_memory`, and days close.
+- `url` 2.5.9 fixes a stack overflow on nested `blob:` URLs (RUSTSEC-2026-0592).
 
 ## [0.1.0-rc.1] - 2026-11-21
 
