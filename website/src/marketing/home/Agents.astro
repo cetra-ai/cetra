@@ -12,15 +12,17 @@ import Terminal from "../components/Terminal.astro";
         eyebrow="MCP and SQL"
         title="Your agents can read it too."
         id="agents-title"
-        lede="cetra has an MCP server. Point Claude Code, Cursor or another MCP client at your traces and ask what went wrong, from your editor."
+        lede="Point Claude Code, Cursor or another MCP client that supports streamable HTTP at your traces and ask what went wrong. Or run npx @cetra-ai/cli init in your repository: your coding agent gets a key, the cetra skill and a prompt to add tracing to your app."
       />
       <ul class="features bullets">
-        <li>Search traces and open a whole trace</li>
-        <li>Run read-only SQL over your project</li>
-        <li>Works with MCP clients that support streamable HTTP</li>
+        <li>Search traces, open a trace, run read-only SQL</li>
+        <li>Read your prompts and issues</li>
+        <li>cetra-cli init sets your repository up for your agent</li>
+        <li>A docs MCP server at cetra.sh/mcp</li>
       </ul>
       <div class="docs-link">
         <Button href="/docs/platform/mcp/" variant="ghost">Read the MCP docs →</Button>
+        <Button href="/docs/get-started/coding-agent/" variant="ghost">Set up with your coding agent →</Button>
       </div>
     </div>
     <Terminal
@@ -56,6 +58,9 @@ import Terminal from "../components/Terminal.astro";
   }
   .docs-link {
     margin-left: -0.4rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
   }
   @media (min-width: 960px) {
     .agents {
