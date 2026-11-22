@@ -7,7 +7,7 @@ import Section from "../../marketing/components/Section.astro";
 import SectionHeading from "../../marketing/components/SectionHeading.astro";
 import { COMPETITORS, formatDate, loadProduct } from "../../marketing/data/compare.mjs";
 import MarketingLayout from "../../marketing/layouts/MarketingLayout.astro";
-import { CLOUD, CONTACT_EMAIL } from "../../marketing/site";
+import { CONTACT_EMAIL, DEMO_URL } from "../../marketing/site";
 
 export function getStaticPaths() {
   return COMPETITORS.map((slug) => ({
@@ -97,7 +97,7 @@ const hasGuide = ["mdx", "md"].some((ext) =>
           <Button href="/docs/get-started/opentelemetry/">Send OpenTelemetry</Button>
         )
       }
-      <Button href={CLOUD.demo} variant="secondary" external srHint="(needs a free account)">
+      <Button href={DEMO_URL} variant="secondary" external>
         Try the demo
       </Button>
     </div>

@@ -13,17 +13,20 @@ export const MIN_STARS_SHOWN = 50;
 
 /**
  * The cloud. Sources: the control plane's routes `/signup` and `/login` on `app.cetra.sh`
- * (llmobs-control `web/src/routes/`), the demo route `/demo` on the first cell `eu1.cetra.sh`
- * (docs/plans/demo-org/README.md, D187), the status page `status.cetra.sh` (llmobs-control docs).
+ * (llmobs-control `web/src/routes/`), the status page `status.cetra.sh` (llmobs-control docs).
  */
 export const CLOUD = {
   signup: "https://app.cetra.sh/signup",
   login: "https://app.cetra.sh/login",
-  /** The demo org (D187). A signed-out visitor is sent to log in first. */
-  demo: "https://eu1.cetra.sh/demo",
   /** The regions the cloud offers today (design §9.4). */
   regions: ["EU (eu1)"],
 } as const;
+
+/**
+ * The web demo: the real UI on sample data, with no sign-in and no backend (D-C-22, design §9.6).
+ * The custom domain is attached to the `cetra-web-demo` Worker by hand before launch.
+ */
+export const DEMO_URL = "https://demo.cetra.sh";
 
 /** False until the first release; the layout then shows the release banner. */
 export const RELEASED = false;

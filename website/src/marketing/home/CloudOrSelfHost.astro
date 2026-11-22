@@ -3,7 +3,7 @@ import Button from "../components/Button.astro";
 import Card from "../components/Card.astro";
 import Section from "../components/Section.astro";
 import SectionHeading from "../components/SectionHeading.astro";
-import { CLOUD, CONTACT_EMAIL } from "../site";
+import { CLOUD, CONTACT_EMAIL, DEMO_URL } from "../site";
 ---
 
 <Section tone="teal" divider labelledby="deploy-title">
@@ -22,7 +22,7 @@ import { CLOUD, CONTACT_EMAIL } from "../site";
       </ul>
       <div class="actions">
         <Button href={CLOUD.signup} external>Start free</Button>
-        <Button href={CLOUD.demo} variant="secondary" external srHint="(needs a free account)">Try the demo</Button>
+        <Button href={DEMO_URL} variant="secondary" external>Try the demo</Button>
       </div>
     </Card>
     <Card title="Self-hosted">

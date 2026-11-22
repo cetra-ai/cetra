@@ -4,7 +4,7 @@ import Button from "../components/Button.astro";
 import CopyCommand from "../components/CopyCommand.astro";
 import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
-import { CLOUD, INSTALL_COMMANDS } from "../site";
+import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
 ---
 
 <Section tone="ink" pad="lg" id="top" labelledby="hero-title">
@@ -14,10 +14,10 @@ import { CLOUD, INSTALL_COMMANDS } from "../site";
       <h1 id="hero-title" class="hero-title">LLM observability you run yourself.<br /><span class="accent">In a minute.</span></h1>
       <p class="lede">Traces, evaluations and alerts for your AI app, in one binary. Nothing else to install or babysit, and your data stays on your server. Or let us run it in cetra Cloud.</p>
       <div class="actions">
-        <Button href={CLOUD.demo} size="lg" external srHint="(needs a free account)">Try the demo</Button>
+        <Button href={DEMO_URL} size="lg" external>Try the demo</Button>
         <Button href={CLOUD.signup} size="lg" variant="secondary" external>Start free</Button>
       </div>
-      <p class="small muted">The demo opens a read-only org with live traces. It needs a free cetra Cloud account.</p>
+      <p class="small muted">The demo is the real cetra UI on sample data. No sign-up.</p>
       <p class="eyebrow self-host">Or self-host it</p>
       <CopyCommand id="hero-install" commands={INSTALL_COMMANDS} note="What does this run?" noteHref="/docs/self-hosting/install/" />
     </div>
