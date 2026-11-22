@@ -1,6 +1,6 @@
 # Marketing site (cetra.sh)
 
-The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
+The design is `docs/website/00-design.md`. It has eight milestones, M1–M8, each with its own plan written just before it starts. M6 (benchmarks) waits for the benchmark and is not planned yet.
 
 | Milestone | Plan | Status |
 |---|---|---|
@@ -11,10 +11,11 @@ The design is `docs/website/00-design.md`. It has seven milestones, M1–M7, eac
 | M5 Compare | [`05-m5-compare.md`](05-m5-compare.md) | done (C1–C2) |
 | M6 Benchmarks | not planned: waits for the benchmark | — |
 | M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | done (L1–L2) |
+| M8 Main sync | [`08-m8-main-sync.md`](08-m8-main-sync.md) | done (S1–S7) |
 
 ## Branches
 
-- Each milestone is implemented on its own branch, `claude/website-m<N>`, cut from the previous milestone's branch (M1 from `claude/website-design`). Each branch has a PR whose base is the previous branch.
+- The site is now one branch, `claude/website`, rebased onto main on 2026-11-22, with one PR. The stack #174–#180 is closed.
 - Nothing is merged without the user's yes.
 
 ## Conventions for every phase
