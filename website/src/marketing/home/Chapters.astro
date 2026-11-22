@@ -1,7 +1,9 @@
 ---
 import marketingAlerts from "../../assets/screenshots/marketing-alerts.png";
-import marketingQueueReview from "../../assets/screenshots/marketing-queue-review.png";
 import marketingAssistant from "../../assets/screenshots/marketing-assistant.png";
+import marketingIssue from "../../assets/screenshots/marketing-issue.png";
+import marketingPlayground from "../../assets/screenshots/marketing-playground.png";
+import marketingQueueReview from "../../assets/screenshots/marketing-queue-review.png";
 import marketingTraceList from "../../assets/screenshots/marketing-trace-list.png";
 import Chapter from "../components/Chapter.astro";
 import Frame from "../components/Frame.astro";
@@ -26,24 +28,50 @@ import Section from "../components/Section.astro";
     bare
     id="ch-explore"
     eyebrow="Explore"
-    title="Find what went wrong."
-    lede="Filter by anything, search the text of prompts and outputs, or ask your question in SQL."
-    features={["Errors, slow and expensive in one click", "Full-text search", "Saved views", "A SQL console over your traces"]}
+    title="Find what went wrong, or ask."
+    lede="Filter by anything, search the text of prompts and outputs, write SQL, or ask the built-in assistant in plain words."
+    features={["Errors, slow and expensive in one click", "Full-text search", "A SQL console over your traces", "An assistant that drafts filters, SQL and dashboards, on your own LLM connection"]}
   >
-    <Frame src={marketingAssistant} alt="The assistant panel beside the trace list." label="Assistant" fade />
+    <Frame src={marketingAssistant} alt="The trace list with the assistant panel open, answering which traces failed in the last day." label="Assistant" fade />
   </Chapter>
 </Section>
 
-<Section tone="teal" labelledby="ch-evaluate">
+<Section tone="teal" labelledby="ch-issues">
+  <Chapter
+    bare
+    id="ch-issues"
+    eyebrow="Issues"
+    title="Problems find you."
+    lede="cetra groups recurring errors, bad scores and unhappy users into issues. Fix the cause once instead of reading traces one by one."
+    features={["Errors grouped by fingerprint, with no LLM call", "Bad scores and feedback clustered by meaning", "A fixed issue that comes back reopens", "Alert on it, queue it for review or turn it into a dataset"]}
+  >
+    <Frame src={marketingIssue} alt="An issue page: its state and actions, a daily chart of occurrences, example traces and its history." label="Issues" fade />
+  </Chapter>
+</Section>
+
+<Section tone="ink" labelledby="ch-evaluate">
   <Chapter
     bare
     id="ch-evaluate"
     eyebrow="Evaluate"
-    title="Measure quality when you're ready."
-    lede="Score production traffic with LLM judges and checks, build datasets from real traces, and compare experiments."
-    features={["LLM judges with sampling and a cost cap", "Checks: JSON, regex, schema, contains", "Datasets from production traces", "Experiments from the Python and TypeScript SDKs"]}
+    title="Measure quality, with judges and people."
+    lede="Score production traffic with LLM judges and checks, send traces to annotation queues for human review, and turn real traces into datasets and experiments."
+    features={["LLM judges with sampling and a cost cap", "Checks: JSON, regex, schema, contains", "Annotation queues for human review", "Datasets and experiments from the SDKs"]}
   >
-    <Frame src={marketingQueueReview} alt="An annotation queue item under review." label="Annotation queue" fade />
+    <Frame src={marketingQueueReview} alt="An annotation queue item under review: the trace, the queue's instructions and the score form." label="Annotation queue" fade />
+  </Chapter>
+</Section>
+
+<Section tone="raised" labelledby="ch-prompts">
+  <Chapter
+    bare
+    id="ch-prompts"
+    eyebrow="Prompts"
+    title="Change a prompt without a deploy."
+    lede="Version your prompts in cetra and point a label such as production at the one to serve. Your app fetches it through the SDK, with a cache and a fallback. Try changes in the playground first."
+    features={["Versions and labels", "SDK fetch with a cache and a fallback", "Up to four models side by side in the playground", "Cost, latency and scores per prompt version"]}
+  >
+    <Frame src={marketingPlayground} alt="The playground with a prompt version's messages and variables, and a model's answer with its tokens, cost and latency." label="Playground" fade />
   </Chapter>
 </Section>
 
@@ -53,8 +81,8 @@ import Section from "../components/Section.astro";
     id="ch-alert"
     eyebrow="Alert"
     title="Know when it breaks."
-    lede="Get told when the error rate, the cost, the latency or a score crosses your line, in Slack, by email or on a webhook."
-    features={["Error rate", "Cost over a window", "p95 latency", "Judge score under a threshold"]}
+    lede="Get told when the error rate, the cost, the latency, a score or an issue crosses your line, in Slack, by email or on a webhook."
+    features={["Error rate", "Cost over a window", "p95 latency", "Judge score under a threshold", "Occurrences of an issue"]}
   >
     <Frame src={marketingAlerts} alt="The alerts page with three alert rules, one of them firing, and the recent alert events." label="Alerts" fade />
   </Chapter>

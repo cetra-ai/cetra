@@ -34,7 +34,11 @@ import SectionHeading from "../components/SectionHeading.astro";
           <li class="tile">Storage engine</li>
           <li class="tile">SQL and search</li>
           <li class="tile">Evaluations</li>
+          <li class="tile">Annotation queues</li>
+          <li class="tile">Prompts and playground</li>
+          <li class="tile">Issues</li>
           <li class="tile">Alerts</li>
+          <li class="tile">AI assistant</li>
           <li class="tile">Web UI</li>
         </ul>
       </div>
@@ -99,6 +103,11 @@ import SectionHeading from "../components/SectionHeading.astro";
     font-family: var(--font-display);
     font-size: var(--text-xl);
     color: var(--fg);
+  }
+  @media (min-width: 1100px) {
+    .box--cetra .tiles {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
   }
   @media (max-width: 860px) {
     .compare {
