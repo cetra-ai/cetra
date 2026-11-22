@@ -1,0 +1,17 @@
+# cargo-nextest runs the Rust tests (`just test`, D81). Each test runs in its own process.
+# Doctests are not run by nextest: `just test-doc` runs them with cargo test.
+
+# `--partition slice:` (the CI shards) needs 0.9.127.
+nextest-version = { required = "0.9.127" }
+
+[profile.default]
+# Name tests that run longer than a minute; never kill them.
+slow-timeout = "60s"
+
+# CI (`NEXTEST_PROFILE=ci`, .github/CI.md § Rust tests): run every test and retry none, so a
+# flaky test fails the job. The log gives each test's time.
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = "60s"
+

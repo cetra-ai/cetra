@@ -12,6 +12,14 @@ inputs:
   s3-secret-access-key:
     description: Secret access key paired with s3-access-key-id.
     required: false
+  save-cache:
+    description: Save the job's compiled crates to the S3 cache (one shard of a matrix saves for all).
+    required: false
+    default: "true"
+  nextest:
+    description: Install cargo-nextest (the jobs that run `just test-shard`).
+    required: false
+    default: "false"
   mold:
     description: Install mold and link with it (only the jobs that set the mold RUSTFLAGS in ci.yml).
     required: false
@@ -54,7 +62,7 @@ runs:
         manifest-key: ${{ github.job }}
         cache-executables: true
         github-cache: false
-        save-cache: true
+        save-cache: ${{ inputs.save-cache }}
         # Reports go in the job summary; the workflow token stays contents:read.
         pr-comment: false
 
@@ -62,3 +70,9 @@ runs:
       uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
       with:
         tool: just@1.59.0,cargo-deny@0.20.2
+
+    - name: Install cargo-nextest
+      if: inputs.nextest == 'true'
+      uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      with:
+        tool: cargo-nextest@0.9.151

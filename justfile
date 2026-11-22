@@ -19,24 +19,30 @@ lint:
     # `--all-targets` skips the storage `test = false` targets (benchmarks, S3 probes); name them.
     cargo clippy --workspace --all-targets --all-features --test ingest_bench --test trace_bench --test s3_chaos --test s3_probe -- -D warnings
 
-# Run all Rust tests
-test:
-    cargo test --workspace --all-features
-    # The crash tests must reuse the workspace feature set: `-p cetra-storage`
-    # resolves different features and rebuilds every dependency from scratch.
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_flush_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_compaction_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_deletion_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_media_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_drop_hook_survives_a_lossy_crash
-    cargo test --workspace --all-features -- --ignored --exact model_tests::hook_crash::every_model_hook_crash_reads_back
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::every_retention_hook_aborts_safely
-    cargo test --workspace --all-features -- --ignored --exact crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows
+# The ignored tests that `just test` runs too, as a nextest filterset: the storage crash harness
+# (each crash test re-runs its own test binary as the child it kills).
+crash_tests := "test(=crash_tests::every_flush_hook_aborts_safely) | test(=crash_tests::every_compaction_hook_aborts_safely) | test(=crash_tests::every_deletion_hook_aborts_safely) | test(=crash_tests::every_media_hook_aborts_safely) | test(=crash_tests::every_drop_hook_aborts_safely) | test(=crash_tests::every_flush_hook_survives_a_lossy_crash) | test(=crash_tests::every_compaction_hook_survives_a_lossy_crash) | test(=crash_tests::every_deletion_hook_survives_a_lossy_crash) | test(=crash_tests::every_media_hook_survives_a_lossy_crash) | test(=crash_tests::every_drop_hook_survives_a_lossy_crash) | test(=model_tests::hook_crash::every_model_hook_crash_reads_back) | test(=crash_tests::every_retention_hook_aborts_safely) | test(=crash_tests::a_rotation_crash_reopens_with_the_acknowledged_rows)"
+
+# Run all Rust tests: cargo-nextest runs the unit and integration tests and the crash harness,
+# cargo test the doctests
+test: (test-nextest "") test-doc
+
+# The nextest part of `just test`. `partition` is empty for every test, or one CI shard as a
+# nextest slice, e.g. `slice:2/4`. Both runs use the workspace feature set: `-p cetra-storage`
+# resolves different features and rebuilds every dependency from scratch.
+test-nextest partition:
+    cargo nextest run --workspace --all-features {{ if partition == "" { "" } else { "--partition " + partition } }}
+    cargo nextest run --workspace --all-features --no-tests=pass --run-ignored only {{ if partition == "" { "" } else { "--partition " + partition } }} -E '{{crash_tests}}'
+
+# The doctests (nextest does not run them)
+test-doc:
+    cargo test --workspace --all-features --doc
+
+# One shard of `just test` in CI (`shard` of `total`, .github/CI.md § Rust tests); the first
+# shard also runs the doctests
+test-shard shard total:
+    just test-nextest slice:{{shard}}/{{total}}
+    {{ if shard == "1" { "just test-doc" } else { "true" } }}
 
 # The storage model test with more cases (D-R-14), in release mode.
 model cases="500":
