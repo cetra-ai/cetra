@@ -2,7 +2,7 @@
 // a split name (`CETRA_STORAGE__FLUSH__MAX_AGE`) must be a documented configuration key, and a
 // pattern (`CETRA_AUTH__OIDC__<NAME>__CLIENT_SECRET`) must start like a name in the code.
 // Prints `path:line: message` per finding and exits 1 when there is any.
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -65,13 +65,23 @@ export function main(root) {
     (p) => /\.mdx?$/.test(p) && p !== generated,
     pagePaths,
   );
+  // The agent skill (D-AO-8) names CETRA_* variables too.
+  const skill = join(root, "skills/cetra/SKILL.md");
+  if (existsSync(skill)) pagePaths.push(skill);
+  walk(join(root, "skills/cetra/references"), (p) => p.endsWith(".md"), pagePaths);
   const pages = Object.fromEntries(pagePaths.map((p) => [p, readFileSync(p, "utf8")]));
 
   const codePaths = [];
   for (const crate of readdirSync(join(root, "crates"))) {
     walk(join(root, "crates", crate, "src"), () => true, codePaths);
   }
-  for (const dir of ["sdks/python/src", "sdks/typescript/src", "deploy", "tools/packaging"]) {
+  for (const dir of [
+    "sdks/python/src",
+    "sdks/typescript/src",
+    "node-cli/src",
+    "deploy",
+    "tools/packaging",
+  ]) {
     walk(join(root, dir), () => true, codePaths);
   }
   const codeText = readAll(codePaths);

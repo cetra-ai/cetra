@@ -1,6 +1,7 @@
 packages:
   - web
   - sdks/typescript
+  - node-cli
   - website
 
 # Minutes. D74: packages younger than 7 days are not installed.

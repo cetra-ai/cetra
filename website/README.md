@@ -42,7 +42,7 @@ The UI screenshots under `src/assets/screenshots/` are generated from the web UI
 
 ## Deployment
 
-The site is a Cloudflare Worker with static assets, `cetra-site`, configured in `wrangler.jsonc` (D-W-3). It has no script: Cloudflare serves the files of `dist/`.
+The site is a Cloudflare Worker with static assets, `cetra-site`, configured in `wrangler.jsonc` (D-W-3). Its script answers only `/mcp`, the docs MCP server (D-AO-13); Cloudflare serves every other path from `dist/`.
 
 - A push to `main` deploys production with `wrangler deploy`: `https://cetra.sh/` once the domain is attached, and `https://cetra-site.<subdomain>.workers.dev/`.
 - A pull request authored and triggered by the repository owner, from a branch of this repository, deploys a Worker Preview named `pr-<number>` with `wrangler preview`, at `https://pr-<number>-cetra-site.<subdomain>.workers.dev/`. Other PRs are not deployed, because the job runs the PR's code with a deploy token. Cloudflare adds `X-Robots-Tag: noindex` to `workers.dev` Preview URLs, so they are not indexed.

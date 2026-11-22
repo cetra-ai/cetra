@@ -252,6 +252,7 @@ impl Compactor {
                             kind,
                             inputs,
                             error = error.label(),
+                            source = error.read_source(),
                             "compaction job failed"
                         );
                     }

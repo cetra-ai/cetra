@@ -491,6 +491,12 @@ pub(crate) struct Limits {
     /// Org SSO discovery and authorize, D-P-60: 300 per minute per client IP. Companies sit
     /// behind NAT, so the bucket is generous.
     pub(crate) sso_discover: KeyedLimiter<IpAddr>,
+    /// `POST /api/auth/device/code`: 10 a minute per client IP, an IPv6 address counted by its
+    /// /64 (D-AO-3).
+    pub(crate) device_code: KeyedLimiter<IpAddr>,
+    /// Device-code lookups, approvals and denials: 30 a minute per user, so a signed-in user
+    /// cannot enumerate user codes (D-AO-3).
+    pub(crate) device_lookup: KeyedLimiter<Uuid>,
     /// 5 alert test sends per minute per user, across channels (D-K-19).
     pub(crate) alert_tests_by_user: KeyedLimiter<Uuid>,
     /// 5 alert test sends per minute per channel, whoever sends them (D-K-19).
@@ -567,6 +573,20 @@ impl Limits {
                 },
                 MAX_KEYS,
             ),
+            device_code: KeyedLimiter::new(
+                Bucket {
+                    capacity: 10,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
+            device_lookup: KeyedLimiter::new(
+                Bucket {
+                    capacity: 30,
+                    per: Duration::from_secs(60),
+                },
+                MAX_KEYS,
+            ),
             alert_tests_by_channel: KeyedLimiter::new(
                 Bucket {
                     capacity: 5,
@@ -591,6 +611,8 @@ impl Limits {
         self.connection_tests.prune(now);
         self.sso_dns_checks.prune(now);
         self.sso_discover.prune(now);
+        self.device_code.prune(now);
+        self.device_lookup.prune(now);
         self.alert_tests_by_user.prune(now);
         self.alert_tests_by_channel.prune(now);
         self.mcp.prune(now);
@@ -604,6 +626,18 @@ impl Limits {
 impl Lockout {
     fn prune(&self, now: i64) {
         lock(&self.state).retain(|_, failure| failure.locked_until.is_none_or(|until| now < until));
+    }
+}
+
+/// The limiter key of a client address: an IPv6 address counts by its /64, since one
+/// host usually holds the whole /64; an IPv4 address counts by itself.
+pub(crate) fn network_key(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => ip,
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            IpAddr::V6(std::net::Ipv6Addr::new(s[0], s[1], s[2], s[3], 0, 0, 0, 0))
+        }
     }
 }
 
@@ -766,6 +800,38 @@ mod tests {
         let state = lock(&limiter.state);
         assert!(!state.contains_key(&"full"));
         assert!(state.contains_key(&"partial"));
+    }
+
+    #[test]
+    fn device_codes_allow_ten_a_minute_per_network() {
+        let limits = Limits::new(&DemoConfig::default());
+        let ip: IpAddr = "198.51.100.7".parse().unwrap();
+        for _ in 0..10 {
+            limits.device_code.check(&network_key(ip), 0).unwrap();
+        }
+        assert!(limits.device_code.check(&network_key(ip), 0).is_err());
+        let other: IpAddr = "198.51.100.8".parse().unwrap();
+        limits.device_code.check(&network_key(other), 0).unwrap();
+    }
+
+    #[test]
+    fn network_key_counts_an_ipv6_address_by_its_slash_64() {
+        let host: IpAddr = "2001:db8:1:2:3:4:5:6".parse().unwrap();
+        let neighbour: IpAddr = "2001:db8:1:2:ff::1".parse().unwrap();
+        assert_eq!(network_key(host), network_key(neighbour));
+        let v4: IpAddr = "192.0.2.1".parse().unwrap();
+        assert_eq!(network_key(v4), v4);
+    }
+
+    #[test]
+    fn device_lookups_allow_thirty_a_minute_per_user() {
+        let limits = Limits::new(&DemoConfig::default());
+        let user = Uuid::now_v7();
+        for _ in 0..30 {
+            limits.device_lookup.check(&user, 0).unwrap();
+        }
+        assert!(limits.device_lookup.check(&user, 0).is_err());
+        limits.device_lookup.check(&Uuid::now_v7(), 0).unwrap();
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Authentication building blocks: roles, tokens, passwords, rate limits, and web sessions.
 
 pub(crate) mod cache;
+pub(crate) mod device;
 pub(crate) mod last_used;
 pub(crate) mod limits;
 pub(crate) mod oidc;

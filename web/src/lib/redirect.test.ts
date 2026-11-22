@@ -33,7 +33,7 @@ it("lists the public routes", () => {
   expect(isPublicPath("/verify")).toBe(true);
   expect(isPublicPath("/invite/abc")).toBe(true);
   expect(isPublicPath("/setup/workspace")).toBe(false);
-  expect(isPublicPath("/cli-auth")).toBe(false);
+  expect(isPublicPath("/device")).toBe(false);
   expect(isPublicPath("/account")).toBe(false);
   expect(isPublicPath("/acme")).toBe(false);
   expect(isPublicPath("/loginx")).toBe(false);

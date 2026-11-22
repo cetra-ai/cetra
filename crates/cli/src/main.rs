@@ -59,14 +59,14 @@ enum Command {
         #[arg(long, default_value = health::DEFAULT_URL)]
         url: String,
     },
-    /// Save a personal access token for a server.
+    /// Sign in with a code you approve in the browser, and save a personal access token for a server.
     ///
     /// The token expires after 90 days. Run `cetra login` again when it does.
     Login {
         /// Server URL, for example `http://127.0.0.1:8080`.
         #[arg(long)]
         url: String,
-        /// Print the login URL and do not open a browser.
+        /// Print the sign-in URL and code, and do not open a browser.
         #[arg(long)]
         no_browser: bool,
     },

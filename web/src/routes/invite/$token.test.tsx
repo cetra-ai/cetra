@@ -52,9 +52,6 @@ function recordReplace() {
     replace: (url) => {
       replaced.push(url);
     },
-    submit: () => {
-      throw new Error("the invite page never posts a form");
-    },
   });
   return replaced;
 }

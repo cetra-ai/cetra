@@ -388,6 +388,7 @@ impl TestApp {
             ready: crate::http::health::ReadyCache::default(),
             clock: Clock::Manual(Arc::new(AtomicI64::new(MANUAL_NOW_NS))),
             limits,
+            device: crate::auth::device::DeviceStore::new(),
             key_cache: crate::auth::principal::ApiKeyCache::new(),
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),

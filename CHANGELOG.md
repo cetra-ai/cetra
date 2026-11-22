@@ -16,6 +16,9 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - Shutdown closes `catalog.db` before it releases the data directory lock, so the SQLite
   checkpoint no longer writes the file after the server has stopped.
+- Compaction no longer fails on every pass for a partition of large spans (LLM prompts and
+  completions): a merge reads fewer rows per batch when its rows are large, so its batches fit
+  `compaction.max_memory`, and days close.
 
 ## [0.1.0-rc.1] - 2026-11-21
 
@@ -45,6 +48,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- `POST /api/internal/v1/device/codes` lets a control plane register a device code on a cell (cloud sign-in).
+- `npx @cetra-ai/cli init` sets an app up for cetra in one command and prints a prompt for your coding agent; `cetra-cli query` checks the traces from the terminal; the cetra agent skill is installed in `.claude/skills/cetra/` and `.agents/skills/cetra/`.
 - The Python SDK is published to PyPI as `cetra-sdk` and the TypeScript SDK to npm as
   `@cetra-ai/sdk`, with the server's version, from each release tag (D-N-37).
 - `alerts.email_recipients` (`"members"` or `"any"`) limits email alert channels and their
@@ -143,6 +148,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Issues: error spans of production traces are grouped into issues you can resolve, ignore and merge, with occurrence counts and a filter on the trace list (D-IC-2).
 - Playground (D-V-20 to D-V-28, D-V-38): run prompt versions and recorded LLM spans against up to four models side by side, streamed, with cost and latency; save the result as a prompt version; recent runs.
 - A "Coding agents" dashboard template, and `session_id` as a breakdown of trace widgets.
+- Every docs page has a Markdown copy at `<page>/index.md`, with Copy page and View as Markdown actions; `https://cetra.sh/mcp` is a docs MCP server for coding agents (`search_docs`, `get_page`).
 
 ### Changed
 
@@ -178,9 +184,6 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   update is nullable in the OpenAPI contract, from 1 to 36500; `null` keeps data forever.
 - A read that makes several storage calls (a list with scores, a session or user detail) has 30 s
   in total, not 30 s per call.
-- `cetra login` receives the token from the browser as a form POST, not in the callback URL, so
-  the token stays out of browser history. A token created by the sign-in page expires after 90
-  days; run `cetra login` again when it does.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` that changes `base_url` or `adapter` must send
   `api_key` again (400 on `api_key`), so a new host never receives the stored key.
 - Web UI: with password sign-in off and exactly one sign-in provider, the login page and, for a
@@ -193,6 +196,12 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   queues, Datasets and Experiments pages share one toolbar layout and table style. Experiments has
   no Total chip and Evaluators no All button: select the selected chip again to clear the filter.
 - Item pages (new and edit forms, and the evaluator, issue, issue source, dataset and annotation queue pages) use the list pages' toolbar and left-aligned layout. The alert rule editor gets a back link.
+
+- `cetra login` signs in with a code you approve in the browser, so it works over SSH and in containers.
+
+### Removed
+
+- The `/cli-auth` page and the CLI's localhost callback.
 
 ### Fixed
 
@@ -238,7 +247,6 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The live traces list refetches its first page at most once at a time: a busy stream no longer cancels the refetch it started, and the traces that arrived meanwhile are fetched by one trailing refetch.
 - The live traces list and the trace view stop their stream on a 4xx answer instead of retrying forever, a 401 on a stream goes to `/login`, and the live list opens no stream while it shows an invalid filter.
 - The org's project list says "Forever" for a project that keeps data forever, instead of "Default".
-- The `/cli-auth` page hands the new CLI token over in a form POST instead of a URL, so it stays out of the browser history; the token expires after 90 days, and the page warns about links sent by someone else and shows the CLI's host as reported.
 - OTLP/gRPC checks the credential, the project and the units cap before decoding a message, and
   reserves the in-flight budget for the largest message before the body is read. The gRPC listener
   allows 100 concurrent streams and 32 in-flight requests per connection, and cuts a request

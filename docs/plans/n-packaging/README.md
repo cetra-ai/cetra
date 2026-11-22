@@ -191,8 +191,9 @@ Each archive contains one directory, `cetra-<version>-<target>/`, with four file
   the `.env.example` comment, and the SDK versions (D-N-37): `sdks/typescript/package.json` and
   `VERSION` in its `src/index.ts`, `sdks/python/pyproject.toml` and its `uv.lock`, the Python one
   in PEP 440 form (`tools/packaging/pep440.sh`: `0.1.0-rc.1` is `0.1.0rc1`; only `-alpha.N`,
-  `-beta.N` and `-rc.N` pre-releases have one). `tools/packaging/versions-check.sh` checks that
-  they agree, on every PR (N9).
+  `-beta.N` and `-rc.N` pre-releases have one), and the cetra-cli package (D-AO-2):
+  `node-cli/package.json` and `VERSION` in its `src/version.ts`. `tools/packaging/versions-check.sh`
+  checks that they agree, on every PR (N9).
 - `CHANGELOG.md` is hand-written in the Keep a Changelog format, with an `## [Unreleased]` section
   that each user-visible change adds to. Commit subjects stay as they are (not Conventional
   Commits).
@@ -431,8 +432,8 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
 3. Settings → Actions → General: workflow permissions stay "Read repository contents". The
    workflow grants itself `contents: write`, `packages: write`, `id-token: write` and
    `attestations: write` in the `publish` job only, and `id-token: write` in `pypi` and `npm`.
-4. The SDKs (D-N-37). No registry token is stored anywhere; both registries trust the workflow's
-   OIDC token.
+4. The SDKs (D-N-37) and the cetra-cli (D-AO-2). No registry token is stored anywhere; both
+   registries trust the workflow's OIDC token.
    - Settings → Environments: create `pypi` and `npm`, each limited to tags `v*`, with the user as
      required reviewer.
    - PyPI, organization `cetra-ai` → Publishing → add a **pending publisher** for the project
@@ -440,7 +441,8 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
      `pypi`. The first upload creates the project in the organization.
    - npm: create the organization `cetra-ai`. Publish the first version of `@cetra-ai/sdk` by hand
      (npm configures trusted publishing only on a package that exists), e.g. a `0.0.0` placeholder
-     with the dist-tag `placeholder`, so `latest` stays free:
+     with the dist-tag `placeholder`. npm also points `latest` at a package's first version, so
+     `latest` is the placeholder until the first stable release moves it:
 
      ```bash
      cd sdks/typescript && pnpm run build && npm publish --access public --tag placeholder
@@ -453,6 +455,19 @@ Each sub-phase lists the tools it needs. If one is missing, stop and report whic
      add it no more than two days before the first tag (or delete and re-add it then), and that
      tag's run validates it. Set "Publishing access" to
      require two-factor authentication and disallow tokens, so only the workflow can publish.
+   - npm: `@cetra-ai/cli` gets the same treatment. Publish its first version by hand, with the
+     placeholder tag (the package does not exist until then; as for the SDK, `latest` is that
+     placeholder until the first stable release):
+
+     ```bash
+     cd node-cli && pnpm run build && npm publish --access public --tag placeholder
+     ```
+
+     Then its Settings → Trusted publishing → GitHub Actions, with the same values: organization
+     `cetra-ai`, repository `cetra`, workflow `release.yml`, environment `npm`, "Allow npm publish"
+     ticked and "Allow npm dist-tag" off. Its "Publishing access" requires two-factor
+     authentication and disallows tokens, as the SDK's does. Its pending setup expires like the
+     SDK's: add it within two days of the first tag.
 
 **Dry run (until D46):**
 

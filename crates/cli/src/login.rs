@@ -1,11 +1,9 @@
-//! `cetra login` and `cetra logout` (spec 08, D140).
-//!
-//! The callback server accepts two requests with a matching `state`. The first is the
-//! browser's form POST to `/callback`, whose body carries the `token`. The second is the
-//! `GET /callback?error=access_denied` the browser sends when the user cancels. A GET
-//! that carries a token is refused, so the token never travels in a URL. The token is
-//! checked with `GET /api/auth/me` and stored in the credentials file. It is never logged.
+//! `cetra login` and `cetra logout` (spec 08 § Device authorization, D-AO-4). Login asks the
+//! server for a device code, prints the URL and the code, and polls `POST /api/auth/device/token`
+//! until the user approves or denies, or the code expires. The token is checked with
+//! `GET /api/auth/me` and stored in the credentials file. It is never logged.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -13,51 +11,32 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::Context;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use rand::TryRng;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use serde::{Deserialize, Serialize};
 
 use crate::credentials::{SavedToken, chosen_server, load, save, server_url};
 
-const WAIT: Duration = Duration::from_secs(5 * 60);
-const READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// The largest request head (request line and headers) the callback reads.
-const HEAD_LIMIT: usize = 8192;
-/// The largest form body the callback accepts. A token form is far smaller.
-const BODY_LIMIT: usize = 8192;
+/// How long past the code's `expires_in` the poll loop waits before it gives up.
+const DEADLINE_SLACK: Duration = Duration::from_secs(5);
+/// What `slow_down` adds to the poll interval (RFC 8628 § 3.5).
+const SLOW_DOWN_STEP: Duration = Duration::from_secs(5);
+/// The longest code lifetime the CLI accepts from the server, in seconds.
+const MAX_EXPIRES_IN_S: u64 = 900;
+/// The shortest poll interval the CLI uses, whatever the server says.
+const MIN_INTERVAL: Duration = Duration::from_secs(1);
+const EXPIRED: &str = "the sign-in code expired; run `cetra login` again";
+const BAD_URL: &str = "the server sent an invalid sign-in URL";
+const BAD_CODE: &str = "the server sent an invalid sign-in code";
 
-const PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>cetra</title></head><body><p>You're signed in. Return to the terminal.</p></body></html>";
-const CANCELLED_PAGE: &str = "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>cetra</title></head><body><p>Sign-in cancelled. You can close this window.</p></body></html>";
-
-/// What one callback request means for the wait.
-#[derive(Debug, PartialEq)]
-enum Callback {
-    Token(String),
-    Cancelled,
-    Refused,
-}
-
-/// The parts of a callback request head that the wait needs.
-struct Head {
-    method: String,
-    target: String,
-    content_type: Option<String>,
-    content_length: Option<usize>,
-}
-
-/// `cetra login`. `output` receives the browser URL, one line.
+/// `cetra login`. `output` receives the sign-in URL, then the code, one line each.
 ///
-/// The token the browser creates expires after 90 days. When it does, run
-/// `cetra login` again.
+/// The token expires after 90 days. When it does, run `cetra login` again.
 ///
 /// # Errors
 ///
-/// Returns an error when the server URL is refused by `credentials::server_url`, the
-/// callback times out or the user cancels in the browser, the token is rejected, or the
-/// credentials file cannot be written. The message does not include the token, and a
-/// refused URL is never printed.
+/// Returns an error when the server URL is refused by `credentials::server_url`, the server
+/// refuses to issue a code, the user denies the code or it expires, the server's token is not
+/// a personal access token or is rejected, or the credentials file cannot be written. The
+/// message does not include the token, and a refused URL is never printed.
 pub(crate) async fn login(
     raw: &str,
     no_browser: bool,
@@ -65,22 +44,25 @@ pub(crate) async fn login(
     mut output: impl Write + Send,
 ) -> anyhow::Result<()> {
     let server = server_url(raw)?;
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .context("binding the callback")?;
-    let port = listener
-        .local_addr()
-        .context("binding the callback")?
-        .port();
-    let state = new_state().context("generating state")?;
-    let browser = cli_auth_url(&server, port, &state, local_host().as_deref());
-    writeln!(output, "{browser}").context("printing the login url")?;
-    output.flush().context("printing the login url")?;
+    let host = local_host().as_deref().and_then(sanitise_host);
+    let client = http_client()?;
+    let code = request_code(&client, &server, host.as_deref()).await?;
+    // The server's answer is checked before anything is printed or opened.
+    let sign_in_url = parse_sign_in_url(&code.verification_uri_complete)?;
+    if !is_user_code(&code.user_code) {
+        anyhow::bail!(BAD_CODE);
+    }
+    writeln!(output, "{}", sign_in_url.as_str()).context("printing the sign-in url")?;
+    writeln!(output, "Code: {}", code.user_code).context("printing the sign-in code")?;
+    output.flush().context("printing the sign-in url")?;
     drop(output);
     if !no_browser {
-        open_browser(&browser);
+        open_browser(sign_in_url.as_str());
     }
-    let token = wait_for_callback(listener, &state).await?;
+    let token = poll_for_token(&client, &server, &code).await?;
+    if !is_personal_token(&token) {
+        anyhow::bail!("the server returned an invalid token");
+    }
     verify(&server, &token).await?;
     let mut file = load(credentials)?;
     file.servers.insert(server, SavedToken { token });
@@ -112,15 +94,131 @@ pub(crate) async fn logout(raw: Option<&str>, credentials: &Path) -> anyhow::Res
     save(credentials, &file)
 }
 
-/// The URL the browser opens. `host` is the machine's name, sanitised before it is sent,
-/// and is left out when nothing usable remains.
-fn cli_auth_url(server: &str, port: u16, state: &str, host: Option<&str>) -> String {
-    let mut url = format!("{server}/cli-auth?port={port}&state={state}");
-    if let Some(host) = host.and_then(sanitise_host) {
-        url.push_str("&host=");
-        url.push_str(&host);
+/// Asks the server for a device code for a `login`. `host` is the sanitised machine name.
+async fn request_code(
+    client: &reqwest::Client,
+    server: &str,
+    host: Option<&str>,
+) -> anyhow::Result<CodeAnswer> {
+    let response = client
+        .post(format!("{server}/api/auth/device/code"))
+        .json(&CodeRequest {
+            purpose: "login",
+            host,
+        })
+        .send()
+        .await
+        .context("requesting a sign-in code")?;
+    let status = response.status();
+    if status != reqwest::StatusCode::OK {
+        anyhow::bail!(
+            "the server refused a sign-in code (HTTP {})",
+            status.as_u16()
+        );
     }
-    url
+    response
+        .json::<CodeAnswer>()
+        .await
+        .context("reading the sign-in code")
+}
+
+/// Polls the token endpoint until the grant arrives, the user denies, or the code expires.
+/// A network error on one poll is not fatal: the poll is retried until the deadline. The
+/// server's interval is at least `MIN_INTERVAL` and its lifetime at most `MAX_EXPIRES_IN_S`.
+async fn poll_for_token(
+    client: &reqwest::Client,
+    server: &str,
+    code: &CodeAnswer,
+) -> anyhow::Result<String> {
+    let lifetime = Duration::from_secs(code.expires_in.min(MAX_EXPIRES_IN_S));
+    let deadline = tokio::time::Instant::now() + lifetime.saturating_add(DEADLINE_SLACK);
+    let mut interval = Duration::from_secs(code.interval).max(MIN_INTERVAL);
+    let mut warned = false;
+    loop {
+        tokio::time::sleep(interval).await;
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(EXPIRED);
+        }
+        let response = match client
+            .post(format!("{server}/api/auth/device/token"))
+            .json(&TokenRequest {
+                device_code: &code.device_code,
+            })
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                if !warned {
+                    warn("cannot reach the server; still waiting");
+                    warned = true;
+                }
+                continue;
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 200 {
+            let grant = response
+                .json::<Grant>()
+                .await
+                .context("reading the sign-in grant")?;
+            return Ok(grant.token);
+        }
+        let body = response.bytes().await.unwrap_or_default();
+        match step(status, &body) {
+            Step::Wait => {}
+            Step::SlowDown => interval = next_interval(interval),
+            Step::Denied => anyhow::bail!("sign-in denied in the browser"),
+            Step::Expired => anyhow::bail!(EXPIRED),
+            Step::Failed(failed) => anyhow::bail!("sign-in failed (HTTP {failed})"),
+        }
+    }
+}
+
+/// What one poll answer means for the loop. A 400 with an RFC 8628 code continues it, and so
+/// does a 429 or a 502, 503 or 504 from a proxy: a blip does not end a live code.
+fn step(status: u16, body: &[u8]) -> Step {
+    if matches!(status, 429 | 502 | 503 | 504) {
+        return Step::Wait;
+    }
+    if status != 400 {
+        return Step::Failed(status);
+    }
+    let code = serde_json::from_slice::<ProblemCodeOnly>(body)
+        .ok()
+        .and_then(|problem| problem.code);
+    match code.as_deref() {
+        Some("authorization_pending") => Step::Wait,
+        Some("slow_down") => Step::SlowDown,
+        Some("access_denied") => Step::Denied,
+        Some("expired_token") => Step::Expired,
+        _ => Step::Failed(status),
+    }
+}
+
+/// The sign-in URL the server sent, parsed. Only `http` and `https` are accepted; the returned
+/// URL is re-serialised, so it is the one that gets printed and opened.
+fn parse_sign_in_url(raw: &str) -> anyhow::Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).map_err(|_| anyhow::anyhow!(BAD_URL))?;
+    match url.scheme() {
+        "http" | "https" => Ok(url),
+        _ => anyhow::bail!(BAD_URL),
+    }
+}
+
+/// `XXXX-XXXX` in ASCII capitals, the shape the server issues (spec 08 § Device authorization).
+fn is_user_code(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    bytes.len() == 9
+        && bytes[4] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || byte.is_ascii_uppercase())
+}
+
+fn next_interval(current: Duration) -> Duration {
+    current + SLOW_DOWN_STEP
 }
 
 /// Keeps only `[A-Za-z0-9.-]`, at most 64 characters. `None` when nothing is left.
@@ -141,14 +239,6 @@ fn local_host() -> Option<String> {
         .or_else(|| fs::read_to_string("/etc/hostname").ok())
 }
 
-fn new_state() -> anyhow::Result<String> {
-    let mut bytes = [0u8; 32];
-    rand::rngs::SysRng
-        .try_fill_bytes(&mut bytes)
-        .map_err(|_| anyhow::anyhow!("the random source failed"))?;
-    Ok(URL_SAFE_NO_PAD.encode(bytes))
-}
-
 fn is_personal_token(token: &str) -> bool {
     let mut prefix = String::from("pat-");
     prefix.push_str(cetra_core::names::PRODUCT);
@@ -159,259 +249,72 @@ fn is_personal_token(token: &str) -> bool {
     tail.len() == 32 && tail.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
-/// Waits up to [`WAIT`] for the token or the cancel. Each accepted connection is handled in its
-/// own task, so one that sends nothing (or stalls) delays neither the browser's POST nor the
-/// other connections; the task reports its outcome here.
-async fn wait_for_callback(listener: TcpListener, expected_state: &str) -> anyhow::Result<String> {
-    let deadline = tokio::time::Instant::now() + WAIT;
-    let (outcomes_tx, mut outcomes) = tokio::sync::mpsc::unbounded_channel::<Callback>();
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let (socket, _) = accepted.context("accepting the callback")?;
-                let outcomes_tx = outcomes_tx.clone();
-                let expected_state = expected_state.to_owned();
-                tokio::spawn(async move {
-                    let callback = handle_callback(socket, &expected_state).await;
-                    // The wait may have ended already; the outcome is then not needed.
-                    let _ = outcomes_tx.send(callback);
-                });
-            }
-            outcome = outcomes.recv() => match outcome {
-                Some(Callback::Token(token)) => return Ok(token),
-                Some(Callback::Cancelled) => anyhow::bail!("sign-in cancelled in the browser"),
-                // A refused request is answered and the wait goes on. `outcomes_tx` is still
-                // held here, so the channel never closes.
-                Some(Callback::Refused) | None => {}
-            },
-            () = tokio::time::sleep_until(deadline) => {
-                anyhow::bail!("timed out waiting for the browser");
-            }
-        }
+/// The body of `POST /api/auth/device/code`, which carries no cookie and no `Origin`.
+#[derive(Serialize)]
+struct CodeRequest<'a> {
+    purpose: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host: Option<&'a str>,
+}
+
+/// The answer to `POST /api/auth/device/code`. `Debug` hides the device code.
+#[derive(Deserialize)]
+struct CodeAnswer {
+    device_code: String,
+    user_code: String,
+    verification_uri_complete: String,
+    /// Seconds.
+    expires_in: u64,
+    /// Seconds between polls.
+    interval: u64,
+}
+
+impl fmt::Debug for CodeAnswer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodeAnswer")
+            .field("device_code", &"<redacted>")
+            .field("user_code", &self.user_code)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_in", &self.expires_in)
+            .field("interval", &self.interval)
+            .finish()
     }
 }
 
-async fn handle_callback(mut socket: TcpStream, expected_state: &str) -> Callback {
-    let callback = match read_head(&mut socket).await.as_deref().and_then(parse_head) {
-        Some(head) => callback_for(&mut socket, &head, expected_state).await,
-        None => Callback::Refused,
-    };
-    match &callback {
-        Callback::Token(_) => {
-            let _ = respond(&mut socket, 200, "OK", "text/html; charset=utf-8", PAGE).await;
-        }
-        Callback::Cancelled => {
-            let _ = respond(
-                &mut socket,
-                200,
-                "OK",
-                "text/html; charset=utf-8",
-                CANCELLED_PAGE,
-            )
-            .await;
-        }
-        Callback::Refused => {
-            let _ = respond(
-                &mut socket,
-                400,
-                "Bad Request",
-                "text/plain; charset=utf-8",
-                "rejected\n",
-            )
-            .await;
-        }
-    }
-    callback
+/// The body of `POST /api/auth/device/token`.
+#[derive(Serialize)]
+struct TokenRequest<'a> {
+    device_code: &'a str,
 }
 
-/// Reads the request head up to the blank line. The body, if any, is left unread.
-async fn read_head(socket: &mut TcpStream) -> Option<String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    let deadline = tokio::time::Instant::now() + READ_TIMEOUT;
-    while !buf.ends_with(b"\r\n\r\n") {
-        if buf.len() >= HEAD_LIMIT {
-            return None;
-        }
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            return None;
-        }
-        match tokio::time::timeout(remaining, socket.read(&mut byte)).await {
-            Ok(Ok(1)) => buf.push(byte[0]),
-            _ => return None,
-        }
-    }
-    String::from_utf8(buf).ok()
+/// The grant answer. Only the token is read here. `Debug` hides it.
+#[derive(Deserialize)]
+struct Grant {
+    token: String,
 }
 
-/// A Content-Length of ASCII digits only: `usize::from_str` would also take a leading `+`.
-fn parse_length(value: &str) -> Option<usize> {
-    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    value.parse().ok()
-}
-
-fn parse_head(text: &str) -> Option<Head> {
-    let mut lines = text.split("\r\n");
-    let mut parts = lines.next()?.split_whitespace();
-    let method = parts.next()?.to_owned();
-    let target = parts.next()?.to_owned();
-    let mut content_type = None;
-    let mut content_length = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-        match name.trim().to_ascii_lowercase().as_str() {
-            "content-type" => content_type = Some(value.to_owned()),
-            "content-length" => content_length = Some(parse_length(value)?),
-            _ => {}
-        }
-    }
-    Some(Head {
-        method,
-        target,
-        content_type,
-        content_length,
-    })
-}
-
-async fn callback_for(socket: &mut TcpStream, head: &Head, expected_state: &str) -> Callback {
-    let (path, query) = match head.target.split_once('?') {
-        Some((path, query)) => (path, Some(query)),
-        None => (head.target.as_str(), None),
-    };
-    if path != "/callback" {
-        return Callback::Refused;
-    }
-    if head.method.eq_ignore_ascii_case("GET") {
-        // A GET only ever carries the cancel. A token in a URL is refused.
-        let Some(fields) = query.and_then(form_fields) else {
-            return Callback::Refused;
-        };
-        if first_field(&fields, "state") == Some(expected_state)
-            && first_field(&fields, "error") == Some("access_denied")
-        {
-            return Callback::Cancelled;
-        }
-        return Callback::Refused;
-    }
-    if !head.method.eq_ignore_ascii_case("POST")
-        || query.is_some()
-        || !is_form(head.content_type.as_deref())
-    {
-        return Callback::Refused;
-    }
-    // The length is checked before anything is read, so an oversized body is never buffered.
-    let Some(length) = head.content_length.filter(|length| *length <= BODY_LIMIT) else {
-        return Callback::Refused;
-    };
-    let Some(body) = read_body(socket, length).await else {
-        return Callback::Refused;
-    };
-    let Some(fields) = std::str::from_utf8(&body).ok().and_then(form_fields) else {
-        return Callback::Refused;
-    };
-    token_callback(&fields, expected_state)
-}
-
-async fn read_body(socket: &mut TcpStream, length: usize) -> Option<Vec<u8>> {
-    let mut body = vec![0u8; length];
-    tokio::time::timeout(READ_TIMEOUT, socket.read_exact(&mut body))
-        .await
-        .ok()?
-        .ok()?;
-    Some(body)
-}
-
-fn is_form(content_type: Option<&str>) -> bool {
-    content_type.is_some_and(|value| {
-        value.split(';').next().is_some_and(|media| {
-            media
-                .trim()
-                .eq_ignore_ascii_case("application/x-www-form-urlencoded")
-        })
-    })
-}
-
-fn token_callback(fields: &[(String, String)], expected_state: &str) -> Callback {
-    if first_field(fields, "state") != Some(expected_state) {
-        return Callback::Refused;
-    }
-    match first_field(fields, "token") {
-        Some(token) if is_personal_token(token) => Callback::Token(token.to_owned()),
-        _ => Callback::Refused,
+impl fmt::Debug for Grant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Grant")
+            .field("token", &"<redacted>")
+            .finish()
     }
 }
 
-async fn respond(
-    socket: &mut TcpStream,
-    status: u16,
-    reason: &str,
-    content_type: &str,
-    body: &str,
-) -> io::Result<()> {
-    let header = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    socket.write_all(header.as_bytes()).await?;
-    socket.write_all(body.as_bytes()).await?;
-    socket.shutdown().await
+/// The `code` of a problem answer; any other field is ignored.
+#[derive(Deserialize)]
+struct ProblemCodeOnly {
+    code: Option<String>,
 }
 
-fn first_field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    fields
-        .iter()
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value.as_str())
-}
-
-/// Splits `key=value&...` and decodes both sides. `None` when a pair has no `=` or is
-/// not valid percent-encoding.
-fn form_fields(encoded: &str) -> Option<Vec<(String, String)>> {
-    encoded
-        .split('&')
-        .map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            Some((form_decode(key)?, form_decode(value)?))
-        })
-        .collect()
-}
-
-fn form_decode(value: &str) -> Option<String> {
-    let bytes = value.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        match bytes[index] {
-            b'%' => {
-                if index + 2 >= bytes.len() {
-                    return None;
-                }
-                // Two hex digits only: `from_str_radix` would also take a sign, as in `%+1`.
-                let digits = &bytes[index + 1..index + 3];
-                if !digits.iter().all(u8::is_ascii_hexdigit) {
-                    return None;
-                }
-                let hex = std::str::from_utf8(digits).ok()?;
-                out.push(u8::from_str_radix(hex, 16).ok()?);
-                index += 3;
-            }
-            b'+' => {
-                out.push(b' ');
-                index += 1;
-            }
-            byte => {
-                out.push(byte);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(out).ok()
+/// What one poll means for the loop.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Wait,
+    SlowDown,
+    Denied,
+    Expired,
+    Failed(u16),
 }
 
 async fn verify(server: &str, token: &str) -> anyhow::Result<()> {
@@ -468,8 +371,9 @@ fn browser_command(url: &str) -> Command {
     }
     #[cfg(target_os = "windows")]
     {
-        let mut command = Command::new("cmd");
-        command.args(["/c", "start", "", url]);
+        // No shell: `cmd /c start` would read `&` and `|` in the URL as commands.
+        let mut command = Command::new("rundll32");
+        command.args(["url.dll,FileProtocolHandler", url]);
         command
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -484,7 +388,10 @@ fn browser_command(url: &str) -> Command {
 mod tests {
     use super::*;
     use crate::credentials::normalize_server_url;
-    use tokio::task::JoinHandle;
+    use crate::test_server::Canned;
+
+    /// A pending poll answer, as the server sends it.
+    const PENDING: &str = r#"{"code":"authorization_pending"}"#;
 
     fn example_token() -> String {
         format!(
@@ -493,224 +400,25 @@ mod tests {
         )
     }
 
-    /// Starts one callback wait on a free port and returns the port and the wait.
-    async fn start_wait(state: &'static str) -> (u16, JoinHandle<anyhow::Result<String>>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        (
-            port,
-            tokio::spawn(async move { wait_for_callback(listener, state).await }),
-        )
+    /// A code answer with a zero interval, so that a canned flow polls once a second.
+    fn code_answer() -> String {
+        code_answer_with("http://127.0.0.1:8080/device?code=BCDF-GHJK", "BCDF-GHJK")
     }
 
-    /// Writes one raw request to the callback and returns the whole response.
-    async fn send_raw(port: u16, request: &str) -> String {
-        let mut socket = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        socket.write_all(request.as_bytes()).await.unwrap();
-        let mut response = Vec::new();
-        socket.read_to_end(&mut response).await.unwrap();
-        String::from_utf8_lossy(&response).into_owned()
+    /// A code answer with the given sign-in URL and user code.
+    fn code_answer_with(url: &str, user_code: &str) -> String {
+        serde_json::json!({
+            "device_code": "d".repeat(43),
+            "user_code": user_code,
+            "verification_uri_complete": url,
+            "expires_in": 600,
+            "interval": 0,
+        })
+        .to_string()
     }
 
-    fn form_post(body: &str) -> String {
-        format!(
-            "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    #[test]
-    fn a_personal_token_has_the_pat_shape() {
-        let tail = "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
-        let token = format!("pat-{}-{tail}", cetra_core::names::PRODUCT);
-        assert!(is_personal_token(&token));
-        assert!(!is_personal_token(&format!(
-            "sk-{}-{tail}",
-            cetra_core::names::PRODUCT
-        )));
-    }
-
-    #[test]
-    fn the_host_is_sanitised_and_truncated_before_it_is_sent() {
-        assert_eq!(
-            sanitise_host("my host!.local").as_deref(),
-            Some("myhost.local")
-        );
-        assert_eq!(sanitise_host("  !! "), None);
-        let long = "a".repeat(100);
-        assert_eq!(sanitise_host(&long).map(|host| host.len()), Some(64));
-
-        assert_eq!(
-            cli_auth_url("http://h", 5, "st", Some("my host!.local")),
-            "http://h/cli-auth?port=5&state=st&host=myhost.local"
-        );
-        assert_eq!(
-            cli_auth_url("http://h", 5, "st", Some("!!")),
-            "http://h/cli-auth?port=5&state=st"
-        );
-        assert_eq!(
-            cli_auth_url("http://h", 5, "st", None),
-            "http://h/cli-auth?port=5&state=st"
-        );
-    }
-
-    #[tokio::test]
-    async fn login_refuses_a_url_with_credentials_before_printing() {
-        let dir = tempfile::tempdir().unwrap();
-        let credentials = dir.path().join("cetra").join("credentials.toml");
-        let mut printed = Vec::new();
-        let error = login("http://user:pw@h", true, &credentials, &mut printed)
-            .await
-            .unwrap_err();
-        let text = error.to_string();
-        assert_eq!(text, "the server URL must not contain credentials");
-        assert!(!text.contains("user") && !text.contains("pw"));
-        assert!(printed.is_empty());
-        assert!(!credentials.exists());
-    }
-
-    #[tokio::test]
-    async fn access_denied_ends_the_wait_with_the_cancel_error() {
-        let (port, waiter) = start_wait("state-a").await;
-
-        let response = send_raw(
-            port,
-            "GET /callback?error=access_denied&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
-        )
-        .await;
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert!(response.contains("Sign-in cancelled"));
-
-        let error = waiter.await.unwrap().unwrap_err();
-        assert_eq!(error.to_string(), "sign-in cancelled in the browser");
-    }
-
-    #[tokio::test]
-    async fn access_denied_with_a_wrong_state_keeps_waiting() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-
-        let refused = send_raw(
-            port,
-            "GET /callback?error=access_denied&state=wrong HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
-        )
-        .await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-        assert!(!refused.contains("Sign-in cancelled"));
-
-        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
-        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
-    }
-
-    #[tokio::test]
-    async fn a_form_post_with_the_token_is_accepted() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-
-        let response = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert!(response.contains("You're signed in. Return to the terminal."));
-        assert!(!response.contains(&token));
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
-    }
-
-    #[tokio::test]
-    async fn a_get_carrying_a_token_is_refused_and_the_wait_continues() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-
-        let refused = send_raw(
-            port,
-            &format!(
-                "GET /callback?token={token}&state=state-a HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
-            ),
-        )
-        .await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-        assert!(!refused.contains(&token));
-
-        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
-        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
-    }
-
-    #[tokio::test]
-    async fn a_form_post_with_a_wrong_state_is_refused_and_the_wait_continues() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-
-        let refused = send_raw(port, &form_post(&format!("token={token}&state=wrong"))).await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-        assert!(!refused.contains(&token));
-
-        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
-        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
-    }
-
-    #[tokio::test]
-    async fn an_idle_connection_does_not_delay_the_post() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-        // A connection that sends nothing stays open while the browser posts.
-        let _idle = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-
-        let response = tokio::time::timeout(
-            Duration::from_secs(5),
-            send_raw(port, &form_post(&format!("token={token}&state=state-a"))),
-        )
-        .await
-        .expect("the POST is answered while the idle connection is open");
-        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
-    }
-
-    #[test]
-    fn a_signed_content_length_is_refused() {
-        let head = "POST /callback HTTP/1.1\r\nContent-Length: +5\r\n";
-        assert!(parse_head(head).is_none());
-        let plain = "POST /callback HTTP/1.1\r\nContent-Length: 5\r\n";
-        assert_eq!(
-            parse_head(plain).and_then(|head| head.content_length),
-            Some(5)
-        );
-    }
-
-    #[test]
-    fn a_sign_is_not_a_percent_escape() {
-        assert_eq!(form_decode("%+1"), None);
-        assert_eq!(form_decode("%-1"), None);
-        assert_eq!(form_decode("%41").as_deref(), Some("A"));
-        assert_eq!(form_fields("a=%+1"), None);
-    }
-
-    #[tokio::test]
-    async fn an_oversized_or_unframed_post_is_refused_without_reading_it() {
-        let (port, waiter) = start_wait("state-a").await;
-        let token = example_token();
-
-        // The length is over the cap. Only the head is sent, so nothing is read.
-        let oversized = format!(
-            "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\r\n",
-            BODY_LIMIT + 1
-        );
-        let refused = send_raw(port, &oversized).await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-
-        // No Content-Length at all.
-        let unframed = "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\n";
-        let refused = send_raw(port, unframed).await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-
-        // Not a form.
-        let wrong_type = "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n";
-        let refused = send_raw(port, wrong_type).await;
-        assert!(refused.starts_with("HTTP/1.1 400"), "{refused}");
-
-        let accepted = send_raw(port, &form_post(&format!("token={token}&state=state-a"))).await;
-        assert!(accepted.starts_with("HTTP/1.1 200"), "{accepted}");
-        assert_eq!(waiter.await.unwrap().unwrap(), token);
+    fn grant(token: &str) -> String {
+        format!(r#"{{"server":"http://127.0.0.1:8080","token":"{token}"}}"#)
     }
 
     struct LineWriter {
@@ -732,6 +440,291 @@ mod tests {
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
+    }
+
+    fn query_value(url: &str, name: &str) -> Option<String> {
+        let query = url.split_once('?')?.1;
+        for pair in query.split('&') {
+            let (key, value) = pair.split_once('=')?;
+            if key == name {
+                return Some(value.to_owned());
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_personal_token_has_the_pat_shape() {
+        let tail = "EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0";
+        let token = format!("pat-{}-{tail}", cetra_core::names::PRODUCT);
+        assert!(is_personal_token(&token));
+        assert!(!is_personal_token(&format!(
+            "sk-{}-{tail}",
+            cetra_core::names::PRODUCT
+        )));
+    }
+
+    #[test]
+    fn the_host_is_sanitised_and_truncated() {
+        assert_eq!(
+            sanitise_host("my host!.local").as_deref(),
+            Some("myhost.local")
+        );
+        assert_eq!(sanitise_host("  !! "), None);
+        let long = "a".repeat(100);
+        assert_eq!(sanitise_host(&long).map(|host| host.len()), Some(64));
+    }
+
+    #[test]
+    fn step_maps_each_rfc_8628_code() {
+        assert_eq!(step(400, PENDING.as_bytes()), Step::Wait);
+        assert_eq!(step(400, br#"{"code":"slow_down"}"#), Step::SlowDown);
+        assert_eq!(step(400, br#"{"code":"access_denied"}"#), Step::Denied);
+        assert_eq!(step(400, br#"{"code":"expired_token"}"#), Step::Expired);
+    }
+
+    #[test]
+    fn a_busy_or_unavailable_server_keeps_the_code_alive() {
+        assert_eq!(step(429, b""), Step::Wait);
+        assert_eq!(step(502, b""), Step::Wait);
+        assert_eq!(step(503, b""), Step::Wait);
+        assert_eq!(step(504, b""), Step::Wait);
+        assert_eq!(step(500, b""), Step::Failed(500));
+    }
+
+    #[test]
+    fn the_sign_in_url_must_be_http_or_https() {
+        assert!(parse_sign_in_url("javascript:alert(1)").is_err());
+        assert!(parse_sign_in_url("file:///etc/passwd").is_err());
+        assert!(parse_sign_in_url("not a url").is_err());
+        let url = parse_sign_in_url("https://cetra.example/device?code=BCDF-GHJK").unwrap();
+        assert_eq!(url.as_str(), "https://cetra.example/device?code=BCDF-GHJK");
+    }
+
+    #[test]
+    fn the_user_code_is_four_capitals_a_dash_and_four_capitals() {
+        assert!(is_user_code("BCDF-GHJK"));
+        assert!(!is_user_code("bcdf-ghjk"));
+        assert!(!is_user_code("BCDF-GHJK\n"));
+        assert!(!is_user_code("BCDFGHJK"));
+        assert!(!is_user_code("BCDF-GHJ"));
+    }
+
+    #[tokio::test]
+    async fn a_javascript_sign_in_url_is_refused_before_anything_is_printed() {
+        let canned = Canned::json(vec![(
+            200,
+            code_answer_with("javascript:alert(1)", "BCDF-GHJK"),
+        )])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let mut printed = Vec::new();
+        let error = login(&canned.url, true, &credentials, &mut printed)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), BAD_URL);
+        assert!(printed.is_empty());
+        assert!(!credentials.exists());
+    }
+
+    #[tokio::test]
+    async fn a_sign_in_url_with_a_space_and_an_ampersand_is_printed_without_a_space() {
+        let canned = Canned::json(vec![
+            (
+                200,
+                code_answer_with(
+                    "http://127.0.0.1:8080/device?code=BCDF-GHJK&note=a b",
+                    "BCDF-GHJK",
+                ),
+            ),
+            (400, r#"{"code":"access_denied"}"#.to_owned()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let error = login(
+            &canned.url,
+            true,
+            &credentials,
+            LineWriter {
+                tx,
+                buf: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), "sign-in denied in the browser");
+
+        let printed = rx.recv().await.expect("the sign-in url is printed");
+        assert!(!printed.contains(' '), "{printed}");
+        assert!(printed.starts_with("http://127.0.0.1:8080/device?code=BCDF-GHJK&"));
+        assert!(printed.contains("note=a%20b"), "{printed}");
+    }
+
+    #[tokio::test]
+    async fn a_user_code_that_is_not_in_the_shape_is_refused_before_anything_is_printed() {
+        for user_code in ["bcdf-ghjk", "BCDF-GHJK\n"] {
+            let canned = Canned::json(vec![(
+                200,
+                code_answer_with("http://127.0.0.1:8080/device?code=BCDF-GHJK", user_code),
+            )])
+            .await;
+            let dir = tempfile::tempdir().unwrap();
+            let credentials = dir.path().join("cetra").join("credentials.toml");
+            let mut printed = Vec::new();
+            let error = login(&canned.url, true, &credentials, &mut printed)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), BAD_CODE, "{user_code:?}");
+            assert!(printed.is_empty(), "{user_code:?}");
+        }
+    }
+
+    #[test]
+    fn other_answers_fail_the_sign_in() {
+        assert_eq!(
+            step(400, br#"{"code":"invalid_request"}"#),
+            Step::Failed(400)
+        );
+        assert_eq!(step(500, PENDING.as_bytes()), Step::Failed(500));
+        assert_eq!(step(400, b"not json"), Step::Failed(400));
+    }
+
+    #[test]
+    fn a_slow_down_adds_five_seconds() {
+        assert_eq!(
+            next_interval(Duration::from_secs(5)),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[tokio::test]
+    async fn login_refuses_a_url_with_credentials_before_printing() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let mut printed = Vec::new();
+        let error = login("http://user:pw@h", true, &credentials, &mut printed)
+            .await
+            .unwrap_err();
+        let text = error.to_string();
+        assert_eq!(text, "the server URL must not contain credentials");
+        assert!(!text.contains("user") && !text.contains("pw"));
+        assert!(printed.is_empty());
+        assert!(!credentials.exists());
+    }
+
+    #[tokio::test]
+    async fn a_pending_code_is_polled_until_the_grant_and_the_token_is_saved() {
+        let token = example_token();
+        let canned = Canned::json(vec![
+            (200, code_answer()),
+            (400, PENDING.to_owned()),
+            (200, grant(&token)),
+            (200, "{}".to_owned()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        login(
+            &canned.url,
+            true,
+            &credentials,
+            LineWriter {
+                tx,
+                buf: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut lines = Vec::new();
+        while let Ok(line) = rx.try_recv() {
+            lines.push(line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "http://127.0.0.1:8080/device?code=BCDF-GHJK".to_owned(),
+                "Code: BCDF-GHJK".to_owned(),
+            ]
+        );
+
+        let requests = canned.recorded();
+        let targets: Vec<&str> = requests.iter().map(|r| r.target.as_str()).collect();
+        assert_eq!(
+            targets,
+            [
+                "/api/auth/device/code",
+                "/api/auth/device/token",
+                "/api/auth/device/token",
+                "/api/auth/me",
+            ]
+        );
+        assert!(requests[0].body.contains(r#""purpose":"login""#));
+        for request in &requests[..3] {
+            let head = request.head.to_ascii_lowercase();
+            assert!(
+                !head.contains("\norigin:") && !head.contains("\nauthorization:"),
+                "{head}"
+            );
+        }
+
+        let saved = load(&credentials).unwrap();
+        assert_eq!(
+            saved.servers[&normalize_server_url(&canned.url)].token,
+            token
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_code_fails_and_saves_nothing() {
+        let canned = Canned::json(vec![
+            (200, code_answer()),
+            (400, r#"{"code":"access_denied"}"#.to_owned()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let error = login(&canned.url, true, &credentials, Vec::<u8>::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "sign-in denied in the browser");
+        assert!(!credentials.exists());
+    }
+
+    #[tokio::test]
+    async fn an_expired_code_fails_and_saves_nothing() {
+        let canned = Canned::json(vec![
+            (200, code_answer()),
+            (400, r#"{"code":"expired_token"}"#.to_owned()),
+        ])
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let error = login(&canned.url, true, &credentials, Vec::<u8>::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), EXPIRED);
+        assert!(!credentials.exists());
+    }
+
+    #[tokio::test]
+    async fn a_grant_with_a_secret_key_is_refused_and_saves_nothing() {
+        let token = format!(
+            "sk-{}-EXAMPLE0EXAMPLE0EXAMPLE0EXAMPLE0",
+            cetra_core::names::PRODUCT
+        );
+        let canned = Canned::json(vec![(200, code_answer()), (200, grant(&token))]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("cetra").join("credentials.toml");
+        let error = login(&canned.url, true, &credentials, Vec::<u8>::new())
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "the server returned an invalid token");
+        assert!(!credentials.exists());
     }
 
     #[tokio::test]
@@ -804,62 +797,25 @@ mod tests {
             .await
             .expect("login did not print a url")
             .expect("login closed the url channel");
-        let callback_port = query_value(&printed, "port").expect("callback port");
-        let state = query_value(&printed, "state").expect("state");
+        let code = query_value(&printed, "code").expect("device code in the url");
 
-        let created = client
-            .post(format!("{server}/api/v1/me/tokens"))
+        // The session approves the code. The server's poll then hands the token to the CLI.
+        let approved = client
+            .post(format!("{server}/api/auth/device/{code}/approve"))
             .header("origin", "http://127.0.0.1:8080")
             .header(reqwest::header::COOKIE, &cookie)
-            .json(&serde_json::json!({
-                "name": "cli",
-                "scopes": ["read", "write"]
-            }))
+            .json(&serde_json::json!({}))
             .send()
             .await
             .unwrap();
-        assert_eq!(created.status(), 201, "{}", created.status());
-        let created: serde_json::Value = created.json().await.unwrap();
-        let secret = created["secret"].as_str().unwrap().to_owned();
-        let callback = format!("http://127.0.0.1:{callback_port}/callback");
+        assert_eq!(approved.status(), 204, "{}", approved.status());
 
-        // A token in a GET is refused and the wait goes on.
-        let in_url = client
-            .get(format!("{callback}?token={secret}&state={state}"))
-            .send()
+        // The first poll comes one interval (5 s) after the code was issued.
+        tokio::time::timeout(Duration::from_secs(15), login_task)
             .await
+            .expect("login did not finish after the approval")
+            .unwrap()
             .unwrap();
-        assert_eq!(in_url.status(), 400);
-        assert!(!in_url.text().await.unwrap().contains(&secret));
-
-        let wrong = client
-            .post(&callback)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(format!("token={secret}&state=wrong"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(wrong.status(), 400);
-        let wrong_body = wrong.text().await.unwrap();
-        assert!(!wrong_body.contains(&secret));
-
-        let ok = client
-            .post(&callback)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(format!("token={secret}&state={state}"))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(ok.status(), 200);
-        let page = ok.text().await.unwrap();
-        assert!(!page.contains(&secret));
-        login_task.await.unwrap().unwrap();
 
         #[cfg(unix)]
         {
@@ -874,7 +830,8 @@ mod tests {
             assert_eq!(dir_mode, 0o700);
         }
         let saved = load(&credentials).unwrap();
-        assert_eq!(saved.servers[&normalize_server_url(&server)].token, secret);
+        let secret = saved.servers[&normalize_server_url(&server)].token.clone();
+        assert!(secret.starts_with("pat-"), "the saved token is a PAT");
 
         logout(Some(&server), &credentials).await.unwrap();
         assert!(
@@ -894,16 +851,5 @@ mod tests {
 
         running.shutdown().await.unwrap();
         let _ = fs::remove_dir_all(&dir);
-    }
-
-    fn query_value(url: &str, name: &str) -> Option<String> {
-        let query = url.split_once('?')?.1;
-        for pair in query.split('&') {
-            let (key, value) = pair.split_once('=')?;
-            if key == name {
-                return Some(value.to_owned());
-            }
-        }
-        None
     }
 }

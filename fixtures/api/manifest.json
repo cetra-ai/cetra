@@ -198,6 +198,16 @@
     "file": "static/deletion.json"
   },
   {
+    "operation_id": "get_device_request",
+    "path_params": {
+      "user_code": "BCDF-GHJK"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/device-request.json"
+  },
+  {
     "operation_id": "get_eval_job",
     "path_params": {
       "id": "01900000-0000-7000-8000-000000000800"

@@ -485,6 +485,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         ready: crate::http::health::ReadyCache::default(),
         clock: Clock::System,
         limits,
+        device: crate::auth::device::DeviceStore::new(),
         key_cache: crate::auth::principal::ApiKeyCache::new(),
         pat_cache: crate::auth::principal::PatCache::new(),
         last_used: crate::auth::last_used::LastUsed::new(),
@@ -912,7 +913,9 @@ fn spawn_prune(state: AppState) -> JoinHandle<()> {
         interval.tick().await;
         loop {
             interval.tick().await;
-            state.limits.prune(state.clock.now_ns());
+            let now = state.clock.now_ns();
+            state.limits.prune(now);
+            state.device.sweep(now);
         }
     })
 }
