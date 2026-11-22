@@ -76,6 +76,7 @@ def test_body_span_target(score_runtime: ScoreSetup) -> None:
     lower = {name.lower(): value for name, value in headers.items()}
     assert lower["authorization"] == f"Bearer {TEST_API_KEY}"
     assert lower["content-type"] == "application/json"
+    assert lower["user-agent"] == f"cetra-sdk-python/{cetra.__version__}"
     assert score_batches(recorder)[0] == [
         {
             "score_id": the_id,

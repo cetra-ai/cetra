@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 import requests
 
+from cetra._client import USER_AGENT
 from cetra._context import current_values
 from cetra._log import logger
 from cetra._mask import apply
@@ -388,7 +389,7 @@ class ScoreQueue:
             return self._session.post(
                 self._url,
                 json={"scores": batch},
-                headers={"Authorization": f"Bearer {self._api_key}"},
+                headers={"Authorization": f"Bearer {self._api_key}", "User-Agent": USER_AGENT},
                 timeout=_REQUEST_TIMEOUT_S,
             )
         except requests.RequestException:

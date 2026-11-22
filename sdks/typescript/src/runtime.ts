@@ -42,6 +42,15 @@ import { QuotaState } from "./quota.js";
 import { ScoreQueue } from "./scores.js";
 import { type FetchLike, runtimeGlobals } from "./web.js";
 
+/**
+ * The `User-Agent` of every request the SDK sends itself (spec 10 §
+ * Lifecycle, User agent). A function, not a constant: `index.js` imports this module, so
+ * `VERSION` is only initialized once the whole module graph has loaded.
+ */
+export function userAgent(): string {
+  return `cetra-sdk-js/${VERSION}`;
+}
+
 export class Runtime {
   readonly config: Config;
   readonly provider: TracerProvider;

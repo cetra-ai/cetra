@@ -239,6 +239,7 @@ describe("the lifecycle", () => {
       "Content-Type": "application/x-protobuf",
       Authorization: "Bearer sk-cetra-test",
       "Content-Encoding": "gzip",
+      "User-Agent": `cetra-sdk-js/${VERSION}`,
     });
     // The body really is a gzip stream.
     const restored = await gunzip(calls[0]?.body);

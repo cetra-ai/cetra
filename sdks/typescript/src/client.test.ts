@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError, Client } from "./client.js";
 import { ConfigError } from "./config.js";
+import { VERSION } from "./index.js";
 import { BASE, FakeRest, inOrder } from "./rest.test-helpers.js";
 
 const KEY = "sk-cetra-test";
@@ -42,6 +43,7 @@ describe("Client", () => {
     expect(request?.url).toBe(`${BASE}/datasets`);
     expect(request?.headers.Authorization).toBe(`Bearer ${KEY}`);
     expect(request?.headers["Content-Type"]).toBe("application/json");
+    expect(request?.headers["User-Agent"]).toBe(`cetra-sdk-js/${VERSION}`);
     expect(request?.body).toBe('{"name":"faq"}');
   });
 

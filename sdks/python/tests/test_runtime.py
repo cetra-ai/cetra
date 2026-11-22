@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 import pytest
 from opentelemetry import trace
+from opentelemetry.exporter.otlp.proto.http import _OTLP_HTTP_HEADERS
 from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceRequest,
 )
@@ -223,6 +224,9 @@ def test_otlp_exporter_request(http_recorder: Recorder) -> None:
     assert lower["authorization"] == "Bearer sk-cetra-test"
     assert lower["content-encoding"] == "gzip"
     assert lower["content-type"] == "application/x-protobuf"
+    # The exporter's own token stays first; the SDK's is appended (spec 10 § Lifecycle, User agent).
+    exporter_agent = _OTLP_HTTP_HEADERS["User-Agent"]
+    assert lower["user-agent"] == f"{exporter_agent} cetra-sdk-python/{cetra.__version__}"
     request = ExportTraceServiceRequest()
     request.ParseFromString(gzip.decompress(body))
     scope_spans = request.resource_spans[0].scope_spans[0]

@@ -15,7 +15,7 @@ import type { Config } from "./config.js";
 import { debug, warn } from "./log.js";
 import { Prompt, PromptNotAvailable } from "./prompt.js";
 import { defaultSleep, NON_NEGATIVE_INTEGER } from "./retry.js";
-import { currentRuntime } from "./runtime.js";
+import { currentRuntime, userAgent } from "./runtime.js";
 import { type ChatEntry, type ChatMessage, PromptCompileError } from "./template.js";
 import { getFetch, timeoutSignal } from "./web.js";
 
@@ -170,7 +170,10 @@ export class PromptCache {
     const selector =
       t.version !== undefined ? `version=${t.version}` : `label=${encodeURIComponent(t.label)}`;
     const url = `${config.baseUrl}/api/v1/projects/current/prompts/${segment(name)}/resolve?${selector}`;
-    const headers: Record<string, string> = { Authorization: `Bearer ${config.apiKey ?? ""}` };
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${config.apiKey ?? ""}`,
+      "User-Agent": userAgent(),
+    };
     if (etag !== undefined) {
       headers["If-None-Match"] = etag;
     }

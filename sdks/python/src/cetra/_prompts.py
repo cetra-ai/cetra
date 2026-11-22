@@ -19,7 +19,7 @@ import requests
 from opentelemetry import trace as trace_api
 
 from cetra import _runtime
-from cetra._client import ApiError, _segment
+from cetra._client import USER_AGENT, ApiError, _segment
 from cetra._config import Config
 from cetra._log import logger
 from cetra._template import PromptCompileError, chat_names, render, render_chat, variables
@@ -367,7 +367,7 @@ def _fetch(
         return _Failed("sdk disabled")
     segment = quote(name, safe="")
     url = f"{config.base_url}/api/v1/projects/current/prompts/{segment}/resolve"
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": USER_AGENT}
     if etag is not None:
         headers["If-None-Match"] = etag
     query = _query(label, version)
