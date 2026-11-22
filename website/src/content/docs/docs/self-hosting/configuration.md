@@ -33,8 +33,9 @@ defaults is in the [configuration reference](/docs/self-hosting/configuration-re
 
 First start without the setup page: set `CETRA_INIT_ADMIN_EMAIL`, `CETRA_INIT_ADMIN_PASSWORD`,
 `CETRA_INIT_ORG` and `CETRA_INIT_PROJECT` together, and optionally `CETRA_INIT_SECRET_KEY`
-(`sk-cetra-` followed by 32 letters or digits) to know the project's ingest key in advance. They
-apply only to an empty database.
+(`sk-cetra-` followed by 32 letters or digits) to know the project's ingest key in advance, and
+`CETRA_INIT_READ_KEY` (same format, a different value) for a key that can only read. They apply
+only to an empty database; on later starts they are ignored.
 
 ## Secrets
 

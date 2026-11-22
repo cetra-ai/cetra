@@ -352,7 +352,9 @@ Reads, ingestion, deletions, retention, compaction and backups keep working.
   deletes are refused, so the project stays `dropping` and the deletion worker retries and logs until the
   server runs without restore mode.
 - Sign-in with an identity provider. Members of orgs that enforce SSO, and every user when
-  `auth.disable_password = true`, sign in with an API key.
+  `auth.disable_password = true`, sign in with an API key. A drill that only reads traces can use a
+  key with scope `read`: `CETRA_INIT_READ_KEY` creates one with a value you choose when the
+  installation first starts ([Configuration reference](/docs/self-hosting/configuration-reference/#init)).
 
 **What it does not do:**
 

@@ -27,6 +27,7 @@ use crate::meta::users::{
 use cetra_core::ids::OrgId;
 
 const FULL_SCOPES: [KeyScope; 3] = [KeyScope::Ingest, KeyScope::Read, KeyScope::Write];
+const READ_SCOPES: [KeyScope; 1] = [KeyScope::Read];
 
 /// The setup token, when first-run setup is still open.
 pub(crate) struct SetupState {
@@ -99,6 +100,8 @@ pub(crate) struct Provisioned {
     pub(crate) project: ProjectRow,
     /// The secret key, when one was requested.
     pub(crate) key: Option<ApiKeyRow>,
+    /// The read-only key of `init.read_key`, when one was given (D-N-38).
+    pub(crate) read_key: Option<ApiKeyRow>,
 }
 
 /// Values for [`provision`]. The password is already a PHC string.
@@ -109,6 +112,7 @@ struct Provision {
     org_name: String,
     project_name: String,
     key: Option<KeyMaterial>,
+    read_key: Option<KeyMaterial>,
 }
 
 struct KeyMaterial {
@@ -152,7 +156,8 @@ pub(crate) async fn prepare(state: &AppState) -> Result<(), BootstrapError> {
 /// # Errors
 ///
 /// Returns [`BootstrapError::Init`] for a bad email, name, password, or secret
-/// key. The reason names the rule or `CETRA_INIT_SECRET_KEY`, not the value.
+/// key, or a read key that is malformed or equal to the secret key. The
+/// reason names the rule or the variable, not the value.
 pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
     let init = state.config.init.clone();
     let email = init
@@ -170,8 +175,27 @@ pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
     check_policy(&password, &email).map_err(|error| init_error(policy_reason(error)))?;
     let key = match init.secret_key.as_ref() {
         None => None,
-        Some(secret) => Some(provided_key(secret.expose())?),
+        Some(secret) => Some(provided_key(
+            secret.expose(),
+            "init",
+            "CETRA_INIT_SECRET_KEY is not a secret key",
+        )?),
     };
+    let read_key = match init.read_key.as_ref() {
+        None => None,
+        Some(secret) => Some(provided_key(
+            secret.expose(),
+            "init-read",
+            "CETRA_INIT_READ_KEY is not a secret key",
+        )?),
+    };
+    if let (Some(key), Some(read_key)) = (&key, &read_key)
+        && key.hash == read_key.hash
+    {
+        return Err(init_error(
+            "CETRA_INIT_READ_KEY must differ from CETRA_INIT_SECRET_KEY",
+        ));
+    }
     let hasher = Hasher::new().await?;
     let password_hash = hasher.hash(&password).await?;
     match provision(
@@ -183,6 +207,7 @@ pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
             org_name,
             project_name,
             key,
+            read_key,
         },
     )
     .await?
@@ -249,30 +274,44 @@ async fn insert_first(
         insert_project_with_derived_slug(conn, org.id, &input.project_name, None, now).await?;
     let key = match &input.key {
         None => None,
-        Some(key) => Some(
-            insert_api_key(
-                conn,
-                NewApiKey {
-                    project_id: project.id,
-                    kind: "secret",
-                    scopes: FULL_SCOPES.to_vec(),
-                    name: Some(key.name.clone()),
-                    prefix: key.prefix.clone(),
-                    hash: key.hash.clone(),
-                    created_by: user.id,
-                    expires_at: None,
-                },
-                now,
-            )
-            .await?,
-        ),
+        Some(key) => Some(insert_key(conn, project.id, user.id, key, &FULL_SCOPES, now).await?),
+    };
+    let read_key = match &input.read_key {
+        None => None,
+        Some(key) => Some(insert_key(conn, project.id, user.id, key, &READ_SCOPES, now).await?),
     };
     Ok(Provisioned {
         user,
         org,
         project,
         key,
+        read_key,
     })
+}
+
+async fn insert_key(
+    conn: &mut sqlx::SqliteConnection,
+    project_id: cetra_core::ids::ProjectId,
+    created_by: uuid::Uuid,
+    key: &KeyMaterial,
+    scopes: &[KeyScope],
+    now: i64,
+) -> Result<ApiKeyRow, MetaError> {
+    insert_api_key(
+        conn,
+        NewApiKey {
+            project_id,
+            kind: "secret",
+            scopes: scopes.to_vec(),
+            name: Some(key.name.clone()),
+            prefix: key.prefix.clone(),
+            hash: key.hash.clone(),
+            created_by,
+            expires_at: None,
+        },
+        now,
+    )
+    .await
 }
 
 fn init_complete(init: &InitConfig) -> bool {
@@ -297,12 +336,13 @@ fn required_name(value: Option<&str>, key: &'static str) -> Result<String, Boots
     Ok(name.to_owned())
 }
 
-fn provided_key(plaintext: &str) -> Result<KeyMaterial, BootstrapError> {
+/// Checks the shape of an init key. `reason` names the variable, never the value.
+fn provided_key(plaintext: &str, name: &str, reason: &str) -> Result<KeyMaterial, BootstrapError> {
     if parse_key(plaintext) != Some(KeyKind::Secret) {
-        return Err(init_error("CETRA_INIT_SECRET_KEY is not a secret key"));
+        return Err(init_error(reason));
     }
     Ok(KeyMaterial {
-        name: "init".to_owned(),
+        name: name.to_owned(),
         prefix: display_prefix(plaintext),
         hash: hash_token(plaintext),
     })
@@ -327,12 +367,17 @@ fn audit(message: &'static str, created: &Provisioned) {
     let user_id = created.user.id;
     let org_id = created.org.id;
     let project_id = created.project.id;
-    if let Some(key) = &created.key {
-        let key_id = key.id;
-        tracing::info!(target: "audit", %user_id, %org_id, %project_id, %key_id, "{message}");
-    } else {
-        tracing::info!(target: "audit", %user_id, %org_id, %project_id, "{message}");
-    }
+    let key_id = created.key.as_ref().map(|key| key.id.to_string());
+    let read_key_id = created.read_key.as_ref().map(|key| key.id.to_string());
+    tracing::info!(
+        target: "audit",
+        %user_id,
+        %org_id,
+        %project_id,
+        key_id = key_id.as_deref(),
+        read_key_id = read_key_id.as_deref(),
+        "{message}"
+    );
 }
 
 /// A completed `POST /api/auth/setup` write. `secret_key` is shown once.
@@ -376,6 +421,7 @@ pub(crate) async fn create_setup(
                 prefix: minted.prefix,
                 hash: minted.hash,
             }),
+            read_key: None,
         },
     )
     .await?;
@@ -392,6 +438,7 @@ mod tests {
     use crate::auth::secret::{KeyKind, hash_token, new_key};
     use crate::meta::users::count_users;
     use crate::test_support::{TestApp, capture_logs};
+    use axum::http::{Method, StatusCode};
 
     fn init(value: serde_json::Value) -> crate::config::InitConfig {
         serde_json::from_value(value).unwrap()
@@ -470,5 +517,162 @@ mod tests {
         assert!(text.contains("password is too short"), "{text}");
         assert!(!text.contains("nope-nope"), "{text}");
         assert_eq!(count_users(weak.state.meta.reader()).await.unwrap(), 0);
+    }
+
+    /// The init values of [`init_creates_the_admin_once`], plus `extra`.
+    fn init_with(extra: serde_json::Value) -> crate::config::InitConfig {
+        let mut value = serde_json::json!({
+            "admin_email": "ada@example.com",
+            "admin_password": "cetra-ok-1",
+            "org": "Acme",
+            "project": "Support bot",
+        });
+        let serde_json::Value::Object(extra) = extra else {
+            panic!("extra init values must be an object");
+        };
+        for (key, field) in extra {
+            value[key] = field;
+        }
+        init(value)
+    }
+
+    /// The only project of the app.
+    async fn the_project(app: &TestApp) -> String {
+        sqlx::query_scalar("SELECT id FROM projects")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
+    fn bearer(key: &str) -> String {
+        format!("Bearer {key}")
+    }
+
+    #[tokio::test]
+    async fn the_init_read_key_reads_and_cannot_ingest_or_write() {
+        let secret = new_key(KeyKind::Secret).unwrap();
+        let read = new_key(KeyKind::Secret).unwrap();
+        let app = TestApp::with_config(|config| {
+            config.init = init_with(serde_json::json!({
+                "secret_key": secret.plaintext.clone(),
+                "read_key": read.plaintext.clone(),
+            }));
+        })
+        .await;
+        let (prepared, logs) = capture_logs(prepare(&app.state)).await;
+        prepared.unwrap();
+        assert!(logs.contains("init applied"), "{logs}");
+        assert!(logs.contains("read_key_id"), "{logs}");
+        assert!(!logs.contains(&read.plaintext), "{logs}");
+        assert!(!logs.contains(&secret.plaintext), "{logs}");
+        let mut rows: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT name, key_hash, scopes FROM api_keys ORDER BY name")
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        rows.sort();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, "init");
+        assert_eq!(rows[0].1, hash_token(&secret.plaintext));
+        assert_eq!(rows[1].0, "init-read");
+        assert_eq!(rows[1].1, hash_token(&read.plaintext));
+        assert_eq!(rows[1].2, r#"["read"]"#);
+
+        let project = the_project(&app).await;
+        let (reads, logs) = capture_logs(async {
+            let traces = app
+                .request(Method::GET, &format!("/api/v1/projects/{project}/traces"))
+                .header("authorization", &bearer(&read.plaintext))
+                .send()
+                .await;
+            let ingest = app
+                .request(Method::POST, "/v1/traces")
+                .header("authorization", &bearer(&read.plaintext))
+                .header("content-type", "application/json")
+                .body("{}")
+                .send()
+                .await;
+            let write = app
+                .request(
+                    Method::POST,
+                    &format!("/api/v1/projects/{project}/datasets"),
+                )
+                .header("authorization", &bearer(&read.plaintext))
+                .json(&serde_json::json!({"name": "probe"}))
+                .send()
+                .await;
+            let full = app
+                .request(Method::POST, "/v1/traces")
+                .header("authorization", &bearer(&secret.plaintext))
+                .header("content-type", "application/json")
+                .body("{}")
+                .send()
+                .await;
+            (traces, ingest, write, full)
+        })
+        .await;
+        let (traces, ingest, write, full) = reads;
+        assert_eq!(traces.status, StatusCode::OK);
+        assert_eq!(ingest.status, StatusCode::FORBIDDEN);
+        assert_eq!(write.status, StatusCode::FORBIDDEN);
+        assert_eq!(full.status, StatusCode::OK);
+        assert!(!logs.contains(&read.plaintext), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn the_init_read_key_reads_in_restore_mode() {
+        let read = new_key(KeyKind::Secret).unwrap();
+        let app = TestApp::with_config(|config| {
+            config.restore_mode = true;
+            config.init = init_with(serde_json::json!({"read_key": read.plaintext.clone()}));
+        })
+        .await;
+        prepare(&app.state).await.unwrap();
+        let project = the_project(&app).await;
+        let traces = app
+            .request(Method::GET, &format!("/api/v1/projects/{project}/traces"))
+            .header("authorization", &bearer(&read.plaintext))
+            .send()
+            .await;
+        assert_eq!(traces.status, StatusCode::OK);
+        let keys: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_keys")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(keys, 1);
+    }
+
+    #[tokio::test]
+    async fn a_bad_or_reused_init_read_key_stops_startup() {
+        let secret = new_key(KeyKind::Secret).unwrap();
+        let public = new_key(KeyKind::Public).unwrap();
+        let cases = [
+            (
+                serde_json::json!({"read_key": "sk-cetra-short"}),
+                "sk-cetra-short".to_owned(),
+                "CETRA_INIT_READ_KEY is not a secret key",
+            ),
+            (
+                serde_json::json!({"read_key": public.plaintext.clone()}),
+                public.plaintext.clone(),
+                "CETRA_INIT_READ_KEY is not a secret key",
+            ),
+            (
+                serde_json::json!({
+                    "secret_key": secret.plaintext.clone(),
+                    "read_key": secret.plaintext.clone(),
+                }),
+                secret.plaintext.clone(),
+                "CETRA_INIT_READ_KEY must differ from CETRA_INIT_SECRET_KEY",
+            ),
+        ];
+        for (extra, value, reason) in cases {
+            let app = TestApp::with_config(|config| config.init = init_with(extra)).await;
+            let error = prepare(&app.state).await.unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains(reason), "{text}");
+            assert!(!text.contains(&value), "{text}");
+            assert_eq!(count_users(app.state.meta.reader()).await.unwrap(), 0);
+        }
     }
 }
