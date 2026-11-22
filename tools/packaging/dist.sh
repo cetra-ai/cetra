@@ -58,7 +58,7 @@ bin="target/${target}/release/cetra"
 
 # The binary must run here and embed the UI (D-G-37).
 "$bin" version | grep -qx 'ui: embedded'
-"$bin" version | grep -qx "cetra ${version}"
+grep -qx "cetra ${version}" <<<"$("$bin" version)"
 if [[ "$target" == *-linux-musl ]]; then
   # Static: no interpreter, no shared libraries (D-N-1).
   if ! file "$bin" | grep -q 'static'; then
