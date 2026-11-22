@@ -18,8 +18,8 @@ export const MIN_STARS_SHOWN = 50;
 export const CLOUD = {
   signup: "https://app.cetra.sh/signup",
   login: "https://app.cetra.sh/login",
-  /** The regions the cloud offers today (design §9.4). */
-  regions: ["EU (eu1)"],
+  /** The regions the cloud offers today (design §9.4; us1 from D-Q-121 in llmobs-control). */
+  regions: ["EU (eu1)", "US (us1)"],
 } as const;
 
 /**

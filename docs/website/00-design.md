@@ -186,7 +186,7 @@ Run in CI with the docs checks (`just check-docs` or a sibling recipe):
 1. *(Replaced by §9.6 on 2026-11-22.)* **The demo needs sign-in** (D187). Keep **"Try the demo"** as the main button, labelled honestly as needing a free account. The homepage's screenshots show the product with no sign-up.
 2. **Benchmarks:** launch **without** `/benchmarks/` and without engine numbers. M6 adds them when the benchmark is measured.
 3. **Compare pages: all nine at launch**: Langfuse, Arize Phoenix, LangSmith, Braintrust, Helicone, Opik, LangWatch, Laminar, MLflow.
-4. **Cloud region: named** (today `eu1`) on Security, Pricing and the "Cloud or self-hosted" cards, with more added as regions open. The exact cloud URLs (demo, sign-up, log in) come from the cloud track before M2. This is a lookup, not a decision.
+4. **Cloud region: named** (`eu1`; `us1` since 2026-11-22, on OVH in Virginia, llmobs-control D-Q-121) on Security, Pricing and the "Cloud or self-hosted" cards, with more added as regions open. The exact cloud URLs (demo, sign-up, log in) come from the cloud track before M2. This is a lookup, not a decision.
 5. **Fact checking:** a Sonnet agent verifies every comparison fact against its source before a page is published, with no separate user approval per page. The **"checked on" date is shown** on each page.
 
 Answers of 2026-11-22, after main gained the features of D191–D195:
