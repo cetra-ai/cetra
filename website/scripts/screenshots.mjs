@@ -1,15 +1,18 @@
 // Rewrites the docs' UI screenshots from the web UI running on its MSW mocks (D-W-12).
-// Usage: node scripts/screenshots.mjs [shot name ...]
+// Usage: [CETRA_SCREENSHOTS_PORT=port] node scripts/screenshots.mjs [shot name ...]
+// The dev server uses port 5199 unless CETRA_SCREENSHOTS_PORT says otherwise.
 // Needs Chromium: `pnpm --dir website exec playwright install chromium` once.
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { portIsFree } from "./port-free.mjs";
 
 const SITE = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT = dirname(SITE);
-const ORIGIN = "http://localhost:5199";
+const PORT = Number(process.env.CETRA_SCREENSHOTS_PORT ?? 5199);
+const ORIGIN = `http://localhost:${PORT}`;
 const OUT = join(SITE, "src/assets/screenshots");
 // The page clock is pinned so each run draws the same pictures. The dev server serves the large
 // generated dataset, built from the page's clock; its experiments start on 2026-11-02, so the
@@ -18,10 +21,21 @@ const OUT = join(SITE, "src/assets/screenshots");
 const NOW = "2026-11-19T12:00:00Z";
 
 async function startServer() {
-  const server = spawn("pnpm", ["--dir", "web", "exec", "vite", "--port", "5199", "--strictPort"], {
-    cwd: ROOT,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  // Another server on the port would answer the poll below and every shot would come from its
+  // (possibly stale) UI, so refuse to start.
+  if (!(await portIsFree(PORT))) {
+    throw new Error(
+      `port ${PORT} is already in use (a vite dev server from another worktree?); stop that process and rerun`,
+    );
+  }
+  const server = spawn(
+    "pnpm",
+    ["--dir", "web", "exec", "vite", "--port", String(PORT), "--strictPort"],
+    {
+      cwd: ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
   let output = "";
   server.stdout.on("data", (chunk) => {
     output += chunk;

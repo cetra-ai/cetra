@@ -80,7 +80,7 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "actions": [
-      { "click": "button[aria-label=\"Assistant\"]" },
+      { "click": "button[aria-label=\"Ask AI\"]" },
       {
         "click": "textarea[aria-label=\"Message the assistant\"]",
         "type": "Which traces failed in the last day?"
