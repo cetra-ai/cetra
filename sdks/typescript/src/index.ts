@@ -54,4 +54,4 @@ export { type ChatEntry, type ChatMessage, PromptCompileError } from "./template
 export { uuid7 } from "./uuid.js";
 
 /** Package version. Kept equal to package.json. */
-export const VERSION = "0.1.0-rc.1";
+export const VERSION = "0.1.0-rc.2";
