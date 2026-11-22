@@ -1,7 +1,7 @@
 ---
 import marketingAlerts from "../../assets/screenshots/marketing-alerts.png";
-import marketingEvaluators from "../../assets/screenshots/marketing-evaluators.png";
-import marketingSqlConsole from "../../assets/screenshots/marketing-sql-console.png";
+import marketingQueueReview from "../../assets/screenshots/marketing-queue-review.png";
+import marketingAssistant from "../../assets/screenshots/marketing-assistant.png";
 import marketingTraceList from "../../assets/screenshots/marketing-trace-list.png";
 import Chapter from "../components/Chapter.astro";
 import Frame from "../components/Frame.astro";
@@ -30,7 +30,7 @@ import Section from "../components/Section.astro";
     lede="Filter by anything, search the text of prompts and outputs, or ask your question in SQL."
     features={["Errors, slow and expensive in one click", "Full-text search", "Saved views", "A SQL console over your traces"]}
   >
-    <Frame src={marketingSqlConsole} alt="The SQL console with a query over the spans table, the table schema and the query result." label="SQL" fade />
+    <Frame src={marketingAssistant} alt="The assistant panel beside the trace list." label="Assistant" fade />
   </Chapter>
 </Section>
 
@@ -43,7 +43,7 @@ import Section from "../components/Section.astro";
     lede="Score production traffic with LLM judges and checks, build datasets from real traces, and compare experiments."
     features={["LLM judges with sampling and a cost cap", "Checks: JSON, regex, schema, contains", "Datasets from production traces", "Experiments from the Python and TypeScript SDKs"]}
   >
-    <Frame src={marketingEvaluators} alt="The evaluators page: templates for LLM judges and checks, and a table of evaluators with their runs, errors and results." label="Evaluators" fade />
+    <Frame src={marketingQueueReview} alt="An annotation queue item under review." label="Annotation queue" fade />
   </Chapter>
 </Section>
 
