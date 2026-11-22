@@ -21,7 +21,7 @@ Each archive holds the `cetra` binary (web UI included), `LICENSE`, `LICENSE-ELA
 ## Binary
 
 ```bash
-curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh
+curl -fsSL https://cetra.sh/install.sh | sh
 ```
 
 The script picks the archive for your OS and CPU, checks it against `SHA256SUMS`, and copies

@@ -35,8 +35,7 @@ export const RELEASED = false;
 export const INSTALL_COMMANDS = [
   {
     label: "macOS / Linux",
-    command:
-      "curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh",
+    command: "curl -fsSL https://cetra.sh/install.sh | sh",
   },
   {
     label: "Docker",

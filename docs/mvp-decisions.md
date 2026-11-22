@@ -816,6 +816,7 @@ Decisions of track W (`docs/plans/docs-site/README.md`), numbered `D-W-<n>` (`do
 | D-W-17 | API overview URL | **The REST API overview is at `reference/api/overview/`**, because `starlight-openapi` owns `reference/api/`. |
 | D-W-18 | Configuration reference follows the code | **Where spec 12 and the loader differ, the page follows the loader and spec 12 is corrected.** `AWS_REGION` and `CETRA_RESTORE_MODE` are not aliases, `telemetry.*` and `tls.*` are refused, and the storage keys the spec omitted are listed. |
 | D-W-19 | `llms.txt` | **`starlight-llms-txt` 0.12.0 at its default paths**: `/llms.txt`, `/llms-full.txt` and `/llms-small.txt` at the site root. The `links` job (lychee) runs with the nightly workflow, not weekly. The generated changelog page is git-ignored and is skipped by `check-env-vars.mjs`, since it names removed variables. The `.md` copy of each page (D-AO-12) is written by `scripts/md-pages.mjs`. |
+| D-W-20 | Short install URL | **`https://cetra.sh/install.sh` is a 302 redirect, in `website/public/_redirects`, to `https://github.com/cetra-ai/cetra/releases/latest/download/install.sh`** (the user, 2026-11-22). The site, the docs and `cetra-cli` show `curl -fsSL https://cetra.sh/install.sh \| sh`. The script stays a release asset (D-N-15); only the URL people type is shorter, and it can move without changing the command. |
 
 ## Track IC — Issue clustering
 

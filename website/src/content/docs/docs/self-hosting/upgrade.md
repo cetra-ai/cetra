@@ -46,7 +46,7 @@ Procedure:
 
 ```bash
 sudo systemctl stop cetra
-curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | CETRA_INSTALL_DIR=/usr/local/bin sudo -E sh
+curl -fsSL https://cetra.sh/install.sh | CETRA_INSTALL_DIR=/usr/local/bin sudo -E sh
 sudo systemctl start cetra
 ```
 
