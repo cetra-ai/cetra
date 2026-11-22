@@ -185,7 +185,7 @@ S4 replaces both alt texts.
 2. `Stack.astro`:
    - In the cetra box, the tile list becomes, in this order: `OTLP ingestion`, `Storage engine`, `SQL and search`, `Evaluations`, `Annotation queues`, `Prompts and playground`, `Issues`, `Alerts`, `AI assistant`, `Web UI`.
    - The cetra box's figcaption stays.
-   - `.tiles` already has two columns. Give the cetra box's tile list three columns from 861 px up (`.box--cetra .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }` in a `@media (min-width: 1100px)` block), so ten tiles take four rows on wide screens. Screenshot at 1440, 960 and 390 (no tile text may overflow its tile at 960) and report how the two boxes compare in height.
+   - `.tiles` already has two columns. Give the cetra box's tile list three columns from 1100 px up (`.box--cetra .tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }` in a `@media (min-width: 1100px)` block), so ten tiles take four rows on wide screens. Screenshot at 1440, 960 and 390 (no tile text may overflow its tile at 960) and report how the two boxes compare in height.
 3. `Chapters.astro` has six `Section`s in this order. The tones are `raised`, `ink`, `teal`, `ink`, `raised`, `ink`. The first keeps `id="product"`. Each uses `Chapter bare` with a `Frame … fade` exactly as now. Chapter ids are `ch-trace`, `ch-explore`, `ch-issues`, `ch-evaluate`, `ch-prompts`, `ch-alert`, and each `Section`'s `labelledby` is its chapter id.
 
    1. **Trace**: unchanged (eyebrow, title, lede, features, `marketing-trace-list.png`, alt, label).
