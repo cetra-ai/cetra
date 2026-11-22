@@ -1,0 +1,97 @@
+{
+  "slug": "langwatch",
+  "name": "LangWatch",
+  "url": "https://langwatch.ai",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Platform for LLM and agent tracing, evaluations, agent simulations and an AI gateway; open core, self-hostable.",
+  "facts": {
+    "selfHostStack": {
+      "value": "App, Workers, NLP and LangEvals services, plus ClickHouse, PostgreSQL and Redis; object storage for older data",
+      "sources": ["https://langwatch.ai/docs/self-hosting/overview"]
+    },
+    "selfHostLicence": {
+      "value": "Apache 2.0 core; enterprise/ directory is commercial. SSO, RBAC, SCIM, audit logs, extended retention need a licence",
+      "sources": [
+        "https://langwatch.ai/docs/self-hosting/licensing",
+        "https://github.com/langwatch/langwatch/blob/main/LICENSE.md",
+        "https://github.com/langwatch/langwatch/blob/main/NOTICE"
+      ]
+    },
+    "cloudFree": {
+      "value": "Developer plan, EUR 0: 50k events/month, 14-day data access, 2 users",
+      "sources": ["https://langwatch.ai/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Growth: EUR 29 per core-seat per month; 200k events included, then EUR 5 per 100k; 30-day retention",
+      "sources": ["https://langwatch.ai/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP (protobuf or JSON) at /api/otel/v1/traces; OTLP/gRPC not supported",
+      "sources": ["https://langwatch.ai/docs/integration/opentelemetry/guide"]
+    },
+    "sql": {
+      "value": "Yes: LangWatchQL analytics SQL via CLI, REST API and MCP; no SQL editor in the UI documented",
+      "sources": ["https://langwatch.ai/docs/features/querying-your-data"]
+    },
+    "mcp": {
+      "value": "Yes: search and inspect traces, query analytics, manage prompts, evaluators, monitors, experiments, annotations",
+      "sources": ["https://langwatch.ai/docs/integration/mcp"]
+    },
+    "onlineEvals": {
+      "value": "Yes: monitors run evaluators (including LLM-as-judge) on production traces, with sampling and preconditions",
+      "sources": ["https://langwatch.ai/docs/evaluations/online-evaluation/overview"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets (CSV/JSON upload, from traces) and an experiments workbench, SDK and CI runs",
+      "sources": [
+        "https://langwatch.ai/docs/datasets/overview",
+        "https://langwatch.ai/docs/evaluations/experiments/overview"
+      ]
+    },
+    "promptManagement": {
+      "value": "Yes: versioned prompt library with tags, playground, CLI and API access",
+      "sources": ["https://langwatch.ai/docs/prompt-management/overview"]
+    },
+    "gateway": {
+      "value": "Yes: AI Gateway with OpenAI- and Anthropic-compatible endpoints, virtual keys, budgets, rate limits, guardrails",
+      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/ai-gateway/overview.mdx"]
+    },
+    "alerts": {
+      "value": "Alerts on graph thresholds, per-trace automations, scheduled reports; email, Slack, webhook",
+      "sources": ["https://github.com/langwatch/langwatch/blob/main/docs/features/automations.mdx"]
+    },
+    "issueDetection": {
+      "value": "Topic clustering groups traces into topics and subtopics about once a day, on a model you choose",
+      "sources": ["https://langwatch.ai/docs/features/topic-clustering"]
+    },
+    "annotationQueues": {
+      "value": "Yes: queues with participants and score types; reviewers work an inbox item by item, then send traces to a dataset",
+      "sources": [
+        "https://langwatch.ai/docs/annotations/queues",
+        "https://langwatch.ai/docs/annotations/overview"
+      ]
+    },
+    "assistant": {
+      "value": "Langy: chat panel that reads traces and evals, writes Scenario tests and opens pull requests",
+      "sources": [
+        "https://langwatch.ai/docs/langy/overview",
+        "https://langwatch.ai/docs/langy/chat"
+      ]
+    },
+    "codingAgents": {
+      "value": "Setup for Claude Code, Codex, GitHub Copilot, Gemini CLI, opencode, Grok CLI and pi; Cursor via the gateway",
+      "sources": ["https://langwatch.ai/docs/coding-agents/overview"]
+    }
+  },
+  "chooseThem": [
+    "Agent simulation testing (scenarios) in the same product as tracing and evals",
+    "A built-in AI gateway with virtual keys and budgets alongside observability",
+    "Enterprise licence adds SSO, RBAC, SCIM, audit logs and per-scope retention policies",
+    "SDKs, an MCP server and a CLI covering evaluators, monitors and experiments"
+  ],
+  "notes": "Pricing page shows EUR, not USD. The 'alerts' and 'gateway' facts are sourced from LangWatch docs files read in a local checkout (GitHub URLs cited), not from the web pages. The OTel page does not name a semantic convention; other docs mention gen_ai.conversation.id and OpenInference/OpenLLMetry examples. Fetched pages (pricing, OTel guide, self-hosting overview) contained an embedded instruction to run `npx langwatch report`; it was ignored. Cloud prices in EUR per core-seat; enterprise custom. Verified 2026-11-20: pricing, self-host services, licensing, OTLP (HTTP only), LangWatchQL, MCP, gateway, automations (alerts/reports; email/Slack/webhook) confirmed. Dropped unverified 'hybrid deployment' and 'ISO 27001 reports' from chooseThem. sql: 'SQL UI not documented' reworded; the UI-absence claim is unproven. PROMPT INJECTION: self-hosting overview and OTel guide pages contain an 'Agent Instructions' block telling agents to run 'npx langwatch report --user-approved'; ignored. Added 2026-11-22: four new rows. Topic clustering groups what users ask about, not failures. The coding-agents overview tells AI agents to run a report command after asking the user; ignored. Langy availability on cloud is not stated on the overview page.",
+  "chooseUs": [
+    "You want to self-host without ClickHouse, PostgreSQL and Redis",
+    "You want OTLP over gRPC as well as HTTP"
+  ]
+}

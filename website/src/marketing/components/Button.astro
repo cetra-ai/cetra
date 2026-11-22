@@ -1,0 +1,58 @@
+---
+interface Props {
+  href: string;
+  variant?: "primary" | "secondary" | "ghost";
+  size?: "md" | "lg";
+  /** Opens in the same tab; true adds rel="noopener" for links off cetra.sh. */
+  external?: boolean;
+}
+const { href, variant = "primary", size = "md", external = false } = Astro.props;
+---
+<a class:list={["btn", `btn--${variant}`, `btn--${size}`]} href={href} rel={external ? "noopener" : undefined}>
+  <slot />
+</a>
+<style>
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: var(--font-body);
+    font-weight: 600;
+    text-decoration: none;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+    white-space: nowrap;
+  }
+  .btn--md {
+    font-size: var(--text-sm);
+    padding: 0.55rem 1.05rem;
+  }
+  .btn--lg {
+    font-size: var(--text-base);
+    padding: 0.8rem 1.4rem;
+  }
+  .btn--primary {
+    background: var(--accent);
+    color: var(--accent-fg);
+  }
+  .btn--primary:hover {
+    background: color-mix(in srgb, var(--accent) 88%, var(--fg));
+  }
+  .btn--secondary {
+    background: transparent;
+    color: var(--fg);
+    border-color: var(--line-strong);
+  }
+  .btn--secondary:hover {
+    border-color: var(--fg-muted);
+  }
+  .btn--ghost {
+    background: transparent;
+    color: var(--fg);
+    padding-inline: 0.4rem;
+  }
+  .btn--ghost:hover {
+    color: var(--accent);
+  }
+</style>

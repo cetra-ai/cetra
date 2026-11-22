@@ -1,0 +1,117 @@
+---
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+---
+
+<Section tone="ink" divider labelledby="stack-title">
+  <SectionHeading
+    eyebrow="One binary"
+    title="Nothing else to run."
+    id="stack-title"
+    lede="Most LLM observability platforms you can self-host are a stack of services to install, upgrade and back up. cetra is one process and one data folder."
+  />
+  <div class="compare">
+    <figure class="column">
+      <div class="box box--stack">
+        <p class="eyebrow box-label">A typical self-hosted stack</p>
+        <ul class="tiles">
+          <li class="tile">Web app</li>
+          <li class="tile">Worker</li>
+          <li class="tile">Postgres</li>
+          <li class="tile">Redis</li>
+          <li class="tile">ClickHouse</li>
+          <li class="tile">Object storage</li>
+        </ul>
+      </div>
+      <figcaption>Six services. Each one to install, size, upgrade, monitor and back up.</figcaption>
+    </figure>
+    <figure class="column">
+      <div class="box box--cetra">
+        <p class="eyebrow box-label">cetra</p>
+        <div class="tile tile--big">cetra</div>
+        <ul class="tiles">
+          <li class="tile">OTLP ingestion</li>
+          <li class="tile">Storage engine</li>
+          <li class="tile">SQL and search</li>
+          <li class="tile">Evaluations</li>
+          <li class="tile">Annotation queues</li>
+          <li class="tile">Prompts and playground</li>
+          <li class="tile">Issues</li>
+          <li class="tile">Alerts</li>
+          <li class="tile">AI assistant</li>
+          <li class="tile">Web UI</li>
+        </ul>
+      </div>
+      <figcaption>One binary and one data folder. Upgrading means replacing a file; backing up is one command.</figcaption>
+    </figure>
+  </div>
+</Section>
+
+<style>
+  .compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-6);
+    margin-top: var(--space-7);
+  }
+  .column {
+    margin: 0;
+    display: grid;
+    gap: var(--space-4);
+    align-content: start;
+  }
+  figcaption {
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .box {
+    padding: var(--space-5);
+    border-radius: var(--radius-lg);
+  }
+  .box--stack {
+    border: 1px dashed var(--line-strong);
+  }
+  .box--cetra {
+    border: 1px solid var(--accent);
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+  }
+  .box-label {
+    color: var(--fg-muted);
+  }
+  .box--cetra .box-label {
+    color: var(--accent);
+  }
+  .tiles {
+    list-style: none;
+    padding: 0;
+    margin: var(--space-3) 0 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-3);
+  }
+  .tile {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: var(--space-3) var(--space-4);
+    font-family: var(--font-mono);
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .tile--big {
+    margin-top: var(--space-3);
+    padding: var(--space-6);
+    font-family: var(--font-display);
+    font-size: var(--text-xl);
+    color: var(--fg);
+  }
+  @media (min-width: 1100px) {
+    .box--cetra .tiles {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 860px) {
+    .compare {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

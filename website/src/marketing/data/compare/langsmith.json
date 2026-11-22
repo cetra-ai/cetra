@@ -1,0 +1,98 @@
+{
+  "slug": "langsmith",
+  "name": "LangSmith",
+  "url": "https://www.langchain.com/langsmith",
+  "checkedOn": "2026-11-20",
+  "oneLine": "LangChain's hosted platform for tracing, evaluating and deploying LLM applications; self-hosting is an Enterprise add-on.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Enterprise add-on, Kubernetes/Helm: app services, ClickHouse (or SmithDB), PostgreSQL, Redis/Valkey, blob storage",
+      "sources": [
+        "https://docs.langchain.com/langsmith/self-hosted",
+        "https://www.langchain.com/pricing"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Proprietary: self-hosting needs an Enterprise plan and a licence key",
+      "sources": ["https://docs.langchain.com/langsmith/self-hosted"]
+    },
+    "cloudFree": {
+      "value": "Developer: $0, 1 seat, 5k base traces/month, community support; base traces kept 14 days",
+      "sources": ["https://www.langchain.com/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Plus: $39 per seat per month, up to 10k base traces/month, then pay as you go",
+      "sources": ["https://www.langchain.com/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP at <api-url>/otel; no gRPC endpoint documented; maps gen_ai.*, OpenInference, TraceLoop, Logfire",
+      "sources": ["https://docs.langchain.com/langsmith/trace-with-opentelemetry"]
+    },
+    "sql": {
+      "value": "Not documented: docs describe a filter query language, SDK and REST API queries",
+      "sources": [
+        "https://docs.langchain.com/langsmith/trace-query-syntax",
+        "https://docs.langchain.com/langsmith/export-traces"
+      ]
+    },
+    "mcp": {
+      "value": "Hosted Remote MCP (OAuth or API key): runs, threads, prompts, datasets, experiments, billing usage",
+      "sources": ["https://docs.langchain.com/langsmith/langsmith-remote-mcp"]
+    },
+    "onlineEvals": {
+      "value": "Yes: online evaluations on production traces, including LLM-as-a-judge evaluators with weekly cost caps",
+      "sources": ["https://docs.langchain.com/langsmith/online-evaluations-llm-as-judge"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets built from examples, production traces or synthetic data, and experiments",
+      "sources": ["https://docs.langchain.com/langsmith/evaluation"]
+    },
+    "promptManagement": {
+      "value": "Yes: Prompt and Context Hub with commits and tags",
+      "sources": ["https://docs.langchain.com/langsmith/prompt-engineering"]
+    },
+    "gateway": {
+      "value": "LLM Gateway (beta): routes model calls with tracing, fallbacks, spend and rate limits",
+      "sources": ["https://docs.langchain.com/langsmith/llm-gateway"]
+    },
+    "alerts": {
+      "value": "Slack, PagerDuty, Dynatrace and webhooks; email only via a webhook recipe",
+      "sources": ["https://docs.langchain.com/langsmith/alerts"]
+    },
+    "issueDetection": {
+      "value": "Insights reports group up to 1,000 sampled traces into auto-generated categories; Plus and Enterprise plans",
+      "sources": ["https://docs.langchain.com/langsmith/insights"]
+    },
+    "annotationQueues": {
+      "value": "Queues of runs or threads; assign named reviewers or a reviewer count; a reservation locks an item to one reviewer",
+      "sources": ["https://docs.langchain.com/langsmith/annotation-queues"]
+    },
+    "assistant": {
+      "value": "LangSmith Chat (formerly Polly): asks over traces, threads, prompts and experiments; needs a model provider key",
+      "sources": ["https://docs.langchain.com/langsmith/polly"]
+    },
+    "codingAgents": {
+      "value": "Tracing guides for Claude Code, OpenAI Codex, Cursor, VS Code Copilot Chat, OpenCode and Pi",
+      "sources": [
+        "https://docs.langchain.com/langsmith/trace-claude-code.md",
+        "https://docs.langchain.com/langsmith/trace-with-codex.md",
+        "https://docs.langchain.com/langsmith/trace-with-cursor.md",
+        "https://docs.langchain.com/langsmith/trace-with-vscode-copilot.md",
+        "https://docs.langchain.com/langsmith/trace-with-opencode.md",
+        "https://docs.langchain.com/langsmith/trace-with-pi.md"
+      ]
+    }
+  },
+  "chooseThem": [
+    "First-party tracing for LangChain and LangGraph, with a managed cloud and no infrastructure to run",
+    "Evaluation, online evaluators and agent deployment in one hosted product",
+    "Enterprise options: self-hosted, hybrid, custom SSO, RBAC and a support SLA",
+    "Cloud data location in US or EU, with a free single-seat Developer tier"
+  ],
+  "notes": "Per-trace overage price not on pricing page read; not stated. Retention: base 14 days, extended 180 days. Remote MCP read/write not labelled by docs (tool names suggest push_prompt, create_dataset, update_examples, run_experiment change state). Self-host page said licence key required; did not find licence name. SQL is an absence finding. Homepage URL assumed as langchain.com/langsmith (not opened). Verified 2026-11-20: removed unsupported 'standalone MCP server deprecated' (docs keep it for self-hosted <v0.16); Developer-specific retention not stated (base 14 days); regions are US and EU only (APAC dropped); sql reworded to 'Not documented'; rest confirmed. Homepage URL not opened. Added 2026-11-22: four new rows. The Polly page does not state which plans include it or whether self-hosted deployments do. The Insights page does not say whether it runs self-hosted. The docs index lists no Gemini CLI page; not used as a claim. Verifier 2026-11-22: codingAgents named OpenCode and Pi without a source; added the two trace guides (trace-with-opencode, trace-with-pi) to the sources.",
+  "chooseUs": [
+    "You want to self-host without an Enterprise plan",
+    "You want an open-source core you can read and run",
+    "You want SQL over your traces in the UI, the API and MCP"
+  ]
+}

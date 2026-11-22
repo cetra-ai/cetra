@@ -1,0 +1,89 @@
+---
+interface Line {
+  /** "user": the person's prompt; "tool": a tool call; "out": tool output; "agent": the agent's answer. */
+  kind: "user" | "tool" | "out" | "agent";
+  text: string;
+}
+interface Props {
+  title: string;
+  lines: Line[];
+}
+const { title, lines } = Astro.props;
+
+/** What a screen reader says before each line, since the visible marks are hidden. */
+const PREFIX: Record<Line["kind"], string> = {
+  user: "You: ",
+  tool: "Tool call: ",
+  out: "Result: ",
+  agent: "Agent: ",
+};
+---
+
+<figure class="term" aria-label={title}>
+  <div class="bar"><span class="title">{title}</span></div>
+  <div class="body">
+    {
+      lines.map((line) => (
+        <p class:list={["line", `line--${line.kind}`]}>
+          {line.kind === "user" && <span class="mark" aria-hidden="true">›</span>}
+          {line.kind === "tool" && <span class="mark" aria-hidden="true">⏺</span>}
+          <span class="visually-hidden">{PREFIX[line.kind]}</span>
+          <span>{line.text}</span>
+        </p>
+      ))
+    }
+  </div>
+</figure>
+
+<style>
+  .term {
+    --fg-muted: var(--c-stone-400);
+    --line: var(--c-line);
+    margin: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-lg);
+    background: var(--c-ink-0);
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    line-height: 1.7;
+  }
+  .bar {
+    height: 36px;
+    display: flex;
+    align-items: center;
+    padding-inline: var(--space-4);
+    border-bottom: 1px solid var(--line);
+    background: var(--c-ink-3);
+    color: var(--fg-muted);
+  }
+  .body {
+    padding: var(--space-5);
+    display: grid;
+    gap: var(--space-2);
+    overflow-x: auto;
+  }
+  .line {
+    display: flex;
+    gap: var(--space-2);
+    white-space: pre-wrap;
+    color: var(--c-stone-300);
+  }
+  .line--user {
+    color: var(--c-paper);
+  }
+  .line--tool {
+    color: var(--c-teal-light);
+  }
+  .line--out {
+    color: var(--fg-muted);
+    padding-left: var(--space-5);
+  }
+  .line--agent {
+    color: var(--c-paper);
+  }
+  .mark {
+    flex: none;
+  }
+</style>

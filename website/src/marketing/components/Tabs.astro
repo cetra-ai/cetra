@@ -1,0 +1,51 @@
+---
+interface Props {
+  id: string;
+  labels: string[];
+}
+const { id, labels } = Astro.props;
+---
+<div class="tabs-root" data-tabs data-tabs-id={id}>
+  <div class="tablist" role="tablist">
+    {labels.map((label, i) => (
+      <button
+        type="button"
+        role="tab"
+        id={`${id}-tab-${i}`}
+        aria-selected={i === 0 ? "true" : "false"}
+        tabindex={i === 0 ? 0 : -1}
+      >
+        {label}
+      </button>
+    ))}
+  </div>
+  <slot />
+</div>
+<style>
+  .tablist {
+    overflow-x: auto;
+  }
+</style>
+<script>
+  import { wireTabs } from "../lib/tabs";
+
+  document.querySelectorAll<HTMLElement>("[data-tabs]").forEach((root) => {
+    const id = root.dataset.tabsId ?? "";
+    const tabs = Array.from(
+      root.querySelectorAll<HTMLElement>(":scope > [role=tablist] > [role=tab]"),
+    );
+    const panels = Array.from(root.querySelectorAll<HTMLElement>(":scope > [data-tab-panel]"));
+    if (tabs.length !== panels.length) {
+      console.error(`Tabs ${id}: ${tabs.length} labels, ${panels.length} panels`);
+      return;
+    }
+    panels.forEach((panel, i) => {
+      panel.id = `${id}-panel-${i}`;
+      panel.setAttribute("role", "tabpanel");
+      panel.setAttribute("aria-labelledby", `${id}-tab-${i}`);
+      panel.hidden = i !== 0;
+      tabs[i].setAttribute("aria-controls", panel.id);
+    });
+    wireTabs(tabs, panels);
+  });
+</script>

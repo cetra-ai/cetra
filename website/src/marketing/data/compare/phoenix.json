@@ -1,0 +1,122 @@
+{
+  "slug": "phoenix",
+  "name": "Arize Phoenix",
+  "url": "https://phoenix.arize.com",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Source-available LLM tracing, evaluation and prompt tooling from Arize, built on OpenTelemetry and OpenInference.",
+  "facts": {
+    "selfHostStack": {
+      "value": "One Phoenix container (UI, API, OTLP collector) with SQLite by default; PostgreSQL 14+ recommended for production",
+      "sources": [
+        "https://arize.com/docs/phoenix/self-hosting/architecture",
+        "https://github.com/Arize-ai/phoenix/blob/main/docker-compose.yml"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "Elastic License 2.0 (source-available, not OSI open source); docs state no feature gates when self-hosted",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/LICENSE",
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/self-hosting/license.mdx",
+        "https://arize.com/docs/phoenix/self-hosting"
+      ]
+    },
+    "cloudFree": {
+      "value": "Free Phoenix Cloud account exists; its limits not found in docs. Arize AX Free: 25k spans, 1 GB/month, 15-day retention",
+      "sources": [
+        "https://arize.com/pricing/",
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations/coding-agents/claude-code.mdx"
+      ]
+    },
+    "cloudPaidFrom": {
+      "value": "Arize AX Pro (separate managed product): $50/month incl. 50k spans and 10 GB ingestion per month, 30-day retention",
+      "sources": ["https://arize.com/pricing/"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP/protobuf at /v1/traces (port 6006) and gRPC (port 4317); OpenInference conventions",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/self-hosting/configuration.mdx",
+        "https://github.com/Arize-ai/phoenix/blob/main/README.md"
+      ]
+    },
+    "sql": {
+      "value": "Not documented: docs describe a span query DSL, dataframe export, REST API and CLI",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/tracing/how-to-tracing/importing-and-exporting-traces/extract-data-from-spans.mdx"
+      ]
+    },
+    "mcp": {
+      "value": "Remote MCP server (beta) built in at /mcp, Phoenix 19.0.0+; gives agents access to Phoenix data and skills",
+      "sources": ["https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations/mcp.mdx"]
+    },
+    "onlineEvals": {
+      "value": "Evals can run on production traces; continuous online evals with alerting are documented under Arize AX",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/evaluation/llm-evals.mdx"
+      ]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets, experiments and server-side dataset evaluators (LLM and code)",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/datasets-and-experiments/overview-datasets.mdx",
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/evaluation/server-evals/llm-evaluators.mdx"
+      ]
+    },
+    "promptManagement": {
+      "value": "Yes: prompt versioning, tags and a prompt playground",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/prompt-engineering/overview-prompts/prompt-management.mdx"
+      ]
+    },
+    "gateway": {
+      "value": "Not documented in Phoenix docs; they list integrations with third-party AI gateways",
+      "sources": ["https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/integrations.mdx"]
+    },
+    "alerts": {
+      "value": "Not documented in Phoenix; its docs list monitors and alerting as Arize AX features",
+      "sources": [
+        "https://github.com/Arize-ai/phoenix/blob/main/docs/phoenix/resources/frequently-asked-questions/what-is-the-difference-between-phoenix-and-arize.mdx"
+      ]
+    },
+    "issueDetection": {
+      "value": "Unknown",
+      "sources": [
+        "https://arize.com/docs/phoenix/pxi",
+        "https://arize.com/docs/phoenix/cookbook/tracing/identify-high-signal-traces",
+        "https://arize.com/docs/phoenix/llms.txt"
+      ]
+    },
+    "annotationQueues": {
+      "value": "Unknown",
+      "sources": [
+        "https://arize.com/docs/phoenix/resources/frequently-asked-questions/langfuse-alternative-arize-phoenix-vs-langfuse-key-differences",
+        "https://arize.com/docs/phoenix/tracing/how-to-tracing/feedback-and-annotations"
+      ]
+    },
+    "assistant": {
+      "value": "PXI (beta): assistant on every page; investigates failing traces, edits playground prompts, queries your data",
+      "sources": ["https://arize.com/docs/phoenix/pxi"]
+    },
+    "codingAgents": {
+      "value": "Plugin traces Claude Code sessions; guides for Codex, GitHub Copilot, Cursor and Gemini CLI",
+      "sources": [
+        "https://arize.com/docs/phoenix/integrations/coding-agents/claude-code",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/codex",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/copilot",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/cursor",
+        "https://arize.com/docs/phoenix/integrations/coding-agents/gemini"
+      ]
+    }
+  },
+  "chooseThem": [
+    "Runs as a single container with SQLite by default, so a first deployment needs few services",
+    "OpenInference auto-instrumentation across many frameworks and providers",
+    "Pre-built evaluators, dataset evaluators and experiments",
+    "Arize AX offers a managed option that uses the same OpenTelemetry/OpenInference instrumentation"
+  ],
+  "notes": "Phoenix (open source) and Arize AX (managed, commercial) are separate products; cloudFree/cloudPaidFrom partly describe AX. Phoenix Cloud limits not found. Negative claims (no online evals, alerts, gateway, SQL) are based on Phoenix docs, which defer these to AX; wording kept as 'per its docs'. Docs read from local checkout (docs/phoenix, commit dated 2026-11-07) and cited by GitHub URL; some arize.com pages fetched live. Ports from configuration.mdx. A WebFetch of /self-hosting/license on arize.com was not completed. Verified 2026-11-20: selfHostStack, licence (ELv2, 'no feature gates' per docs), AX pricing, otel ports, MCP confirmed against local checkout/arize.com. Absence claims reworded to 'Not documented'; onlineEvals was overstated since Phoenix docs say evals can run on production traces; chooseThem 'Deep'/'Strong' removed. Added 2026-11-22: four new rows. issueDetection is Unknown: PXI investigates failures on request and the cookbook describes manual failure clustering, but no page describes automatic grouping. annotationQueues is Unknown: a Phoenix FAQ says Phoenix and Arize AX include annotation queues, but its comparison table links the queue docs to Arize AX, and the Phoenix annotation pages describe annotating through the client, REST API or UI. The PXI page has a line telling AI agents to fetch another docs index (a different host); ignored. Docs were read from the project's checkout, which mirrors arize.com/docs/phoenix (its llms.txt lists these URLs).",
+  "chooseUs": [
+    "You want LLM judges on live traffic and alerts in the open-source product",
+    "You want an MIT-licensed core",
+    "You want SQL over your traces in the UI, the API and MCP"
+  ]
+}

@@ -1,0 +1,47 @@
+---
+import Button from "../components/Button.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import { loadIntegrations, MIGRATING_GROUP } from "../data/integrations.mjs";
+
+const items = loadIntegrations().filter((item) => item.group !== MIGRATING_GROUP);
+---
+
+<Section tone="ink" divider labelledby="integrations-title">
+  <SectionHeading
+    eyebrow="Integrations"
+    title="Works with your stack."
+    id="integrations-title"
+    lede="OpenTelemetry in, from any framework or coding agent. Each of these is covered by recorded or hand-written traces, or SDK tests, in the repository:"
+  />
+  <div class="pills">
+    {items.map((item) => <a class="pill" href={item.href}>{item.title}</a>)}
+  </div>
+  <div class="all">
+    <Button href="/integrations/" variant="ghost">All integrations →</Button>
+  </div>
+</Section>
+
+<style>
+  .pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+    margin-top: var(--space-7);
+  }
+  .pill {
+    font-size: var(--text-sm);
+    padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--fg);
+    text-decoration: none;
+  }
+  .pill:hover {
+    border-color: var(--accent);
+  }
+  .all {
+    margin-top: var(--space-6);
+    margin-left: -0.4rem;
+  }
+</style>

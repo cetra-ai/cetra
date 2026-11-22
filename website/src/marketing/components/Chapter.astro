@@ -1,0 +1,103 @@
+---
+interface Props {
+  eyebrow?: string;
+  title: string;
+  lede: string;
+  features?: string[];
+  id?: string;
+  /** The slot holds its own frame (a Frame): drop the visual's border, background and fade. */
+  bare?: boolean;
+}
+const { eyebrow, title, lede, features, id, bare = false } = Astro.props;
+---
+<div class="chapter">
+  <div class="text">
+    <div class="head">
+      {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+      <h2 id={id}>{title}</h2>
+    </div>
+    <div class="body">
+      <p class="lede">{lede}</p>
+      {features && features.length > 0 && (
+        <ul class="features bullets">
+          {features.map((feature) => (
+            <li>{feature}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  </div>
+  <div class:list={["visual", bare && "visual--bare"]}>
+    <slot />
+  </div>
+</div>
+<style>
+  .chapter {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+  }
+  .text {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-5);
+  }
+  @media (min-width: 960px) {
+    .text {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: var(--space-8);
+      align-items: start;
+    }
+  }
+  h2 {
+    font-size: var(--text-2xl);
+    margin-top: var(--space-3);
+  }
+  .lede {
+    color: var(--fg-muted);
+  }
+  .features {
+    margin: var(--space-5) 0 0;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2) var(--space-5);
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  @media (max-width: 720px) {
+    .features {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .visual {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+    box-shadow: var(--shadow-panel);
+    overflow: hidden;
+    position: relative;
+  }
+  @media (max-width: 720px) {
+    .visual {
+      overflow-x: auto;
+    }
+  }
+  .visual::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 30%;
+    background: linear-gradient(to bottom, transparent, var(--band-bg));
+    pointer-events: none;
+  }
+  /* Placed last so it overrides the .visual rules above, including the phone media query. */
+  .visual--bare {
+    border: 0;
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+    overflow: visible;
+  }
+  .visual--bare::after {
+    content: none;
+  }
+</style>

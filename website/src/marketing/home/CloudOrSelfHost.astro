@@ -1,0 +1,67 @@
+---
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import { CLOUD, CONTACT_EMAIL, DEMO_URL } from "../site";
+---
+
+<Section tone="teal" divider labelledby="deploy-title">
+  <SectionHeading
+    eyebrow="Two ways to run it"
+    title="Our cloud, or your server."
+    id="deploy-title"
+    lede="The same software either way."
+  />
+  <div class="cards">
+    <Card title="cetra Cloud">
+      <ul class="points bullets">
+        <li>Free up to 100,000 spans and scores a month</li>
+        <li>Paid plans from $30 a month</li>
+        <li>In the EU or the US: you pick the region</li>
+      </ul>
+      <div class="actions">
+        <Button href={CLOUD.signup} external>Start free</Button>
+        <Button href={DEMO_URL} variant="secondary" external>Try the demo</Button>
+      </div>
+    </Card>
+    <Card title="Self-hosted">
+      <ul class="points bullets">
+        <li>Free, with no limits on volume, seats or retention</li>
+        <li>One binary, Docker or Helm</li>
+        <li>A licence key adds single sign-on and project roles</li>
+      </ul>
+      <div class="actions">
+        <Button href="/docs/self-hosting/install/">Install</Button>
+        <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+      </div>
+    </Card>
+  </div>
+  <div class="more">
+    <Button href="/pricing/" variant="ghost">See pricing →</Button>
+    <Button href="/self-hosting/" variant="ghost">Self-hosting →</Button>
+    <Button href="/security/" variant="ghost">Security →</Button>
+  </div>
+</Section>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+  .actions {
+    margin-top: var(--space-5);
+  }
+  .more {
+    display: flex;
+    justify-content: center;
+    margin-top: var(--space-6);
+  }
+  @media (max-width: 860px) {
+    .cards {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

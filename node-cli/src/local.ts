@@ -24,8 +24,7 @@ const READY_CHECK_MS = 2_000;
 const TOKEN_LIFETIME_MS = 90 * 24 * 60 * 60 * 1000;
 const PASSWORD_LENGTH = 24;
 const PASSWORD_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-const INSTALL_HINT =
-  "Install cetra: curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh";
+const INSTALL_HINT = "Install cetra: curl -fsSL https://cetra.sh/install.sh | sh";
 const DOCKER_NOT_STARTED = `cetra did not start; see docker logs ${CONTAINER}`;
 
 /** Whether the URL points at this machine: localhost, 127.0.0.0/8 or [::1] (URL keeps the brackets). */
@@ -328,7 +327,7 @@ async function startDocker(context: StartContext): Promise<Started> {
     if (firstStart) await cleanupContainer(deps);
     if (/pull access denied|not found|unauthorized/i.test(ran.stderr)) {
       throw new CliError(
-        `docker could not pull ${IMAGE} (the image is public from the first release); install the binary instead: curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh`,
+        `docker could not pull ${IMAGE} (the image is public from the first release); install the binary instead: curl -fsSL https://cetra.sh/install.sh | sh`,
         Exit.Unreachable,
       );
     }

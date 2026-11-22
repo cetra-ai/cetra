@@ -1,0 +1,81 @@
+{
+  "slug": "cetra",
+  "name": "cetra",
+  "url": "https://cetra.sh",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source LLM observability and evaluation that runs as one binary on one machine, or in cetra Cloud.",
+  "facts": {
+    "selfHostStack": {
+      "value": "One binary and one data folder; S3-compatible storage optional",
+      "sources": ["/docs/get-started/run-cetra/", "/docs/self-hosting/s3/"]
+    },
+    "selfHostLicence": {
+      "value": "MIT core; single sign-on and project roles need a licence key (Elastic License 2.0)",
+      "sources": ["/docs/platform/plans-and-licence/"]
+    },
+    "cloudFree": {
+      "value": "100,000 spans and scores a month, 30 days of history, 1 seat",
+      "sources": ["/pricing/"]
+    },
+    "cloudPaidFrom": {
+      "value": "$30 a month for 200,000 spans and scores, then $4 per 100,000",
+      "sources": ["/pricing/"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP and gRPC; reads OpenTelemetry GenAI and OpenInference attributes",
+      "sources": ["/docs/get-started/opentelemetry/"]
+    },
+    "sql": {
+      "value": "SQL console in the UI, plus SQL over the API and MCP",
+      "sources": ["/docs/tracing/sql-console/", "/docs/platform/mcp/"]
+    },
+    "mcp": {
+      "value": "MCP server over streamable HTTP: traces, spans, SQL, prompts and issues",
+      "sources": ["/docs/platform/mcp/"]
+    },
+    "onlineEvals": {
+      "value": "LLM judges and checks on live traces, with a filter, sampling and a spending cap",
+      "sources": ["/docs/evaluation/online-rules/"]
+    },
+    "datasetsExperiments": {
+      "value": "Versioned datasets; experiments run from the Python and TypeScript SDKs",
+      "sources": ["/docs/evaluation/datasets/", "/docs/evaluation/experiments/"]
+    },
+    "promptManagement": {
+      "value": "Versioned prompts with labels, SDK fetch with a cache and a fallback, and a playground",
+      "sources": ["/docs/evaluation/prompts/", "/docs/evaluation/playground/"]
+    },
+    "gateway": {
+      "value": "No LLM gateway or proxy",
+      "sources": ["/docs/"]
+    },
+    "alerts": {
+      "value": "Error rate, cost, latency, scores and issue occurrences, to Slack, email or a signed webhook",
+      "sources": ["/docs/platform/alerts/", "/docs/evaluation/issues/"]
+    },
+    "issueDetection": {
+      "value": "Errors grouped by fingerprint; bad scores, feedback and topics clustered on your LLM connection",
+      "sources": ["/docs/evaluation/issues/"]
+    },
+    "annotationQueues": {
+      "value": "Queues of traces, spans or sessions, with instructions, score forms and a lease per reviewer",
+      "sources": ["/docs/evaluation/annotation-queues/"]
+    },
+    "assistant": {
+      "value": "Chat in the UI on your own LLM connection; drafts filters, SQL, dashboards and evaluators",
+      "sources": ["/docs/platform/assistant/"]
+    },
+    "codingAgents": {
+      "value": "Claude Code, Codex CLI and Gemini CLI via cetra agents setup; GitHub Copilot via printed settings",
+      "sources": [
+        "/docs/integrations/claude-code/",
+        "/docs/integrations/codex/",
+        "/docs/integrations/gemini-cli/",
+        "/docs/integrations/copilot/"
+      ]
+    }
+  },
+  "chooseThem": [],
+  "notes": "cetra's own facts, sourced to its docs. Sources starting with / are pages of cetra.sh. Updated 2026-11-22: prompt management and MCP rows corrected; issue detection, annotation queues, assistant and coding-agent rows added from the docs pages.",
+  "chooseUs": []
+}

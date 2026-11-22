@@ -1,0 +1,2 @@
+# The install script's short URL (D-W-20): curl -fsSL https://cetra.sh/install.sh | sh
+/install.sh https://github.com/cetra-ai/cetra/releases/latest/download/install.sh 302

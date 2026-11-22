@@ -1,0 +1,66 @@
+---
+import Button from "../components/Button.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import Terminal from "../components/Terminal.astro";
+---
+
+<Section tone="teal" divider labelledby="coding-title">
+  <div class="coding">
+    <div class="text">
+      <SectionHeading
+        eyebrow="Coding agents"
+        title="See what your coding agents cost."
+        id="coding-title"
+        lede="Trace Claude Code, Codex, Gemini CLI and GitHub Copilot. Every turn, model call and tool call, with tokens and API-equivalent cost per person, and per repository and branch where the agent reports them."
+      />
+      <ul class="features bullets">
+        <li>One cetra agents setup command for Claude Code, Codex and Gemini CLI</li>
+        <li>A ready-made Coding agents dashboard</li>
+        <li>Claude Code: leave prompts and tool output out with --no-content</li>
+        <li>API-equivalent cost, to compare people, repositories and sessions</li>
+      </ul>
+      <div class="docs-link">
+        <Button href="/docs/integrations/claude-code/" variant="ghost">Set up Claude Code →</Button>
+      </div>
+    </div>
+    <Terminal
+      title="terminal"
+      lines={[
+        { kind: "user", text: "export CETRA_INGEST_KEY=sk-cetra-…" },
+        { kind: "user", text: "cetra agents setup claude-code --url https://cetra.example.com" },
+        { kind: "user", text: "claude \"fix the failing test in billing\"" },
+        { kind: "out", text: "# in cetra: one trace per prompt, with its model calls and tools" },
+        { kind: "out", text: "# tagged you@example.com · acme/billing · fix-tests" },
+      ]}
+    />
+  </div>
+</Section>
+
+<style>
+  .coding {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+  }
+  .text {
+    display: grid;
+    gap: var(--space-5);
+    align-content: start;
+    min-width: 0;
+  }
+  .features {
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .docs-link {
+    margin-left: -0.4rem;
+  }
+  @media (min-width: 960px) {
+    .coding {
+      grid-template-columns: 1fr 1fr;
+      align-items: center;
+      gap: var(--space-8);
+    }
+  }
+</style>

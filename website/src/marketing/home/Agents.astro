@@ -1,0 +1,72 @@
+---
+import Button from "../components/Button.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+import Terminal from "../components/Terminal.astro";
+---
+
+<Section tone="raised" divider labelledby="agents-title">
+  <div class="agents">
+    <div class="text">
+      <SectionHeading
+        eyebrow="MCP and SQL"
+        title="Your agents can read it too."
+        id="agents-title"
+        lede="Point Claude Code, Cursor or another MCP client that supports streamable HTTP at your traces and ask what went wrong. Or run npx @cetra-ai/cli init in your repository: your coding agent gets a key, the cetra skill and a prompt to add tracing to your app."
+      />
+      <ul class="features bullets">
+        <li>Search traces, open a trace, run read-only SQL</li>
+        <li>Read your prompts and issues</li>
+        <li>cetra-cli init sets your repository up for your agent</li>
+        <li>A docs MCP server at cetra.sh/mcp</li>
+      </ul>
+      <div class="docs-link">
+        <Button href="/docs/platform/mcp/" variant="ghost">Read the MCP docs →</Button>
+        <Button href="/docs/get-started/coding-agent/" variant="ghost">Set up with your coding agent →</Button>
+      </div>
+    </div>
+    <Terminal
+      title="claude · support-bot"
+      lines={[
+        { kind: "user", text: "Which traces failed most in the last day?" },
+        { kind: "tool", text: "cetra · query_sql" },
+        { kind: "out", text: "SELECT name, count(*) AS failed FROM traces WHERE status = 'error' AND start_time > now() - INTERVAL '1 day' GROUP BY name ORDER BY failed DESC LIMIT 3" },
+        { kind: "out", text: "refund-agent 14 · billing-lookup 9 · handoff 4" },
+        { kind: "tool", text: "cetra · get_trace" },
+        { kind: "out", text: "refund-agent · tool \"issue_refund\" returned 422: amount above the limit" },
+        { kind: "agent", text: "refund-agent fails when the refund is above the limit. The tool returns 422 and the agent retries with the same amount. I can add a check before the call." },
+      ]}
+    />
+  </div>
+</Section>
+
+<style>
+  .agents {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-7);
+  }
+  .text {
+    display: grid;
+    gap: var(--space-5);
+    align-content: start;
+    min-width: 0;
+  }
+  .features {
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
+  }
+  .docs-link {
+    margin-left: -0.4rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+  @media (min-width: 960px) {
+    .agents {
+      grid-template-columns: 1fr 1fr;
+      align-items: center;
+      gap: var(--space-8);
+    }
+  }
+</style>

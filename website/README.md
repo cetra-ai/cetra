@@ -6,8 +6,18 @@ Read `STYLE.md` before writing.
 
 ## Where pages live
 
-- `src/pages/index.astro` is the landing page.
+- `src/pages/index.astro` is the homepage (the marketing site); its sections are in `src/marketing/home/`.
 - Documentation pages are `.md` or `.mdx` files under `src/content/docs/docs/`. The URL is the path: `src/content/docs/docs/tracing/sessions.mdx` is `/docs/tracing/sessions/`, and `index.mdx` is the directory's page.
+
+## Marketing pages
+
+- Marketing pages are plain Astro pages under `src/pages/`, using `src/marketing/layouts/MarketingLayout.astro`. They never use Starlight. Their components, styles and constants are in `src/marketing/`.
+- Every marketing route is listed in `src/marketing/routes.mjs`. `scripts/check-marketing.mjs` checks each one after the build: structure, metadata, `noindex`, internal links, and a 350 KB page-weight cap without fonts.
+- `LAUNCHED` is true since M7: marketing pages are indexable, except the routes in `ALWAYS_NOINDEX`.
+- `public/og.png` is the Open Graph image of every marketing page; regenerate it with `pnpm --dir website exec node scripts/og-image.mjs` after a brand change.
+- URLs and repeated strings live in `src/marketing/site.ts`.
+- `/styleguide/` shows every component. Its source is `src/pages/styleguide.astro`.
+- The design is `docs/website/00-design.md`.
 
 ## Commands
 
@@ -38,6 +48,7 @@ The UI screenshots under `src/assets/screenshots/` are generated from the web UI
 
 - Run `just docs-screenshots` in a pull request that changes a screen shown in the docs, and commit the new PNGs. A reviewer checks the PNG diff. Name shots to rewrite only those: `just docs-screenshots trace-view sessions`.
 - The first time, install the browser: `pnpm --dir website exec playwright install chromium`. CI never downloads a browser.
+- A shot with `"theme": "dark"` is taken in the UI's dark theme; the marketing pages use the `marketing-*` shots.
 - To add a shot, add an entry to `screenshots.json` (`name`, `path`, `waitFor`, and optionally `actions` and `waitAfter`), run the recipe, and show the PNG on its page with `<Image>`. `just check-docs` fails when a listed shot has no PNG or a PNG has no entry.
 
 ## Deployment

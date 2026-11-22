@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs the cetra binary from a GitHub release (D-N-15):
-#   curl -fsSL https://github.com/cetra-ai/cetra/releases/latest/download/install.sh | sh
+# Installs the cetra binary from a GitHub release (D-N-15). cetra.sh/install.sh redirects here (D-W-20):
+#   curl -fsSL https://cetra.sh/install.sh | sh
 #
 # Environment:
 #   CETRA_VERSION        version to install, e.g. 0.1.0 (default: the latest release)

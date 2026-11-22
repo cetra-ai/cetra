@@ -1,0 +1,95 @@
+{
+  "slug": "langfuse",
+  "name": "Langfuse",
+  "url": "https://langfuse.com",
+  "checkedOn": "2026-11-20",
+  "oneLine": "Open-source LLM observability, evaluation and prompt management platform, available as cloud or self-hosted.",
+  "facts": {
+    "selfHostStack": {
+      "value": "Web and worker containers plus PostgreSQL, ClickHouse, Redis/Valkey and S3-compatible blob storage",
+      "sources": [
+        "https://langfuse.com/self-hosting",
+        "https://github.com/langfuse/langfuse/blob/main/docker-compose.yml"
+      ]
+    },
+    "selfHostLicence": {
+      "value": "MIT except ee/ (commercial licence); docs mark org creators, instance management API, UI customization as EE",
+      "sources": [
+        "https://github.com/langfuse/langfuse/blob/main/LICENSE",
+        "https://github.com/langfuse/langfuse/blob/main/ee/LICENSE",
+        "https://langfuse.com/self-hosting"
+      ]
+    },
+    "cloudFree": {
+      "value": "Hobby: free, 50k units/month, 30 days data access, 2 users, 2 alerts",
+      "sources": ["https://langfuse.com/pricing"]
+    },
+    "cloudPaidFrom": {
+      "value": "Core: $29/month incl. 100k units, then $8 per 100k units (traces, observations and scores count as units)",
+      "sources": ["https://langfuse.com/pricing"]
+    },
+    "otel": {
+      "value": "OTLP over HTTP (JSON, protobuf) at /api/public/otel; no gRPC; aims for OTel GenAI conventions, maps others",
+      "sources": ["https://langfuse.com/docs/opentelemetry/get-started"]
+    },
+    "sql": {
+      "value": "Not documented: docs describe a JSON Metrics API, SDK query access and blob storage export",
+      "sources": [
+        "https://langfuse.com/docs/api-and-data-platform/features/query-via-sdk",
+        "https://langfuse.com/docs/metrics/features/metrics-api"
+      ]
+    },
+    "mcp": {
+      "value": "Native MCP server (Streamable HTTP, Basic auth with project keys); read and write tools, e.g. prompts and observations",
+      "sources": ["https://langfuse.com/docs/api-and-data-platform/features/mcp-server"]
+    },
+    "onlineEvals": {
+      "value": "Yes: rules run LLM-as-a-judge evaluators on incoming observations; self-hosted worker runs them",
+      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge"]
+    },
+    "datasetsExperiments": {
+      "value": "Yes: datasets and experiments via UI, SDKs or OpenTelemetry",
+      "sources": ["https://langfuse.com/docs/evaluation/experiments/datasets"]
+    },
+    "promptManagement": {
+      "value": "Yes: prompt versioning with labels and client-side caching",
+      "sources": ["https://langfuse.com/docs/prompt-management/overview"]
+    },
+    "gateway": {
+      "value": "AI Gateway in public beta: proxy for OpenAI and Anthropic calls with tracing, cost tracking, budgets",
+      "sources": ["https://langfuse.com/docs/ai-gateway"]
+    },
+    "alerts": {
+      "value": "Slack, PagerDuty, signed webhooks and GitHub Actions; no email listed; self-hosted v4+ has no alert limit",
+      "sources": ["https://langfuse.com/docs/observability/features/alerts"]
+    },
+    "issueDetection": {
+      "value": "Unknown",
+      "sources": ["https://langfuse.com/llms.txt"]
+    },
+    "annotationQueues": {
+      "value": "Yes: queues of traces, observations or sessions; reviewers add scores with required score configs; optional assignees",
+      "sources": ["https://langfuse.com/docs/evaluation/evaluation-methods/annotation-queues"]
+    },
+    "assistant": {
+      "value": "Halo: chat in the app that queries traces and metrics and edits datasets, dashboards and prompts with approval",
+      "sources": ["https://langfuse.com/docs/halo"]
+    },
+    "codingAgents": {
+      "value": "Tracing guides for Claude Code (via hooks), OpenAI Codex, GitHub Copilot and Cursor, among others",
+      "sources": [
+        "https://langfuse.com/llms.txt",
+        "https://langfuse.com/integrations/developer-tools/claude-code.md"
+      ]
+    }
+  },
+  "chooseThem": [
+    "Large set of framework integrations and a documented feature set",
+    "Self-hosting documented for Docker Compose and Kubernetes, using ClickHouse for analytics"
+  ],
+  "notes": "Langfuse repo is ClickHouse-owned per LICENSE copyright line. 'No SQL' is an absence finding: the docs I read do not mention SQL; low-risk but not an explicit denial. MCP trace tools not confirmed on the page read (observations and prompts are). Pricing page does not name the self-host licence; LICENSE file does. Pricing may change; Enterprise listed at $2,499/month. Verified 2026-11-20: removed unverified 'community support' from cloudFree; sql reworded to 'Not documented'; chooseThem trimmed (dropped unverified Japan/HIPAA regions, 'large user base', 'mature'); other facts confirmed (LICENSE ClickHouse copyright, compose images checked locally). MCP trace tools not confirmed on page. Added 2026-11-22: issue detection, annotation queues, assistant and coding-agent rows (checked that day). issueDetection is Unknown: the docs index lists no such page; the repo holds a Topics feature gated behind an internal personal preview flag (web/src/features/topics), not documented. Halo is on Cloud plans and in public beta for self-hosted from v4.28.0. Docs pages carry an Agent Instructions block addressed to AI agents (install a skill, use the CLI); ignored. Removed the chooseThem item on prompt management, annotation queues and playground, which cetra now matches. 2026-11-22: removed the chooseThem item on EU and US regions and tiered retention, which cetra Cloud now matches (eu1, us1).",
+  "chooseUs": [
+    "You want to self-host without running ClickHouse, Redis and blob storage next to it",
+    "You want SQL over your traces in the UI, the API and MCP"
+  ]
+}

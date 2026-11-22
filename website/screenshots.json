@@ -93,5 +93,64 @@
     "name": "assistant-setting",
     "path": "/acme/settings/assistant",
     "waitFor": "Turn on the assistant"
+  },
+  {
+    "name": "marketing-trace-view",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
+    "waitAfter": "Input / Output"
+  },
+  {
+    "name": "marketing-trace-list",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-alerts",
+    "path": "/acme/support-bot/alerts",
+    "waitFor": "High error rate",
+    "now": "2026-01-01T11:00:00Z",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-assistant",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "actions": [
+      { "click": "button[aria-label=\"Ask AI\"]" },
+      {
+        "click": "textarea[aria-label=\"Message the assistant\"]",
+        "type": "Which traces failed in the last day?"
+      },
+      { "click": "button[aria-label=\"Send\"]" }
+    ],
+    "waitAfter": "Open in traces",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-playground",
+    "path": "/acme/support-bot/playground?prompt=support-reply&version=2",
+    "waitFor": "Run all",
+    "now": "2026-01-01T11:00:00Z",
+    "actions": [{ "click": "button:has-text('Run all')" }],
+    "waitAfter": "Open trace",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-queue-review",
+    "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
+    "waitFor": "Complete and next",
+    "now": "2026-01-01T11:00:00Z",
+    "theme": "dark"
+  },
+  {
+    "name": "marketing-issue",
+    "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000001c01",
+    "waitFor": "ValueError: could not parse the reply",
+    "now": "2026-01-03T20:00:00Z",
+    "theme": "dark"
   }
 ]

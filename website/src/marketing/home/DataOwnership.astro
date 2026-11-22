@@ -1,0 +1,37 @@
+---
+import Card from "../components/Card.astro";
+import Section from "../components/Section.astro";
+import SectionHeading from "../components/SectionHeading.astro";
+---
+
+<Section tone="raised" labelledby="data-title">
+  <SectionHeading
+    eyebrow="Your data"
+    title="Your traces stay yours."
+    id="data-title"
+    lede="Prompts and outputs carry your customers' data. cetra keeps it where you decide."
+  />
+  <div class="cards">
+    <Card title="Self-hosted by default">
+      Run cetra on your own server. Traces leave it only for what you set up: an LLM judge's model provider, an alert channel or a webhook.
+    </Card>
+    <Card title="Nothing phones home">
+      cetra sends no usage data. A licence key is checked offline.
+    </Card>
+    <Card title="Retention and deletion">
+      Set retention per project, and delete by user, by trace or by filter when someone asks.
+    </Card>
+    <Card title="Open files">
+      Traces are stored as Parquet files, which any Parquet tool can open.
+    </Card>
+  </div>
+</Section>
+
+<style>
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-5);
+    margin-top: var(--space-7);
+  }
+</style>

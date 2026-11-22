@@ -60,6 +60,18 @@ async function startServer() {
 async function shoot(context, shot) {
   const page = await context.newPage();
   try {
+    // Each shot starts from empty storage (no "Recent" items from an earlier shot). The docs show
+    // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default.
+    const theme = shot.theme ?? "light";
+    await page.emulateMedia({ colorScheme: theme });
+    await page.addInitScript((value) => {
+      try {
+        localStorage.clear();
+        localStorage.setItem("cetra.theme", value);
+      } catch {
+        // storage unavailable: the UI's default theme stays
+      }
+    }, theme);
     await page.clock.setFixedTime(new Date(shot.now ?? NOW));
     await page.goto(ORIGIN + shot.path);
     await page.getByText(shot.waitFor).first().waitFor();
@@ -109,16 +121,6 @@ try {
     reducedMotion: "reduce",
     locale: "en-US",
     timezoneId: "UTC",
-  });
-  // Each shot starts from empty storage (no "Recent" items from an earlier shot). The UI
-  // defaults to the dark theme; the docs show the light one.
-  await context.addInitScript(() => {
-    try {
-      localStorage.clear();
-      localStorage.setItem("cetra.theme", "light");
-    } catch {
-      // storage unavailable: the default theme stays
-    }
   });
   // The first load registers the mock service worker; later pages are intercepted from the start.
   const warmup = await context.newPage();

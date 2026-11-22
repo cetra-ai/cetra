@@ -1,0 +1,176 @@
+---
+interface Props {
+  commands: readonly { label: string; command: string }[];
+  note?: string;
+  noteHref?: string;
+  /** Unique per page. */
+  id: string;
+}
+const { commands, note, noteHref, id } = Astro.props;
+
+/**
+ * Splits a command for display: a long one wraps after a "/" or at a space, never inside a word
+ * such as "cetra-ai". The text content stays the command, so the copy button copies it as is.
+ */
+function tokens(command: string): string[] {
+  return command.split(/(\/|\s+)/).filter((token) => token !== "");
+}
+---
+<div class="copy" data-copy>
+  {commands.length > 1 && (
+    <div class="tablist" role="tablist" aria-label="Install method">
+      {commands.map((c, i) => (
+        <button
+          type="button"
+          role="tab"
+          id={`${id}-tab-${i}`}
+          aria-controls={`${id}-panel-${i}`}
+          aria-selected={i === 0 ? "true" : "false"}
+          tabindex={i === 0 ? 0 : -1}
+        >
+          {c.label}
+        </button>
+      ))}
+    </div>
+  )}
+  {commands.map((c, i) => (
+    <div
+      class="panel"
+      role={commands.length > 1 ? "tabpanel" : undefined}
+      id={`${id}-panel-${i}`}
+      aria-labelledby={commands.length > 1 ? `${id}-tab-${i}` : undefined}
+      hidden={i !== 0}
+    >
+      <pre tabindex="0"><code><span class="prompt" aria-hidden="true">$ </span><span class="cmd">{tokens(c.command).map((t) => (t === "/" ? <>/<wbr /></> : /^\s+$/.test(t) ? t : <span class="tok">{t}</span>))}</span></code></pre>
+      <button type="button" class="copy-btn" aria-label="Copy command" data-copy-target={`${id}-panel-${i}`}>Copy</button>
+    </div>
+  ))}
+  <span class="visually-hidden" role="status" aria-live="polite"></span>
+  {note && <p class="note">{noteHref ? <a href={noteHref}>{note}</a> : note}</p>}
+</div>
+<style>
+  /* The box is always dark, whatever band it sits in. */
+  .copy {
+    --fg: var(--c-paper);
+    --fg-muted: var(--c-stone-400);
+    --line: var(--c-line);
+    --line-strong: var(--c-line-strong);
+    --surface-2: var(--c-ink-3);
+    --accent: var(--c-teal-light);
+    background: var(--c-ink-0);
+    border: 1px solid;
+    border-color: var(--c-line-strong);
+    border-radius: var(--radius);
+    color: var(--fg);
+    color-scheme: dark;
+  }
+  .tablist [role="tab"] {
+    font-size: var(--text-xs);
+  }
+  .panel {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3) var(--space-4);
+  }
+  .panel[hidden] {
+    display: none;
+  }
+  /* The whole command stays visible: it wraps instead of scrolling, with the wrapped lines
+     indented past the "$ " prompt. The copy button copies it unwrapped. */
+  pre {
+    margin: 0;
+    white-space: pre-wrap;
+    padding-left: 2ch;
+    text-indent: -2ch;
+    min-width: 0;
+    flex: 1;
+    font-size: var(--text-sm);
+    color: var(--c-paper);
+  }
+  .tok {
+    white-space: nowrap;
+  }
+  .prompt {
+    color: var(--c-teal-light);
+    user-select: none;
+  }
+  .copy-btn {
+    font: inherit;
+    font-family: var(--font-body);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--fg);
+    background: transparent;
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 0.35rem 0.8rem;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .copy-btn:hover {
+    border-color: var(--fg-muted);
+  }
+  .note {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    padding: 0 var(--space-4) var(--space-3);
+  }
+</style>
+<script>
+  import { wireTabs } from "../lib/tabs";
+
+  // One pending label reset per button: a new attempt replaces the old timer.
+  const resetTimers = new WeakMap<HTMLButtonElement, number>();
+
+  async function copyCommand(button: HTMLButtonElement) {
+    const root = button.closest<HTMLElement>("[data-copy]");
+    const status = root?.querySelector<HTMLElement>('[role="status"]');
+    const target = document.getElementById(button.dataset.copyTarget ?? "");
+    const cmd = target?.querySelector<HTMLElement>(".cmd");
+    const text = cmd?.textContent ?? "";
+    try {
+      if (!navigator.clipboard) throw new Error("no clipboard");
+      await navigator.clipboard.writeText(text);
+      showFeedback(button, status, "Copied", "Copied", 1500);
+    } catch {
+      showFeedback(button, status, "Select and copy", "Select the command and copy it", 3000);
+      if (cmd) window.getSelection()?.selectAllChildren(cmd);
+    }
+  }
+
+  // The visible label shows the result for a moment, then "Copy" again. The live region announces
+  // the result, because the button's accessible name stays "Copy command".
+  function showFeedback(
+    button: HTMLButtonElement,
+    status: HTMLElement | null | undefined,
+    label: string,
+    announcement: string,
+    ms: number,
+  ) {
+    button.textContent = label;
+    // Clear the live region first, so a repeated message is announced again.
+    if (status) {
+      status.textContent = "";
+      window.setTimeout(() => {
+        status.textContent = announcement;
+      }, 50);
+    }
+    window.clearTimeout(resetTimers.get(button));
+    resetTimers.set(
+      button,
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, ms),
+    );
+  }
+
+  document.querySelectorAll<HTMLElement>("[data-copy]").forEach((root) => {
+    const tabs = Array.from(root.querySelectorAll<HTMLElement>(":scope > .tablist > [role=tab]"));
+    const panels = Array.from(root.querySelectorAll<HTMLElement>(":scope > .panel"));
+    wireTabs(tabs, panels);
+  });
+  document.querySelectorAll<HTMLButtonElement>(".copy-btn").forEach((button) => {
+    button.addEventListener("click", () => copyCommand(button));
+  });
+</script>

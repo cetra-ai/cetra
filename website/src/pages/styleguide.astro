@@ -1,0 +1,187 @@
+---
+import Button from "../marketing/components/Button.astro";
+import Card from "../marketing/components/Card.astro";
+import Chapter from "../marketing/components/Chapter.astro";
+import CopyCommand from "../marketing/components/CopyCommand.astro";
+import Section from "../marketing/components/Section.astro";
+import SectionHeading from "../marketing/components/SectionHeading.astro";
+import Tabs from "../marketing/components/Tabs.astro";
+import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
+import { INSTALL_COMMANDS } from "../marketing/site";
+
+// The size tokens of styles/tokens.css, largest first.
+const TYPE_TOKENS = [
+  "--text-hero",
+  "--text-3xl",
+  "--text-2xl",
+  "--text-xl",
+  "--text-lg",
+  "--text-base",
+  "--text-sm",
+  "--text-xs",
+];
+
+// The raw colour tokens of styles/tokens.css, with their hex values.
+const COLOUR_TOKENS = [
+  ["--c-ink", "#141414"],
+  ["--c-ink-2", "#1b1b1b"],
+  ["--c-ink-3", "#232323"],
+  ["--c-line", "#2e2e2e"],
+  ["--c-line-strong", "#3d3d3d"],
+  ["--c-paper", "#f5f5f4"],
+  ["--c-stone-300", "#d6d3d1"],
+  ["--c-stone-400", "#a8a29e"],
+  ["--c-stone-600", "#57534e"],
+  ["--c-teal", "#0f766e"],
+  ["--c-teal-light", "#2dd4bf"],
+  ["--c-teal-deep", "#0a2e2b"],
+  ["--c-teal-ink", "#042f2e"],
+];
+---
+<MarketingLayout
+  title="Style guide"
+  description="The cetra marketing components and colour bands, for review."
+  route="/styleguide/"
+>
+  <Section tone="ink">
+    <SectionHeading
+      level={1}
+      eyebrow="Style guide"
+      title="cetra marketing components"
+      lede="Every component and band of the marketing site."
+    />
+    <div class="row">
+      <Button variant="primary" size="lg" href="/docs/">Primary</Button>
+      <Button variant="secondary" size="lg" href="/docs/">Secondary</Button>
+      <Button variant="ghost" href="/docs/">Ghost</Button>
+    </div>
+  </Section>
+
+  <Section tone="raised" divider>
+    <SectionHeading title="Type scale" />
+    <div class="type-scale">
+      {
+        TYPE_TOKENS.map((token) => (
+          <div>
+            <p class="eyebrow">{token}</p>
+            <p style={`font-size: var(${token});`}>Trace every model call</p>
+          </div>
+        ))
+      }
+    </div>
+  </Section>
+
+  <Section tone="ink">
+    <SectionHeading title="Copy command" />
+    <div class="block">
+      <CopyCommand
+        id="install"
+        commands={INSTALL_COMMANDS}
+        note="What does this run?"
+        noteHref="/docs/self-hosting/install/"
+      />
+    </div>
+  </Section>
+
+  <Section tone="teal" divider>
+    <Chapter
+      eyebrow="Chapter"
+      title="A chapter title"
+      lede="One sentence that says what this part of the product does."
+      features={["First feature", "Second feature", "Third feature", "Fourth feature"]}
+    >
+      <div class="scene">Scene area</div>
+    </Chapter>
+  </Section>
+
+  <Section tone="paper">
+    <SectionHeading title="Cards" />
+    <div class="cards">
+      <Card title="Card with a link" href="/docs/">
+        <p>The whole card links to the docs.</p>
+      </Card>
+      <Card title="Card without a link">
+        <p>A card with no link, only text.</p>
+      </Card>
+      <Card title="Outline card" tone="outline">
+        <p>The outline tone has no fill.</p>
+      </Card>
+    </div>
+  </Section>
+
+  <Section tone="ink">
+    <SectionHeading title="Tabs" />
+    <div class="block">
+      <Tabs id="demo-tabs" labels={["One", "Two"]}>
+        <div data-tab-panel class="tab-panel">
+          <p>The first panel. Arrow keys move between the tabs.</p>
+        </div>
+        <div data-tab-panel class="tab-panel">
+          <p>The second panel. Home and End jump to the first and last tab.</p>
+        </div>
+      </Tabs>
+    </div>
+  </Section>
+
+  <Section tone="ink">
+    <SectionHeading title="Colour tokens" />
+    <ul class="swatches">
+      {
+        COLOUR_TOKENS.map(([name, hex]) => (
+          <li>
+            <span class="chip" style={`background: var(${name});`} />
+            <p class="eyebrow">{name}, {hex}</p>
+          </li>
+        ))
+      }
+    </ul>
+  </Section>
+</MarketingLayout>
+
+<style>
+  .row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-4);
+    margin-top: var(--space-6);
+  }
+  .type-scale {
+    display: grid;
+    gap: var(--space-5);
+    margin-top: var(--space-6);
+  }
+  .block {
+    max-width: 46rem;
+  }
+  .scene {
+    height: 320px;
+    display: grid;
+    place-items: center;
+    color: var(--fg-muted);
+  }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--space-5);
+    margin-top: var(--space-6);
+  }
+  .tab-panel {
+    padding: var(--space-4) 0;
+  }
+  .swatches {
+    list-style: none;
+    margin: var(--space-6) 0 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: var(--space-5);
+  }
+  .chip {
+    display: block;
+    height: 72px;
+    border-radius: var(--radius);
+    border: 1px solid var(--line);
+    margin-bottom: var(--space-2);
+  }
+</style>
