@@ -1,14 +1,17 @@
 """Tests for the instrumentor registry and wiring (plan F § P10, D-F-7)."""
 
+import asyncio
 import sys
 import types
 from collections.abc import Callable, Mapping
 from typing import Any, Protocol
 
 import anthropic
+import httpx2
 import openai
 import pytest
 from anthropic.types import TextBlock
+from openai.resources.chat.completions import AsyncCompletions, Completions
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.util.types import AnyValue
@@ -16,6 +19,7 @@ from opentelemetry.util.types import AnyValue
 import cetra
 import cetra._runtime as runtime_module
 from cetra._config import ConfigError
+from cetra._host import HOST
 from cetra._instrument import REGISTRY, Instrumentor, resolve
 from cetra._runtime import Runtime
 
@@ -201,8 +205,12 @@ def test_capture_content_false_hides_instrumentor_payloads(
 def test_shutdown_uninstruments(memory: Memory, spans: Spans, http_recorder: Recorder) -> None:
     exporter, start = memory
     original = openai.OpenAI.request
+    chat_create = Completions.create
+    async_chat_create = AsyncCompletions.create
     start(instrument=["openai"])
     assert openai.OpenAI.request is not original  # wrapped
+    assert Completions.create is not chat_create
+    assert AsyncCompletions.create is not async_chat_create
     client = openai.OpenAI(base_url=f"{http_recorder.url}/v1", api_key="test")
     client.chat.completions.create(
         model="gpt-4o-mini", messages=[{"role": "user", "content": "hello"}]
@@ -211,6 +219,8 @@ def test_shutdown_uninstruments(memory: Memory, spans: Spans, http_recorder: Rec
 
     runtime_module.shutdown()
     assert openai.OpenAI.request is original  # uninstrumented
+    assert Completions.create is chat_create
+    assert AsyncCompletions.create is async_chat_create
 
     # A call after shutdown creates no span, even under a fresh runtime.
     start()
@@ -230,3 +240,151 @@ def test_other_registry_entries_import(entry: Instrumentor) -> None:
         entry.module, reason=f"cetra-sdk[{entry.extra}] not installed"
     )
     assert getattr(module, entry.cls, None) is not None
+
+
+# --- The OpenAI client host stamp (D-IN-18, spec 10 § Instrumentors) ---
+
+CHAT_BODY = {
+    "id": "c",
+    "object": "chat.completion",
+    "created": 1,
+    "model": "m",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "hi"},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+}
+EMBEDDING_BODY = {
+    "object": "list",
+    "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+    "model": "m",
+    "usage": {"prompt_tokens": 1, "total_tokens": 1},
+}
+STREAM_BODY = (
+    b'data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m",'
+    b'"choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}\n\n'
+    b'data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m",'
+    b'"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    b"data: [DONE]\n\n"
+)
+
+
+def _json_transport(body: dict[str, Any]) -> httpx2.MockTransport:
+    return httpx2.MockTransport(lambda request: httpx2.Response(200, json=body))
+
+
+def _llm_span(finished: list[ReadableSpan]) -> ReadableSpan:
+    """The single OpenInference LLM span among ``finished``."""
+    matches = [span for span in finished if attrs(span).get("openinference.span.kind") == "LLM"]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _chat(base_url: str) -> None:
+    client = openai.OpenAI(
+        base_url=base_url,
+        api_key="test",
+        http_client=httpx2.Client(transport=_json_transport(CHAT_BODY)),
+    )
+    client.chat.completions.create(
+        model="gpt-4o-mini", messages=[{"role": "user", "content": "hello"}]
+    )
+
+
+def test_openai_span_records_the_client_host(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    start(instrument=["openai"])
+    _chat("https://api.novita.ai/openai")
+    assert attrs(_llm_span(spans(exporter)))["server.address"] == "api.novita.ai"
+
+
+def test_async_openai_span_records_the_client_host(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    start(instrument=["openai"])
+    client = openai.AsyncOpenAI(
+        base_url="https://api.novita.ai/openai",
+        api_key="test",
+        http_client=httpx2.AsyncClient(transport=_json_transport(CHAT_BODY)),
+    )
+
+    async def call() -> None:
+        await client.chat.completions.create(
+            model="gpt-4o-mini", messages=[{"role": "user", "content": "hello"}]
+        )
+
+    asyncio.run(call())
+    assert attrs(_llm_span(spans(exporter)))["server.address"] == "api.novita.ai"
+
+
+def test_streaming_span_records_the_client_host(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    start(instrument=["openai"])
+    client = openai.OpenAI(
+        base_url="https://api.novita.ai/openai",
+        api_key="test",
+        http_client=httpx2.Client(
+            transport=httpx2.MockTransport(
+                lambda request: httpx2.Response(
+                    200,
+                    headers={"content-type": "text/event-stream"},
+                    content=STREAM_BODY,
+                )
+            )
+        ),
+    )
+    stream = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+        stream=True,
+    )
+    for _ in stream:
+        pass
+    assert attrs(_llm_span(spans(exporter)))["server.address"] == "api.novita.ai"
+
+
+def test_embeddings_span_records_the_client_host(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    start(instrument=["openai"])
+    client = openai.OpenAI(
+        base_url="https://api.deepinfra.com/v1/openai",
+        api_key="test",
+        http_client=httpx2.Client(transport=_json_transport(EMBEDDING_BODY)),
+    )
+    client.embeddings.create(model="m", input="hello")
+    (embedding,) = [
+        span
+        for span in spans(exporter)
+        if attrs(span).get("openinference.span.kind") == "EMBEDDING"
+    ]
+    assert attrs(embedding)["server.address"] == "api.deepinfra.com"
+
+
+def test_host_is_not_stamped_outside_a_call(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    runtime = start(instrument=["openai"])
+    runtime.tracer.start_span("manual").end()
+    (manual,) = [span for span in spans(exporter) if span.name == "manual"]
+    assert "server.address" not in attrs(manual)
+
+
+def test_existing_server_address_is_kept(memory: Memory, spans: Spans) -> None:
+    exporter, start = memory
+    runtime = start(instrument=["openai"])
+    token = HOST.set("api.novita.ai")
+    try:
+        runtime.tracer.start_span("x", attributes={"server.address": "custom"}).end()
+    finally:
+        HOST.reset(token)
+    (span,) = [span for span in spans(exporter) if span.name == "x"]
+    assert attrs(span)["server.address"] == "custom"
+
+
+def test_no_stamp_without_the_openai_instrumentor(memory: Memory) -> None:
+    _, start = memory
+    original = Completions.create
+    start(instrument=[])
+    assert Completions.create is original

@@ -253,6 +253,8 @@ The SDK does not patch `threading` or executors. The Python guide (https://cetra
 
 `cetra-sdk[all]` installs every one.
 
+With `openai` named, the SDK also stamps the host of the OpenAI client's base URL (D-IN-18). It wraps the OpenAI resource `create` methods (chat completions, responses and embeddings, sync and async) outermost. A context variable holds the client's base-URL host during the call, and the span processor sets `server.address` on spans that start during it and have none, so the server's endpoint rule (spec 02 § Model, provider, usage) can name OpenRouter, Novita or another provider behind the OpenAI client. Shutdown restores the methods. Other methods (`parse`, `responses.stream`) are not wrapped, so their spans carry no host.
+
 ### Datasets and experiments
 
 ```python

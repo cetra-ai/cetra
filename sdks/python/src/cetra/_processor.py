@@ -16,6 +16,7 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, SpanExporter
 
 from cetra._context import current_values
 from cetra._filter import default_filter
+from cetra._host import HOST
 from cetra._log import logger
 from cetra._serialize import attribute_value
 
@@ -106,6 +107,9 @@ class CetraSpanProcessor(SpanProcessor):
             span.set_attribute("cetra.prompt.name", values.prompt[0])
             if values.prompt[1] is not None:
                 span.set_attribute("cetra.prompt.version", values.prompt[1])
+        host = HOST.get()
+        if host is not None and "server.address" not in (span.attributes or {}):
+            span.set_attribute("server.address", host)
 
     def _stamp_metadata(self, span: Span, metadata: Mapping[str, object]) -> None:
         for key, value in metadata.items():

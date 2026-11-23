@@ -26,6 +26,9 @@ instrumented yourself is left alone (one debug line). `shutdown()` uninstruments
 everything the SDK enabled. Our provider raises the OTel attribute limit to
 10 000, so flattened message attributes are not clipped.
 
+With `instrument=["openai"]`, cetra records the host of the OpenAI client's base URL as `server.address`, so calls to OpenRouter, Novita or another provider behind the OpenAI client show that provider.
+The host is the only part of the URL that is recorded.
+
 ## Existing OpenTelemetry setups
 
 By default `init()` builds its own `TracerProvider` and never registers it

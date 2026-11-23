@@ -140,22 +140,39 @@ def enable_for(runtime: "Runtime", classes: Sequence[type]) -> None:
         hide_inputs=True if hide else None,
         hide_outputs=True if hide else None,
     )
+    stamped = False
     for cls in classes:
         entry = _entry_of(cls)
         instance: Any = cls()
         if instance.is_instrumented_by_opentelemetry:
             # The app instrumented this library itself; leave it alone.
             logger.debug("cetra: instrumentor %s already active; skipped", entry.name)
-            continue
-        try:
-            instance.instrument(
-                tracer_provider=runtime.provider,
-                config=config,
-                raise_exception_on_conflict=True,
-            )
-        except (DependencyConflictError, ImportError):
-            raise ConfigError(_extra_hint(entry)) from None
-        runtime.instrumentors.append(instance)
+        else:
+            try:
+                instance.instrument(
+                    tracer_provider=runtime.provider,
+                    config=config,
+                    raise_exception_on_conflict=True,
+                )
+            except (DependencyConflictError, ImportError):
+                raise ConfigError(_extra_hint(entry)) from None
+            runtime.instrumentors.append(instance)
+        if entry.name == "openai" and not stamped:
+            # The host stamp (D-IN-18) belongs to the openai name, whoever instrumented it.
+            _stamp_host(runtime)
+            stamped = True
+
+
+def _stamp_host(runtime: "Runtime") -> None:
+    """Wrap the OpenAI client methods with the host stamp; shutdown restores them.
+
+    Imported here, so an empty or non-OpenAI ``instrument`` list never loads it.
+    """
+    from cetra._host import HostStamp
+
+    stamp = HostStamp()
+    stamp.instrument()
+    runtime.instrumentors.append(stamp)
 
 
 def _extra_hint(entry: Instrumentor) -> str:
