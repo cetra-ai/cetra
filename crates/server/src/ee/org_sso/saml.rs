@@ -429,8 +429,8 @@ mod tests {
 
     const AUTHORIZE: &str = "/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme";
 
-    async fn count(app: &TestApp, sql: &str) -> i64 {
-        sqlx::query_scalar(sql)
+    async fn count(app: &TestApp, sql: String) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
             .fetch_one(app.state.meta.reader())
             .await
             .unwrap()
@@ -482,9 +482,7 @@ mod tests {
         assert!(cookie_header(&response, "cetra_saml").contains("Max-Age=0"));
         let provider = store::identity_provider(org);
         assert_eq!(
-            count(
-                &app,
-                &format!(
+            count(&app, format!(
                     "SELECT COUNT(*) FROM identities WHERE provider = '{provider}' \
                      AND subject = 'ada@acme.test'"
                 ),
@@ -493,9 +491,7 @@ mod tests {
             1
         );
         assert_eq!(
-            count(
-                &app,
-                &format!(
+            count(&app, format!(
                     "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
                      WHERE u.email = 'ada@acme.test' AND m.org_id = '{org}' AND m.role = '{}'",
                     org_role_str(OrgRole::Viewer)
@@ -714,7 +710,7 @@ mod tests {
             ..saml_options(&app, org, &request_id)
         };
         let members = format!("SELECT COUNT(*) FROM org_members WHERE org_id = '{org}'");
-        let members_before = count(&app, &members).await;
+        let members_before = count(&app, members.clone()).await;
         let response = post_acs(
             &app,
             org,
@@ -724,12 +720,10 @@ mod tests {
         .await;
         assert_eq!(location(&response), "/acme");
         one_cookie(&response, SESSION_NAME);
-        assert_eq!(count(&app, &members).await, members_before);
+        assert_eq!(count(&app, members.clone()).await, members_before);
         let now = app.state.clock.now_ns();
         assert_eq!(
-            count(
-                &app,
-                &format!(
+            count(&app, format!(
                     "SELECT COUNT(*) FROM org_sso_providers WHERE org_id = '{org}' \
                      AND last_login_at = {now}"
                 ),
@@ -815,7 +809,8 @@ mod tests {
             count(
                 &app,
                 "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
-                 WHERE u.email = 'ada@acme.test'",
+                 WHERE u.email = 'ada@acme.test'"
+                    .to_owned(),
             )
             .await,
             0
@@ -844,7 +839,8 @@ mod tests {
             count(
                 &app,
                 "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
-                 WHERE u.email = 'ada@acme.test'",
+                 WHERE u.email = 'ada@acme.test'"
+                    .to_owned(),
             )
             .await,
             0

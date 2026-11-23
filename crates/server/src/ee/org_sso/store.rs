@@ -1112,7 +1112,7 @@ pub(crate) async fn revoke_for_domains(
     domains: &[String],
     now: i64,
 ) -> Result<(u64, Vec<String>), MetaError> {
-    let mut users = std::collections::BTreeSet::new();
+    let mut users = BTreeSet::new();
     for domain in domains {
         let ids: Vec<String> = sqlx::query_scalar(
             "SELECT id FROM users WHERE is_instance_admin = 0 \

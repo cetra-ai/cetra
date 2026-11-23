@@ -1547,9 +1547,9 @@ mod tests {
         let row = |secret: Vec<u8>, issuer: &str| ProviderRow {
             id: Uuid::nil(),
             org_id: OrgId::new_v7(),
-            protocol: crate::api::org_sso::SsoProtocol::Oidc,
+            protocol: SsoProtocol::Oidc,
             display_name: "Acme".to_owned(),
-            oidc: Some(super::store::OidcColumns {
+            oidc: Some(store::OidcColumns {
                 issuer: issuer.to_owned(),
                 client_id: "c".to_owned(),
                 client_secret_enc: secret,
@@ -2537,7 +2537,7 @@ mod tests {
         assert_eq!(
             body["errors"][0]["message"].as_str(),
             Some(
-                cetra_saml::MetadataError::NoSigningCertificate
+                MetadataError::NoSigningCertificate
                     .to_string()
                     .as_str()
             )
