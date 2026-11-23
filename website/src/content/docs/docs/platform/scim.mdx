@@ -72,7 +72,7 @@ Any other filter fails with `400 invalidFilter`. cetra does not ignore it. Lists
 {/* untested: an HTTP request to a running server, which no test runs */}
 ```http
 GET /scim/v2/Users?filter=userName%20eq%20%22ada%40example.com%22 HTTP/1.1
-Host: <CETRA_HOST>
+Host: <HOST>
 Authorization: Bearer scim-cetra-…
 Accept: application/scim+json
 ```
