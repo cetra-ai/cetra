@@ -69,6 +69,14 @@ Milestone 4 of track SA ([`README.md`](README.md)): the internal security review
 
 **Commit:** `Apply the SAML security review (D-SA-20, D-SA-21)`
 
+## Local interop findings (2026-11-23)
+
+Against Mock SAML (mocksaml.com) on a local https server:
+
+| # | Finding | Disposition |
+|---|---|---|
+| I1 | Mock SAML's signing certificate (X.509 v1, valid until 3021) was refused as unreadable: its `notAfter` is past the i64-nanosecond range (April 2262). | **Fixed:** certificate dates saturate at `i64::MAX`; they are shown, never enforced. Test `a_certificate_expiring_after_2262_is_read` with `fixtures/saml/idp-far-future.cert.pem`. |
+
 ## Interop by hand (the user)
 
 Following `website/src/content/docs/docs/platform/sso.mdx` § Set up SAML, on a server with an https public URL and a licence listing `org_sso` and `saml`:
