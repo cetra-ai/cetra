@@ -77,6 +77,8 @@ The implementer reports the `httpx2` version used.
 
 IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingestion.md` and `crates/otel`. IN1.4 and IN1.5 can run alongside them, in their own worktrees cut from the same base. IN1.6 runs last. IN1.4's `uv lock` records `cetra-sdk` as an editable path dependency, so IN1.5's code reaches the capture environment without a re-lock.
 
+IN1.2b (a follow-up after IN1.3, edits `cost.rs`, `context.rs` tests and one docs page) runs before IN1.4–IN1.6.
+
 **Rules for every phase.** Run only the tests named in "Done when", not the full suites (the machine is shared). Compile Rust once, right before the commit. Change no file outside the phase's Edit list. Commit once, with the given subject. If a step is unclear or contradicts the code, stop and report instead of improvising.
 
 ---
@@ -455,6 +457,33 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows (wa
 
 ---
 
+## IN1.2b — Gateway fallback in `lookup`, host-table names (follow-up, from the second plan review)
+
+**Goal:** `PriceTable::price_for` (the "Which price applies?" check, budgets, issues) prices gateway spans as ingestion does, and the host table's provider names are checked.
+
+**Edit:** `crates/otel/src/cost.rs`, `crates/otel/src/context.rs` (tests only), `website/src/content/docs/docs/tracing/cost-and-tokens.mdx`, `skills/cetra/references/` (only if the regeneration rewrites a file).
+
+**Runs after IN1.3** (it needs the refreshed snapshot).
+
+**Steps.**
+
+1. In `cost.rs`, move the gateway fallback from `apply` into `lookup`: `lookup(prices, model, provider, start_time)` first does today's ranked lookup; when that gives `None` and `provider` is `Some(p)` with `publisher_candidates(p, model)` giving `Some((publisher, names))`, it tries the ranked lookup for each name with `Some(publisher)` and returns the first match. Delete `publisher_row` and the call to it in `apply`, so `apply` calls `lookup` once as before IN1.2. `price_for` then gets the fallback because it calls `lookup`.
+2. Test in `cost.rs`: `price_for_applies_the_gateway_fallback`: a table with an `openai` row for `gpt-4o-mini`; `price_for("openai/gpt-4o-mini", Some("openrouter"), 0)` returns that row; `price_for("openai/gpt-4o-mini", Some("novita"), 0)` returns `None`.
+3. Test in `context.rs` `mod tests`: `endpoint_providers_are_rule_12_fixed_points_and_priced_or_listed`: for each `(_, name)` of `ENDPOINT_PROVIDERS`, `canonical_provider(name, false) == name`; and `name` is the provider of at least one row of `crate::cost::builtin_price_rows()`, unless it is in `const UNPRICED_ENDPOINT_PROVIDERS: &[&str] = &["helicone", "huggingface", "nvidia_nim", "openrouter", "portkey"];` (defined in the test; LiteLLM has no chat rows for them; gateways among them are priced by D-IN-13). If another name fails, stop and report it; do not edit the table.
+4. `cost-and-tokens.mdx`: where the page states that a price row only applies to spans of its provider, add one sentence: "Gateways (OpenRouter, Vercel AI Gateway, Helicone, Portkey, Cloudflare AI Gateway) are the exception: when no row of the gateway matches a model named `vendor/name`, the price of the model's publisher applies, without the gateway's fees." If the page is in `skills/references.json`, run `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` and commit what it rewrites.
+
+**Done when:**
+
+```bash
+cargo test -p cetra-otel --lib cost::tests context::tests
+cargo test -p cetra-otel --test fixtures --test golden
+cd website && node scripts/skill-references.mjs
+```
+
+**Commit:** `Apply the gateway fallback to every price lookup`
+
+---
+
 ## IN1.4 — Capture harness: real hosts and suffix routes
 
 **Goal:** a scenario turn can name a real host, the Python harness reaches the mock under that host, and the mock matches routes by path suffix.
@@ -583,6 +612,8 @@ bash -n tools/packaging/release-prep.sh
 ```
 
 All pass.
+
+After the routing change, delete the `unknown` handler if nothing calls it any more (its 404 answer and log line move into `respond`).
 
 **Commit:** `Route real hosts to the capture mock and match routes by suffix`
 
@@ -714,7 +745,7 @@ All pass.
 
    - Turn: `api` `openai.chat`, `message.text` `"The capital of France is Paris."`, `finish` `stop`, `usage` `{input: 14, output: 8}`.
    - `spec_refs`: `02 § Model, provider, usage`, `02 § Provider from the endpoint`, `02 § Cost computation`.
-   - `libraries`: the twin case's list. The OpenInference cases add `cetra-sdk`; `instrumentation` stays the instrumentor package.
+   - `libraries`: the twin case's list. `cetra-sdk` is not listed (its version in `case.json` would break `check-capture` at every SDK release; `libraries` only has to contain `instrumentation`); `instrumentation` stays the instrumentor package.
    - `notes` say which attribute carries the host (`server.address` from cetra's stamp, or OpenLLMetry's `gen_ai.openai.api_base`) and what the provider and cost resolve to. The notes of `openllmetry/openrouter-chat` add that OpenLLMetry already writes `gen_ai.provider.name=openrouter` itself, so that case pins gateway pricing, not the endpoint rule.
 
 2. Add a row to `fixtures/otlp/prices.json` (canonical format; `just fixtures-fmt`): `model_name` `deepseek/deepseek-v3.2`, `match_pattern` `deepseek/deepseek\-v3\.2`, `provider` `novita`, `valid_from` `1970-01-01T00:00:00.000000000Z`, `price_input` 0.269, `price_output` 0.4 (the snapshot's real Novita price), the other prices and `tiers` null. The OpenRouter cases are priced by the existing `gpt-4o-mini` row through D-IN-13.
