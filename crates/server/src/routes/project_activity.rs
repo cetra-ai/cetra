@@ -20,7 +20,7 @@ use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::meta::projects::ProjectRow;
 use crate::routes::projects::visible_projects;
-use crate::routes::read::{Deadline, READ_TIMEOUT, open_query};
+use crate::routes::read::{Deadline, open_query};
 
 /// Most project ids in one request: one page of the project list.
 const MAX_IDS: usize = 50;
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn the_project_timeout_is_under_the_request_deadline() {
-        assert!(PROJECT_TIMEOUT < READ_TIMEOUT);
+        assert!(PROJECT_TIMEOUT < crate::routes::read::READ_TIMEOUT);
         assert!(PROJECT_TIMEOUT > Duration::ZERO);
     }
 
