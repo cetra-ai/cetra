@@ -6,3 +6,4 @@
 
 pub(crate) mod limiter;
 pub(crate) mod report;
+pub(crate) mod spool;
