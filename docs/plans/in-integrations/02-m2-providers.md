@@ -29,6 +29,20 @@ CARGO_TARGET_DIR=/home/sebastien/travaux/llm-observer/target
 - `website/STYLE.md`.
 - The existing pages `website/src/content/docs/docs/integrations/{openai,crewai,litellm}.mdx`.
 
+## Amendments from the second review (override the phase text below)
+
+1. **Expected lock changes.** In `tools/capture/py`, the first `uv lock` (IN2.2) also rewrites the `cetra-sdk` block (IN2.3 added extras), and adding the IN2.4 pins bumps `openinference-instrumentation` (0.1.75 → 0.1.77) and `openinference-semantic-conventions` (0.1.43 → 0.1.44). These changes are expected. Stop and report only for any other change to an existing pin.
+2. **Existing cases must not drift.** IN2.4's Done when also runs `cargo run -q -p cetra-capture -- run --all --check`, so a new transitive version that changes an existing case is caught. If an existing case differs, stop and report the case and the diff.
+3. **The OpenInference bullet on OpenAI-compatible pages (IN2.5, IN2.6, IN2.7).** Plain OpenInference in Python already names these hosts: `api.groq.com`, `api.x.ai`, `api.deepseek.com`, `api.fireworks.ai`, `api.together.xyz`, `api.together.ai`, `api.cerebras.ai`, `api.perplexity.ai`, `api.moonshot.cn`, `api.z.ai`, `api.minimax.io`, `*.openai.azure.com`. Pages for those providers (Groq and Together's "Through the OpenAI client" sections, xAI, DeepSeek, Fireworks AI, Cerebras, Perplexity, Moonshot, Z.ai, MiniMax) do not get the bullet "With plain OpenInference … shows as `openai`". Every other OpenAI-compatible page keeps it.
+4. **`{api}` in scenario messages.** `scenario.rs` has no helper that gives an `Api`'s serde name. Add `fn name(self) -> &'static str` on `Api`, returning the serde names (`"openai.chat"`, …, `"cohere.chat"`, `"ollama.chat"`), with a unit test that `name()` equals the serde serialization for every variant, and use it in the new messages.
+5. **Perplexity** base URL: `https://api.perplexity.ai`. Keep it. The `orchestrator/v1` path the research saw is a separate product, and `sonar` is served at the root.
+6. **Azure TypeScript tab.** The imports block imports `OpenAI` and `AzureOpenAI` (`import OpenAI, { AzureOpenAI } from "openai";`), so the byte-compared `{/* example:integration-openai */}` block stays unchanged. The call block uses `new AzureOpenAI({ … })`.
+7. **Vertex page Limits** add: "Through Vertex AI's OpenAI-compatible endpoint on a regional host (`<REGION>-aiplatform.googleapis.com`), the provider shows as `openai`; only the global `aiplatform.googleapis.com` host is mapped."
+8. **Instrumentor classes in IN2.4.**
+   - Azure uses `cetra_runtime(["openai"])`, which enables OpenInference's `OpenAIInstrumentor` itself, so no class is named in the program.
+   - Vertex uses `from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor`, then `GoogleGenAIInstrumentor().instrument(tracer_provider=provider)`.
+   - The other five use the classes of IN2.3's table, from the same modules.
+
 ## What it is, and what it is not
 
 When it is done:
