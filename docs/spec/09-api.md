@@ -305,6 +305,15 @@ Errors use `urn:ietf:params:scim:api:messages:2.0:Error` with `scimType` where S
 
 Routes refused by a managed member's lock (D-EA-18) answer `409 scim_managed`: `PATCH /api/v1/orgs/{org}/members/{user}`, `DELETE /api/v1/orgs/{org}/members/{user}`, the org's invitation create and accept routes for verified-domain emails, and the project override routes for a managed member.
 
+### Audit log (track EA M3, `ee`)
+
+| Method & path | Notes |
+|---|---|
+| `GET /api/v1/orgs/{org}/audit-events` | Org owners and admins (`OrgPerm::ViewAudit`, session or PAT, no API key). Filters `from`, `to` (epoch milliseconds or RFC 3339; `from` inclusive, `to` exclusive), `action` (at most 20 comma-separated names; an entry ending in `.` is a group such as `member.`), `actor_id`, `target_id` (at most 64 characters), `project_id`, `outcome`. `limit` 1–500, default 100, and `cursor` (the `seq` of the last record, base64url of `{"seq": N}`). Newest first. `400 field_error` for a bad filter. Answers `{data, next_cursor}`; `actor` and `target` carry `status` (`present`, `former_member`, `deleted`, `unresolved`) |
+| `GET /api/v1/orgs/{org}/audit-events/export?format=csv\|ndjson` | The same filters, no `limit` or `cursor`. Records `audit.export_started` before the first byte. At most 1,000,000 records, streamed 1,000 at a time. CSV cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return get a leading `'`. Answers `text/csv; charset=utf-8` or `application/x-ndjson`, `Content-Disposition: attachment`, `Cache-Control: no-store`. Without `audit_log`: `403 plan_required` |
+| `GET /api/v1/admin/audit-events` | Instance admins (`Access::InstanceAdmin`). The instance log only (records with no org). `project_id` is accepted and matches nothing. Gate: `audit_log` on the licence, or `entitlements.control_plane`; otherwise `403 plan_required`. Resolves users only; other kinds are `unresolved` |
+| `GET /api/v1/admin/audit-events/export?format=csv\|ndjson` | As the org export, for the instance log, under the same gate |
+
 ## Response shapes (observability read API)
 
 Field lists live in the Rust types (`cetra_server::api`) and the contract file; these are the rules behind them (D70, D73).

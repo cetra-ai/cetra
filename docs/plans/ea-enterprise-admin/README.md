@@ -85,7 +85,7 @@ What we avoid: whole-object snapshots and raw args; silently ignored filters; gl
 | `outcome` | `success` \| `failure` | `failure` only for actions the catalog marks as recording failures: sign-ins of a known account and licence install. |
 | `actor_kind` | text | `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system`, `anonymous` (D-EA-3). |
 | `actor_id` | text, null | User id, key id, SCIM token id, control-plane token id; null for `system`, `cli`, `anonymous`. |
-| `via` | text, null | For `user`: `session`, `pat`, `device`; `pat` and `device` carry `credential_id`. |
+| `via` | text, null | For `user`: `session` or `pat`; `pat` carries `credential_id`. A device approval is a session action (M1). |
 | `credential_id` | text, null | The PAT id. Never a token value. |
 | `target_kind`, `target_id` | text, null | The resource acted on: `user`, `member`, `invite`, `api_key`, `pat`, `project`, `org`, `sso_provider`, `sso_domain`, `scim_token`, `scim_group`, `evaluator`, … A SCIM user operation targets the cetra user id (`user`), with the SCIM row id in `details`, so the record still resolves after the SCIM row is deleted. |
 | `details` | JSON | Typed per action, allow-listed fields only (D-EA-5). |
@@ -154,7 +154,8 @@ The plans for M1 and M2 turn this list into the exact enum, with each variant's 
 #### Read API and UI (ee)
 
 - `GET /api/v1/orgs/{org}/audit-events`. Filters: `from`, `to`, `action` (one or several, or a group prefix like `member.`), `actor_id`, `target_id`, `project_id`, `outcome`. Paging is by cursor on `seq`, newest first, 100 per page by default and 500 at most.
-  - Each row carries `actor` and `target` objects with the resolved display fields.
+  - The cursor is an opaque string: base64url (no padding) of `{"seq": N}`. The response is `{data, next_cursor}`; `next_cursor` is null on the last page. Pass it back as `cursor` for the next page.
+  - Each row carries `actor` and `target` objects with the resolved display fields and a `status`: `present` (name and email shown), `former_member` (org log, not a member; no name or email), `deleted` (no user row, or the key, project or provider no longer exists) or `unresolved` (a kind the scope does not resolve, id only). The instance log resolves users only (D-EA-8).
   - Access: new `OrgPerm::ViewAudit` for org admins and owners, with a session or a PAT; no API key (D-EA-10).
 - `GET /api/v1/orgs/{org}/audit-events/export?format=csv|ndjson&…` streams the same filters, with no page limit, up to 1,000,000 rows per export, under the same `ViewAudit` permission. It records `audit.export_started` before streaming.
 - `GET /api/v1/admin/audit-events` and its export serve the instance log to instance admins. Instance admins never read org logs (no implicit org access, spec 08).

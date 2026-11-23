@@ -25,7 +25,7 @@ For the steps in each provider, see [Okta SCIM setup](/docs/platform/scim-okta/)
 
 An org can have two live tokens at once. To rotate a token without downtime, create the new one, update your identity provider, then revoke the old one. Revoking a token stops every request that uses it.
 
-cetra sets a managed member's role from their groups, and recomputes it on every change that can affect it (see [Roles from groups](#roles-from-groups)). When the identity provider creates a user who is already a member, cetra links the membership and sets its role at once.
+cetra sets a managed member's role from their groups, and recomputes it on every change that can affect it (see [Roles from groups](#roles-from-groups)). When the identity provider creates a user who is already a member, cetra links the membership and sets its role at once. If that member is an admin and none of their groups maps an org role, the role drops to the org's default role until the identity provider pushes their groups. An owner keeps the owner role.
 
 ## Supported endpoints
 
@@ -144,7 +144,7 @@ Mapping and default-role changes recompute only while SCIM is enabled. A recompu
 
 ### Seats and refused raises
 
-A member raised from `viewer` to `member` or `admin` needs a seat, and a raise past the org's seat limit is refused for that member. The member keeps their role. The rest of the change still applies, so one full plan does not block the whole sync. Raising a `member` to `admin` needs no seat. Each request that refuses raises records one `scim.role_raise_refused` entry with the count and up to 20 SCIM user ids. The records hold no names.
+A member raised from `viewer` to `member` or `admin` needs a seat, and a raise past the org's seat limit is refused for that member. The member keeps their role, and gets none of the project roles that the raise would have given. The rest of the change still applies, so one full plan does not block the whole sync. Raising a `member` to `admin` needs no seat. Each request that refuses raises records one `scim.role_raise_refused` entry with the count and up to 20 SCIM user ids. The records hold no names.
 
 ### Lapses
 

@@ -131,6 +131,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | Create/delete projects, manage members & invites, org limits | | | ✓ | ✓ |
 | Delete org, transfer ownership, change owners | | | | ✓ |
 | Manage SCIM provisioning: enable, default role, tokens (session only, `ManageProvisioning`) | | | | ✓ |
+| Read and export the org's audit log (`ViewAudit`, session or PAT, never an API key; EA D-EA-10) | | | ✓ | ✓ |
 | Instance settings (instance admins only) | — | — | — | — |
 
 Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24). Dashboards: project `member` and above through a session or a read-write PAT; a `read` key and a read-only PAT read them and run their queries (D-C-16).
@@ -235,6 +236,8 @@ Unauthenticated failures write no row, only a tracing line: a failed login for a
 The catalog also covers project objects (evaluators, online rules, score definitions, alert rules and channels, LLM connections, model prices, prompts, datasets, issue sources, dashboards, annotation queues and the assistant setting) and data leaving the product: SQL runs, SQL and dataset exports, and MCP tool calls that name a project. SQL runs, exports and MCP tool calls record a SHA-256 of the query text, never the text, before they run. SQL runs by demo-org visitors are not recorded (D-EA-23).
 
 The catalog of actions, and the reads and exports of the log, are in `docs/plans/ea-enterprise-admin/README.md` § Audit log (D-EA-1 to D-EA-10).
+
+**Reads (track EA M3, `ee`).** Org owners and admins read their org's log with `OrgPerm::ViewAudit`, through a session or a PAT, never an API key. Instance admins read the instance log (records with no org) through `/api/v1/admin/audit-events`. Instance admins never read an org's log (D-EA-8). The instance log needs the `audit_log` feature on the licence, or a cloud cell (`entitlements.control_plane`), which needs no licence (D-EA-19). A lapse stops reads and exports with `403 plan_required`, and recording goes on. Each export records `audit.export_started` before it streams, with the format and the names of the filters, never their values (D-EA-6).
 
 ## Client IP
 
