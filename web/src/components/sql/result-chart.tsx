@@ -1,6 +1,8 @@
 import { memo, useMemo, useState } from "react";
+import type { BarShapeProps } from "recharts";
 import { Bar, CartesianGrid, ComposedChart, Legend, Line, XAxis, YAxis } from "recharts";
 import type { Schema } from "@/api/types";
+import { BucketBar, roundsTop } from "@/components/charts/plot-helpers";
 import { ChartSettings } from "@/components/sql/chart-settings";
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { formatTimestamp } from "@/lib/format";
@@ -119,6 +121,9 @@ export const SqlResultChart = memo(function SqlResultChart({
                     dataKey={name}
                     fill={color}
                     isAnimationActive={false}
+                    shape={(props: BarShapeProps) => (
+                      <BucketBar {...props} roundTop={roundsTop(props.payload, name)} />
+                    )}
                   />
                 );
               })}

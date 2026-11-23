@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import type { BarShapeProps } from "recharts";
 import { Bar, BarChart, ReferenceArea, Tooltip, XAxis, YAxis } from "recharts";
 import { widgetQuery } from "@/api/dashboards";
 import type { Schema } from "@/api/types";
-import { axisStyle, formatTick } from "@/components/charts/plot-helpers";
+import { axisStyle, BucketBar, formatTick, roundsTop } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { chooseBucket } from "@/lib/chart-scale";
 import { formatTimestamp } from "@/lib/format";
@@ -31,6 +32,8 @@ const CONFIG = {
 } satisfies ChartConfig;
 
 const NS_PER_MS = 1_000_000;
+/** The stack of a bar, bottom first: the order the segments render in. */
+const TRACE_STACK = ["ok", "errors"] as const;
 
 /**
  * One row per bucket of the grid from the bucket containing `fromMs` to the bucket containing
@@ -188,12 +191,23 @@ export function TracesHistogram({
             cursor={{ fill: "var(--muted-foreground)", fillOpacity: 0.12 }}
             content={<HistogramTooltip zone={zone} />}
           />
-          <Bar dataKey="ok" stackId="traces" fill="var(--chart-ok)" isAnimationActive={false} />
+          <Bar
+            dataKey="ok"
+            stackId="traces"
+            fill="var(--chart-ok)"
+            isAnimationActive={false}
+            shape={(props: BarShapeProps) => (
+              <BucketBar {...props} roundTop={roundsTop(props.payload, "ok", TRACE_STACK)} />
+            )}
+          />
           <Bar
             dataKey="errors"
             stackId="traces"
             fill="var(--chart-error)"
             isAnimationActive={false}
+            shape={(props: BarShapeProps) => (
+              <BucketBar {...props} roundTop={roundsTop(props.payload, "errors", TRACE_STACK)} />
+            )}
           />
           {low !== undefined && high !== undefined && rows[low] && rows[high] ? (
             <ReferenceArea

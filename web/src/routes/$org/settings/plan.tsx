@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
 import { Check, Lock, TriangleAlert } from "lucide-react";
+import type { BarShapeProps } from "recharts";
 import { Bar, BarChart, CartesianGrid, Legend, XAxis, YAxis } from "recharts";
 import { orgUsageQuery } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
+import { BucketBar, roundsTop } from "@/components/charts/plot-helpers";
 import { type Feature, featureOffer } from "@/components/plan/feature-label";
 import { UpgradeButton } from "@/components/plan/upgrade-button";
 import { day, numbers, UsageMeter } from "@/components/plan/usage-meter";
@@ -44,6 +46,8 @@ const USAGE_CHART: ChartConfig = {
   spans: { label: "Spans", color: "var(--chart-1)" },
   scores: { label: "Scores", color: "var(--chart-2)" },
 };
+/** The stack of the usage bars, bottom first: the order the segments render in. */
+const USAGE_STACK = ["spans", "scores"] as const;
 
 function formatLimit(value: number | undefined): string {
   return value === undefined ? "unlimited" : numbers.format(value);
@@ -208,8 +212,25 @@ function UsageSection({ org, entitlements }: { org: string; entitlements: Entitl
               <YAxis tickLine={false} axisLine={false} width={56} />
               <ChartTooltip content={<ChartTooltipContent />} />
               <Legend />
-              <Bar dataKey="spans" stackId="units" fill="var(--color-spans)" />
-              <Bar dataKey="scores" stackId="units" fill="var(--color-scores)" />
+              <Bar
+                dataKey="spans"
+                stackId="units"
+                fill="var(--color-spans)"
+                shape={(props: BarShapeProps) => (
+                  <BucketBar {...props} roundTop={roundsTop(props.payload, "spans", USAGE_STACK)} />
+                )}
+              />
+              <Bar
+                dataKey="scores"
+                stackId="units"
+                fill="var(--color-scores)"
+                shape={(props: BarShapeProps) => (
+                  <BucketBar
+                    {...props}
+                    roundTop={roundsTop(props.payload, "scores", USAGE_STACK)}
+                  />
+                )}
+              />
             </BarChart>
           </ChartContainer>
           <UsageTotals days={query.data.days} />

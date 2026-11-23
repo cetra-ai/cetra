@@ -157,9 +157,55 @@ export function lineDot(
   };
 }
 
+/** The corner radius of chart bars, in px (the user, 2026-11-23). */
+export const BAR_RADIUS = 2;
+
+/**
+ * The SVG path of a bar whose two top corners are rounded by `radius`, clamped to half the width
+ * and to the height so a thin or short bar never bulges.
+ */
+export function topRoundedBarPath(
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number = BAR_RADIUS,
+): string {
+  const r = Math.max(0, Math.min(radius, width / 2, height));
+  const right = x + width;
+  const bottom = y + height;
+  return [
+    `M${x},${bottom}`,
+    `L${x},${y + r}`,
+    `Q${x},${y} ${x + r},${y}`,
+    `L${right - r},${y}`,
+    `Q${right},${y} ${right},${y + r}`,
+    `L${right},${bottom}`,
+    "Z",
+  ].join(" ");
+}
+
+/**
+ * Whether the bar of `key` in `row` gets a rounded top: its value is a number above 0, and, in a
+ * stack drawn in `stack` order (bottom first), no later key of the row has a value above 0.
+ * Without `stack` the bar is alone in its column.
+ */
+export function roundsTop(row: unknown, key: string, stack?: readonly string[]): boolean {
+  const value = rowNumber(row, key);
+  if (value === undefined || value <= 0) {
+    return false;
+  }
+  if (stack === undefined) {
+    return true;
+  }
+  const index = stack.indexOf(key);
+  return stack.slice(index + 1).every((later) => (rowNumber(row, later) ?? 0) <= 0);
+}
+
 /**
  * A bar of one bucket. It is faded when the row's `fadeKey` value is below `fadeBelow`, and it
- * is a bucket button when `onBucket` is given (mouse only, as `lineDot`).
+ * is a bucket button when `onBucket` is given (mouse only, as `lineDot`). `roundTop` rounds its
+ * top corners (`topRoundedBarPath`).
  */
 export function BucketBar({
   x,
@@ -171,10 +217,12 @@ export function BucketBar({
   onBucket,
   fadeKey,
   fadeBelow,
+  roundTop,
 }: BarShapeProps & {
   onBucket?: (timeMs: number) => void;
   fadeKey?: string;
   fadeBelow?: number;
+  roundTop?: boolean;
 }) {
   const left = x ?? 0;
   const top = y ?? 0;
@@ -182,7 +230,17 @@ export function BucketBar({
   const count = fadeKey === undefined ? undefined : rowNumber(payload, fadeKey);
   const fillOpacity =
     count !== undefined && fadeBelow !== undefined && count < fadeBelow ? THIN_OPACITY : undefined;
+  const rounded = roundTop === true && width > 0 && height > 0;
   if (time === undefined || width <= 0 || height <= 0 || !onBucket) {
+    if (rounded) {
+      return (
+        <path
+          d={topRoundedBarPath(left, top, width, height)}
+          fill={fill}
+          fillOpacity={fillOpacity}
+        />
+      );
+    }
     return (
       <rect
         x={left}
@@ -196,7 +254,22 @@ export function BucketBar({
   }
   return (
     <g>
-      <rect x={left} y={top} width={width} height={height} fill={fill} fillOpacity={fillOpacity} />
+      {rounded ? (
+        <path
+          d={topRoundedBarPath(left, top, width, height)}
+          fill={fill}
+          fillOpacity={fillOpacity}
+        />
+      ) : (
+        <rect
+          x={left}
+          y={top}
+          width={width}
+          height={height}
+          fill={fill}
+          fillOpacity={fillOpacity}
+        />
+      )}
       {/* biome-ignore lint/a11y/noAriaHiddenOnFocusable: mouse-only bucket target with tabIndex -1; the chart group is the keyboard path (D-C-3) */}
       <foreignObject x={left} y={top} width={width} height={height} aria-hidden="true">
         <button
