@@ -276,7 +276,7 @@ B1 (catalog) ──┬── B2 (evaluation)
    - create: `Created { adapter }`.
    - update: record right after `update_connection` returns `Some(row)`, before both returns, with `Updated { fields, key_changed: key_sent }`.
    - delete: when it removed the row; the conflict path rolls back.
-   - `test_connection`, `test_embedding` and `after_connection_write`'s "online rule resumed" line: drop the audit target. A user-caused resume after a key change is not a separate record: the `llm_connection.updated` row covers it.
+   - `test_connection`, `test_embedding` and `after_connection_write`'s "online rule resumed" line: drop the audit target. A rule resumed by a key change or a passing test gets its own `online_rule.resumed` row, reason `connection` (D-EA-21, added after this plan).
    - `no_key_material_in_logs`: assert rows instead of the text, and that no key text is in `details`.
 4. **Model prices:**
    - `prices::write` gets a `ctx: &audit::Ctx` parameter (clone it into its closure, P-7). Before `change` is consumed (`let stored = match change`, ~625), compute the action (`ModelPriceAction::Created/Updated/Deleted` from the `PriceChange` variant) and the id. Before `Ok(WriteOutcome::Done(stored))`, record that action with `.org(org)`, `.project(p)` when `Some`, and target `(ModelPrice, id)`.

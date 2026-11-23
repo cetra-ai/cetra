@@ -18,7 +18,8 @@ pub(crate) enum OnlineRuleAction {
     #[serde(rename = "online_rule.paused")]
     #[serde(rename_all = "snake_case")]
     Paused { reason: &'static str },
-    /// `reason` is `manual` for the resume route and `budget period` for the budget worker.
+    /// `reason` is `manual` for the resume route, `budget period` for the budget worker and
+    /// `connection` when a connection's key change or passing test resumes it (D-EA-21).
     #[serde(rename = "online_rule.resumed")]
     #[serde(rename_all = "snake_case")]
     Resumed { reason: &'static str },
