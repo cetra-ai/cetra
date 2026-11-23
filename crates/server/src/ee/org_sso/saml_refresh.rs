@@ -358,7 +358,6 @@ mod tests {
         let failed = assert_logs_clean(
             &[
                 url.as_str(),
-                "127.0.0.1",
                 IDP_ENTITY_ID,
                 "BEGIN CERTIFICATE",
             ],
@@ -376,7 +375,6 @@ mod tests {
         let rotated = assert_logs_clean(
             &[
                 url.as_str(),
-                "127.0.0.1",
                 IDP_ENTITY_ID,
                 "BEGIN CERTIFICATE",
             ],

@@ -2592,7 +2592,9 @@ mod tests {
         // An enforced OIDC provider cannot switch to SAML.
         let (app, seeded, owner) = saml_app().await;
         configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
-        let refused = put_saml(&app, &owner.cookie, &saml_xml("Acme SAML")).await;
+        // The covered owner's password session is revoked by enforcement; the instance admin
+        // owner (`seeded`) is exempt (D-P-58).
+        let refused = put_saml(&app, &seeded.cookie, &saml_xml("Acme SAML")).await;
         assert_eq!(refused.status, StatusCode::CONFLICT);
         assert_eq!(detail(&refused), SWITCH_ENFORCED);
 
@@ -2609,7 +2611,7 @@ mod tests {
         .await;
         let refused = put(
             &app,
-            &owner.cookie,
+            &seeded.cookie,
             &body(idp.issuer(), Some(CLIENT_SECRET), "Acme Okta"),
         )
         .await;

@@ -764,7 +764,26 @@ mod tests {
 
     #[tokio::test]
     async fn enforcement_refuses_password_login_for_saml_domains() {
-        let (app, seeded, _owner) = saml_app().await;
+        let (app, seeded, owner) = saml_app().await;
+        // Org enforcement refuses a password login after the password verifies (D-P-58), so
+        // the covered owner gets a password first.
+        let hash = crate::auth::password::Hasher::new()
+            .await
+            .unwrap()
+            .hash("cetra-ok-1")
+            .await
+            .unwrap();
+        let now = app.state.clock.now_ns();
+        let owner_id = owner.id;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::users::set_password_hash(conn, owner_id, Some(&hash), now).await
+                })
+            })
+            .await
+            .unwrap();
         configure_org_saml(
             &app,
             seeded.org_id,
@@ -776,7 +795,7 @@ mod tests {
         .await;
         let response = app
             .request(Method::POST, "/api/auth/login")
-            .json(&serde_json::json!({ "email": "x@acme.test", "password": "cetra-ok-1" }))
+            .json(&serde_json::json!({ "email": "owner@acme.test", "password": "cetra-ok-1" }))
             .send()
             .await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
@@ -892,6 +911,7 @@ mod tests {
     async fn the_acs_is_rate_limited() {
         let (app, seeded, _owner) = saml_app().await;
         let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
         for _ in 0..60 {
             let response = post_acs(&app, org, "!!!", &[]).await;
             assert_eq!(location(&response), "/login?error=saml_invalid");
