@@ -1,10 +1,10 @@
 <!-- Generated from website/src/content/docs/docs/integrations/langchain.mdx by website/scripts/skill-references.mjs. Do not edit: run `just docs-gen`. -->
 
-# LangChain and LangGraph
+# LangChain
 
 Trace LangChain and LangGraph with cetra: chains, chat models, tools and agent steps, from Python and TypeScript.
 
-cetra traces LangChain and LangGraph runs as a tree: the graph, its nodes, each model call and each tool call.
+cetra traces LangChain and LangGraph runs as a tree: the graph, its nodes, each model call and each tool call. For LangGraph graphs and Deep Agents, see [LangGraph](https://cetra.sh/docs/integrations/langgraph/) and [Deep Agents](https://cetra.sh/docs/integrations/deepagents/).
 
 ## Install
 

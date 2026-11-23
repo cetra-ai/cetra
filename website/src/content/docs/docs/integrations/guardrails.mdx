@@ -1,0 +1,94 @@
+---
+title: Guardrails AI
+description: "Trace Guardrails AI guards and validators with cetra from Python, with the model call they check."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace Guardrails AI guards and validators with cetra from Python, with the model call they check.
+
+<Backing fixtures={["openinference/guardrails-guard"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[openai]" guardrails-ai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Guardrails and needs OPENAI_API_KEY */}
+```python
+from typing import Any
+
+import cetra
+from guardrails import Guard, OnFailAction
+from guardrails.validators import (
+    FailResult,
+    PassResult,
+    ValidationResult,
+    Validator,
+    register_validator,
+)
+
+
+@register_validator(name="no-banned-word", data_type="string")
+class NoBannedWord(Validator):
+    """Reject text that contains the word secret."""
+
+    def validate(
+        self,
+        value: Any,
+        metadata: dict[str, Any],
+    ) -> ValidationResult:
+        if "secret" in value:
+            return FailResult(error_message="contains banned word")
+        return PassResult()
+
+
+cetra.init(use_global_provider=True, instrument=["openai"])
+
+guard = Guard(name="no-secrets").use(NoBannedWord(on_fail=OnFailAction.EXCEPTION))
+guard(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+Guardrails writes its spans on the global tracer provider, so pass `use_global_provider=True`: cetra joins that provider instead of building its own. Call `cetra.init()` before you create the first guard. Define your validators locally with `@register_validator`, as in the sample; hub validators are separate, deprecated packages.
+
+## What you get
+
+- The guarded call is a `guardrail` span for the guard and one for the model `call`, and a `guardrail` span per validator run, with the validator's name and outcome.
+- The model call is an `llm` span nested under the `call` span, with the messages, the token counts and the cost, computed from the built-in prices.
+- The `call` span's own token counts are not read, because its kind is `guardrail`: tokens count once, on the `llm` span.
+
+## Limits
+
+- Pass the API key through `OPENAI_API_KEY`: a key passed as an argument ends up in the recorded parameters.
+- Guardrails sends usage metrics unless `enable_metrics` is off in `~/.guardrailsrc`.
+- Guardrails writes its own spans; the OpenInference Guardrails instrumentation does not support current versions.
+- The captured fixture does not include Guardrails' `step` span: its input and output embed per-run ids that cannot be normalized. A live run shows it as another `guardrail` span between the guard and the call.
+- The fixture was captured with guardrails-ai 0.11.0 and openinference-instrumentation-openai 0.1.69.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.
