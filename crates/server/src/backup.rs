@@ -666,6 +666,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_crash_spool_is_not_backed_up() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let running = bind(config(&data), None).await.unwrap();
+        let spool = data.join("telemetry").join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(
+            spool.join("crash-00000000000000000001-0000000001.json"),
+            "{}",
+        )
+        .unwrap();
+        let project = ProjectId::new_v7();
+        append(&running, project, 3).await;
+        let target = root.path().join("backup");
+        run(running.state(), &target, false).await.unwrap();
+        running.shutdown().await.unwrap();
+
+        assert!(!target.join("telemetry").exists());
+        let mut names: Vec<String> = std::fs::read_dir(&target)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "catalog.db",
+                "manifest.json",
+                "meta.db",
+                "objects",
+                "secret.key"
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn a_full_backup_restores_with_its_data() {
         let root = tempfile::tempdir().unwrap();
         let running = bind(config(&root.path().join("data")), None).await.unwrap();

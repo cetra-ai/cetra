@@ -7,6 +7,7 @@
 pub(crate) mod layer;
 pub(crate) mod limiter;
 pub(crate) mod report;
+pub(crate) mod sender;
 pub(crate) mod spool;
 
 use std::cell::Cell;
@@ -15,13 +16,20 @@ use std::panic::{Location, PanicHookInfo};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio::task::JoinHandle;
+
+use crate::http::AppState;
 use crate::observability::facts::{self, Deployment};
+use crate::observability::heartbeat;
+use crate::observability::instance;
+use crate::observability::switchboard::{Decision, NOTICE_TARGET, Switch};
 
 use self::limiter::{Limiter, ReportKey};
 use self::report::{
     CrashReport, EventSite, ReportKind, capture_frames, event_report, location_of_event,
     location_of_panic, panic_report, unix_hour,
 };
+use self::sender::{SEND_PERIOD, SendSummary, crash_url, send_spool};
 use self::spool::Spool;
 
 /// The clock a [`Reporter`] reads: nanoseconds since the Unix epoch.
@@ -187,9 +195,82 @@ pub(crate) fn report_panic(info: &PanicHookInfo<'_>) {
     }
 }
 
+/// The docs section listing every field, logged in the notice.
+pub(crate) const CRASH_DOCS_URL: &str =
+    "https://cetra.sh/docs/self-hosting/telemetry/#crash-reports";
+
+/// The startup line when crash reports are on. Shows at `log.level = "warn"` too.
+fn notice_on() {
+    tracing::info!(
+        target: NOTICE_TARGET,
+        docs = CRASH_DOCS_URL,
+        "telemetry: crash reports are on: panics and error events are sent to us as code locations and function names, never messages or values; turn them off with telemetry.crash_reports = false or CETRA_TELEMETRY=off"
+    );
+}
+
+/// The startup line when crash reports are off, with why.
+fn notice_off(reason: &'static str) {
+    tracing::info!(target: NOTICE_TARGET, reason, "telemetry: crash reports are off");
+}
+
+/// Logs the crash-reports notice; when off, deletes the spool; when on, spawns the sender.
+/// Fails closed.
+pub(crate) async fn start(state: &AppState, decision: Decision) -> Option<JoinHandle<()>> {
+    let spool = Spool::for_data_dir(&state.config.data_dir);
+    if let Switch::Off(reason) = decision.crash_reports {
+        if let Err(error) = spool.clear() {
+            tracing::debug!(error = %error, "telemetry: crash spool not cleared");
+        }
+        notice_off(reason.as_str());
+        return None;
+    }
+    spool.remove_temporaries();
+    let Ok(client) = heartbeat::client(heartbeat::REQUEST_TIMEOUT) else {
+        notice_off("client_unavailable");
+        return None;
+    };
+    // The sender still runs without an id: its reports then carry no `instance_id`.
+    let instance_id = match instance::instance_id(&state.meta).await {
+        Ok(id) => Some(id),
+        Err(error) => {
+            tracing::debug!(error = %error, "telemetry: instance id");
+            None
+        }
+    };
+    notice_on();
+    let url = crash_url(&state.config.telemetry.endpoint);
+    let clock = state.clock.clone();
+    Some(tokio::spawn(async move {
+        loop {
+            // Counted repeats of past hours go to the spool first (design § Details settled, dedup).
+            if let Some(reporter) = REPORTER.get() {
+                reporter.flush_pending();
+            }
+            // `flush_pending` writes at most 20 small files a minute: synchronous I/O here is
+            // fine, no `spawn_blocking` needed.
+            let summary = send_spool(&client, &url, &spool, instance_id, clock.now_ns()).await;
+            if summary != SendSummary::default() {
+                tracing::debug!(
+                    sent = summary.sent,
+                    dropped = summary.dropped,
+                    kept = summary.kept,
+                    "telemetry: crash reports"
+                );
+            }
+            tokio::time::sleep(SEND_PERIOD).await;
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::meta::instance_settings::{TELEMETRY_INSTANCE_ID, get_setting};
+    use crate::observability::switchboard::OffReason;
+    use crate::observability::test_receiver::Receiver;
+    use crate::test_support::{TestApp, capture_logs};
 
     #[test]
     fn report_guard_refuses_a_second_entry() {
@@ -227,5 +308,142 @@ mod tests {
     #[test]
     fn the_global_reporter_is_unset_in_tests() {
         assert!(REPORTER.get().is_none());
+    }
+
+    /// A report of one event at line 1, for writing into a test spool.
+    fn one_report() -> CrashReport {
+        let site = EventSite {
+            file: Some("crates/x.rs"),
+            line: Some(1),
+            target: "cetra_x",
+            module_path: None,
+            fields: Vec::new(),
+        };
+        event_report(&site, Vec::new(), Deployment::Binary, Duration::ZERO)
+    }
+
+    #[tokio::test]
+    async fn start_when_off_clears_the_spool_and_logs_the_reason() {
+        let app = TestApp::new().await;
+        let spool = Spool::for_data_dir(&app.state.config.data_dir);
+        spool
+            .write(&one_report(), app.state.clock.now_ns())
+            .unwrap();
+        let decision = Decision {
+            heartbeat: Switch::Off(OffReason::Config),
+            crash_reports: Switch::Off(OffReason::DoNotTrack),
+        };
+        let (handle, logs) = capture_logs(start(&app.state, decision)).await;
+        assert!(handle.is_none());
+        assert!(!app.state.config.data_dir.join("telemetry").join("spool").exists());
+        assert!(logs.contains("telemetry: crash reports are off"), "{logs}");
+        assert!(logs.contains("DO_NOT_TRACK"), "{logs}");
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_INSTANCE_ID)
+            .await
+            .unwrap();
+        assert!(stored.is_none());
+    }
+
+    #[tokio::test]
+    async fn start_when_on_logs_and_spawns() {
+        let app = TestApp::new().await;
+        let decision = Decision {
+            heartbeat: Switch::Off(OffReason::Config),
+            crash_reports: Switch::On,
+        };
+        let (handle, logs) = capture_logs(start(&app.state, decision)).await;
+        let handle = handle.expect("the sender task is spawned");
+        handle.abort();
+        assert!(logs.contains("telemetry: crash reports are on"), "{logs}");
+        assert!(logs.contains("CETRA_TELEMETRY=off"), "{logs}");
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_INSTANCE_ID)
+            .await
+            .unwrap();
+        assert!(stored.is_some());
+    }
+
+    #[tokio::test]
+    async fn the_sender_posts_what_was_spooled() {
+        let receiver = Receiver::start("/v1/crash", 204, Duration::ZERO).await;
+        let app = TestApp::with_config(|c| {
+            c.telemetry.endpoint = receiver.base.clone();
+            c.telemetry.crash_reports = true;
+        })
+        .await;
+        let spool = Spool::for_data_dir(&app.state.config.data_dir);
+        spool
+            .write(&one_report(), app.state.clock.now_ns())
+            .unwrap();
+        let decision = Decision {
+            heartbeat: Switch::Off(OffReason::Config),
+            crash_reports: Switch::On,
+        };
+        let handle = start(&app.state, decision)
+            .await
+            .expect("the sender task is spawned");
+        // The first pass runs at once; poll for up to 5 s.
+        for _ in 0..100 {
+            if !receiver.requests().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        handle.abort();
+        let bodies = receiver.bodies();
+        assert_eq!(bodies.len(), 1);
+        let report: CrashReport = serde_json::from_slice(&bodies[0]).unwrap();
+        let id = crate::observability::instance::existing_instance_id(&app.state.meta)
+            .await
+            .unwrap();
+        assert!(id.is_some());
+        assert_eq!(report.instance_id, id);
+        assert!(spool.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_crash_modules_do_not_touch_licences() {
+        let sources = [
+            include_str!("mod.rs"),
+            include_str!("layer.rs"),
+            include_str!("limiter.rs"),
+            include_str!("report.rs"),
+            include_str!("sender.rs"),
+            include_str!("spool.rs"),
+        ];
+        let forbidden = [
+            concat!("crate::", "ee"),
+            concat!("licen", "se"),
+            concat!("entitle", "ments"),
+        ];
+        for source in sources {
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for word in forbidden {
+                assert!(!code.contains(word), "a crash module mentions {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_report_path_never_logs() {
+        let sources = [
+            include_str!("report.rs"),
+            include_str!("limiter.rs"),
+            include_str!("spool.rs"),
+            include_str!("layer.rs"),
+        ];
+        let macros = [
+            concat!("tracing::", "error!"),
+            concat!("tracing::", "warn!"),
+            concat!("tracing::", "info!"),
+            concat!("tracing::", "debug!"),
+            concat!("tracing::", "trace!"),
+            concat!("tracing::", "event!"),
+        ];
+        for source in sources {
+            let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for word in macros {
+                assert!(!code.contains(word), "a report path logs with {word}");
+            }
+        }
     }
 }

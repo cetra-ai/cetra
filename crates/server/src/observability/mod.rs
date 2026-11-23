@@ -18,6 +18,8 @@ pub(crate) mod scrub;
 pub(crate) mod spans;
 pub mod subscriber;
 pub(crate) mod switchboard;
+#[cfg(test)]
+pub(crate) mod test_receiver;
 
 /// Why the subscriber or the export could not be built. Messages name keys and static
 /// reasons, never a header or resource value.

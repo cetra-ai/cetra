@@ -625,6 +625,9 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {
         tasks.push(task);
     }
+    if let Some(task) = crate::observability::crash::start(&state, decision).await {
+        tasks.push(task);
+    }
     // Feature counts for the heartbeat's `usage` (track TL M6), loaded and saved while it runs.
     if let Some(task) = crate::analytics::counters::start(&state, decision).await {
         tasks.push(task);
@@ -1261,6 +1264,51 @@ mod tests {
         assert!(logs.contains("telemetry: the heartbeat is off"), "{logs}");
         assert!(logs.contains("debug_build"), "{logs}");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_startup_notice_says_crash_reports_are_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: crash reports are off"), "{logs}");
+        assert!(logs.contains("config"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn crash_reports_on_logs_the_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut on = config(dir.path());
+        on.telemetry.crash_reports = true;
+        let (running, logs) = crate::test_support::capture_logs(Box::pin(bind(on, None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: crash reports are on"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_mode_clears_the_crash_spool() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("telemetry").join("spool");
+        std::fs::create_dir_all(&spool).unwrap();
+        std::fs::write(
+            spool.join("crash-00000000000000000001-0000000001.json"),
+            "{}",
+        )
+        .unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        assert!(!spool.exists());
+        let line = logs
+            .lines()
+            .find(|line| line.contains("telemetry: crash reports are off"))
+            .unwrap_or_default();
+        assert!(line.contains("restore_mode"), "{logs}");
     }
 
     #[tokio::test]
