@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! SCIM resource representations and discovery documents (RFC 7643 §§ 4.1, 5, 6, 7; RFC 7644
 //! § 3.4.2, track EA M5, D-EA-12). Absent optional values are omitted, never `null`.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::{Map, Value, json};
 

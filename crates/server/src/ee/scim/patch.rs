@@ -2,7 +2,6 @@
 //! SCIM PATCH bodies for users, normalized (RFC 7644 § 3.5.2, track EA M5, D-EA-12). Okta and
 //! Entra ID send `active` as a boolean or as a string, with a path or as a bare object; all those
 //! forms are read here. An understood operation on an attribute cetra does not store is a no-op.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use serde_json::Value;
 
@@ -138,7 +137,7 @@ fn path_change(path: &str, value: &Value) -> Result<Option<UserChange>, ScimErro
 
 /// The changes of an `add` or `replace` without a path. Each key is handled as a path; `name`
 /// and the enterprise URN hold objects of their own.
-fn map_changes(value: &Value) -> Result<Vec<UserChange>, ScimError> {
+pub(crate) fn map_changes(value: &Value) -> Result<Vec<UserChange>, ScimError> {
     let fields = value.as_object().ok_or_else(ScimError::invalid_syntax)?;
     let mut changes = Vec::new();
     for (key, item) in fields {

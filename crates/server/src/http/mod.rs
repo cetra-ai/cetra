@@ -199,6 +199,7 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn(crate::ee::scim::error::scim_errors))
         .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn_with_state(
             state.clone(),

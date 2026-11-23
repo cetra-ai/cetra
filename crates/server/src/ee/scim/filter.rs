@@ -2,7 +2,6 @@
 //! The SCIM filter parser for `/Users` (RFC 7644 § 3.4.2.2, track EA M5, D-EA-12). Only one `eq`
 //! on `userName`, `externalId` or the work email is accepted. Every other filter is
 //! `400 invalidFilter`.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::str::Chars;
 

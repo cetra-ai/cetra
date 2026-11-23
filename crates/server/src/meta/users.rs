@@ -3,11 +3,14 @@
 
 use std::collections::HashMap;
 
+use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
-use super::{MetaError, personal_tokens, unique_or, web_sessions};
+use super::{MetaError, invites, members, personal_tokens, unique_or, web_sessions};
+use crate::auth::OrgRole;
+use crate::entitlements::over_limit;
 
 /// Why an email was rejected. The message does not contain the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -406,6 +409,44 @@ pub(crate) async fn set_email_tx(
         .await
         .map_err(|error| unique_or(error, "uniqueness"))?;
     Ok(())
+}
+
+/// Adds `user` to `org` with `role` unless already a member (then the role stays, P-5), within
+/// `max_seats` for a non-viewer role, and removes the org's pending invitation for the user's
+/// email. `Ok(None)`: already a member. `Ok(Some(role))`: added.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] `"seat limit"` when no seat is left, and [`MetaError`] when a
+/// query fails or the user does not exist.
+pub(crate) async fn ensure_member_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    user: Uuid,
+    role: OrgRole,
+    max_seats: Option<u64>,
+    now: i64,
+) -> Result<Option<OrgRole>, MetaError> {
+    if members::org_role_tx(conn, org, user).await?.is_some() {
+        return Ok(None);
+    }
+    let email: String = sqlx::query_scalar("SELECT email FROM users WHERE id = ?")
+        .bind(user.to_string())
+        .fetch_one(&mut *conn)
+        .await?;
+    if role != OrgRole::Viewer {
+        // The invitation of this email is removed below, so it does not count against the limit.
+        let seats = members::seat_members_tx(conn, org).await?
+            + invites::seat_invites_tx(conn, org, now, Some(email.as_str())).await?;
+        if over_limit(max_seats, seats, 1) {
+            return Err(MetaError::Conflict("seat limit"));
+        }
+    }
+    members::add_org_member(conn, org, user, role, now).await?;
+    if let Some(invite) = invites::pending_invite_for_tx(conn, org, &email, now).await? {
+        invites::delete_invite(conn, org, invite.id).await?;
+    }
+    Ok(Some(role))
 }
 
 /// Replaces the display name. `None` clears it.

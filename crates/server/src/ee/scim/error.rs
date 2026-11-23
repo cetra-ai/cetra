@@ -2,7 +2,6 @@
 //! SCIM errors and responses (RFC 7644 § 3.12, track EA M5, D-EA-12). Every `/scim/v2` answer is
 //! `application/scim+json`. The error layer rewrites the problem answers of that path, so no
 //! problem body (and no internal detail) leaves it.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use axum::extract::Request;
 use axum::http::{HeaderValue, StatusCode, header};
