@@ -66,7 +66,7 @@ What we avoid: whole-object snapshots and raw args; silently ignored filters; gl
 
 ### Where the code goes
 
-- **Recording is core (MIT).** `audit::record` replaces today's 133 inline `tracing::info!(target: "audit", …)` calls, and every org records whatever its plan (D-EA-1). It is D150's "auth events log" made durable, and recording has to run on every plan, or an upgrade would show no history.
+- **Recording is core (MIT).** `audit::record` replaces today's about 134 inline `tracing::info!(target: "audit", …)` calls, and every org records whatever its plan (D-EA-1). It is D150's "auth events log" made durable, and recording has to run on every plan, or an upgrade would show no history.
 - **Everything that reads, exports or streams the log is `ee`.** So is all of SCIM: `crates/server/src/ee/audit/`, `crates/server/src/ee/scim/` and `web/src/ee/` (D-P-1, D-P-2, with SPDX headers checked by `just check-ee`).
 - D-P-4 is amended to say "reading, exporting and streaming audit logs".
 
@@ -82,7 +82,7 @@ What we avoid: whole-object snapshots and raw args; silently ignored filters; gl
 | `org_id` | UUIDv7, null | Null: an instance record (D-EA-8). |
 | `project_id` | UUIDv7, null | Set when the action is project-scoped. |
 | `action` | text | A dotted name from the catalog, e.g. `member.role_changed` (D-EA-4). Append-only names. |
-| `outcome` | `success` \| `failure` | `failure` only for actions the catalog marks as recording failures (sign-ins, SCIM authentication with a known token, licence install). |
+| `outcome` | `success` \| `failure` | `failure` only for actions the catalog marks as recording failures: sign-ins of a known account and licence install. |
 | `actor_kind` | text | `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system`, `anonymous` (D-EA-3). |
 | `actor_id` | text, null | User id, key id, SCIM token id, control-plane token id; null for `system`, `cli`, `anonymous`. |
 | `via` | text, null | For `user`: `session`, `pat`, `device`; `pat` and `device` carry `credential_id`. |
@@ -99,9 +99,10 @@ Indexes support the reads: `(org_id, seq)`, `(org_id, action, seq)`, `(org_id, a
 - `audit::record(tx, event)` takes the `meta.db` transaction of the change, so a change never commits without its record and a rolled-back change leaves none (D-EA-2).
 - **Actions that change nothing in `meta.db`** (sign-ins, SQL runs, exports, MCP tool calls) record in a transaction of their own, **before** the action runs. If that write fails, the action is refused. Such records carry the request's parameters, never a result: no row counts or durations, which are only known after the data has left.
 - **Work done later by a worker** (a deletion applied, retention purged, a domain lapsed) records when the worker commits it, with actor `system`.
-- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored. The existing lockout bounds it.
+- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored, at most one row per account and minute with a count, and an attempt refused by the lockout (`auth/limits.rs`) is not stored. A SCIM call with a revoked or expired token is a tracing line only.
+- **An org-provider sign-in writes two rows** in one transaction: the instance record and the org's record (D-EA-9).
 - **One request, one record.** A bulk operation (a dataset import, adds by filter, a batch of SCIM group members) writes one record with a count, never one per item.
-- **Restore mode.** A record follows its change: when restore mode refuses a write, nothing is recorded.
+- **Restore mode** (N's M3) refuses outbound calls and stops workers, not `meta.db` writes. So recording and SCIM run normally, the stream sends nothing, and the hourly audit purge is off, since it cannot be undone on a restored copy.
 - A failed audit write fails the request. The alternative, a change with no record, is what an audit log exists to prevent. This is unlike Langfuse, which never lets the audit write fail the caller.
 - After commit, the same function emits the `tracing` line with target `audit`, so operators who ship stdout keep their pipeline.
 - The event is a Rust enum, one variant per catalog action, each with its typed details. The action name, the target and the `details` JSON come from the variant. Call sites cannot write free-form strings.
@@ -119,7 +120,7 @@ The catalog lists every action, its scope (org or instance) and its `details` fi
 - **SSO.**
   - Org SSO: provider created, changed (the names of the changed fields, never the secret), enabled, disabled, enforced and unenforced, test sign-in; domain added, verified, lapsed, moved and removed; break-glass disable (actor `cli`).
   - Instance SSO enforcement changes come from configuration and are recorded at startup as `instance.config_applied` with the key names.
-- **SCIM.** Token created, rotated and revoked; user provisioned, updated, deactivated, reactivated and deleted; group created, renamed and deleted, members changed; group mapping changed; SCIM enabled and disabled.
+- **SCIM.** Token created, rotated and revoked; user provisioned, updated, deactivated, reactivated and deleted; group created, renamed and deleted, members changed; group mapping changed; role raise refused at the seat limit; SCIM enabled and disabled.
 - **Audit.** Stream destination created, changed and deleted; export started (format and filters).
 - **Data leaving the product (D-EA-6).** SQL console run (a SHA-256 of the SQL text; never the text, which can quote payload values); SQL and table export; dataset export; MCP tool call (tool name, project). Each is recorded before it runs (§ Writing).
 - **Deletions.** GDPR deletion requested and applied (kind, counts; the subject's identifier never appears, as the deletion row already keeps it under its own rules).
@@ -145,7 +146,7 @@ The plans for M1 and M2 turn this list into the exact enum, with each variant's 
 - The org limit `audit_retention_days` (D-P-13), from the org token, replaces it for that org: on the cloud, 365 for Enterprise and more by contract.
 - Cloud cells set `audit.retention_days = 90`, so orgs on the other plans keep 90 days, and an upgrade to Enterprise shows the last 90 days (open question 4).
 - An hourly task deletes records older than the retention, in batches.
-- An org drop deletes the org's records when the drop is applied (track M's drop path). The drop itself is an instance record.
+- An org drop deletes the org's records when the drop is applied (track M's drop path), together with its SCIM tokens, users, groups and mappings. The drop itself is an instance record.
 - A user's erasure leaves their records with ids only (above).
 
 #### Read API and UI (ee)
@@ -184,7 +185,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 - **Filters.** `userName eq`, `externalId eq` and `emails[type eq "work"].value eq` on Users; `displayName eq` and `externalId eq` on Groups. Anything else is `400 invalidFilter`, never ignored.
 - **Errors and statuses.** SCIM error bodies (`urn:ietf:params:scim:api:messages:2.0:Error`, `scimType`). `POST` answers 201 with `Location` and `meta`; `PUT` and `PATCH` answer 200 with the resource; `DELETE` answers 204; an unknown id is a SCIM 404. Content type `application/scim+json`, with `application/json` accepted.
 - **Uniqueness.** A `POST /Users` whose `userName` or `externalId` already has a SCIM row in the org answers `409 uniqueness`, and so does a `POST /Groups` with a `displayName` already used in the org. Okta and Entra rely on that answer to match existing resources.
-- **Outside OpenAPI.** The SCIM routes follow RFC 7644, not cetra's API conventions, so they are not in `openapi.json`. The docs page describes them. CSRF does not apply: they take a bearer token only.
+- **Outside OpenAPI.** The `/scim/v2` routes follow RFC 7644, not cetra's API conventions, so their `RouteDef`s are undocumented and stay out of `openapi.json`. The docs page describes them. The Provisioning routes (tokens, enable, mappings) are cetra API and are in OpenAPI. CSRF does not apply: SCIM takes a bearer token only. The route-access suite covers `Access::Scim`.
 - **Ids.** SCIM resource ids are the `scim_users` and `scim_groups` row ids (UUIDv7, per org), never cetra's global user ids. A token can only name its own org's rows (the Langfuse pitfall).
 - **Users.**
   - Attributes: `userName` (the email; it must be in a verified domain, D-EA-13), `name.givenName`, `name.familyName`, `displayName`, `emails`, `active`, `externalId`, and the enterprise extension's `department` and `employeeNumber`, stored and echoed.
@@ -240,7 +241,8 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 - **`DELETE`** does what `active: false` does, then deletes the SCIM row and its group memberships. The user account and what it authored (scores, annotations) stay.
 - **Owners.** Deactivating or deleting an owner removes their membership, unless they are the org's last active owner: that is refused (`409`, "an org needs an owner"), using the same check as `remove_org_member`. The IdP is the authority once an owner enabled SCIM (open question 3).
 - Project API keys are project credentials, not the user's, and stay. The audit records name who created them, so an admin can review them.
-- All of this reuses the existing functions: the member removal, `revoke_access` from the control-plane users API (moved to a shared module) and `users::set_disabled`. There is no second implementation.
+- All of this reuses the existing code: the member removal (`members::remove_org_member` with its owner check), the revocation of `routes/internal_users.rs`'s `revoke_access`, and `users::set_disabled`. There is no second implementation.
+- `revoke_access` opens its own write today. It is split into a function on a connection, which deletes sessions and revokes PATs and returns the revoked token hashes, and the PAT-cache eviction, which runs after commit. The control-plane route and SCIM both call it. Membership removal, revocation, the account disable and the audit record then commit in one transaction.
 
 #### Roles from groups (D-EA-14)
 
@@ -253,14 +255,14 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
   - D139 still applies: overrides only exist for org members and viewers, so an org admin's project mappings are ignored.
   - Writing an override needs `project_roles`. Enterprise and the licence have it.
 - Mappings never grant or lower `owner`. An owner's org role stays owner while they are provisioned, whatever their groups map to. Only deprovisioning removes an owner (§ Deprovisioning).
-- **Seats.** A create or a role raise (from `viewer`) that would pass `max_seats` is refused for that user, who keeps their current role (a create gets `403 plan_limit`). A group change that raises several users applies to those within the limit, records `scim.role_raise_refused` for the others, and still succeeds, so one full plan does not block the IdP's whole sync.
+- **Seats.** Seats are D176's: owner, admin and member memberships plus pending invites with those roles (D-P-20); viewers are free, so a viewer create never hits the limit. A create as `member` or `admin`, or a raise from `viewer`, that would pass `max_seats` is refused for that user, who keeps their current role (a create gets `403 plan_limit`). A group change that raises several users applies to those within the limit, records `scim.role_raise_refused` for the others, and still succeeds, so one full plan does not block the IdP's whole sync.
 - **Materialised.** Every SCIM change recomputes the affected users' roles and writes `org_members` and `project_members` in the same transaction. RBAC (spec 08) is unchanged and reads only those tables.
 - **SCIM-managed members.** A member is SCIM-managed while an active `scim_users` row of the org links to them.
   - Members who joined before SCIM was enabled are not managed until the IdP provisions them.
   - When it does, their roles are recomputed from their groups: an admin may be lowered, never an owner. Their manual overrides are replaced by the mapped ones.
 - **SCIM only (D-EA-18).** While SCIM is enabled and the org has `scim`:
   - org SSO's JIT join is off for the org;
-  - invitations to emails of its verified domains are refused (`409 scim_managed`);
+  - invitations to emails of its verified domains are refused (`409 scim_managed`), and so is accepting one created before SCIM was enabled;
   - for a managed member, these are refused with `409 scim_managed`, and the UI shows "Managed by your identity provider": the org role change (`update_org_member`), the removal (`remove_org_member`, self-leave included), and setting or removing project overrides through the org route and through `ee/project_roles.rs`'s project route.
   - Outsiders are still invited and managed by hand.
 - **Lifting the locks.** Disabling SCIM, or a lapse of `scim`, keeps every member and role as it is, turns JIT back on as configured, and makes members editable again. So a lapsed org is never left unable to manage its members.
@@ -279,6 +281,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 
 - Cloud Enterprise orgs use the same SCIM endpoints on their cell.
 - Cells have no verified domains (D183: the control plane federates SSO). So the control plane adds the org's verified SSO domains to the signed org token (`sso_domains`, a new optional claim), and the cell treats them as the org's verified domains for SCIM only (not for routing or enforcement, which stay on the control plane).
+- The control plane pushes a new org token whenever the org's domains change (D-P-11). Until then the cell uses the previous list. A domain removed on Q stops new creates once the new token arrives, and already provisioned members stay, as for a lapsed domain.
 - Users provisioned on the cell first sign in through the `cloud` provider and are linked by email (D-P-66's `control_plane` proof).
 - This is a request to track Q (§ Requests). M5 ships the cell's side. Until Q's token carries `sso_domains`, a cloud org has no verified domains, so enabling SCIM is refused. Cloud SCIM goes live with Q's release.
 
@@ -296,12 +299,12 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | D-EA-8 | **Org log and instance log (user).** Records with no org form the instance log, read by instance admins on `/admin`. Instance admins never read org logs. | Org logs only: setup, licence and admin actions stay unrecorded. Admins read every org: breaks "no implicit org access". |
 | D-EA-9 | **Sign-ins are instance records**, and an org-provider sign-in or JIT join is also recorded in that org's log. | Copying every login to every org of the user: discloses one org's members' activity to another. |
 | D-EA-10 | **Owners and admins read (user).** New `OrgPerm::ViewAudit`, with a session or a PAT; no API key. | Owners only: admins run day-to-day membership and need the log. |
-| D-EA-11 | **Download first, stream later (user).** M2 has the API, UI and CSV/NDJSON export; M3 adds one signed HTTPS NDJSON destination per org and one for the instance. Delivery is at least once, with a cursor. | Streaming in M2: delays the page. Syslog or S3 sinks: HTTPS covers the major SIEMs. No stream: self-hosted can ship tracing lines, but cloud customers could not. |
+| D-EA-11 | **Download first, stream later (user).** M3 has the API, UI and CSV/NDJSON export; M4 adds one signed HTTPS NDJSON destination per org and one for the instance. Delivery is at least once, with a cursor. | Streaming with the page: delays the page. Syslog or S3 sinks: HTTPS covers the major SIEMs. No stream: self-hosted can ship tracing lines, but cloud customers could not. |
 | D-EA-12 | **SCIM 2.0 Users and Groups at `/scim/v2`**: the token names the org; per-org resource ids; `eq` filters only, others 400; no Bulk, sort or ETags; the Okta and Entra quirks handled and tested from recorded fixtures. | Users only (Langfuse): Entra assigns by group. A per-org base URL: a second org key in the URL adds nothing to the token. |
 | D-EA-13 | **Verified domains only (user).** SCIM provisions only emails of the org's verified domains, links existing accounts with D-P-66's rule, and creates new ones with `email_verified_via = 'idp'` (no format change). Email changes need both emails in the org's domains and no other org membership. | Any email: an IdP admin could add other companies' users without consent, and revoke their sessions. Others as invitations: two lifecycles for one SCIM user. |
 | D-EA-14 | **Group mappings (user).** Groups map to an org role and optional project roles. The highest role wins (`none` < `viewer` < `member` < `admin`), with `scim_default_role` for unmapped users. Mappings never grant or lower `owner`. Seat limits refuse single raises without failing the sync. Roles are written to `org_members` and `project_members`. | Org roles only: per-project access is a common enterprise ask. A `roles` attribute (Langfuse): non-standard, and Entra pushes groups. Evaluating groups in RBAC at request time: changes the hot path for no gain. |
 | D-EA-15 | **Per-org hashed `scim-cetra-…` tokens**, two active at most, owners with a session only; `Principal::Scim`; a per-token rate limit. | An org API key over Basic (Langfuse): mixes credentials. A token per SSO provider (LangWatch): we have one provider per org. |
-| D-EA-16 | **Remove and revoke (user).** Deactivation removes the membership and overrides, revokes sessions and PATs, and disables the account when no membership is left. Reactivation restores both. An owner can be removed, but not the last one. Existing functions are reused. | Membership only (Langfuse): a fired employee keeps working sessions. Always disable (LangWatch): locks users out of other orgs. |
+| D-EA-16 | **Remove and revoke (user).** Deactivation removes the membership and overrides, revokes sessions and PATs, and disables the account when no membership is left. Reactivation restores both. An owner can be removed, but not the last one (pending open question 3). Existing functions are reused. | Membership only (Langfuse): a fired employee keeps working sessions. Always disable (LangWatch): locks users out of other orgs. |
 | D-EA-17 | **Cloud SCIM on the cell, domains from Q (user).** The org token carries `sso_domains`, used by the cell for SCIM only. A request to track Q. | Self-hosted only at first: Enterprise cloud orgs wait. SCIM on the control plane: much new Q work, and the cell still has to apply it. |
 | D-EA-18 | **SCIM only while enabled (user).** A member is managed while an active SCIM row links to them. JIT is off, invitations to verified-domain emails are refused, and manual role changes, override changes and removals of managed members are refused (`scim_managed`). Disabling SCIM or a lapse of `scim` lifts the locks and keeps every role. | Keep both (the IdP overwrites manual changes on the next push): roles flip silently. |
 | D-EA-19 | **Lapses never widen access (user, D-P-8).** Recording continues; reads, exports and the stream stop; SCIM accepts removals and lowering changes, and refuses creates, reactivations and raises. Features `audit_log` and `scim` (`ee`; Enterprise, licence). | SCIM fully off when lapsed: IdP deprovisions would not reach cetra. |
@@ -328,6 +331,7 @@ Recording comes first because it is core and replaces existing code. It is split
 
 - **Delivers:**
   - the catalog for project objects, deletions and data leaving the product (SQL runs, exports, MCP tool calls, recorded before they run);
+  - the catalog is one enum split into a module per group, so M2 and M5 add variants in different files;
   - one record per bulk request;
   - the remaining `target: "audit"` lines either replaced, or moved to their module's target when they are data edits.
 - **Depends on:** M1.
@@ -338,7 +342,7 @@ Recording comes first because it is core and replaces existing code. It is split
 - **Delivers:**
   - the `audit_log` feature (`Feature`, OpenAPI, the web feature names, the licence card);
   - the org and instance read routes with filters and cursor paging;
-  - the CSV and NDJSON exports;
+  - the CSV and NDJSON exports and their `audit.export_started` record;
   - `OrgPerm::ViewAudit`;
   - resolution of names and emails at read time, current members only in org logs;
   - the gating and lapse behaviour;
@@ -350,7 +354,7 @@ Recording comes first because it is core and replaces existing code. It is split
 ### M4 — SIEM stream (ee)
 
 - **Delivers:**
-  - org and instance HTTPS destinations (URL, sealed header, signing secret) and `OrgPerm::ManageAuditStream`;
+  - org and instance HTTPS destinations (URL, sealed header, signing secret), `OrgPerm::ManageAuditStream`, and their audit records;
   - the delivery task with cursor, batching, signing, egress policy and backoff;
   - the failing-destination email;
   - restore-mode silence;
