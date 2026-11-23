@@ -1423,4 +1423,18 @@ mod tests {
         assert_eq!(fields.release.as_deref(), Some("sha"));
         assert_eq!(bag.state("lmnr.span.release"), Some(Use::Consumed));
     }
+
+    #[test]
+    fn every_snapshot_provider_is_a_fixed_point_of_rule_12() {
+        for row in crate::cost::builtin_price_rows() {
+            if let Some(provider) = &row.provider {
+                assert_eq!(
+                    &canonical_provider(provider, false),
+                    provider,
+                    "{}",
+                    row.model_name
+                );
+            }
+        }
+    }
 }
