@@ -1135,7 +1135,42 @@ CREATE UNIQUE INDEX scim_users_org_external_id ON scim_users (org_id, external_i
 CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id);
 ```
 
-A member is SCIM-managed while an active `scim_users` row links to them (spec 08 § SCIM). The `scim_groups` and `scim_group_mappings` tables come with M6.
+A member is SCIM-managed while an active `scim_users` row links to them (spec 08 § SCIM).
+
+Migration `0033_scim_groups.sql` (track EA M6, D-EA-12, D-EA-14). Groups are per org. `scim_group_members` links groups to `scim_users` rows, and `scim_group_mappings` and `scim_group_project_roles` hold the roles a group gives. A group with neither an org role nor project rows has no mapping row. No text column has a `CHECK` (D-R-34).
+
+```sql
+CREATE TABLE scim_groups (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    external_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX scim_groups_org_display_name ON scim_groups (org_id, display_name);
+CREATE UNIQUE INDEX scim_groups_org_external_id ON scim_groups (org_id, external_id) WHERE external_id IS NOT NULL;
+
+CREATE TABLE scim_group_members (
+    group_id TEXT NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+    scim_user_id TEXT NOT NULL REFERENCES scim_users(id) ON DELETE CASCADE,
+    PRIMARY KEY (group_id, scim_user_id)
+);
+CREATE INDEX scim_group_members_user ON scim_group_members (scim_user_id);
+
+CREATE TABLE scim_group_mappings (
+    group_id TEXT PRIMARY KEY REFERENCES scim_groups(id) ON DELETE CASCADE,
+    org_role TEXT,                      -- 'admin' | 'member' | 'viewer' | NULL (not mapped)
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE scim_group_project_roles (
+    group_id TEXT NOT NULL REFERENCES scim_groups(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,                 -- 'admin' | 'member' | 'viewer' | 'none'
+    PRIMARY KEY (group_id, project_id)
+);
+```
 
 ## Encryption of secrets
 

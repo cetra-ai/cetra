@@ -126,6 +126,7 @@ fixtures/storage/golden/     golden data directories, written from the first sta
 fixtures/server/golden/      golden server backups (meta.db, catalog.db, secret.key, manifest, socket lines), written
                              from the first stable release on (SF6, D-R-38, spec 04 § Format versions)
 fixtures/api/                example API responses (UI mocks), checked against the server types (spec 09)
+fixtures/scim/               SCIM requests in the shape Okta and Entra ID send, replayed in tests (track EA M6; written from the vendors' documentation, not validator runs)
 tools/                       dev tools (fixture capture, benchmarks); not shipped
 tools/soak/                  soak plots (uv)
 tools/capture/               fixture capture: mock provider, OTLP receiver, scenarios (B2)

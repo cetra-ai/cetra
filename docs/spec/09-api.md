@@ -283,6 +283,10 @@ The Provisioning routes are cetra API, documented in OpenAPI. They need a sessio
 |---|
 | `GET /api/v1/orgs/{org}/scim` (readable without the `scim` feature) · `PATCH /api/v1/orgs/{org}/scim` (`{enabled?, default_role?}` with `default_role` `viewer` or `member`; enabling needs the `scim` feature and a verified domain, and on self-hosted `org_sso`; 403 `plan_required` or 409 when refused) |
 | `POST /api/v1/orgs/{org}/scim/tokens` (`{name}`; the secret `scim-cetra-…` is shown once; 409 when the org has two live tokens) · `DELETE /api/v1/orgs/{org}/scim/tokens/{id}` (revokes at once) |
+| `GET /api/v1/orgs/{org}/scim/groups` (`ScimGroupList`: every group with its member count and mapping, ordered by display name; the display name is shown to owners only) |
+| `PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` (`{org_role?, projects[]}`, `org_role` `admin`, `member` or `viewer`, `owner` is a 400; `projects` at most 200, no duplicate project; an empty mapping is a 400, use DELETE; returns the `ScimGroup`) · `DELETE /api/v1/orgs/{org}/scim/groups/{id}/mapping` (204, or 404 for an unknown group; always allowed, so a lapsed org can remove mappings) |
+
+The mapping routes need `ManageProvisioning` (owner, session only). A PUT that raises any role needs `scim`, and `project_roles` when a project row is new or higher; a PUT that only lowers roles works while lapsed (D-EA-19). When SCIM is enabled, a mapping change recomputes the group's members in the same write, and records `scim.group_mapping_changed` (spec 08 § SCIM).
 
 The SCIM surface is `<public_url>/scim/v2`, authenticated by a `scim-cetra-…` bearer token and outside OpenAPI, as RFC 7644 defines it (D-EA-12). It takes no CSRF token.
 
@@ -292,6 +296,10 @@ The SCIM surface is `<public_url>/scim/v2`, authenticated by a `scim-cetra-…` 
 | `GET /scim/v2/Users` | `filter` (`userName eq`, `externalId eq`, `emails[type eq "work"].value eq`; other filters `400 invalidFilter`), `startIndex`, `count`. |
 | `POST /scim/v2/Users` | `201` with `Location` and `meta`. `409 uniqueness` for an existing `userName` or `externalId`. |
 | `GET`, `PUT`, `PATCH`, `DELETE /scim/v2/Users/{id}` | `{id}` is the `scim_users` row id. `PUT` and `PATCH` answer `200` with the resource, `DELETE` answers `204`. An unknown id is `404`. |
+| `GET /scim/v2/Groups` · `POST /scim/v2/Groups` | `GET` takes one `eq` filter on `displayName` or `externalId` (other filters `400 invalidFilter`), `startIndex`, `count` and `excludedAttributes=members`. `POST` answers `201` with `Location` and needs `scim`. `409 uniqueness` for a duplicate name or external id. |
+| `GET`, `PUT`, `PATCH`, `DELETE /scim/v2/Groups/{id}` | `{id}` is the `scim_groups` row id. `PUT` and `PATCH` answer `200` with the group and its members, `DELETE` answers `204`. Each route first loads the group in the caller's org (`404` otherwise). Members are SCIM user ids. |
+
+The Okta and Entra ID request shapes that the replay tests send (`fixtures/scim/`) are written from the vendors' public documentation, not from validator runs.
 
 Errors use `urn:ietf:params:scim:api:messages:2.0:Error` with `scimType` where SCIM defines one. A `/scim/v2` path that matches no route is a SCIM `404`, never the web app. Per token: 600 requests a minute, burst 600.
 

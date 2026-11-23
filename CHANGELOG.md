@@ -11,6 +11,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions, configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, and data leaving the product (SQL runs, exports and MCP tool calls) are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
 - SCIM 2.0 user provisioning (Enterprise and the self-hosted licence): per-org tokens, Okta and Entra ID compatible Users endpoint, deprovisioning that revokes access, and members managed by the identity provider.
+- SCIM groups and role mappings to org and project roles, with Okta and Entra ID setup guides.
 
 ### Changed
 

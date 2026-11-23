@@ -123,6 +123,8 @@ export default defineConfig({
                     { label: "Organizations and roles", link: "/docs/platform/organizations/" },
                     { label: "Single sign-on", link: "/docs/platform/sso/" },
                     { label: "SCIM provisioning", link: "/docs/platform/scim/" },
+                    { label: "Okta SCIM setup", link: "/docs/platform/scim-okta/" },
+                    { label: "Entra ID SCIM setup", link: "/docs/platform/scim-entra/" },
                     {
                       label: "Deletion and retention",
                       link: "/docs/platform/deletion-and-retention/",
