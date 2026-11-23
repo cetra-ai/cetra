@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::catalog::{
     AlertChannelAction, AlertRuleAction, AnnotationQueueAction, ApiKeyAction, AssistantAction,
-    AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction, InstanceAction,
+    AuditAction, AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction, InstanceAction,
     InviteAction, IssueSourceAction, JoinVia, LlmConnectionAction, LoginMethod, McpAction,
     MemberAction, ModelPriceAction, OnlineRuleAction, OrgAction, PatAction, ProjectAction,
     PromptAction, ScimAction, ScoreDefinitionAction, SignupMethod, SqlAction, SsoAction,
@@ -359,6 +359,11 @@ fn samples() -> Vec<Action> {
             query_sha256: Some("0".repeat(64)),
         }
         .into(),
+        AuditAction::ExportStarted {
+            format: "csv",
+            filters: vec!["from", "action"],
+        }
+        .into(),
     ]
 }
 
@@ -392,6 +397,7 @@ fn group(action: &Action) -> &'static str {
         Action::AnnotationQueue(_) => "annotation_queue",
         Action::Sql(_) => "sql",
         Action::Mcp(_) => "mcp",
+        Action::Audit(_) => "audit",
     }
 }
 

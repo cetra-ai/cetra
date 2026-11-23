@@ -625,6 +625,22 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("get", "/api/v1/orgs/{org}/deletions", "list_org_deletions"),
     (
         "get",
+        "/api/v1/orgs/{org}/audit-events",
+        "list_org_audit_events",
+    ),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-events/export",
+        "get_org_audit_export",
+    ),
+    ("get", "/api/v1/admin/audit-events", "list_admin_audit_events"),
+    (
+        "get",
+        "/api/v1/admin/audit-events/export",
+        "get_admin_audit_export",
+    ),
+    (
+        "get",
         "/api/v1/projects/{project}/evaluators",
         "list_evaluators",
     ),
@@ -1104,6 +1120,10 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_deletions",
     "get_deletion",
     "list_org_deletions",
+    "list_org_audit_events",
+    "get_org_audit_export",
+    "list_admin_audit_events",
+    "get_admin_audit_export",
     "list_evaluators",
     "list_evaluator_versions",
     "list_score_definitions",
@@ -1179,6 +1199,7 @@ const TAGS: &[&str] = &[
     "media",
     "internal",
     "deletions",
+    "audit",
     "alerts",
     "issues",
     "assistant",
@@ -1301,6 +1322,8 @@ fn document_lint() {
                 | "post_personal_token"
                 | "delete_personal_token"
                 | "list_admin_users"
+                | "list_admin_audit_events"
+                | "get_admin_audit_export"
                 | "post_admin_user"
                 | "patch_admin_user"
                 | "post_admin_user_reset_link"
@@ -1422,13 +1445,19 @@ fn document_lint() {
             || *id == "put_assistant_feedback"
             || *id == "put_org_assistant"
             || *id == "post_org_assistant_test"
+            || *id == "list_org_audit_events"
+            || *id == "get_org_audit_export"
         {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "get_invite_preview" {
             expected_errors.extend(["404", "429"]);
         } else if *id == "post_org_invite" || *id == "post_project" {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "list_admin_users" || *id == "post_admin_settings_test_email" {
+        } else if *id == "list_admin_users"
+            || *id == "post_admin_settings_test_email"
+            || *id == "list_admin_audit_events"
+            || *id == "get_admin_audit_export"
+        {
             expected_errors.extend(["400", "401", "403", "429"]);
         } else if *id == "get_admin_settings" || *id == "get_admin_license" {
             expected_errors.extend(["401", "403", "429"]);

@@ -1,0 +1,75 @@
+{
+  "data": [
+    {
+      "id": "01900000-0000-7000-8000-000000001d04",
+      "at": "2026-01-04T11:00:00.000000000Z",
+      "action": "user.created",
+      "outcome": "success",
+      "actor": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000100",
+        "via": "session",
+        "name": "Ada Example",
+        "email": "ada@example.com",
+        "status": "present"
+      },
+      "target": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000102",
+        "email": "new@example.com",
+        "status": "present"
+      },
+      "details": {
+        "instance_admin": false
+      },
+      "ip": "203.0.113.7",
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001d05",
+      "at": "2026-01-04T10:45:00.000000000Z",
+      "action": "auth.login_failed",
+      "outcome": "failure",
+      "actor": {
+        "kind": "anonymous",
+        "status": "unresolved"
+      },
+      "target": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000101",
+        "name": "Bob Example",
+        "email": "bob@example.com",
+        "status": "present"
+      },
+      "details": {},
+      "ip": "198.51.100.23",
+      "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) Safari/605.1.15"
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000001d06",
+      "at": "2026-01-04T10:00:00.000000000Z",
+      "action": "instance.license_installed",
+      "outcome": "success",
+      "actor": {
+        "kind": "user",
+        "id": "01900000-0000-7000-8000-000000000100",
+        "via": "session",
+        "name": "Ada Example",
+        "email": "ada@example.com",
+        "status": "present"
+      },
+      "target": {
+        "kind": "license",
+        "id": "lic-1",
+        "status": "unresolved"
+      },
+      "details": {
+        "kid": "kid-1",
+        "license_id": "lic-1"
+      },
+      "ip": "203.0.113.7",
+      "user_agent": "Mozilla/5.0 (X11; Linux x86_64) Firefox/140.0"
+    }
+  ],
+  "next_cursor": null
+}

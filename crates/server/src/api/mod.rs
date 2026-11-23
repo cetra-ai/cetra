@@ -9,6 +9,7 @@ pub mod agent_context;
 pub mod alerts;
 pub mod annotation_queues;
 pub mod assistant;
+pub mod audit;
 pub mod backfills;
 pub mod common;
 pub mod connections;

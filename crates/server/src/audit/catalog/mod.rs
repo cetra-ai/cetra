@@ -6,6 +6,7 @@
 mod alert_channel;
 mod alert_rule;
 mod annotation_queue;
+mod audit;
 mod api_key;
 mod assistant;
 mod auth;
@@ -34,6 +35,7 @@ mod user;
 pub(crate) use alert_channel::AlertChannelAction;
 pub(crate) use alert_rule::AlertRuleAction;
 pub(crate) use annotation_queue::AnnotationQueueAction;
+pub(crate) use audit::AuditAction;
 pub(crate) use api_key::ApiKeyAction;
 pub(crate) use assistant::AssistantAction;
 pub(crate) use auth::{AuthAction, LoginMethod, SignupMethod};
@@ -90,6 +92,7 @@ pub(crate) enum Action {
     AnnotationQueue(AnnotationQueueAction),
     Sql(SqlAction),
     Mcp(McpAction),
+    Audit(AuditAction),
 }
 
 impl From<AuthAction> for Action {
@@ -251,5 +254,11 @@ impl From<SqlAction> for Action {
 impl From<McpAction> for Action {
     fn from(action: McpAction) -> Self {
         Self::Mcp(action)
+    }
+}
+
+impl From<AuditAction> for Action {
+    fn from(action: AuditAction) -> Self {
+        Self::Audit(action)
     }
 }

@@ -23,6 +23,10 @@ use utoipa::openapi::tag::{Tag, TagBuilder};
 use utoipa::openapi::{Content, InfoBuilder, OpenApi, OpenApiBuilder, Ref, RefOr, Required};
 use utoipa::{IntoParams, PartialSchema, ToSchema};
 
+use super::audit::{
+    AuditActor, AuditEvent, AuditExportFormat, AuditExportParams, AuditListParams, AuditOutcome,
+    AuditRef, AuditRefStatus,
+};
 use super::account::{
     AuthConfig, ChangePasswordRequest, CreateOrgRequest, CreateProjectRequest,
     ForgotPasswordRequest, LoginRequest, Me, OrgMembership, Project, ResendVerificationRequest,
@@ -206,6 +210,13 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<DeletionPreviewRequest>();
     set.insert::<DeletionPreview>();
     set.insert_page::<Deletion>("DeletionPage");
+    set.insert::<AuditOutcome>();
+    set.insert::<AuditRefStatus>();
+    set.insert::<AuditExportFormat>();
+    set.insert::<AuditActor>();
+    set.insert::<AuditRef>();
+    set.insert::<AuditEvent>();
+    set.insert_page::<AuditEvent>("AuditEventPage");
     set.insert::<SortOrder>();
     set.insert::<TraceSort>();
     set.insert::<SpanSort>();
@@ -711,6 +722,10 @@ pub fn openapi() -> OpenApi {
             tag("media", "Extracted media blobs."),
             tag("deletions", "GDPR deletions and their status."),
             tag(
+                "audit",
+                "Audit records of an organization and of the instance.",
+            ),
+            tag(
                 "ingest",
                 "Calls made by coding agents and SDKs on the ingest key.",
             ),
@@ -1058,11 +1073,97 @@ fn paths() -> Paths {
     let paths = annotation_queue_paths(paths);
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
+    let paths = audit_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
     let paths = assistant_paths(paths);
     let paths = assistant_settings_paths(paths);
     media_paths(paths).build()
+}
+
+fn audit_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session = Some(vec![SecurityRequirement::new("session", [] as [&str; 0])]);
+    let list_org = operation(
+        "list_org_audit_events",
+        "audit",
+        "List an organization's audit records",
+    )
+    .description(Some(
+        "Newest first. Admins and owners, with a session or a personal access token. Needs the `audit_log` feature: without it, 403 `plan_required`.",
+    ))
+    .parameters(Some(with_query::<AuditListParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_named("AuditEventPage", "One page of records, newest first."),
+        QUERY_ERRORS,
+    ))
+    .build();
+    let export_org = operation(
+        "get_org_audit_export",
+        "audit",
+        "Export an organization's audit records",
+    )
+    .description(Some(
+        "The records of the filters as CSV or NDJSON, newest first, at most 1,000,000 of them. The export is recorded first as `audit.export_started`. Admins and owners; needs the `audit_log` feature (403 `plan_required` otherwise).",
+    ))
+    .parameters(Some(with_query::<AuditExportParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses("200", audit_export_result(), QUERY_ERRORS))
+    .build();
+    let list_admin = operation(
+        "list_admin_audit_events",
+        "audit",
+        "List the instance's audit records",
+    )
+    .description(Some(
+        "Newest first. Instance admins only, with a session. Needs a licence that lists `audit_log`, or a cloud cell (403 `plan_required` otherwise). Org records are never listed here.",
+    ))
+    .securities(session.clone())
+    .parameters(Some(with_query::<AuditListParams>(Vec::new())))
+    .responses(responses(
+        "200",
+        json_named("AuditEventPage", "One page of records, newest first."),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    let export_admin = operation(
+        "get_admin_audit_export",
+        "audit",
+        "Export the instance's audit records",
+    )
+    .description(Some(
+        "The instance's records as CSV or NDJSON, newest first, at most 1,000,000 of them. Recorded first as `audit.export_started`. Instance admins only, with a session; needs the licence or a cloud cell (403 `plan_required` otherwise).",
+    ))
+    .securities(session)
+    .parameters(Some(with_query::<AuditExportParams>(Vec::new())))
+    .responses(responses(
+        "200",
+        audit_export_result(),
+        &[400, 401, 403, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/audit-events",
+            PathItem::new(HttpMethod::Get, list_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-events/export",
+            PathItem::new(HttpMethod::Get, export_org),
+        )
+        .path(
+            "/api/v1/admin/audit-events",
+            PathItem::new(HttpMethod::Get, list_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-events/export",
+            PathItem::new(HttpMethod::Get, export_admin),
+        )
 }
 
 fn admin_paths(paths: PathsBuilder) -> PathsBuilder {
@@ -4259,6 +4360,15 @@ fn dataset_paths(paths: PathsBuilder) -> PathsBuilder {
 fn export_result() -> Response {
     ResponseBuilder::new()
         .description("The version's items, one per line (JSONL) or one per row (CSV), with `Content-Disposition: attachment`.")
+        .content("application/x-ndjson", Content::new(Some(string_schema())))
+        .content("text/csv", Content::new(Some(string_schema())))
+        .build()
+}
+
+/// The body of an audit export: NDJSON lines or CSV rows, as an attachment.
+fn audit_export_result() -> Response {
+    ResponseBuilder::new()
+        .description("The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`.")
         .content("application/x-ndjson", Content::new(Some(string_schema())))
         .content("text/csv", Content::new(Some(string_schema())))
         .build()

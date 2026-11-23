@@ -25,6 +25,7 @@ use cetra_server::api::assistant::{
     AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
     UpdateAssistantConversationRequest,
 };
+use cetra_server::api::audit::AuditEvent;
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -450,6 +451,8 @@ fn static_files_match_their_types() {
     roundtrip::<Deletion>("static/deletion-resolving.json");
     roundtrip::<DeletionPreview>("static/deletion-preview.json");
     roundtrip::<Page<Deletion>>("static/org-deletions.json");
+    roundtrip::<Page<AuditEvent>>("static/org-audit-events.json");
+    roundtrip::<Page<AuditEvent>>("static/admin-audit-events.json");
     roundtrip::<Deletion>("static/deletion-project.json");
     roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");
@@ -756,6 +759,9 @@ fn generated_files_roundtrip() {
             "query_widget" => roundtrip::<WidgetQueryResponse>(&example.file),
             "list_deletions" => roundtrip::<Page<Deletion>>(&example.file),
             "list_org_deletions" => roundtrip::<Page<Deletion>>(&example.file),
+            "list_org_audit_events" | "list_admin_audit_events" => {
+                roundtrip::<Page<AuditEvent>>(&example.file);
+            }
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "list_assistant_conversations" => {
                 roundtrip::<Page<AssistantConversation>>(&example.file);
@@ -911,6 +917,8 @@ fn manifest_covers_the_read_operations() {
                 && id != "stream_traces"
                 && id != "stream_trace"
                 && id != "get_dataset_export"
+                && id != "get_org_audit_export"
+                && id != "get_admin_audit_export"
                 && id != "get_oauth_authorize"
                 && id != "get_sso_authorize"
                 && id != "get_oauth_callback"

@@ -1285,6 +1285,20 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/org-deletions.json",
             "application/json",
         ),
+        example(
+            "list_org_audit_events",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-audit-events.json",
+            "application/json",
+        ),
+        example(
+            "list_admin_audit_events",
+            BTreeMap::new(),
+            BTreeMap::new(),
+            "static/admin-audit-events.json",
+            "application/json",
+        ),
         example_accepted(
             "delete_project",
             BTreeMap::new(),
