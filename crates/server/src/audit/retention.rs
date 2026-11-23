@@ -24,7 +24,7 @@ const DAY_NS: i64 = 86_400 * 1_000_000_000;
 pub(crate) async fn purge(state: &AppState, now: i64) -> Result<u64, MetaError> {
     let meta = &state.meta;
     let instance_days = state.config.audit.retention_days;
-    let mut removed = purge_scope(meta, None, instance_days, now).await?;
+    let mut removed = purge_scope(meta, Covered::Instance, instance_days, now).await?;
     // Every org, active or not: a dropped org's records were already deleted (D-EA-7).
     let org_ids: Vec<String> = sqlx::query_scalar("SELECT id FROM orgs")
         .fetch_all(meta.reader())
@@ -45,17 +45,75 @@ pub(crate) async fn purge(state: &AppState, now: i64) -> Result<u64, MetaError> 
             Some(0) => 0,
             Some(days) => u32::try_from(days.max(MIN_RETENTION_DAYS)).unwrap_or(u32::MAX),
         };
-        removed += purge_scope(meta, Some(org), days, now).await?;
+        let org = org.to_string();
+        removed += purge_scope(meta, Covered::Org(&org), days, now).await?;
     }
+    // Records of an org that no longer exists (a drop that did not finish) are kept at the
+    // instance's days too, so they do not outlive the instance log's limit.
+    removed += purge_scope(meta, Covered::Orphans, instance_days, now).await?;
     Ok(removed)
 }
 
-/// Deletes records of `org` (`None`: the instance log) older than `days` (0 = keep all), in
+/// The records a purge covers (D-EA-7): the instance log, one org's records, or the records
+/// whose org has no `orgs` row.
+#[derive(Clone, Copy)]
+enum Covered<'a> {
+    Instance,
+    Org(&'a str),
+    Orphans,
+}
+
+impl<'a> Covered<'a> {
+    /// The org id the statements bind first, if any.
+    fn bind(self) -> Option<&'a str> {
+        match self {
+            Covered::Org(org) => Some(org),
+            Covered::Instance | Covered::Orphans => None,
+        }
+    }
+
+    /// The read check (plan step 2): selects one record older than the cutoff. It binds
+    /// [`Covered::bind`] first, then the cutoff.
+    fn exists_sql(self) -> &'static str {
+        match self {
+            Covered::Instance => {
+                "SELECT 1 FROM audit_events WHERE org_id IS NULL AND at < ? LIMIT 1"
+            }
+            Covered::Org(_) => "SELECT 1 FROM audit_events WHERE org_id = ? AND at < ? LIMIT 1",
+            Covered::Orphans => {
+                "SELECT 1 FROM audit_events WHERE org_id IS NOT NULL \
+                 AND org_id NOT IN (SELECT id FROM orgs) AND at < ? LIMIT 1"
+            }
+        }
+    }
+
+    /// The batched delete. It binds [`Covered::bind`] first, then the cutoff and the batch size.
+    fn delete_sql(self) -> &'static str {
+        match self {
+            Covered::Instance => {
+                "DELETE FROM audit_events WHERE seq IN \
+                 (SELECT seq FROM audit_events WHERE org_id IS NULL AND at < ? LIMIT ?)"
+            }
+            Covered::Org(_) => {
+                "DELETE FROM audit_events WHERE seq IN \
+                 (SELECT seq FROM audit_events WHERE org_id = ? AND at < ? LIMIT ?)"
+            }
+            Covered::Orphans => {
+                "DELETE FROM audit_events WHERE seq IN \
+                 (SELECT seq FROM audit_events WHERE org_id IS NOT NULL \
+                 AND org_id NOT IN (SELECT id FROM orgs) AND at < ? LIMIT ?)"
+            }
+        }
+    }
+}
+
+/// Deletes the records `covered` names that are older than `days` (0 = keep all), in
 /// batches; returns the count. Each batch is its own write, so the writer is released between
-/// batches.
+/// batches. Before the first write, the reader checks that an old record exists, so a purge
+/// with nothing to delete takes no write.
 async fn purge_scope(
     meta: &MetaDb,
-    org: Option<OrgId>,
+    covered: Covered<'_>,
     days: u32,
     now: i64,
 ) -> Result<u64, MetaError> {
@@ -63,23 +121,36 @@ async fn purge_scope(
         return Ok(0);
     }
     let cutoff = now.saturating_sub(i64::from(days).saturating_mul(DAY_NS));
-    let org = org.map(|org| org.to_string());
+    let bind = covered.bind().map(str::to_owned);
+    let mut exists = sqlx::query(covered.exists_sql());
+    if let Some(bind) = &bind {
+        exists = exists.bind(bind);
+    }
+    let exists = exists
+        .bind(cutoff)
+        .fetch_optional(meta.reader())
+        .await
+        .map_err(MetaError::from)?;
+    if exists.is_none() {
+        return Ok(0);
+    }
+    let delete_sql = covered.delete_sql();
     let mut removed = 0;
     loop {
-        let org = org.clone();
+        let bind = bind.clone();
         let deleted = meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let result = sqlx::query(
-                        "DELETE FROM audit_events WHERE seq IN \
-                         (SELECT seq FROM audit_events WHERE org_id IS ? AND at < ? LIMIT ?)",
-                    )
-                    .bind(org.as_deref())
-                    .bind(cutoff)
-                    .bind(PURGE_BATCH)
-                    .execute(&mut *conn)
-                    .await
-                    .map_err(MetaError::from)?;
+                    let mut query = sqlx::query(delete_sql);
+                    if let Some(bind) = &bind {
+                        query = query.bind(bind);
+                    }
+                    let result = query
+                        .bind(cutoff)
+                        .bind(PURGE_BATCH)
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(MetaError::from)?;
                     Ok(result.rows_affected())
                 })
             })
@@ -299,6 +370,23 @@ mod tests {
 
         assert_eq!(removed, 0);
         assert_eq!(count_org(meta, org).await, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn orphaned_org_records_are_purged() {
+        // No `orgs` row for `gone`: a drop that did not finish left its records behind. They
+        // go at the instance's days, like the instance log.
+        let app = app_with_instance_days(30).await;
+        let meta = &app.state.meta;
+        let now = 1000 * DAY;
+        let gone = uuid::Uuid::now_v7();
+        insert_rows(meta, 2, now - 31 * DAY, Some(gone)).await;
+        insert_rows(meta, 1, now - DAY, Some(gone)).await;
+
+        let removed = purge(&app.state, now).await.unwrap();
+
+        assert_eq!(removed, 2);
+        assert_eq!(count_org(meta, gone).await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]

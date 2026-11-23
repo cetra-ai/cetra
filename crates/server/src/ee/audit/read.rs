@@ -101,7 +101,8 @@ fn id_filter(field: &'static str, value: Option<&str>) -> Result<Option<String>,
         Some(value) if value.chars().count() > MAX_ID_CHARS => {
             Err(field_error(field, "must be at most 64 characters"))
         }
-        Some(value) => Ok(Some(value.to_owned())),
+        // Ids are stored lowercase (UUIDs as hex), so the filter matches in any case.
+        Some(value) => Ok(Some(value.to_ascii_lowercase())),
         None => Ok(None),
     }
 }

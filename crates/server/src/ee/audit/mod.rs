@@ -417,6 +417,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn id_filters_are_case_insensitive() {
+        let (app, seeded) = app_with(&["audit_log"]).await;
+        let bob = Uuid::from_u128(0xb0b);
+        record_many(
+            &app,
+            &ada_ctx(&seeded),
+            role_changed(&seeded, bob),
+            at_ms(1),
+            1,
+        )
+        .await;
+        let upper_actor = seeded.user_id.to_string().to_uppercase();
+        let upper_target = bob.to_string().to_uppercase();
+        assert_eq!(
+            rows(&app, &seeded, &format!("?actor_id={upper_actor}"))
+                .await
+                .len(),
+            1
+        );
+        assert_eq!(
+            rows(&app, &seeded, &format!("?target_id={upper_target}"))
+                .await
+                .len(),
+            1
+        );
+    }
+
+    /// Inserts one record of `action` for `org`, directly (no catalog check).
+    async fn insert_action(app: &TestApp, org: OrgId, action: &'static str) {
+        let org = org.to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO audit_events (id, at, org_id, action, outcome, actor_kind) \
+                         VALUES (lower(hex(randomblob(16))), ?, ?, ?, 'success', 'system')",
+                    )
+                    .bind(at_ms(1))
+                    .bind(org)
+                    .bind(action)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(crate::meta::MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("a row is written");
+    }
+
+    #[tokio::test]
+    async fn an_underscore_in_a_prefix_is_not_a_wildcard() {
+        let (app, seeded) = app_with(&["audit_log"]).await;
+        insert_action(&app, seeded.org_id, "apiXkey.created").await;
+        insert_action(&app, seeded.org_id, "api_key.created").await;
+        let listed = rows(&app, &seeded, "?action=api_key.").await;
+        let actions: Vec<&str> = listed.iter().map(|event| event.action.as_str()).collect();
+        assert_eq!(actions, vec!["api_key.created"]);
+    }
+
+    #[tokio::test]
+    async fn a_cursor_cannot_read_another_scope() {
+        let (app, seeded) = app_with(&["audit_log"]).await;
+        let ctx = ada_ctx(&seeded);
+        let other = OrgId::new_v7();
+        let bob = Uuid::from_u128(0xb0b);
+        // Org B's records are written first, so they have the lower `seq`s.
+        let other_added = Event::new(MemberAction::Added {
+            role: "viewer",
+            via: JoinVia::SsoJit,
+        })
+        .org(other)
+        .target(TargetKind::User, bob);
+        record_many(&app, &ctx, other_added, at_ms(1), 3).await;
+        record_many(&app, &ctx, role_changed(&seeded, bob), at_ms(2), 3).await;
+        // The cursor of org A's first page, one row long, sits above all of org B's rows.
+        let page = page_of(&app, &seeded.cookie, &org_path(seeded.org_id, "?limit=1")).await;
+        let cursor = page.next_cursor.expect("a next page");
+        let before = read::decode_cursor(&cursor).expect("a cursor");
+        let filters = read::filters(None, None, None, None, None, None, None).expect("filters");
+        let scoped = read::page(
+            app.state.meta.reader(),
+            &Scope::Org(other),
+            &filters,
+            Some(before),
+            100,
+        )
+        .await
+        .expect("a page");
+        assert_eq!(scoped.len(), 3);
+        assert!(scoped.iter().all(|row| row.action == "member.added"));
+    }
+
+    #[tokio::test]
+    async fn invalid_filters_and_refused_exports_record_nothing() {
+        let (app, seeded) = app_with(&["audit_log"]).await;
+        let bad = get(
+            &app,
+            &seeded.cookie,
+            &export_path(seeded.org_id, "?format=csv&action=Member.Role"),
+        )
+        .await;
+        assert_eq!(bad.status, 400);
+        let bad_instance = get(
+            &app,
+            &seeded.cookie,
+            "/api/v1/admin/audit-events/export?format=csv&action=Member.Role",
+        )
+        .await;
+        assert_eq!(bad_instance.status, 400);
+        assert_eq!(count_exports(&app).await, 0);
+
+        // Without the feature (a lapsed licence), the export is refused before it records.
+        let (lapsed, seeded) = app_with(&[]).await;
+        let refused = get(
+            &lapsed,
+            &seeded.cookie,
+            &export_path(seeded.org_id, "?format=csv"),
+        )
+        .await;
+        assert_eq!(refused.status, 403);
+        assert_eq!(count_exports(&lapsed).await, 0);
+    }
+
+    #[tokio::test]
     async fn paging_by_cursor_never_skips_or_repeats() {
         let (app, seeded) = app_with(&["audit_log"]).await;
         let ctx = ada_ctx(&seeded);
@@ -602,7 +728,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn details_never_carry_an_email() {
+    async fn example_fixtures_carry_no_email() {
         for file in ["org-audit-events.json", "admin-audit-events.json"] {
             let path = format!(
                 "{}/../../fixtures/api/static/{file}",
@@ -614,6 +740,62 @@ mod tests {
                 let details = event["details"].to_string();
                 assert!(!details.contains('@'), "{file}: {details}");
             }
+        }
+    }
+
+    /// Real actions that record (an invite, a role change, an API key) store no email in
+    /// `details`: the addresses are joined at read time (D-EA-3).
+    #[tokio::test]
+    async fn recorded_details_carry_no_email() {
+        let (app, seeded) = app_with(&["audit_log"]).await;
+        let member = app
+            .add_member(&seeded, "member@acme.test", OrgRole::Member)
+            .await;
+        let invite = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/orgs/{}/invites", seeded.org_id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({"email": "invitee@acme.test", "role": "member"}))
+            .send()
+            .await;
+        assert_eq!(
+            invite.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&invite.body)
+        );
+        let role = app
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/{}/members/{}", seeded.org_id, member.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({"role": "admin"}))
+            .send()
+            .await;
+        assert_eq!(role.status, 200, "{}", String::from_utf8_lossy(&role.body));
+        let key = app
+            .request(
+                Method::POST,
+                &format!("/api/v1/projects/{}/api-keys", seeded.project.id),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&json!({"kind": "secret", "name": "ci", "scopes": ["read"]}))
+            .send()
+            .await;
+        assert_eq!(key.status, 201, "{}", String::from_utf8_lossy(&key.body));
+
+        let stored: Vec<(String, String)> =
+            sqlx::query_as("SELECT action, details FROM audit_events")
+                .fetch_all(app.state.meta.reader())
+                .await
+                .expect("rows");
+        let actions: Vec<&str> = stored.iter().map(|(action, _)| action.as_str()).collect();
+        assert!(actions.len() >= 3, "{actions:?}");
+        for (action, details) in &stored {
+            assert!(!details.contains('@'), "{action}: {details}");
         }
     }
 
@@ -650,22 +832,35 @@ mod tests {
     #[tokio::test]
     async fn csv_export_has_the_header_and_escapes_formulas() {
         let (app, seeded) = app_with(&["audit_log"]).await;
-        let ctx = Ctx {
-            actor: Actor::User {
-                id: seeded.user_id,
-                via: Via::Session,
-                credential_id: None,
-            },
-            ip: None,
-            user_agent: Some("=cmd()".to_owned()),
-        };
-        let event = Event::new(MemberAction::Added {
-            role: "viewer",
-            via: JoinVia::SsoJit,
-        })
-        .org(seeded.org_id)
-        .target(TargetKind::User, seeded.user_id);
-        record_many(&app, &ctx, event, at_ms(1), 1).await;
+        // The user agent is attacker-chosen (plan P-6): each cell that starts with a formula
+        // or control character gets a leading `'`, and the others pass unchanged.
+        let cases = [
+            ("=cmd()", "'=cmd()"),
+            ("+1", "'+1"),
+            ("-1", "'-1"),
+            ("@SUM(A1)", "'@SUM(A1)"),
+            ("\tx", "'\tx"),
+            ("\rx", "'\rx"),
+            ("plain", "plain"),
+        ];
+        for (agent, _) in cases {
+            let ctx = Ctx {
+                actor: Actor::User {
+                    id: seeded.user_id,
+                    via: Via::Session,
+                    credential_id: None,
+                },
+                ip: None,
+                user_agent: Some(agent.to_owned()),
+            };
+            let event = Event::new(MemberAction::Added {
+                role: "viewer",
+                via: JoinVia::SsoJit,
+            })
+            .org(seeded.org_id)
+            .target(TargetKind::User, seeded.user_id);
+            record_many(&app, &ctx, event, at_ms(1), 1).await;
+        }
         let response = get(
             &app,
             &seeded.cookie,
@@ -684,7 +879,24 @@ mod tests {
         let body = String::from_utf8(response.body.to_vec()).expect("utf-8");
         let header = "at,action,outcome,actor_kind,actor_id,actor_name,actor_email,actor_status,via,credential_id,target_kind,target_id,target_name,target_email,target_status,project_id,project_name,ip,user_agent,details\r\n";
         assert!(body.starts_with(header), "{body}");
-        assert!(body.contains(",'=cmd(),"), "{body}");
+        // Parsed back, so quoted cells (a CR inside one) read as the cell they hold.
+        let mut reader = csv::ReaderBuilder::new().from_reader(body.as_bytes());
+        let column = reader
+            .headers()
+            .expect("header")
+            .iter()
+            .position(|name| name == "user_agent")
+            .expect("user_agent column");
+        let cells: Vec<String> = reader
+            .records()
+            .map(|record| record.expect("record")[column].to_owned())
+            .collect();
+        for (agent, expected) in cases {
+            assert!(
+                cells.iter().any(|cell| cell == expected),
+                "{agent:?} should export as {expected:?}: {cells:?}"
+            );
+        }
     }
 
     #[tokio::test]
