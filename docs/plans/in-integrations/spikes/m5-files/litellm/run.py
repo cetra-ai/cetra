@@ -42,7 +42,7 @@ def serve(h):
     s=http.server.ThreadingHTTPServer(("127.0.0.1",0),h); threading.Thread(target=serve_f,args=(s,),daemon=True).start(); return s.server_address[1]
 def serve_f(s): s.serve_forever()
 fp=serve(Fake); rp=serve(Recv); pp=free()
-env=dict(os.environ, FAKE_BASE=f"http://127.0.0.1:{fp}/v1", OTEL_EXPORTER="otlp_http", OTEL_ENDPOINT=f"http://127.0.0.1:{rp}", OTEL_HEADERS="Authorization=Bearer%20test-key,x-extra=1",
+env=dict(os.environ, FAKE_BASE=f"http://127.0.0.1:{fp}/v1", OTEL_EXPORTER="otlp_http", OTEL_ENDPOINT=f"http://127.0.0.1:{rp}", OTEL_HEADERS="Authorization=Bearer test-key,x-extra=1",
   OTEL_SERVICE_NAME="litellm-proxy", LITELLM_LOCAL_MODEL_COST_MAP="True", PYTHONPATH=os.path.join(HERE,"hook"), EXT_LOG=os.path.join(OUT,"external.log"), LITELLM_LOG="INFO", DISABLE_SCHEMA_UPDATE="true")
 env.update({k:v for k,v in (kv.split("=",1) for kv in os.environ.get("EXTRA_ENV","").split(";") if kv)})
 open(os.path.join(OUT,"external.log"),"w").close()

@@ -31,15 +31,15 @@ Implementer: the GLM 5.3 agent, one agent per phase. Conventions as in M4:
 
 | File | What it is |
 |---|---|
-| `litellm/config.yaml` | the proxy's `model_list`, `litellm_settings` and `general_settings` (nine models; the capture keeps `gpt-4o-mini`, `ds` and the embedding model) |
-| `litellm/run.py` | the driver: fake upstream, receiver, the `litellm` command, the requests, the 8 s wait, SIGINT |
+| `litellm/config.yaml` | the proxy's `model_list`, `litellm_settings` and `general_settings` (ten models; the capture keeps `gpt-4o-mini`, `ds` and the embedding model, which the capture names `text-embedding-3-small` where the template says `emb`) |
+| `litellm/run.py` | the driver: fake upstream, receiver, the `litellm` command, the requests, the 8 s wait, SIGINT. Do not carry over `PYTHONPATH=hook`, `EXT_LOG` or the `.venv/bin/litellm` path (spike-only DNS blocking and layout). Its `%20` in `OTEL_HEADERS` is fixed to a literal space |
 | `bifrost/config.json` | the config with `@APP_DIR@`, `@MOCK_URL@` and `@OTLP_ENDPOINT@` placeholders |
 | `bifrost/{pricing,model-parameters}.json` | the vendor's local pricing files (copy both into the scenario directory) |
 | `bifrost/run.py` | the driver (ports, app dir, readiness, request, stop) |
 | `aigw/aigw.tmpl.yaml` | the Gateway API config with `@LISTEN@` and `@FAKE@` (the mock's port) |
 | `aigw/run.py` | the driver (env, readiness, request, stop) |
 | `temporal/{run.py,wfmod.py,pyproject.toml}` | the driver, the workflow module and the spike's project pins |
-| `common.py` | the spike's fake provider, receiver and `wait_http`/`stop` helpers (used by the three drivers) |
+| `common.py` | the spike's fake provider, receiver and `wait_http`/`stop` helpers (used by the three drivers). `Fake`, `Recv`, `serve` and `REQLOG` are spike-only and are not carried over: the runner provides the mock and receiver. Scenarios use the harness helpers of IN5.1 |
 
 The `master_key` in `litellm/config.yaml` and the keys in the drivers are test values, not secrets.
 
@@ -134,7 +134,7 @@ IN5.1 and IN5.2 touch disjoint files. They run one after the other in this workt
    - Unit tests, next to the `HEAD /api/hello` test (`mock.rs` ~933): `get_models_is_answered_without_a_turn` (status 200, the body, the mock's error list stays empty, a scripted turn is still available afterwards) and `post_models_is_still_an_unknown_route`.
 
 2. **`run.rs`: the program's process group.** No `unsafe`, no `libc`, no `nix`.
-   - In `spawn_program` (`run.rs` ~360, where `Command::new(bin)` and `.kill_on_drop(true)` are), call `.process_group(0)` on the `tokio::process::Command`. It is an inherent method of tokio's `Command` on Unix (tokio 1.54.1 is locked); put it in a `#[cfg(unix)]` statement. `kill_on_drop(true)` stays: it kills only the child, not the processes the child started.
+   - In `spawn_program` (`run.rs` ~360), split the builder chain: `let mut command = Command::new(bin);` then `command.args(args).current_dir(dir).kill_on_drop(true).env_clear().envs(env).stdout(…).stderr(…);`, then `#[cfg(unix)] command.process_group(0);`, then `command.spawn().map_err(…)` as today. `process_group` is an inherent method of tokio's `Command` on Unix (tokio 1.54.1 is locked). `kill_on_drop(true)` stays: it kills only the child, not the processes the child started.
    - Add, `#[cfg(unix)]`:
      ```rust
      /// Sends SIGTERM to every process of the group whose leader is `pid`. Errors are ignored:
@@ -159,14 +159,15 @@ IN5.1 and IN5.2 touch disjoint files. They run one after the other in this workt
          }
      }
      ```
-   - In `run_case` (`run.rs` ~176), right after `spawn_program` (~191), build the guard from `child.id()` (`Some` until the child is reaped; skip the guard when it is `None`) and keep it alive until the function returns.
+   - In `run_case` (`run.rs` ~176), right after `spawn_program` (~191), build the guard from `child.id()` (`Some` until the child is reaped; skip the guard when it is `None`) and keep it alive until the function returns. The guard also cleans up leftovers on the success path (a gateway the scenario failed to stop). Errors from `kill` are ignored, so a group that is already gone is fine.
    - In `wait_program` (`run.rs` ~424), in the timeout arm, call `kill_process_group(pid)` (with `child.id()`, read before the kill) before `child.kill().await` and `child.wait().await`.
 
 3. **`run.rs`: `program_env` gets the tools directory.**
    - New signature: `pub fn program_env(parent: &HashMap<String, String>, scenario: &Scenario, repo_root: &Path, mock_port: u16, receiver_port: u16, meta_path: &str) -> BTreeMap<String, String>`. It is `pub` and re-exported in `lib.rs` (line 21); its only caller is `run_case` (`run.rs` ~191), which already has `repo_root`. Update that call.
    - Insert `CETRA_CAPTURE_TOOLS` = `<repo_root>/target/capture-tools` (a `String` from `repo_root.join("target/capture-tools")`; `repo_root` is UTF-8 as `meta_path` is: use `utf8_path`-style handling, and keep the function infallible by `to_string_lossy`). Insert it with the other fixed `CETRA_CAPTURE_*` variables, before `env.extend(scenario.env.clone())`.
    - Update the doc comment ("`CETRA_CAPTURE_TOOLS` names the pinned binaries' directory") and the test `program_env_drops_parent_secrets_and_applies_scenario_env` (`run.rs` ~1124–1140): pass `Path::new("/repo")` and assert `CETRA_CAPTURE_TOOLS` is `/repo/target/capture-tools`.
-   - There is no "inject a timeout" alternative: the timeout stays the constant `PROGRAM_TIMEOUT`.
+   - There is no "inject a timeout" alternative.
+   - Raise `PROGRAM_TIMEOUT` (`run.rs` line 27) from 120 s to 180 s: the gateways start in 1 to 8 s and the LiteLLM proxy needs up to 60 s, plus the 8 s wait.
 
 4. **`run.rs`: tests** (`#[cfg(unix)]`, in the existing `tests` module):
    - `kill_process_group_stops_grandchildren`: spawn `sh -c "sleep 60 & echo $!; wait"` with `tokio::process::Command`, `.process_group(0)`, piped stdout, and read the first line, the grandchild's pid. Call `kill_process_group(child.id())`. Assert `child.wait()` returns within 5 s (use `tokio::time::timeout`). Then assert the grandchild is gone, polling for up to 5 s: `/proc/<pid>` does not exist, or its `stat` file shows state `Z`. The `/proc` check is Linux only: put it under `#[cfg(target_os = "linux")]`.
@@ -178,6 +179,11 @@ IN5.1 and IN5.2 touch disjoint files. They run one after the other in this workt
      - `_write_meta(libraries: dict[str, str]) -> None`: reads `CETRA_CAPTURE_META` (a missing variable raises `KeyError` naming it) and writes `{"libraries": libraries}`.
      - `finish(provider)`: flush, shut down, then `_write_meta(importlib_versions(os.environ["CETRA_CAPTURE_LIBRARIES"].split(",")))`. Its behaviour does not change.
    - Add `finish_tool(provider: TracerProvider | None, versions: dict[str, str]) -> None`: with a provider, `force_flush()` then `shutdown()`; with `None`, no flush; then `_write_meta(versions)`. It writes exactly `versions`. Every entry of the scenario's `libraries` must be a key of `versions` (the runner requires it, `run.rs` `read_libraries` ~487).
+   - Add the gateway helpers (the spike's `common.py` equivalents; add `import socket, subprocess, signal, time, urllib.request, urllib.error` and `from collections.abc import Callable` as needed):
+     - `free_port() -> int`: bind a socket to `127.0.0.1:0`, read the port, close it, return it.
+     - `wait_http(url: str, timeout: float, ok: Callable[[int], bool] = lambda status: status == 200) -> None`: poll `GET url` every 0.25 s; an HTTP error status counts as a status (`urllib.error.HTTPError.code`); connection errors are retried; return when `ok(status)` is true; raise `TimeoutError` naming the URL after `timeout` seconds.
+     - `stop_gateway(proc: subprocess.Popen[bytes], wait: float) -> None`: `proc.send_signal(signal.SIGINT)`, `proc.wait(timeout=wait)`, and on `subprocess.TimeoutExpired` `proc.kill()` then `proc.wait()`.
+   - **Tests.** `tools/capture/py` has no test directory, so these helpers have no unit tests; `ruff` and `mypy` check them, and the IN5.3 captures exercise them.
    - Add `tool_binary(*parts: str) -> str`: `os.path.join(os.environ["CETRA_CAPTURE_TOOLS"], *parts)`. When the file does not exist it raises `FileNotFoundError` with a message that names the path and says `run `just capture-tools` (Linux x86_64 only)`. A scenario that needs a binary calls it first, so a host without the binaries fails with that message.
 
 6. **`tools/capture/fetch-tools.sh`** (bash, `set -euo pipefail`; run from the repo root, resolving it from the script's own path):
@@ -198,7 +204,7 @@ IN5.1 and IN5.2 touch disjoint files. They run one after the other in this workt
 
 7. **`justfile`:**
    - New recipe `capture-tools` running `bash tools/capture/fetch-tools.sh`, with a comment line above it (the justfile's style).
-   - `capture` (`+cases: capture-py-sync capture-ts-sync`), `capture-all` and `check-capture` each gain `capture-tools` as a dependency.
+   - `capture` (`+cases: capture-py-sync capture-ts-sync`), `capture-all` and `check-capture` each gain `capture-tools` as a dependency. The binary scenarios need Linux x86_64: elsewhere `capture-tools` exits 0, and `check-capture` and `capture-all` then fail on those cases with the message naming `just capture-tools`. `check-capture` is not in CI.
 
 8. **`AGENTS.md` § Required tools:** add "for captures, `just capture-tools` downloads Temporal CLI, Bifrost, aigw and Envoy into `target/capture-tools` (pinned, checksummed)".
 
@@ -245,6 +251,7 @@ cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run
    - In `scope_gated`, before the Mirascope prefix test: when `scope_name == "bifrost"`, the span has no `gen_ai.operation.name` (`!present(bag, "gen_ai.operation.name")`), and it has `gen_ai.request.model` or `gen_ai.response.model` (`present`, peeked, not consumed), return `Some(SpanKind::Chain)`. Otherwise it decides nothing, so the existing rules still apply (Bifrost's 24 `plugin.*` spans have no model and stay `span`; its `chat` span has `gen_ai.operation.name = chat` and is decided earlier as `llm`).
    - The scope name is the instrumentation scope's `name`: the spike printed `bifrost@v2.5.1`, name `bifrost` and version `v2.5.1`. The golden fixture of IN5.3 proves it: if the root span is not `chain` there, stop and report the scope name.
    - Update the doc comment above `scope_gated`.
+   - The spec's row order (Bifrost after Mirascope) and the code's order (the Bifrost test before the Mirascope prefix test) differ on purpose and do not matter: the scopes are disjoint.
    - **Spec 02 § Span kind:** a new row after the `mirascope.type` row (line 96) and before `model fallback` (line 97): "Bifrost (scope `bifrost`) | On a span whose instrumentation scope name is `bifrost` and that has no `gen_ai.operation.name`: `gen_ai.request.model` or `gen_ai.response.model` present → `chain` (Bifrost's server root span repeats its `chat` child's model and content, D-IN-25). Any other span, and any other scope, does not decide the kind".
 
 4. **The OpenAI chat converter** (`convert/openai.rs`; spec 02 § Input / output, the GenAI row (line 108) and the "Message conversion" paragraph (line 120) name it):
@@ -273,7 +280,7 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
 - `cost.rs`: each new cost key alone (`gen_ai.cost.total_cost`, `gen_ai.cost.input_cost`, `gen_ai.cost.output_cost`, `bifrost.cost.input`, `bifrost.cost.output`); the margin case: `gen_ai.cost.total_cost` differs from the price table's figure, and the reported total wins with `cost_source = reported`; `cost_input + cost_output` need not equal `cost_total`.
 - `kind.rs`: `embedding` and `aembedding` give `embedding` (extend `gen_ai_operation_name_uses_the_semconv_table`, `kind.rs` ~378); the Bifrost root span in scope `bifrost` with `gen_ai.request.model` and no operation is `chain`, and the keys are not consumed; the same attributes in another scope are `llm` (model fallback); in scope `bifrost` with only `gen_ai.response.model` it is `chain`; in scope `bifrost` without a model it is `span`; a Bifrost `chat` span (`gen_ai.operation.name = chat`) stays `llm`.
 - `openai.rs`: the flattened tool call (`id`, `name`, `args` as a JSON string) gives `ToolCall` with `arguments` parsed and no `extra`; the same with an extra key keeps it in `extra`; `args` absent gives `arguments: None`; `content: ""` beside `tool_calls` adds no text part; `content: ""` without tool calls still adds the empty text part; the existing `a_part_that_cannot_be_modelled_stays_on_the_message` still passes.
-- `genai.rs`, a span carrying both conventions: attributes `gen_ai.output.messages` (the LiteLLM JSON above), `gen_ai.completion.0.function_call.name` and `.arguments`, read through `read_span`: the output is one assistant message with one `ToolCall` and `finish_reason` `tool_calls`; the two keys are in `Use::Payload` afterwards (`bag.state`); and a case with a non-empty `parts` is left alone, with the keys untouched.
+- `genai.rs`, a span carrying both conventions: attributes `gen_ai.output.messages` (the LiteLLM JSON above), `gen_ai.completion.0.function_call.name` and `.arguments`, read through a new test helper `read_span_with_bag(attrs) -> (Io, AttrBag<'_>)` (as `openllmetry.rs` ~183 does; import `crate::bag::{AttrBag, Use}` in the test module): the output is one assistant message with one `ToolCall` and `finish_reason` `tool_calls`; the two keys are in `Use::Payload` afterwards (`bag.state`); and a case with a non-empty `parts` is left alone, with the keys untouched.
 
 **Done when:** `cargo nextest run -p cetra-otel`, `cargo clippy -p cetra-otel --all-targets -- -D warnings` and `cargo fmt --check` pass, with no `expected.json` changed.
 
@@ -304,17 +311,19 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
    | `envoy-ai-gateway-chat` | `openinference` | `aigw` | `aigw`, `envoy`, `openai` | `{"aigw": "1.2.1", "envoy": "1.39.1", **importlib_versions(["openai"])}` |
    | `temporal-openai-agents` | `openinference` | `openinference-instrumentation-openai-agents` | `openai`, `openai-agents`, `openinference-instrumentation-openai-agents`, `opentelemetry-sdk`, `temporalio`, `temporalio-openai-agents`, `temporal-cli` | `{**importlib_versions(<the six pip names>), "temporal-cli": "1.10.1"}` |
 
+   **Files and checks.** The template drivers are not `ruff`/`mypy` clean. The Done-when `ruff format --check`, `ruff check` and `mypy` apply to the new scenario files, so write typed code with no wildcard imports. The project's rule set includes `S` (bandit) and `ANN`: a gateway launch may carry `# noqa: S603 - a pinned binary`; use an absolute path (`tool_binary(...)`, or the `litellm` next to `sys.executable`) so `S607` does not fire. Each scenario directory has `main.py` and one module named `<group>_<case>.py` with underscores (for example `genai_litellm_proxy_chat.py`; `main.py` imports `main` from it, as `openinference/vertex-ai-chat` does), because mypy maps every `main.py` to one module and every other module name must be unique across scenarios. `temporal-openai-agents` has a third module for the workflow, `openinference_temporal_openai_agents_workflow.py` (the workflow must be importable by name; it cannot live in `__main__`). Do not name any module `workflows.py`.
+
    Common to every program:
    - the mock is at `CETRA_CAPTURE_MOCK_URL` (`harness.mock_url`); OTLP goes to `CETRA_CAPTURE_OTLP_ENDPOINT` (`harness.receiver_base_url` strips `/v1/traces`), with `Authorization: Bearer capture-mock-key`;
-   - ports for everything configurable come from `bind(0)` (`common.free` in the spike);
+   - ports for everything configurable come from `harness.free_port()`; readiness and stopping use `harness.wait_http` and `harness.stop_gateway`;
    - a binary is located with `harness.tool_binary(...)` (IN5.1 step 5), called first;
    - the gateway process gets an explicit `env=` (the runner clears the environment, and the child needs only what the scenario lists);
-   - the gateway is stopped with SIGINT in `try/finally` before `finish_tool` (every gateway flushes on SIGINT), and the program waits for it;
+   - the gateway is stopped with `harness.stop_gateway` (SIGINT) in `try/finally` before `finish_tool` (every gateway flushes on SIGINT);
    - the client is the `openai` package, with `base_url` pointing at the gateway.
 
    **LiteLLM Proxy** (both cases; start from `spikes/m5-files/litellm/{config.yaml,run.py}`):
-   - **Config.** `general_settings.master_key` is set, as in the template (the proxy refuses to start without one; the template's value is the one the spike ran, and a weaker one may be refused). `litellm_settings: {callbacks: ["otel"], turn_off_message_logging: false}`. Chat case models: `gpt-4o-mini` (`openai/gpt-4o-mini`) and the alias `ds` (`deepseek/deepseek-chat`), both with `api_base: os.environ/FAKE_BASE`. Embedding case model: `model_name: text-embedding-3-small`, `litellm_params.model: openai/text-embedding-3-small`. The model name matters: the embedding span reports no cost, so cetra must price it from the built-in table, and `crates/otel/tests/golden.rs` `captured_llm_spans_are_priced_by_the_builtin_snapshot` (~316–380) fails for any captured `llm` or `embedding` span with tokens and a model that has no price. If the embedding span is unpriced (its provider is empty), stop and report. The chat alias is `ds`, not `or-claude`: the deepseek span is the aliased-model case (reported cost 3.01e-05 in the spike), and it needs no price row.
-   - **Launch.** `[os.path.join(os.path.dirname(sys.executable), "litellm"), "--config", <cfg>, "--port", <p>, "--host", "127.0.0.1"]`, the config written into a temporary directory by the program. Readiness: poll `GET http://127.0.0.1:<p>/health/liveliness` every second for up to 90 s.
+   - **Config.** `general_settings.master_key` is set, as in the template, and requests send `Authorization: Bearer <master>` (the proxy refuses to start without one; the template's value is the one the spike ran, and a weaker one may be refused). `litellm_settings: {callbacks: ["otel"], turn_off_message_logging: false}`. Chat case models: `gpt-4o-mini` (`openai/gpt-4o-mini`) and the alias `ds` (`deepseek/deepseek-chat`), both with `api_base: os.environ/FAKE_BASE`. Embedding case model: `model_name: text-embedding-3-small` (the template calls it `emb`; rename it), `litellm_params.model: openai/text-embedding-3-small`. The model name matters: the embedding span reports no cost, so cetra must price it from the built-in table, and `crates/otel/tests/golden.rs` `captured_llm_spans_are_priced_by_the_builtin_snapshot` (~316–380) fails for any captured `llm` or `embedding` span with tokens and a model that has no price. If the embedding span is unpriced (its provider is empty), stop and report. The chat alias is `ds`, not `or-claude`: the deepseek span is the aliased-model case (reported cost 3.01e-05 in the spike), and it needs no price row.
+   - **Launch.** `[os.path.join(os.path.dirname(sys.executable), "litellm"), "--config", <cfg>, "--port", <p>, "--host", "127.0.0.1"]`, the config written into a temporary directory by the program. Readiness: `wait_http("http://127.0.0.1:<p>/health/liveliness", 60)`. If start-up exceeds 60 s, stop and report.
    - **Gateway environment** (explicit `env=`): `PATH`, `HOME`, `FAKE_BASE=<mock>/v1`, `LITELLM_LOCAL_MODEL_COST_MAP=True` (without it the proxy fetches the model cost map from `raw.githubusercontent.com` at start), `DISABLE_SCHEMA_UPDATE=true`, `OTEL_EXPORTER=otlp_http`, `OTEL_ENDPOINT=<receiver base>`, `OTEL_HEADERS=Authorization=Bearer capture-mock-key` with a **literal space** (LiteLLM sends the value as is, so `%20` would arrive as `Bearer%20capture-mock-key`), `OTEL_SERVICE_NAME=litellm-proxy`.
    - **Requests** carry `Authorization: Bearer <master key>` (`OpenAI(api_key=<master key>)`). Chat case, in this order, each with `user="user-1"`: (1) `gpt-4o-mini`, no tools; (2) `ds`, no tools; (3) `gpt-4o-mini` with one `get_weather` tool. Embedding case: one `embeddings.create(model="text-embedding-3-small", input="hello")`.
    - **Turns** (`openai.chat`, in request order): a text turn (31 in, 12 out, model `gpt-4o-mini-2024-07-18`), a text turn for `ds` (model `deepseek-chat`), a tool-call turn (`get_weather`, `{"city": "Paris"}`, finish `tool_calls`, 82 in, 17 out). Embedding case: one `openai.embeddings` turn, model `text-embedding-3-small`, `"dims": 2`, usage input 5.
@@ -328,7 +337,7 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
    - **Two requests** with `OpenAI(base_url=f"http://127.0.0.1:{p}/v1").chat.completions.create(model="openai/gpt-4o-mini", ...)`: (1) the question with one `get_weather` tool, which gets the tool-call turn; (2) the same conversation plus the assistant's tool call and a `tool` message, which gets the text turn. Turns: `openai.chat` tool-call (82/17, finish `tool_calls`), then `openai.chat` text (131/12).
    - The mock answers Bifrost's two `GET /v1/models` at start (IN5.1 step 1); without that step the capture fails with "no route".
    - **Expect two `llm` and two `chain`.** `span_names: ["/v1/chat/completions", "chat gpt-4o-mini"]` keeps the roots and the `chat` spans and drops the 24 `plugin.*` spans per request. `volatile_attributes: ["bifrost.request.id", "bifrost.selected_key.id"]`; `timing_attributes: ["bifrost.overhead.duration_ms", "bifrost.upstream.duration_ms", "bifrost.worker.handoff_ms"]`.
-   - **Unverified:** the spike ran only the first request. The second request's history is probably flattened the same way (`name`/`args`) in `gen_ai.input.messages`, but that was not observed. If the second `chat` span's input shape differs from rule B2's, or the history stays a malformed part, stop and report; do not widen the rule.
+   - **Unverified:** the spike ran only the first request. The second request's history is probably flattened the same way (`name`/`args`) in `gen_ai.input.messages`, but that was not observed. Stop at the first mismatch with rule B2 (a different shape, or a history part that stays malformed) and report; do not widen the rule.
 
    **Envoy AI Gateway** (`envoy-ai-gateway-chat`; start from `spikes/m5-files/aigw/`):
    - A temporary directory under `/tmp` with a short name (the `AIGW_RUNTIME_DIR` holds a Unix socket; a path longer than about 100 characters fails with `bind: invalid argument`) holds `AIGW_CONFIG_HOME`, `AIGW_DATA_HOME`, `AIGW_STATE_HOME` and `AIGW_RUNTIME_DIR`. Symlink (or copy) `tool_binary("envoy", "1.39.1", "envoy")` to `$AIGW_DATA_HOME/envoy-versions/1.39.1/bin/envoy`, so `aigw` never downloads Envoy.
@@ -338,7 +347,7 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
    - aigw binds fixed ports (1061, 8081, 9856, 18000, 18002, 19000, 19001, 19003): a foreign process on one breaks only this case. Cases run in sequence. Nothing varies between runs, so `volatile_attributes` and `timing_attributes` are empty.
 
    **Temporal** (`temporal-openai-agents`; start from `spikes/m5-files/temporal/{run.py,wfmod.py}`):
-   - `workflows.py` beside `main.py` holds the workflow and the `get_weather` activity (defined in `__main__` the worker fails "Failed validating workflow"). It is `wfmod.py` of the spike.
+   - The workflow module (`openinference_temporal_openai_agents_workflow.py`) holds the workflow and the `get_weather` activity (defined in `__main__` the worker fails "Failed validating workflow"). It is `wfmod.py` of the spike.
    - `main.py`: `create_tracer_provider(resource=Resource.create({"service.name": "capture-app"}))` from `temporalio.contrib.opentelemetry`; `add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))` (the exporter reads the runner's `OTEL_EXPORTER_OTLP_*`); `trace.set_tracer_provider`; `OpenAIAgentsPlugin(model_provider=OpenAIProvider(openai_client=AsyncOpenAI(base_url=<mock>/v1, api_key=..., max_retries=0), use_responses=True), model_params=ModelActivityParameters(start_to_close_timeout=timedelta(seconds=30)), use_otel_instrumentation=True)` and `OpenTelemetryPlugin(add_temporal_spans=True)` on the client; `WorkflowEnvironment.start_local(dev_server_existing_path=tool_binary("temporal", "1.10.1", "temporal"), dev_server_extra_args=["--headless", "--log-level", "warn"], ui=False)`; one workflow with the fixed id `wf-capture`.
    - No `instrument=` and no `OpenAIAgentsInstrumentor`: the plugin instruments OpenAI Agents itself, and a second instrumentor would double the spans.
    - After the workflow: `await env.shutdown()`, then `finish_tool(tp, ...)` (the provider flushes and shuts down inside it).
@@ -348,6 +357,7 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
 3. **Capture, bless and check** (the golden test loads every captured case, so blessing happens in this same commit):
    - `just capture genai/litellm-proxy-chat genai/litellm-proxy-embedding genai/bifrost-chat openinference/envoy-ai-gateway-chat openinference/temporal-openai-agents`.
    - `just fixtures-bless`, then `just fixtures-fmt`, then `just fixtures-check` (`justfile` ~525–534). Review the diff of each `expected.json` before committing.
+   - **No port may remain.** For all five cases, after blessing, run `grep -nE '127\.0\.0\.1:[0-9]+|localhost:[0-9]+' fixtures/otlp/<group>/<case>/{input,expected}.json` and `grep -nE -A3 'server\.port|\.port\"' …`. The first must print nothing. The second may print only well-known ports (such as `443`, which the scrubber leaves); a value equal to the gateway's, the mock's or the receiver's port from the run means the port was not scrubbed: stop and report the attribute.
    - Check each `expected.json`:
      - LiteLLM chat: provider is the upstream's (`openai` for the first and third request, `deepseek` for `ds`); cost is `reported` with the `gen_ai.cost.*` values, including the aliased model (`gen_ai.response.model` is `ds`); the tool turn's output is a tool call; no `gen_ai.completion.0.function_call.*` key stays in `attributes`.
      - LiteLLM embedding: the span is `embedding` and priced.
@@ -358,7 +368,7 @@ Read `spikes/m5-gateways.md` § LiteLLM Proxy (the `litellm_request` dump) for t
 
    Stop and report every deviation.
 
-**Done when:**
+**Done when** (the `ruff` and `mypy` run covers the new scenario files):
 
 ```bash
 cargo nextest run -p cetra-otel --test golden --test fixtures
