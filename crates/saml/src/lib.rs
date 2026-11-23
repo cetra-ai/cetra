@@ -6,9 +6,13 @@
 
 mod cert;
 mod metadata;
+mod request;
 pub(crate) mod xml;
 
 pub use cert::IdpCertificate;
 pub use metadata::{
     IdpMetadata, MAX_CERTIFICATES, MAX_METADATA_BYTES, MetadataError, parse_metadata,
+};
+pub use request::{
+    AuthnRequest, RequestError, authn_request_redirect_url, is_valid_request_id, sp_metadata_xml,
 };
