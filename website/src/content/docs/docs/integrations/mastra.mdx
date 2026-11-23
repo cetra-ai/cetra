@@ -1,0 +1,108 @@
+---
+title: Mastra
+description: "Trace Mastra agents with cetra from TypeScript: agent runs, steps, model calls and tool calls, exported by Mastra's OpenTelemetry exporter."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Mastra agent runs from TypeScript. Mastra's OpenTelemetry exporter sends the agent, step, model call and tool spans to cetra.
+
+<Backing fixtures={["genai/mastra-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+```bash
+npm install @mastra/core @mastra/observability @mastra/otel-exporter @ai-sdk/openai zod
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+The exporter sends the spans to cetra directly, so you do not need the cetra SDK. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+
+{/* untested: calls OpenAI through Mastra and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```ts
+import { createOpenAI } from "@ai-sdk/openai";
+import { Mastra } from "@mastra/core";
+import { Agent } from "@mastra/core/agent";
+import { createTool } from "@mastra/core/tools";
+import { Observability } from "@mastra/observability";
+import { OtelExporter } from "@mastra/otel-exporter";
+import { z } from "zod";
+
+const openai = createOpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const weather = createTool({
+  id: "get_weather",
+  description: "Look up the weather for a city",
+  inputSchema: z.object({ city: z.string() }),
+  execute: async ({ city }) => ({ temperature_c: 18, city }),
+});
+const agent = new Agent({
+  id: "weather-agent",
+  name: "weather-agent",
+  instructions: "You are a weather assistant.",
+  model: openai.chat("gpt-4o-mini"),
+  tools: { get_weather: weather },
+});
+const mastra = new Mastra({
+  agents: { agent },
+  observability: new Observability({
+    configs: {
+      otel: {
+        serviceName: "weather-app",
+        exporters: [
+          new OtelExporter({
+            provider: {
+              custom: {
+                endpoint: "http://localhost:8080/v1/traces",
+                protocol: "http/protobuf",
+                headers: { Authorization: `Bearer ${process.env.CETRA_API_KEY}` },
+              },
+            },
+            signals: { logs: false },
+          }),
+        ],
+      },
+    },
+  }),
+});
+
+await mastra.getAgent("agent").generate("What's the weather in Paris?", { maxSteps: 3 });
+// shutdown flushes the batched spans before the process ends.
+await mastra.shutdown();
+```
+
+  </TabItem>
+</Tabs>
+
+Keep `signals: { logs: false }`. The exporter then sends traces only, and cetra does not store logs.
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span named `invoke_agent weather-agent`, with the prompt as its input, the answer as its output, and the system instructions and tool names;
+- a `span` for Mastra's run span, and `chain` spans for the agent's steps and for the model generation;
+- an `llm` span named `chat gpt-4o-mini` for each model call, with the provider `openai`, the request model `gpt-4o-mini`, the response model, the token counts, the cost computed from the built-in prices, the messages, and the time to first token (TTFT);
+- a `tool` span for each tool call, with the arguments as its input and the result as its output.
+
+## Limits
+
+- The fixture was captured with `@mastra/core` 1.83.0, `@mastra/observability` 1.24.0 and `@mastra/otel-exporter` 1.5.2.
+- Processor and chunk spans appear as plain spans when a run has them. The captured fixture leaves them out.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

@@ -1,0 +1,94 @@
+---
+title: Microsoft Agent Framework
+description: "Trace Microsoft Agent Framework agents and workflows with cetra from Python: agent runs, model calls, tool calls and workflow steps."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Microsoft Agent Framework agent runs and workflows, from the spans the framework writes itself.
+
+<Backing fixtures={["genai/agent-framework-agent-tool", "genai/agent-framework-workflow"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk agent-framework-core agent-framework-openai
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Agent Framework writes its spans to the global OpenTelemetry tracer provider. Start cetra with `use_global_provider=True` so that it joins that provider, then turn on the framework's instrumentation. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Agent Framework and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+import cetra
+from agent_framework import Agent, tool
+from agent_framework.observability import enable_instrumentation
+from agent_framework.openai import OpenAIChatCompletionClient
+
+cetra.init(use_global_provider=True)
+enable_instrumentation(enable_sensitive_data=True)
+
+
+@tool
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+client = OpenAIChatCompletionClient(
+    model="gpt-4o-mini",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+agent = Agent(
+    client=client,
+    name="WeatherAgent",
+    instructions="You are a weather bot.",
+    tools=[get_weather],
+)
+
+
+async def run() -> None:
+    await agent.run("What is the weather in Paris?")
+
+
+asyncio.run(run())
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+`enable_sensitive_data=True` makes the framework record the messages and the tool arguments and results. The sample sets it.
+
+## What you get
+
+- An agent run produces an `invoke_agent` span named after the agent, with the messages and the tool definitions, then a `chat` `llm` span for each model call with the provider, the model, the token counts and the cost, and an `execute_tool` `tool` span for each tool call.
+- A workflow produces an `invoke_workflow` span. Each executor and each edge group is a `chain` span, and each message the workflow sends is a plain span.
+
+## Limits
+
+- Workflow steps are `chain` spans. A workflow with no model call has no `llm` span.
+- The fixtures were captured with `agent-framework-core` 1.26.0 and `agent-framework-openai` 1.18.2, not with the `agent-framework` meta package.
+- Set `enable_sensitive_data=True` to record content. The sample sets it.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

@@ -1,0 +1,102 @@
+---
+title: AutoGen
+description: "Trace AutoGen AgentChat agents with cetra from Python: agent runs, model calls and tool calls, through the OpenInference AutoGen instrumentor."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces AutoGen AgentChat runs through the OpenInference AutoGen instrumentor: agent, model call and tool spans.
+
+<Backing fixtures={["openinference/autogen-agentchat-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk openinference-instrumentation-autogen-agentchat autogen-agentchat "autogen-ext[openai]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Turn on the AutoGen instrumentor alone. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+AutoGen reads its runtime tracing switch when it is imported, so set it before the import.
+
+{/* untested: calls OpenAI through AutoGen and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import asyncio
+import os
+
+# Only the AutoGen instrumentor is enabled. Enabling the OpenAI instrumentor as well
+# would record each model call twice.
+os.environ["AUTOGEN_DISABLE_RUNTIME_TRACING"] = "true"
+
+import cetra
+
+cetra.init(instrument=["autogen-agentchat"])
+
+from autogen_agentchat.agents import AssistantAgent  # noqa: E402
+from autogen_ext.models.openai import OpenAIChatCompletionClient  # noqa: E402
+
+
+async def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+client = OpenAIChatCompletionClient(
+    model="gpt-4o-mini",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+agent = AssistantAgent(
+    "weather_agent",
+    model_client=client,
+    tools=[get_weather],
+    system_message="You are a weather bot.",
+    reflect_on_tool_use=True,
+)
+
+
+async def run() -> None:
+    await agent.run(task="What is the weather in Paris?")
+
+
+asyncio.run(run())
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call, a run produces:
+
+- an `agent` span for the agent's creation, and an `agent` span for the run;
+- an `agent` span named `weather_agent.on_messages_stream`, with the messages as its input;
+- an `llm` span for each model call, named `OpenAIChatCompletionClient.create`, with the provider `openai`, the model, the token counts, the cost computed from the built-in prices and the messages;
+- `tool` spans for the tool call, with its arguments and result.
+
+## Limits
+
+- Enable `instrument=["autogen-agentchat"]` only. Adding `openai` records each model call twice.
+- AutoGen's tool spans include a second, content-free `tool` span named `execute_tool get_weather`, next to the one with the arguments and result.
+- The `weather_agent.on_messages_stream` span in the fixture carries an `exception` event that AutoGen records. Its status stays `ok`.
+- The fixture was captured with `autogen-agentchat` 0.7.5, `autogen-ext` 0.7.5 and `openinference-instrumentation-autogen-agentchat` 0.1.29.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.

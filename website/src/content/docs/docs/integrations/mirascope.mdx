@@ -1,0 +1,99 @@
+---
+title: Mirascope
+description: "Trace Mirascope calls and tool loops with cetra from Python: ops traces, sessions, model calls and tool calls."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+cetra traces Mirascope calls with its ops tracing: each traced function is a `chain` span, and each model call is an `llm` span.
+
+<Backing fixtures={["genai/mirascope-agent-tool"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install cetra-sdk "mirascope[openai,ops]"
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+Mirascope writes its spans to the tracer provider that you pass to `ops.configure`. Start cetra first and pass it cetra's tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls OpenAI through Mirascope and needs CETRA_API_KEY and OPENAI_API_KEY */}
+```python
+import os
+
+import cetra
+from mirascope import llm, ops
+
+cetra.init()
+llm.register_provider(
+    "openai:completions",
+    scope="openai:completions/",
+    api_key=os.environ["OPENAI_API_KEY"],
+)
+ops.configure(tracer_provider=cetra.tracer_provider())
+ops.instrument_llm()
+
+
+@llm.tool
+def get_weather(city: str) -> str:
+    """Get the weather."""
+    return f"sunny in {city}"
+
+
+@ops.trace
+@llm.call("openai:completions/gpt-4o-mini", tools=[get_weather])
+def ask(question: str) -> str:
+    return question
+
+
+@ops.trace
+def run(question: str) -> str:
+    response = ask(question)
+    while response.tool_calls:
+        response = response.resume(response.execute_tools())
+    return response.text()
+
+
+with ops.session(id="sess-1"):
+    run("What is the weather in Paris?")
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+With one tool call inside one session, a run produces:
+
+- a `chain` span for each `@ops.trace` function, with its input and output (`ask.call`, `run`, and the `Response.resume` span for the tool loop);
+- an `llm` span for each model call, with the provider `openai`, the model, the token counts, the cost computed from the built-in prices, the messages and the tool definitions.
+
+The `ops.session` ID becomes the session of the `@ops.trace` spans.
+
+## Limits
+
+- The `openai:completions/` prefix is stripped from the model name on Mirascope spans, so the model reads `gpt-4o-mini`.
+- The `llm` spans in the fixture carry no session. The session is on the traced spans.
+- Each `@ops.trace` span is a `chain` span, so it adds no tokens or cost.
+- The fixture was captured with `mirascope` 2.8.2 and the OpenTelemetry SDK 1.45.2.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Online rules](/docs/evaluation/online-rules/): score these traces automatically.
