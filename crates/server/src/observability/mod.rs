@@ -1,8 +1,9 @@
 //! cetra's own observability (track TL, `docs/plans/tl-telemetry/README.md`): the panic hook,
-//! the OTLP log export to the operator's endpoint, and the `tracing` subscriber the CLI
-//! installs. Prometheus `/metrics` is [`crate::telemetry`] (D-N-28).
+//! the OTLP log and span export to the operator's endpoint, the server's spans, and the
+//! `tracing` subscriber the CLI installs. Prometheus `/metrics` is [`crate::telemetry`] (D-N-28).
 
 pub(crate) mod buckets;
+pub(crate) mod crash;
 pub(crate) mod facts;
 pub(crate) mod heartbeat;
 pub(crate) mod instance;
@@ -10,6 +11,7 @@ pub(crate) mod otlp;
 pub mod panic;
 pub(crate) mod ring;
 pub(crate) mod scrub;
+pub(crate) mod spans;
 pub mod subscriber;
 pub(crate) mod switchboard;
 
