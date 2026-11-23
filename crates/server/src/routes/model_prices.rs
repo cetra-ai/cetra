@@ -12,6 +12,7 @@ use crate::api::model_prices::{
     ModelPrice, ModelPriceInput, ModelPriceListParams, ModelPriceResolution,
     ModelPriceResolveParams,
 };
+use crate::audit;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm};
 use crate::http::AppState;
@@ -249,25 +250,24 @@ async fn create_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<ModelPriceInput>,
 ) -> Result<(StatusCode, error::Json<ModelPrice>), ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
     let row = validated(&body, PriceScope::Project)?;
     let id = Uuid::now_v7();
-    let outcome =
-        prices::write(&state, org, Some(project), PriceChange::Insert { id, row }).await?;
+    let outcome = prices::write(
+        &state,
+        org,
+        Some(project),
+        PriceChange::Insert { id, row },
+        &ctx,
+    )
+    .await?;
     match outcome {
         WriteOutcome::Done(Some(record)) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                project_id = %project,
-                user_id = %user.id,
-                "model price created"
-            );
             Ok((StatusCode::CREATED, error::Json(record_json(&record))))
         }
         other => Err(outcome_error(other)),
@@ -278,27 +278,24 @@ async fn update_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PricePath { id }): error::Path<PricePath>,
     error::Json(body): error::Json<ModelPriceInput>,
 ) -> Result<error::Json<ModelPrice>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
     let row = validated(&body, PriceScope::Project)?;
-    let outcome =
-        prices::write(&state, org, Some(project), PriceChange::Update { id, row }).await?;
+    let outcome = prices::write(
+        &state,
+        org,
+        Some(project),
+        PriceChange::Update { id, row },
+        &ctx,
+    )
+    .await?;
     match outcome {
-        WriteOutcome::Done(Some(record)) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                project_id = %project,
-                user_id = %user.id,
-                "model price updated"
-            );
-            Ok(error::Json(record_json(&record)))
-        }
+        WriteOutcome::Done(Some(record)) => Ok(error::Json(record_json(&record))),
         other => Err(outcome_error(other)),
     }
 }
@@ -307,24 +304,22 @@ async fn delete_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(PricePath { id }): error::Path<PricePath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
-    let outcome = prices::write(&state, org, Some(project), PriceChange::Delete { id }).await?;
+    let outcome = prices::write(
+        &state,
+        org,
+        Some(project),
+        PriceChange::Delete { id },
+        &ctx,
+    )
+    .await?;
     match outcome {
-        WriteOutcome::Done(None) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                project_id = %project,
-                user_id = %user.id,
-                "model price deleted"
-            );
-            Ok(StatusCode::NO_CONTENT)
-        }
+        WriteOutcome::Done(None) => Ok(StatusCode::NO_CONTENT),
         other => Err(outcome_error(other)),
     }
 }
@@ -344,22 +339,17 @@ async fn create_org_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<ModelPriceInput>,
 ) -> Result<(StatusCode, error::Json<ModelPrice>), ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.org.id;
     let row = validated(&body, PriceScope::Org)?;
     let id = Uuid::now_v7();
-    let outcome = prices::write(&state, org, None, PriceChange::Insert { id, row }).await?;
+    let outcome =
+        prices::write(&state, org, None, PriceChange::Insert { id, row }, &ctx).await?;
     match outcome {
         WriteOutcome::Done(Some(record)) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                user_id = %user.id,
-                "org model price created"
-            );
             Ok((StatusCode::CREATED, error::Json(record_json(&record))))
         }
         other => Err(outcome_error(other)),
@@ -370,24 +360,17 @@ async fn update_org_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(PricePath { id }): error::Path<PricePath>,
     error::Json(body): error::Json<ModelPriceInput>,
 ) -> Result<error::Json<ModelPrice>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.org.id;
     let row = validated(&body, PriceScope::Org)?;
-    let outcome = prices::write(&state, org, None, PriceChange::Update { id, row }).await?;
+    let outcome =
+        prices::write(&state, org, None, PriceChange::Update { id, row }, &ctx).await?;
     match outcome {
-        WriteOutcome::Done(Some(record)) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                user_id = %user.id,
-                "org model price updated"
-            );
-            Ok(error::Json(record_json(&record)))
-        }
+        WriteOutcome::Done(Some(record)) => Ok(error::Json(record_json(&record))),
         other => Err(outcome_error(other)),
     }
 }
@@ -396,22 +379,14 @@ async fn delete_org_model_price(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(PricePath { id }): error::Path<PricePath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org = access.org.id;
-    let outcome = prices::write(&state, org, None, PriceChange::Delete { id }).await?;
+    let outcome = prices::write(&state, org, None, PriceChange::Delete { id }, &ctx).await?;
     match outcome {
-        WriteOutcome::Done(None) => {
-            tracing::info!(
-                target: "audit",
-                price_id = %id,
-                org_id = %org,
-                user_id = %user.id,
-                "org model price deleted"
-            );
-            Ok(StatusCode::NO_CONTENT)
-        }
+        WriteOutcome::Done(None) => Ok(StatusCode::NO_CONTENT),
         other => Err(outcome_error(other)),
     }
 }
@@ -1108,11 +1083,55 @@ mod tests {
             id
         })
         .await;
-        assert!(logs.contains("model price created"), "{logs}");
-        assert!(logs.contains("model price updated"), "{logs}");
-        assert!(logs.contains("model price deleted"), "{logs}");
-        assert!(logs.contains(&created_body), "{logs}");
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT action, target_id, project_id FROM audit_events \
+             WHERE action LIKE 'model_price.%' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let actions: Vec<&str> = rows.iter().map(|(action, _, _)| action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["model_price.created", "model_price.updated", "model_price.deleted"]
+        );
+        for (_, target, scope) in &rows {
+            assert_eq!(target, &created_body);
+            assert_eq!(scope.as_deref(), Some(project.to_string().as_str()));
+        }
         assert!(!logs.contains(probe), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn org_price_write_is_recorded_without_project() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = call(
+            &app,
+            &seeded.cookie,
+            Method::POST,
+            ORG,
+            Some(&body("org-audit-model", 1.0, 1.0)),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+        let id = created_id(&created);
+        let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT action, org_id, project_id, target_id FROM audit_events \
+             WHERE action LIKE 'model_price.%'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "model_price.created".to_owned(),
+                Some(seeded.org_id.to_string()),
+                None,
+                Some(id),
+            )]
+        );
     }
 
     #[tokio::test]

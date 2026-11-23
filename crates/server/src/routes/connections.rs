@@ -21,6 +21,8 @@ use crate::api::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use crate::audit::catalog::LlmConnectionAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
 use crate::crypto::{Aad, SecretBox};
@@ -149,6 +151,7 @@ async fn create_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateLlmConnectionRequest>,
 ) -> Result<(StatusCode, error::Json<LlmConnection>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -201,22 +204,23 @@ async fn create_llm_connection(
     };
     let org_id = access.org.id;
     let user_id = user.id;
+    let adapter = body.adapter.as_str();
     let now = state.clock.now_ns();
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                connections::insert_connection(conn, id, org_id, fields, Some(user_id), now).await
+                let row =
+                    connections::insert_connection(conn, id, org_id, fields, Some(user_id), now)
+                        .await?;
+                let event = Event::new(LlmConnectionAction::Created { adapter })
+                    .org(org_id)
+                    .target(TargetKind::LlmConnection, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection created"
-    );
     Ok((StatusCode::CREATED, error::Json(connection_json(&row)?)))
 }
 
@@ -224,10 +228,11 @@ async fn update_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<UpdateLlmConnectionRequest>,
 ) -> Result<error::Json<LlmConnection>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let mut errors = Vec::new();
     if let Some(name) = body.name.as_deref() {
         check_name(name, &mut errors);
@@ -256,6 +261,22 @@ async fn update_llm_connection(
             errors,
         });
     }
+    // The JSON names of the body's `Some` fields (plan P-2), taken before the body is
+    // destructured: names only, never values.
+    let changed_fields = [
+        body.name.is_some().then_some("name"),
+        body.adapter.is_some().then_some("adapter"),
+        body.api_key.is_some().then_some("api_key"),
+        body.base_url.is_some().then_some("base_url"),
+        body.default_model.is_some().then_some("default_model"),
+        body.structured_output.is_some().then_some("structured_output"),
+        body.max_concurrency.is_some().then_some("max_concurrency"),
+        body.requests_per_minute.is_some().then_some("requests_per_minute"),
+        body.extra_headers.is_some().then_some("extra_headers"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<&'static str>>();
     let UpdateLlmConnectionRequest {
         name,
         adapter,
@@ -278,7 +299,6 @@ async fn update_llm_connection(
         None => None,
     };
     let org_id = access.org.id;
-    let user_id = user.id;
     let now = state.clock.now_ns();
     let key_sent = key.is_some();
     let updated = state
@@ -330,6 +350,13 @@ async fn update_llm_connection(
                 else {
                     return Ok(None);
                 };
+                let event = Event::new(LlmConnectionAction::Updated {
+                    fields: changed_fields,
+                    key_changed: key_sent,
+                })
+                .org(org_id)
+                .target(TargetKind::LlmConnection, id);
+                audit::record(conn, &ctx, event, now).await?;
                 if !key_sent {
                     return Ok(Some((row, Vec::new(), Vec::new(), Vec::new())));
                 }
@@ -355,13 +382,6 @@ async fn update_llm_connection(
         &sources,
         "connection key changed",
     );
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection updated"
-    );
     Ok(error::Json(connection_json(&row)?))
 }
 
@@ -369,11 +389,12 @@ async fn delete_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org_id = access.org.id;
-    let user_id = user.id;
+    let now = state.clock.now_ns();
     let went = state
         .meta
         .write(move |conn| {
@@ -391,7 +412,14 @@ async fn delete_llm_connection(
                         "connection is used by evaluators or issue sources",
                     ));
                 }
-                connections::delete_connection(conn, org_id, id).await
+                let went = connections::delete_connection(conn, org_id, id).await?;
+                if went {
+                    let event = Event::new(LlmConnectionAction::Deleted)
+                        .org(org_id)
+                        .target(TargetKind::LlmConnection, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(went)
             })
         })
         .await?;
@@ -399,13 +427,6 @@ async fn delete_llm_connection(
         return Err(ApiError::NotFound);
     }
     state.connections.forget(id);
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -574,7 +595,6 @@ async fn test_connection(
         );
     }
     tracing::info!(
-        target: "audit",
         connection_id = %row.id,
         org_id = %access.org.id,
         user_id = %user.id,
@@ -722,7 +742,6 @@ async fn test_embedding(
         }
     }
     tracing::info!(
-        target: "audit",
         connection_id = %id,
         org_id = %org_id,
         user_id = %user_id,
@@ -749,7 +768,6 @@ fn after_connection_write(
     }
     for rule in resumed {
         tracing::info!(
-            target: "audit",
             rule_id = %rule,
             connection_id = %connection,
             reason,
@@ -2439,9 +2457,62 @@ mod tests {
         .await;
         assert!(!logs.contains(first), "{logs}");
         assert!(!logs.contains(second), "{logs}");
-        // The capture worked: both audit events are in it.
-        assert!(logs.contains("llm connection created"), "{logs}");
-        assert!(logs.contains("llm connection updated"), "{logs}");
+        // Both audit records are in the table, and no key text is in them.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, details FROM audit_events \
+             WHERE action IN ('llm_connection.created', 'llm_connection.updated') ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let actions: Vec<&str> = rows.iter().map(|(action, _)| action.as_str()).collect();
+        assert_eq!(actions, ["llm_connection.created", "llm_connection.updated"]);
+        for (_, details) in &rows {
+            assert!(!details.contains(first) && !details.contains(second), "{details}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_key_change_is_flagged() {
+        let (app, cookie) = app().await;
+        let created = create(
+            &app,
+            &cookie,
+            &json!({ "name": "Flagged", "adapter": "openai", "api_key": "sk-flag-one-0123456789" }),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+        let id = created_id(&created);
+        let renamed = patch(&app, &cookie, id, &json!({ "name": "Flagged 2" })).await;
+        assert_eq!(renamed.status, 200);
+        let rekeyed = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({ "api_key": "sk-flag-two-0123456789" }),
+        )
+        .await;
+        assert_eq!(rekeyed.status, 200);
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT details FROM audit_events \
+             WHERE action = 'llm_connection.updated' AND target_id = ? ORDER BY seq",
+        )
+        .bind(id.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details: Vec<Value> = rows
+            .iter()
+            .map(|(details,)| serde_json::from_str(details).unwrap())
+            .collect();
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["fields"], json!(["name"]));
+        assert_eq!(details[0]["key_changed"], json!(false));
+        assert_eq!(details[1]["fields"], json!(["api_key"]));
+        assert_eq!(details[1]["key_changed"], json!(true));
+        for (text,) in &rows {
+            assert!(!text.contains("sk-flag-"), "{text}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

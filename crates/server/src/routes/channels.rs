@@ -16,6 +16,8 @@ use crate::api::alerts::{
     CreateChannelRequest, DeliveryStatus, NotificationChannel, UpdateChannelRequest,
 };
 use crate::api::common::{FieldError, Page};
+use crate::audit::catalog::AlertChannelAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::config::EmailRecipients;
@@ -110,9 +112,10 @@ async fn create_channel(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateChannelRequest>,
 ) -> Result<(StatusCode, error::Json<NotificationChannel>), ApiError> {
-    let user_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let name = checked_name(&body.name)?;
     if body.kind == ChannelKind::Email && state.mailer.is_none() {
         return Err(field_error(
@@ -133,12 +136,13 @@ async fn create_channel(
     let target_hint = config.target_hint();
     let project_id = access.project.id;
     let kind = body.kind;
+    let org_id = access.project.org_id;
     let now = state.clock.now_ns();
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                alerts::insert_channel(
+                let row = alerts::insert_channel(
                     conn,
                     NewChannel {
                         id,
@@ -150,18 +154,18 @@ async fn create_channel(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let event = Event::new(AlertChannelAction::Created {
+                    kind: row.kind.as_str(),
+                })
+                .org(org_id)
+                .project(project_id)
+                .target(TargetKind::AlertChannel, row.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        channel_id = %row.id,
-        project_id = %project_id,
-        user_id = %user_id,
-        kind = row.kind.as_str(),
-        "alert channel created"
-    );
     Ok((
         StatusCode::CREATED,
         error::Json(channel_json(&state, &row, None)),
@@ -172,11 +176,24 @@ async fn update_channel(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(ChannelPath { id }): error::Path<ChannelPath>,
     error::Json(body): error::Json<UpdateChannelRequest>,
 ) -> Result<error::Json<NotificationChannel>, ApiError> {
-    let user_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let project_id = access.project.id;
+    let org_id = access.project.org_id;
+    // The JSON names of the body's `Some` fields (plan P-2): names only, never values.
+    let fields = [
+        body.name.is_some().then_some("name"),
+        body.url.is_some().then_some("url"),
+        body.secret.is_some().then_some("secret"),
+        body.headers.is_some().then_some("headers"),
+        body.recipients.is_some().then_some("recipients"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<&'static str>>();
     let now = state.clock.now_ns();
     let members = if body.recipients.is_some() {
         member_scope(&state, access.project.org_id, ChannelKind::Email).await?
@@ -190,7 +207,7 @@ async fn update_channel(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                patch_channel_on(
+                let patched = patch_channel_on(
                     conn,
                     &handle,
                     project_id,
@@ -199,20 +216,20 @@ async fn update_channel(
                     now,
                     members.as_deref(),
                 )
-                .await
+                .await?;
+                if let Ok(Some(row)) = &patched {
+                    let event = Event::new(AlertChannelAction::Updated { fields })
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::AlertChannel, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(patched)
             })
         })
         .await?;
     let row = outcome?.ok_or(ApiError::NotFound)?;
     let last = alerts::last_deliveries(state.meta.reader(), project_id).await?;
-    tracing::info!(
-        target: "audit",
-        channel_id = %row.id,
-        project_id = %project_id,
-        user_id = %user_id,
-        kind = row.kind.as_str(),
-        "alert channel updated"
-    );
     Ok(error::Json(channel_json(&state, &row, last.get(&row.id))))
 }
 
@@ -220,26 +237,32 @@ async fn delete_channel(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(ChannelPath { id }): error::Path<ChannelPath>,
 ) -> Result<StatusCode, ApiError> {
-    let user_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let project_id = access.project.id;
+    let org_id = access.project.org_id;
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { alerts::delete_channel(conn, project_id, id).await })
+            Box::pin(async move {
+                let deleted = alerts::delete_channel(conn, project_id, id).await?;
+                if deleted {
+                    let event = Event::new(AlertChannelAction::Deleted)
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::AlertChannel, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(deleted)
+            })
         })
         .await?;
     if !deleted {
         return Err(ApiError::NotFound);
     }
-    tracing::info!(
-        target: "audit",
-        channel_id = %id,
-        project_id = %project_id,
-        user_id = %user_id,
-        "alert channel deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -331,7 +354,6 @@ async fn test_channel(
         },
     };
     tracing::info!(
-        target: "audit",
         channel_id = %id,
         project_id = %project.id,
         user_id = %user_id,
@@ -1202,6 +1224,45 @@ mod tests {
             },
         )
         .await;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT details FROM audit_events WHERE action LIKE 'alert_channel.%'")
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 3);
+        for (details,) in rows {
+            for secret in [SECRET, "hooks.example.com/x", "oncall@example.com"] {
+                assert!(!details.contains(secret), "{details}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn channel_update_records_field_names_only() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, pager()).await;
+        let path = format!("{}/{}", channels(&seeded), created.id);
+        let patched = send(
+            &app,
+            Method::PATCH,
+            &path,
+            &seeded.cookie,
+            Some(json!({"name": "Pager 2", "url": "https://hooks.example.com/y"})),
+        )
+        .await;
+        assert_eq!(patched.status, 200);
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT details FROM audit_events WHERE action = 'alert_channel.updated' AND target_id = ?",
+        )
+        .bind(created.id.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let details: Value = serde_json::from_str(&rows[0].0).unwrap();
+        assert_eq!(details["fields"], json!(["name", "url"]));
+        assert!(!rows[0].0.contains("hooks.example.com/y"), "{}", rows[0].0);
     }
 
     /// An email channel to `recipients`, as a create body.
