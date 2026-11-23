@@ -256,7 +256,7 @@ The SDK does not patch `threading` or executors. The Python guide (https://cetra
 | `ollama` | `cetra-sdk[ollama]` | `openinference.instrumentation.ollama` | `OllamaInstrumentor` | `openinference-instrumentation-ollama>=0.1.20` |
 | `together` | `cetra-sdk[together]` | `openinference.instrumentation.together` | `TogetherInstrumentor` | `openinference-instrumentation-together>=0.1.20` |
 | `instructor` | `cetra-sdk[instructor]` | `openinference.instrumentation.instructor` | `InstructorInstrumentor` | `openinference-instrumentation-instructor>=0.1.35` (Python < 3.14) |
-| `agno` | `cetra-sdk[agno]` | `openinference.instrumentation.agno` | `AgnoInstrumentor` | `openinference-instrumentation-agno>=1.2.1` |
+| `agno` | `cetra-sdk[agno]` | `openinference.instrumentation.agno` | `AgnoInstrumentor` | `openinference-instrumentation-agno>=1.2.0` |
 | `smolagents` | `cetra-sdk[smolagents]` | `openinference.instrumentation.smolagents` | `SmolagentsInstrumentor` | `openinference-instrumentation-smolagents>=0.1.50` |
 | `haystack` | `cetra-sdk[haystack]` | `openinference.instrumentation.haystack` | `HaystackInstrumentor` | `openinference-instrumentation-haystack>=0.1.53` |
 | `beeai` | `cetra-sdk[beeai]` | `openinference.instrumentation.beeai` | `BeeAIInstrumentor` | `openinference-instrumentation-beeai>=0.1.36` (Python < 3.15) |
