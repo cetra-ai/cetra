@@ -244,7 +244,10 @@ async fn update_rule(
         patch.channel_ids.is_some().then_some("channel_ids"),
         patch.enabled.is_some().then_some("enabled"),
         patch.cooldown_s.is_some().then_some("cooldown_s"),
-        patch.notify_while_firing.is_some().then_some("notify_while_firing"),
+        patch
+            .notify_while_firing
+            .is_some()
+            .then_some("notify_while_firing"),
     ]
     .into_iter()
     .flatten()
@@ -254,8 +257,7 @@ async fn update_rule(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let Some(row) = alerts::update_rule(conn, project_id, id, patch, now).await?
-                else {
+                let Some(row) = alerts::update_rule(conn, project_id, id, patch, now).await? else {
                     return Ok(None);
                 };
                 let event = Event::new(AlertRuleAction::Updated { fields })
@@ -1521,12 +1523,11 @@ mod tests {
             .await;
         })
         .await;
-        let details: Vec<(String,)> = sqlx::query_as(
-            "SELECT details FROM audit_events WHERE action = 'alert_rule.created'",
-        )
-        .fetch_all(app.state.meta.reader())
-        .await
-        .unwrap();
+        let details: Vec<(String,)> =
+            sqlx::query_as("SELECT details FROM audit_events WHERE action = 'alert_rule.created'")
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
         assert_eq!(details.len(), 1);
         for (details,) in details {
             assert!(

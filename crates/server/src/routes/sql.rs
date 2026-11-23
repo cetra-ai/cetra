@@ -1381,12 +1381,11 @@ mod tests {
             .await;
         assert_eq!(response.status, StatusCode::OK);
 
-        let count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM audit_events WHERE action LIKE 'sql.%'",
-        )
-        .fetch_one(w.app.state.meta.reader())
-        .await
-        .unwrap();
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action LIKE 'sql.%'")
+                .fetch_one(w.app.state.meta.reader())
+                .await
+                .unwrap();
         assert_eq!(count, 0);
     }
 

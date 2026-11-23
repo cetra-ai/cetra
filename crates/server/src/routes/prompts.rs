@@ -2090,14 +2090,7 @@ mod tests {
         let seeded = app.seed().await;
         let auth = ("cookie", seeded.cookie.as_str());
         let list = base(&seeded);
-        let created = call(
-            &app,
-            Method::POST,
-            &list,
-            auth,
-            Some(text_body("rl", &[])),
-        )
-        .await;
+        let created = call(&app, Method::POST, &list, auth, Some(text_body("rl", &[]))).await;
         assert_eq!(created.status, StatusCode::CREATED);
         let set = call(
             &app,

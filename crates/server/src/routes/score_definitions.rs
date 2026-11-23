@@ -1153,7 +1153,12 @@ mod tests {
         let created = create_ok(&app, &seeded, numeric_body("retired")).await;
         let id = created["id"].as_str().unwrap();
         let response = patch(&app, &seeded, id, json!({"name": "renamed"})).await;
-        assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
         let response = delete(&app, &seeded, id).await;
         assert_eq!(response.status, 204);
         let rows = definition_audit_rows(&app).await;

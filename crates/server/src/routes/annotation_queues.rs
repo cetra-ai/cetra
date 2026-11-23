@@ -452,8 +452,7 @@ async fn update_queue(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let outcome =
-                    store::update_tx(conn, project, id, version, changes, now).await?;
+                let outcome = store::update_tx(conn, project, id, version, changes, now).await?;
                 if let QueueUpdate::Updated(_) = &outcome {
                     let event = Event::new(AnnotationQueueAction::Updated)
                         .org(org)

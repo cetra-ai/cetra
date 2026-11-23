@@ -118,12 +118,9 @@ pub(crate) async fn record_tool(
     let Some(ctx) = audit else {
         return Ok(());
     };
-    let event = Event::new(McpAction::ToolCalled {
-        tool,
-        query_sha256,
-    })
-    .org(project.project.org_id)
-    .project(project.project.id);
+    let event = Event::new(McpAction::ToolCalled { tool, query_sha256 })
+        .org(project.project.org_id)
+        .project(project.project.id);
     audit::record_alone(&state.meta, ctx, event, state.clock.now_ns()).await?;
     Ok(())
 }

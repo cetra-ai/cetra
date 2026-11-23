@@ -1228,11 +1228,10 @@ struct Settle {
     pause: Pause,
 }
 
-/// What the write did: whether the job's row matched, the rules it paused, and a rule whose queued
+/// What the write did: whether the job's row matched, and a rule whose queued
 /// jobs are still to be skipped with `budget` (in chunks, after this write).
 struct Settled {
     matched: bool,
-    paused: Vec<(Uuid, &'static str)>,
     skip_rule: Option<Uuid>,
 }
 
@@ -1287,7 +1286,6 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
     if !eval_jobs::finish(conn, job, claims, finish, now).await? {
         return Ok(Settled {
             matched: false,
-            paused: Vec::new(),
             skip_rule: None,
         });
     }
@@ -1363,12 +1361,11 @@ async fn write_outcome(conn: &mut SqliteConnection, settle: Settle) -> Result<Se
             }
         }
     }
-    for (rule_id, reason) in &paused {
-        record_pause(conn, *rule_id, *reason, now).await?;
+    for (rule_id, reason) in paused {
+        record_pause(conn, rule_id, reason, now).await?;
     }
     Ok(Settled {
         matched: true,
-        paused,
         skip_rule,
     })
 }
@@ -2711,14 +2708,14 @@ mod job_tests {
 
         let row = run_once(&app, &seeded.project, job, Some(conn)).await;
         assert_eq!(row.error.as_deref(), Some("budget"));
-        let rows: Vec<(String, String, String, Option<String>, Option<String>)> =
-            sqlx::query_as(
-                "SELECT action, actor_kind, details, project_id, target_id FROM audit_events \
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(String, String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_kind, details, project_id, target_id FROM audit_events \
                  WHERE action = 'online_rule.paused'",
-            )
-            .fetch_all(app.state.meta.reader())
-            .await
-            .unwrap();
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1, "one pause, one record");
         assert_eq!(rows[0].1, "system");
         assert_eq!(rows[0].2, r#"{"reason":"budget"}"#);

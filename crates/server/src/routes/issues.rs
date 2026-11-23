@@ -331,8 +331,7 @@ async fn create_issue_source(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let written_row =
-                    insert_checked(conn, org, row, limit, &written, now).await?;
+                let written_row = insert_checked(conn, org, row, limit, &written, now).await?;
                 if let SourceWrite::Done(_) = &written_row {
                     let event = Event::new(IssueSourceAction::Created { kind })
                         .org(org)
@@ -448,8 +447,8 @@ async fn update_issue_source(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let written = update_checked(conn, project, org, stored, row, limit, channels, now)
-                    .await?;
+                let written =
+                    update_checked(conn, project, org, stored, row, limit, channels, now).await?;
                 if let SourceWrite::Done(_) = &written {
                     let event = Event::new(IssueSourceAction::Updated {
                         fields: changed_fields,

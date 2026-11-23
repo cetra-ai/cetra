@@ -565,11 +565,7 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
         })
         .await?;
     if sources > 0 {
-        tracing::info!(
-            sources,
-            reason = "budget period",
-            "issue sources resumed"
-        );
+        tracing::info!(sources, reason = "budget period", "issue sources resumed");
         state.issues_wake();
     }
     Ok(cleared.len())

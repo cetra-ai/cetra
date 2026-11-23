@@ -650,12 +650,12 @@ mod tests {
         assert_eq!(before_agent.as_deref(), Some("Agent/1.0"));
 
         // A failed login that names the user as its target (no actor) must lose its ip too.
-        let failed_ctx = crate::audit::Ctx {
-            actor: crate::audit::Actor::Anonymous,
+        let failed_ctx = audit::Ctx {
+            actor: audit::Actor::Anonymous,
             ip: Some("203.0.113.9".parse().unwrap()),
             user_agent: Some("Attacker/1.0".to_owned()),
         };
-        crate::audit::record_login_failed(
+        audit::record_login_failed(
             &app.state.meta,
             &failed_ctx,
             user.id,

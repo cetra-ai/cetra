@@ -511,9 +511,7 @@ async fn create_evaluator(
         })
         .await?;
     match outcome {
-        Outcome::Updated(row) => {
-            Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?)))
-        }
+        Outcome::Updated(row) => Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?))),
         Outcome::ConnectionMissing => Err(bad_request(vec![connection_missing()])),
         Outcome::Gone => Err(ApiError::NotFound),
         // A new evaluator has no rules yet; the arm exists for the shared enum.
@@ -2261,11 +2259,21 @@ mod tests {
         let actions: Vec<&str> = rows.iter().map(|row| row.0.as_str()).collect();
         assert_eq!(
             actions,
-            ["evaluator.created", "evaluator.updated", "evaluator.updated"]
+            [
+                "evaluator.created",
+                "evaluator.updated",
+                "evaluator.updated"
+            ]
         );
         // The host is recorded; the URL, the headers and the secrets are not.
-        assert_eq!(rows[0].2, r#"{"kind":"webhook","url_host":"hooks.example.com"}"#);
-        assert_eq!(rows[1].2, r#"{"fields":["name"],"url_host":"hooks.example.com"}"#);
+        assert_eq!(
+            rows[0].2,
+            r#"{"kind":"webhook","url_host":"hooks.example.com"}"#
+        );
+        assert_eq!(
+            rows[1].2,
+            r#"{"fields":["name"],"url_host":"hooks.example.com"}"#
+        );
         assert_eq!(
             rows[2].2,
             r#"{"fields":["config","webhook_secret"],"url_host":"hooks.example.net"}"#

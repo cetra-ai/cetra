@@ -269,9 +269,13 @@ async fn update_llm_connection(
         body.api_key.is_some().then_some("api_key"),
         body.base_url.is_some().then_some("base_url"),
         body.default_model.is_some().then_some("default_model"),
-        body.structured_output.is_some().then_some("structured_output"),
+        body.structured_output
+            .is_some()
+            .then_some("structured_output"),
         body.max_concurrency.is_some().then_some("max_concurrency"),
-        body.requests_per_minute.is_some().then_some("requests_per_minute"),
+        body.requests_per_minute
+            .is_some()
+            .then_some("requests_per_minute"),
         body.extra_headers.is_some().then_some("extra_headers"),
     ]
     .into_iter()
@@ -2466,9 +2470,15 @@ mod tests {
         .await
         .unwrap();
         let actions: Vec<&str> = rows.iter().map(|(action, _)| action.as_str()).collect();
-        assert_eq!(actions, ["llm_connection.created", "llm_connection.updated"]);
+        assert_eq!(
+            actions,
+            ["llm_connection.created", "llm_connection.updated"]
+        );
         for (_, details) in &rows {
-            assert!(!details.contains(first) && !details.contains(second), "{details}");
+            assert!(
+                !details.contains(first) && !details.contains(second),
+                "{details}"
+            );
         }
     }
 

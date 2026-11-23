@@ -5,10 +5,7 @@
 pub(crate) enum AlertRuleAction {
     #[serde(rename = "alert_rule.created")]
     #[serde(rename_all = "snake_case")]
-    Created {
-        metric: &'static str,
-        enabled: bool,
-    },
+    Created { metric: &'static str, enabled: bool },
     #[serde(rename = "alert_rule.updated")]
     #[serde(rename_all = "snake_case")]
     Updated { fields: Vec<&'static str> },

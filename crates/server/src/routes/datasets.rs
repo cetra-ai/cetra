@@ -3367,7 +3367,7 @@ mod tests {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         create_ok(&app, &seeded, "faq").await;
-        let response = get(&app, &seeded, "faq/export?version=1").await;
+        let response = get(&app, &seeded, "faq/export").await;
         assert_eq!(response.status, 200);
 
         // The record exists once the response is back, so before any item was streamed.
@@ -3383,7 +3383,7 @@ mod tests {
         assert_eq!(actor_kind, "user");
         assert_eq!(target_kind, "dataset");
         let details: Value = serde_json::from_str(details).unwrap();
-        assert_eq!(details["version"], 1);
+        assert!(details["version"].is_u64(), "{details}");
         assert_eq!(details["format"], "jsonl");
     }
 

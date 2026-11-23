@@ -310,14 +310,8 @@ async fn delete_model_price(
     principal::session_user(&principal)?;
     let org = access.project.org_id;
     let project = access.project.id;
-    let outcome = prices::write(
-        &state,
-        org,
-        Some(project),
-        PriceChange::Delete { id },
-        &ctx,
-    )
-    .await?;
+    let outcome =
+        prices::write(&state, org, Some(project), PriceChange::Delete { id }, &ctx).await?;
     match outcome {
         WriteOutcome::Done(None) => Ok(StatusCode::NO_CONTENT),
         other => Err(outcome_error(other)),
@@ -346,8 +340,7 @@ async fn create_org_model_price(
     let org = access.org.id;
     let row = validated(&body, PriceScope::Org)?;
     let id = Uuid::now_v7();
-    let outcome =
-        prices::write(&state, org, None, PriceChange::Insert { id, row }, &ctx).await?;
+    let outcome = prices::write(&state, org, None, PriceChange::Insert { id, row }, &ctx).await?;
     match outcome {
         WriteOutcome::Done(Some(record)) => {
             Ok((StatusCode::CREATED, error::Json(record_json(&record))))
@@ -367,8 +360,7 @@ async fn update_org_model_price(
     principal::session_user(&principal)?;
     let org = access.org.id;
     let row = validated(&body, PriceScope::Org)?;
-    let outcome =
-        prices::write(&state, org, None, PriceChange::Update { id, row }, &ctx).await?;
+    let outcome = prices::write(&state, org, None, PriceChange::Update { id, row }, &ctx).await?;
     match outcome {
         WriteOutcome::Done(Some(record)) => Ok(error::Json(record_json(&record))),
         other => Err(outcome_error(other)),
@@ -1093,7 +1085,11 @@ mod tests {
         let actions: Vec<&str> = rows.iter().map(|(action, _, _)| action.as_str()).collect();
         assert_eq!(
             actions,
-            ["model_price.created", "model_price.updated", "model_price.deleted"]
+            [
+                "model_price.created",
+                "model_price.updated",
+                "model_price.deleted"
+            ]
         );
         for (_, target, scope) in &rows {
             assert_eq!(target, &created_body);
@@ -1116,6 +1112,7 @@ mod tests {
         .await;
         assert_eq!(created.status, 201);
         let id = created_id(&created);
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
             "SELECT action, org_id, project_id, target_id FROM audit_events \
              WHERE action LIKE 'model_price.%'",

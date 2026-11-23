@@ -481,8 +481,7 @@ async fn update_dashboard(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let outcome =
-                    store::update(conn, project, id, version, changes, user, now).await?;
+                let outcome = store::update(conn, project, id, version, changes, user, now).await?;
                 if let UpdateOutcome::Updated(_) = &outcome {
                     let event = Event::new(DashboardAction::Updated)
                         .org(org)
