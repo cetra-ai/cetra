@@ -11,17 +11,25 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::catalog::{
-    ApiKeyAction, AuthAction, DeletionAction, InstanceAction, InviteAction, JoinVia, LoginMethod,
-    MemberAction, OrgAction, PatAction, ProjectAction, SignupMethod, SsoAction, UserAction,
+    AlertChannelAction, AlertRuleAction, AnnotationQueueAction, ApiKeyAction, AssistantAction,
+    AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction, InstanceAction,
+    InviteAction, IssueSourceAction, JoinVia, LlmConnectionAction, LoginMethod, McpAction,
+    MemberAction, ModelPriceAction, OnlineRuleAction, OrgAction, PatAction, ProjectAction,
+    PromptAction, ScoreDefinitionAction, SignupMethod, SqlAction, SsoAction, UserAction,
 };
 use super::{
     Action, Actor, Ctx, Event, LOGIN_FAILED_WINDOW_NS, TargetKind, Via, record, record_alone,
-    record_login_failed,
+    record_login_failed, scope_of_rule, sha256_hex,
 };
 use crate::auth::principal::{AuthUser, Principal};
 use crate::auth::roles::{KeyScope, KeyScopes};
 use crate::auth::secret::KeyKind;
 use crate::http::AppState;
+use crate::meta::connections::{ConnectionFields, insert_connection};
+use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
+use crate::meta::online_rules::{NewRule, RuleFields, insert_rule};
+use crate::meta::orgs::insert_org;
+use crate::meta::projects::insert_project;
 use crate::meta::{MetaDb, MetaError};
 use crate::test_support::{TestApp, capture_logs};
 
@@ -163,6 +171,130 @@ fn samples() -> Vec<Action> {
         .into(),
         DeletionAction::Applied { kind: "traces" }.into(),
         DeletionAction::Failed { kind: "traces" }.into(),
+        EvaluatorAction::Created {
+            kind: "webhook",
+            url_host: Some("hooks.example".to_owned()),
+        }
+        .into(),
+        EvaluatorAction::Updated {
+            fields: vec!["config"],
+            url_host: None,
+        }
+        .into(),
+        EvaluatorAction::Deleted.into(),
+        OnlineRuleAction::Created { evaluator_id: uuid }.into(),
+        OnlineRuleAction::Updated {
+            fields: vec!["sample_rate"],
+            budget_resumed: true,
+        }
+        .into(),
+        OnlineRuleAction::Deleted.into(),
+        OnlineRuleAction::Paused {
+            reason: "budget_exhausted",
+        }
+        .into(),
+        OnlineRuleAction::Resumed { reason: "manual" }.into(),
+        OnlineRuleAction::BackfillStarted {
+            backfill_id: uuid,
+            max_targets: 500,
+        }
+        .into(),
+        ScoreDefinitionAction::Created {
+            data_type: "numeric",
+        }
+        .into(),
+        ScoreDefinitionAction::Updated {
+            fields: vec!["description"],
+        }
+        .into(),
+        ScoreDefinitionAction::Archived.into(),
+        AlertRuleAction::Created {
+            metric: "error_rate",
+            enabled: true,
+        }
+        .into(),
+        AlertRuleAction::Updated {
+            fields: vec!["threshold"],
+        }
+        .into(),
+        AlertRuleAction::Deleted.into(),
+        AlertChannelAction::Created { kind: "webhook" }.into(),
+        AlertChannelAction::Updated {
+            fields: vec!["enabled"],
+        }
+        .into(),
+        AlertChannelAction::Deleted.into(),
+        LlmConnectionAction::Created { adapter: "openai" }.into(),
+        LlmConnectionAction::Updated {
+            fields: vec!["base_url"],
+            key_changed: true,
+        }
+        .into(),
+        LlmConnectionAction::Deleted.into(),
+        ModelPriceAction::Created.into(),
+        ModelPriceAction::Updated.into(),
+        ModelPriceAction::Deleted.into(),
+        AssistantAction::SettingChanged {
+            enabled: true,
+            connection_id: Some(uuid),
+        }
+        .into(),
+        PromptAction::Created.into(),
+        PromptAction::Updated {
+            fields: vec!["description"],
+        }
+        .into(),
+        PromptAction::Deleted.into(),
+        PromptAction::VersionCreated { version: 3 }.into(),
+        PromptAction::LabelSet {
+            label: "production".to_owned(),
+            version: 3,
+        }
+        .into(),
+        PromptAction::LabelRemoved {
+            label: "staging".to_owned(),
+        }
+        .into(),
+        PromptAction::ProtectedLabelsChanged { count: 2 }.into(),
+        DatasetAction::Created.into(),
+        DatasetAction::Updated {
+            fields: vec!["description"],
+        }
+        .into(),
+        DatasetAction::Deleted.into(),
+        DatasetAction::ExportStarted {
+            version: 2,
+            format: "jsonl",
+        }
+        .into(),
+        IssueSourceAction::Created { kind: "github" }.into(),
+        IssueSourceAction::Updated {
+            fields: vec!["repo"],
+        }
+        .into(),
+        IssueSourceAction::Deleted.into(),
+        DashboardAction::Created.into(),
+        DashboardAction::Updated.into(),
+        DashboardAction::Deleted.into(),
+        DashboardAction::OverviewSaved { created: true }.into(),
+        DashboardAction::OverviewReset.into(),
+        AnnotationQueueAction::Created.into(),
+        AnnotationQueueAction::Updated.into(),
+        AnnotationQueueAction::Deleted.into(),
+        SqlAction::Run {
+            query_sha256: "0".repeat(64),
+        }
+        .into(),
+        SqlAction::ExportStarted {
+            query_sha256: "0".repeat(64),
+            format: "csv",
+        }
+        .into(),
+        McpAction::ToolCalled {
+            tool: "query_sql",
+            query_sha256: Some("0".repeat(64)),
+        }
+        .into(),
     ]
 }
 
@@ -180,6 +312,21 @@ fn group(action: &Action) -> &'static str {
         Action::User(_) => "user",
         Action::Instance(_) => "instance",
         Action::Deletion(_) => "deletion",
+        Action::Evaluator(_) => "evaluator",
+        Action::OnlineRule(_) => "online_rule",
+        Action::ScoreDefinition(_) => "score_definition",
+        Action::AlertRule(_) => "alert_rule",
+        Action::AlertChannel(_) => "alert_channel",
+        Action::LlmConnection(_) => "llm_connection",
+        Action::ModelPrice(_) => "model_price",
+        Action::Assistant(_) => "assistant",
+        Action::Prompt(_) => "prompt",
+        Action::Dataset(_) => "dataset",
+        Action::IssueSource(_) => "issue_source",
+        Action::Dashboard(_) => "dashboard",
+        Action::AnnotationQueue(_) => "annotation_queue",
+        Action::Sql(_) => "sql",
+        Action::Mcp(_) => "mcp",
     }
 }
 
@@ -582,4 +729,119 @@ async fn the_tracing_line_names_the_action_and_no_ip() {
     assert!(logs.contains(&user.to_string()), "{logs}");
     assert!(!logs.contains("198.51.100.23"), "{logs}");
     assert!(!logs.contains("marker-agent"), "{logs}");
+}
+
+#[test]
+fn sha256_hex_matches_a_known_vector() {
+    assert_eq!(
+        sha256_hex("abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}
+
+fn connection_fields() -> ConnectionFields {
+    ConnectionFields {
+        name: "main".to_owned(),
+        adapter: "openai".to_owned(),
+        base_url: None,
+        secret_enc: vec![1],
+        api_key_hint: "WXYZ".to_owned(),
+        extra_headers_enc: None,
+        extra_header_names: Vec::new(),
+        default_model: None,
+        structured_output: "native".to_owned(),
+        max_concurrency: 4,
+        requests_per_minute: 300,
+    }
+}
+
+fn evaluator_fields(connection: Option<Uuid>) -> EvaluatorFields {
+    EvaluatorFields {
+        name: "relevance".to_owned(),
+        config: r#"{"model":"gpt-5-mini"}"#.to_owned(),
+        output_score: r#"{"name":"relevance","data_type":"numeric"}"#.to_owned(),
+        connection_id: connection,
+        secret_enc: None,
+        version: 1,
+    }
+}
+
+fn rule_fields() -> RuleFields {
+    RuleFields {
+        name: "relevance rule".to_owned(),
+        filter: None,
+        variable_mapping: r#"{"input":"trace.input"}"#.to_owned(),
+        sample_rate: 1.0,
+        budget_usd: None,
+        budget_period: None,
+        enabled: true,
+    }
+}
+
+/// An org, a project and an online rule on a judge evaluator. Returns the org, the project
+/// and the rule ids.
+async fn seed_rule(meta: &MetaDb) -> (OrgId, ProjectId, Uuid) {
+    meta.write(|conn| {
+        Box::pin(async move {
+            let org = insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1)
+                .await?
+                .id;
+            let project = insert_project(conn, org, "Support", "support", None, 1)
+                .await?
+                .id;
+            let connection = Uuid::now_v7();
+            insert_connection(conn, connection, org, connection_fields(), None, 1).await?;
+            let evaluator = Uuid::now_v7();
+            insert_evaluator(
+                conn,
+                evaluator,
+                project,
+                "llm_judge",
+                evaluator_fields(Some(connection)),
+                None,
+                1,
+            )
+            .await?;
+            let rule = Uuid::now_v7();
+            insert_rule(
+                conn,
+                NewRule {
+                    id: rule,
+                    project_id: project,
+                    evaluator_id: evaluator,
+                    target: "trace".to_owned(),
+                    created_by: None,
+                },
+                rule_fields(),
+                1,
+            )
+            .await?;
+            Ok((org, project, rule))
+        })
+    })
+    .await
+    .expect("seeded")
+}
+
+#[tokio::test]
+async fn scope_of_rule_finds_the_project_and_org() {
+    let (_dir, meta) = crate::meta::test_db().await;
+    let (org, project, rule) = seed_rule(&meta).await;
+    let scope = meta
+        .write(move |conn| Box::pin(async move { scope_of_rule(conn, rule).await }))
+        .await
+        .expect("read");
+    assert_eq!(scope, Some((org, project)));
+}
+
+#[tokio::test]
+async fn scope_of_rule_of_an_unknown_rule_is_none() {
+    let (_dir, meta) = crate::meta::test_db().await;
+    seed_rule(&meta).await;
+    let unknown = Uuid::now_v7();
+    let scope = meta
+        .write(move |conn| Box::pin(async move { scope_of_rule(conn, unknown).await }))
+        .await
+        .expect("read");
+    assert_eq!(scope, None);
 }

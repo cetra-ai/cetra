@@ -3,8 +3,6 @@
 //! Each action of the catalog writes one row to `audit_events` in the transaction of its
 //! change, or in a transaction of its own when it changes nothing in `meta.db`. [`record`]
 //! is the only writer, and it also emits the `audit` tracing line.
-// A2 to A5 add the callers of the catalog and of `Ctx`; remove this allow once each item has one.
-#![allow(dead_code)]
 
 pub(crate) mod catalog;
 pub(crate) mod retention;
@@ -12,6 +10,8 @@ pub(crate) mod retention;
 mod tests;
 
 pub(crate) use catalog::Action;
+// The lowercase hex SHA-256 of a text, as `query_sha256` and the other hashes in details.
+pub(crate) use crate::auth::secret::hash_token as sha256_hex;
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -251,10 +251,24 @@ pub(crate) enum TargetKind {
     SsoDomain,
     Deletion,
     License,
+    Evaluator,
+    OnlineRule,
+    ScoreDefinition,
+    AlertRule,
+    AlertChannel,
+    LlmConnection,
+    ModelPrice,
+    Prompt,
+    Dataset,
+    IssueSource,
+    Dashboard,
+    AnnotationQueue,
 }
 
 impl TargetKind {
     /// user | invite | api_key | pat | project | org | sso_provider | sso_domain | deletion | license
+    /// | evaluator | online_rule | score_definition | alert_rule | alert_channel | llm_connection
+    /// | model_price | prompt | dataset | issue_source | dashboard | annotation_queue
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -267,6 +281,18 @@ impl TargetKind {
             Self::SsoDomain => "sso_domain",
             Self::Deletion => "deletion",
             Self::License => "license",
+            Self::Evaluator => "evaluator",
+            Self::OnlineRule => "online_rule",
+            Self::ScoreDefinition => "score_definition",
+            Self::AlertRule => "alert_rule",
+            Self::AlertChannel => "alert_channel",
+            Self::LlmConnection => "llm_connection",
+            Self::ModelPrice => "model_price",
+            Self::Prompt => "prompt",
+            Self::Dataset => "dataset",
+            Self::IssueSource => "issue_source",
+            Self::Dashboard => "dashboard",
+            Self::AnnotationQueue => "annotation_queue",
         }
     }
 }
@@ -314,6 +340,33 @@ impl Event {
         self.outcome = Outcome::Failure;
         self
     }
+}
+
+/// The org and project of an online rule, for worker records. `None` when the rule does not exist.
+pub(crate) async fn scope_of_rule(
+    conn: &mut sqlx::SqliteConnection,
+    rule: uuid::Uuid,
+) -> Result<Option<(OrgId, ProjectId)>, MetaError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT p.org_id, p.id FROM online_rules r JOIN projects p ON p.id = r.project_id \
+         WHERE r.id = ?",
+    )
+    .bind(rule.to_string())
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(MetaError::from)?;
+    let Some((org, project)) = row else {
+        return Ok(None);
+    };
+    let org = uuid::Uuid::parse_str(&org).map_err(|_| MetaError::Corrupt {
+        table: "projects",
+        column: "org_id",
+    })?;
+    let project = uuid::Uuid::parse_str(&project).map_err(|_| MetaError::Corrupt {
+        table: "projects",
+        column: "id",
+    })?;
+    Ok(Some((OrgId::from_uuid(org), ProjectId::from_uuid(project))))
 }
 
 fn corrupt_details() -> MetaError {
