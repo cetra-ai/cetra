@@ -49,7 +49,7 @@ use crate::clock::Clock;
 use crate::config::{
     AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
     InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, SelfMonitoringConfig,
-    ServerConfig,
+    ServerConfig, TelemetryConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -1303,6 +1303,11 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
         self_monitoring: SelfMonitoringConfig::default(),
+        // Loopback discard port: a test build without debug_assertions can never reach the relay.
+        telemetry: TelemetryConfig {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            ..TelemetryConfig::default()
+        },
     }
 }
 
@@ -1855,6 +1860,11 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
         self_monitoring: SelfMonitoringConfig::default(),
+        // Loopback discard port: a test build without debug_assertions can never reach the relay.
+        telemetry: TelemetryConfig {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            ..TelemetryConfig::default()
+        },
     }
 }
 

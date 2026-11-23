@@ -160,6 +160,16 @@ pub(crate) fn decide(inputs: &Inputs) -> Decision {
     Decision { heartbeat }
 }
 
+/// The decision for this process: [`decide`] over `config` and this build.
+pub(crate) fn for_config(config: &crate::config::ServerConfig) -> Decision {
+    decide(&Inputs {
+        env: config.telemetry.env,
+        restore_mode: config.restore_mode,
+        debug_build: cfg!(debug_assertions),
+        heartbeat: config.telemetry.heartbeat,
+    })
+}
+
 /// Rules 1–3, which turn off everything that goes to us.
 fn shared_off(inputs: &Inputs) -> Option<OffReason> {
     if inputs.env.forced_off {
@@ -435,6 +445,27 @@ mod tests {
         assert_eq!(OffReason::DebugBuild.as_str(), "debug_build");
         assert_eq!(OffReason::Ci.as_str(), "ci");
         assert_eq!(OffReason::Config.as_str(), "config");
+    }
+
+    #[test]
+    fn for_config_reads_the_config() {
+        let dir = std::path::Path::new("unused-by-config");
+        let mut config = crate::test_support::config(dir);
+        config.restore_mode = true;
+        assert_eq!(
+            for_config(&config).heartbeat,
+            Switch::Off(OffReason::RestoreMode)
+        );
+        config.restore_mode = false;
+        assert_eq!(
+            for_config(&config).heartbeat,
+            Switch::Off(OffReason::DebugBuild)
+        );
+        config.telemetry.env.forced_off = true;
+        assert_eq!(
+            for_config(&config).heartbeat,
+            Switch::Off(OffReason::CetraTelemetry)
+        );
     }
 
     #[test]

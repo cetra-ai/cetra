@@ -398,6 +398,49 @@ impl Default for LogConfig {
     }
 }
 
+/// The default `telemetry.endpoint`: the relay track Q runs (D-TL-10).
+const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.cetra.sh";
+
+/// The rule a bad `CETRA_TELEMETRY` breaks (D-TL-11). Never the value.
+const TELEMETRY_VALUES: &str =
+    "accepted values are off, false and 0 (any case); unset or empty leaves the config in charge";
+
+/// `[telemetry]`: what cetra sends to us (D-TL-1, D-TL-8). The switchboard can turn it off
+/// whatever these say (D-TL-11).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryConfig {
+    /// The daily anonymous heartbeat. Default true.
+    #[serde(default = "default_heartbeat")]
+    pub heartbeat: bool,
+    /// Base URL of the relay; the heartbeat goes to `<endpoint>/v1/heartbeat`. `https`, or
+    /// `http` to a loopback IP. Stored without a trailing slash.
+    #[serde(default = "default_telemetry_endpoint")]
+    pub endpoint: String,
+    /// `CETRA_TELEMETRY`, `DO_NOT_TRACK` and the CI variables, captured by the loader from
+    /// the environment it reads. Not a key.
+    #[serde(skip)]
+    pub(crate) env: crate::observability::switchboard::TelemetryEnv,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            heartbeat: default_heartbeat(),
+            endpoint: default_telemetry_endpoint(),
+            env: crate::observability::switchboard::TelemetryEnv::default(),
+        }
+    }
+}
+
+fn default_heartbeat() -> bool {
+    true
+}
+
+fn default_telemetry_endpoint() -> String {
+    DEFAULT_TELEMETRY_ENDPOINT.to_owned()
+}
+
 /// `self_monitoring.otlp_endpoint` (track TL, D-TL-1): an `http` or `https` base URL without
 /// user info, query or fragment. Its path is kept and `/v1/logs` is appended to it.
 #[derive(Clone, PartialEq, Eq)]
@@ -742,8 +785,8 @@ impl Default for DemoConfig {
 
 /// Everything `cetra serve` reads from the environment and `cetra.toml`.
 ///
-/// Keys that spec 12 lists for later work (telemetry, compaction, gc, deletion,
-/// anchor) are not fields. Setting one is an unknown-key error.
+/// Keys that spec 12 lists for later work (compaction, gc, deletion, anchor) are not
+/// fields. Setting one is an unknown-key error.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -837,6 +880,9 @@ pub struct ServerConfig {
     /// `[self_monitoring]`: export of cetra's own logs over OTLP/HTTP (track TL, D-TL-1).
     #[serde(default)]
     pub self_monitoring: SelfMonitoringConfig,
+    /// `[telemetry]`: the heartbeat to us (D-TL-8).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 impl ServerConfig {
@@ -968,6 +1014,13 @@ pub(crate) fn load_from(
     toml: Option<&str>,
     env: &[(&str, &str)],
 ) -> Result<ServerConfig, ConfigError> {
+    let telemetry_env =
+        crate::observability::switchboard::TelemetryEnv::from_pairs(env).map_err(|_| {
+            ConfigError::Provider {
+                key: "CETRA_TELEMETRY".to_owned(),
+                reason: TELEMETRY_VALUES,
+            }
+        })?;
     let mut figment = Figment::new();
     if let Some(toml) = toml {
         figment = figment.merge(Toml::string(toml));
@@ -987,6 +1040,7 @@ pub(crate) fn load_from(
     figment = figment.merge(Serialized::default("storage.data_dir", data_dir));
     let mut config: ServerConfig = figment.extract().map_err(map_figment)?;
     apply_oidc_env(&mut config.auth, env)?;
+    config.telemetry.env = telemetry_env;
     validate(&mut config)?;
     Ok(config)
 }
@@ -1132,6 +1186,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     validate_entitlements(&mut config.entitlements)?;
     validate_orgs(&config.orgs)?;
     validate_demo(&config.demo)?;
+    validate_telemetry(&mut config.telemetry)?;
     if config
         .license_key
         .as_ref()
@@ -1735,6 +1790,36 @@ fn validate_demo(demo: &DemoConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
+/// `telemetry.endpoint` (D-TL-10): `https`, or `http` to a loopback IP address; no user info,
+/// query or fragment. Stored without a trailing slash. Reasons are static.
+fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError> {
+    let invalid = |reason| ConfigError::Invalid {
+        key: "telemetry.endpoint",
+        reason,
+    };
+    let url = url::Url::parse(telemetry.endpoint.trim())
+        .map_err(|_| invalid("must be an absolute http or https URL"))?;
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    match url.scheme() {
+        "https" => {}
+        "http" if loopback => {}
+        _ => return Err(invalid("must be https, or http to a loopback address")),
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid("must not contain user info, a query or a fragment"));
+    }
+    telemetry.endpoint = url.as_str().trim_end_matches('/').to_owned();
+    Ok(())
+}
+
 fn validate_orgs(orgs: &OrgsConfig) -> Result<(), ConfigError> {
     let Some(url) = orgs.create_url.as_deref() else {
         return Ok(());
@@ -2143,11 +2228,17 @@ fn split_key(name: &str) -> Option<String> {
     )
 }
 
-/// `CETRA_CONFIG` and the CLI's own variables (D-H-12) are not config keys.
+/// `CETRA_CONFIG`, `CETRA_TELEMETRY` (read by [`load_from`] before the sources, D-TL-11) and the CLI's own variables (D-H-12) are not config keys.
 fn is_filtered(name: &str) -> bool {
-    ["CETRA_CONFIG", "CETRA_URL", "CETRA_TOKEN", "CETRA_PROJECT"]
-        .iter()
-        .any(|filtered| name.eq_ignore_ascii_case(filtered))
+    [
+        "CETRA_CONFIG",
+        "CETRA_TELEMETRY",
+        "CETRA_URL",
+        "CETRA_TOKEN",
+        "CETRA_PROJECT",
+    ]
+    .iter()
+    .any(|filtered| name.eq_ignore_ascii_case(filtered))
         || alias_key(name).is_some()
 }
 
@@ -2226,11 +2317,12 @@ mod tests {
 
     use super::{
         ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
-        MediaConfig, OrgsConfig, Secret, SelfMonitoringConfig, ServerConfig, SmtpUrl, Tls,
-        issuer_problem, load_from, oidc_env_name, parse_otlp_endpoint, parse_otlp_headers,
-        parse_resource,
+        MediaConfig, OrgsConfig, Secret, SelfMonitoringConfig, ServerConfig, SmtpUrl,
+        TELEMETRY_VALUES, TelemetryConfig, Tls, issuer_problem, load_from, oidc_env_name,
+        parse_otlp_endpoint, parse_otlp_headers, parse_resource,
     };
     use crate::api::account::SignupPolicy;
+    use crate::observability::switchboard::TelemetryEnv;
 
     fn socket(raw: &str) -> SocketAddr {
         raw.parse().unwrap()
@@ -2337,6 +2429,132 @@ mod tests {
         assert_eq!(config.auth.signup, SignupPolicy::Disabled);
         assert_eq!(config.log.level, "debug");
         assert_eq!(config.log.format, Some(LogFormat::Json));
+    }
+
+    #[test]
+    fn telemetry_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        assert!(config.telemetry.heartbeat);
+        assert_eq!(config.telemetry.endpoint, "https://telemetry.cetra.sh");
+        assert_eq!(config.telemetry.env, TelemetryEnv::default());
+    }
+
+    #[test]
+    fn cetra_telemetry_off_loads_and_keeps_the_table() {
+        let config = load_from(None, &[("CETRA_TELEMETRY", "off")]).unwrap();
+        assert!(config.telemetry.env.forced_off);
+        assert!(config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn cetra_telemetry_is_not_mapped_to_the_table() {
+        let env = [
+            ("CETRA_TELEMETRY", "OFF"),
+            ("CETRA_TELEMETRY__HEARTBEAT", "false"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.env.forced_off);
+        assert!(!config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn a_bad_cetra_telemetry_is_a_load_error() {
+        for value in ["on", "1", "true"] {
+            let result = load_from(None, &[("CETRA_TELEMETRY", value)]);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Provider { key, reason })
+                        if key == "CETRA_TELEMETRY" && *reason == TELEMETRY_VALUES
+                ),
+                "value {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cetra_telemetry_error_never_quotes_the_value() {
+        let error = load_from(None, &[("CETRA_TELEMETRY", "planted-value-7f3")])
+            .expect_err("an invalid value is an error");
+        assert!(!error.to_string().contains("planted-value-7f3"));
+    }
+
+    #[test]
+    fn an_empty_cetra_telemetry_loads() {
+        let config = load_from(None, &[("CETRA_TELEMETRY", "")]).unwrap();
+        assert!(!config.telemetry.env.forced_off);
+    }
+
+    #[test]
+    fn do_not_track_and_ci_reach_the_config() {
+        let env = [("DO_NOT_TRACK", "1"), ("GITHUB_ACTIONS", "true")];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.env.do_not_track);
+        assert!(config.telemetry.env.ci);
+    }
+
+    #[test]
+    fn telemetry_heartbeat_from_toml() {
+        let config = load_from(Some("[telemetry]\nheartbeat = false\n"), &[]).unwrap();
+        assert!(!config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn telemetry_endpoint_accepts() {
+        let cases = [
+            (
+                "https://relay.example.com/cetra/",
+                "https://relay.example.com/cetra",
+            ),
+            ("http://127.0.0.1:9", "http://127.0.0.1:9"),
+            ("http://[::1]:8080/", "http://[::1]:8080"),
+        ];
+        for (raw, stored) in cases {
+            let toml = format!("[telemetry]\nendpoint = \"{raw}\"\n");
+            let config = load_from(Some(&toml), &[]).unwrap();
+            assert_eq!(config.telemetry.endpoint, stored, "{raw}");
+            let env = [("CETRA_TELEMETRY__ENDPOINT", raw)];
+            let config = load_from(None, &env).unwrap();
+            assert_eq!(config.telemetry.endpoint, stored, "{raw}");
+        }
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.telemetry, TelemetryConfig::default());
+    }
+
+    #[test]
+    fn telemetry_endpoint_refuses() {
+        let absolute = "must be an absolute http or https URL";
+        let scheme = "must be https, or http to a loopback address";
+        let user_info = "must not contain user info, a query or a fragment";
+        let cases = [
+            ("", absolute),
+            ("not a url", absolute),
+            ("http://localhost:8080", scheme),
+            ("http://relay.example.com", scheme),
+            ("ftp://relay.example.com", scheme),
+            ("http://10.0.0.1", scheme),
+            ("https://user:pw@relay.example.com", user_info),
+            ("https://relay.example.com/?a=1", user_info),
+            ("https://relay.example.com/#f", user_info),
+        ];
+        for (raw, reason) in cases {
+            let toml = format!("[telemetry]\nendpoint = \"{raw}\"\n");
+            let result = load_from(Some(&toml), &[]);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "telemetry.endpoint", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn telemetry_env_is_not_a_key() {
+        let result = load_from(Some("[telemetry]\nenv = 1\n"), &[]);
+        assert!(matches!(result, Err(ConfigError::Figment(_))));
     }
 
     #[test]

@@ -214,3 +214,12 @@ Export cetra's own logs to an OTLP/HTTP endpoint you choose (Sentry, Grafana Clo
 | `self_monitoring.logs` | | boolean | `true` | Export log records. |
 | `self_monitoring.level` | | string | `"warn"` | A log filter for the exported events, like `log.level`. `rmcp` is capped at `warn`. |
 | `self_monitoring.resource` | | string | `""` | Extra resource attributes, `key=value` pairs separated by commas, as in `OTEL_RESOURCE_ATTRIBUTES`. Values may be percent-encoded (`%2C` for a comma). At most 32 attributes and 8192 bytes. They are added after cetra's own (`service.name`, `service.version`, `service.instance.id`, `host.arch`, `os.type`) and replace one of the same key. |
+
+## `[telemetry]`
+
+What cetra sends to us: an anonymous heartbeat once a day. [Telemetry](/docs/self-hosting/telemetry/) lists every field. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1`, restore mode, CI environments and debug builds turn it off whatever these settings say. `CETRA_TELEMETRY` is not the environment form of a setting: its only accepted values are `off`, `false` and `0`, and any other value stops cetra at startup.
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `telemetry.heartbeat` | | boolean | `true` | Send the anonymous daily heartbeat. |
+| `telemetry.endpoint` | | URL | `"https://telemetry.cetra.sh"` | Where the heartbeat goes, as `<endpoint>/v1/heartbeat`. `https`, or `http` to a loopback IP address such as `127.0.0.1` (not the name `localhost`). No user info, query or fragment. For a relay of your own. |

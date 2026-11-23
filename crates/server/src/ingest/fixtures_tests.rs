@@ -37,7 +37,7 @@ use crate::clock::Clock;
 use crate::config::{
     AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
     InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig,
-    SelfMonitoringConfig, ServerConfig,
+    SelfMonitoringConfig, ServerConfig, TelemetryConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
 use crate::meta::MetaDb;
@@ -477,6 +477,11 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         init: InitConfig::default(),
         log: LogConfig::default(),
         self_monitoring: SelfMonitoringConfig::default(),
+        // Loopback discard port: a test build without debug_assertions can never reach the relay.
+        telemetry: TelemetryConfig {
+            endpoint: "http://127.0.0.1:9".to_owned(),
+            ..TelemetryConfig::default()
+        },
     };
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",
