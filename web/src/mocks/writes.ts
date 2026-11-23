@@ -44,8 +44,8 @@ import modelPriceDocument from "../../../fixtures/api/static/model-price.json";
 import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
-import orgAuditStreamDocument from "../../../fixtures/api/static/org-audit-stream.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
+import orgAuditStreamDocument from "../../../fixtures/api/static/org-audit-stream.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
 import orgScimDocument from "../../../fixtures/api/static/org-scim.json";
@@ -904,8 +904,7 @@ const RESPONSES: Record<string, Respond> = {
   put_admin_audit_stream: ({ body }) =>
     HttpResponse.json({
       ...adminAuditStreamDocument,
-      enabled:
-        typeof body.enabled === "boolean" ? body.enabled : adminAuditStreamDocument.enabled,
+      enabled: typeof body.enabled === "boolean" ? body.enabled : adminAuditStreamDocument.enabled,
     }),
   delete_admin_audit_stream: () => noContent(),
   rotate_admin_audit_stream_secret: () =>
