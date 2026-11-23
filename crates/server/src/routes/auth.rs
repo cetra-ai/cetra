@@ -125,6 +125,7 @@ async fn config(State(state): State<AppState>) -> Result<error::Json<AuthConfig>
         org_create_allowed: state.config.orgs.user_create,
         org_create_url: state.config.orgs.create_url.clone(),
         sso_discovery: state.org_sso.discovery_enabled(),
+        analytics: state.analytics.ui_events_wanted(),
     }))
 }
 
@@ -2903,5 +2904,59 @@ mod tests {
         let refused = login_as(&app, "ada@acme.test", PASSWORD).await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         assert_eq!(refused.problem().code, ProblemCode::SsoRequired);
+    }
+
+    fn posthog(config: &mut crate::config::ServerConfig) {
+        config.analytics.posthog_host = Some("http://127.0.0.1:9".to_owned());
+        config.analytics.posthog_key = Some(Secret::new("phc_test".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn auth_config_says_analytics_is_off_in_a_test_build() {
+        let app = TestApp::new().await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(!config.analytics);
+    }
+
+    #[tokio::test]
+    async fn auth_config_says_analytics_is_on_with_posthog() {
+        let app = TestApp::with_config(posthog).await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(config.analytics);
+    }
+
+    #[tokio::test]
+    async fn auth_config_says_analytics_is_on_while_counting() {
+        let app = TestApp::new().await;
+        app.state.analytics.set_counting(true);
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(config.analytics);
+    }
+
+    #[tokio::test]
+    async fn auth_config_says_analytics_is_off_in_restore_mode() {
+        let app = TestApp::with_config(|config| {
+            posthog(config);
+            config.restore_mode = true;
+        })
+        .await;
+        let config: AuthConfig = app
+            .request(Method::GET, "/api/auth/config")
+            .send()
+            .await
+            .json();
+        assert!(!config.analytics);
     }
 }
