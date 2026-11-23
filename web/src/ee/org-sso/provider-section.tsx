@@ -6,10 +6,12 @@ import { fieldErrors, problemMessage } from "@/api/problem";
 import type { Schema } from "@/api/types";
 import { DangerZone } from "@/components/deletions/danger-zone";
 import { TextField } from "@/components/form/text-field";
+import { LockedFeature } from "@/components/plan/locked-feature";
 import { ReadOnlyCodeField } from "@/components/settings/read-only-code-field";
 import { SettingsCard, SettingsFormCard } from "@/components/settings/settings-card";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Label } from "@/components/ui/label";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -18,6 +20,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { storeOrgSso } from "@/ee/org-sso/cache";
+import { SamlProviderForm } from "@/ee/org-sso/saml-provider-form";
+import { SamlSpCard } from "@/ee/org-sso/saml-sp-card";
 
 const JIT_ROLES: Schema<"JitRole">[] = ["viewer", "member"];
 const JIT_ROLE_LABELS: Record<Schema<"JitRole">, string> = {
@@ -29,10 +33,68 @@ const LOCKED_REASON = "Needs the Teams add-on or an enterprise licence";
 type Field = "issuer" | "clientId" | "clientSecret";
 
 /**
- * The org's identity provider: its settings and the callback URL (D-P-52). Removal is in
- * `ProviderRemoval`. The parent remounts this form when the provider is created or removed.
+ * The org's identity provider: its protocol, its settings and the values to register at the
+ * provider (D-P-52, D-SA-12). Removal is in `ProviderRemoval`. The parent remounts this section
+ * when the provider is created, removed or switched to another protocol.
  */
 export function ProviderSection({
+  org,
+  sso,
+  locked,
+  samlLocked,
+  upgradeUrl,
+}: {
+  org: string;
+  sso: Schema<"OrgSso">;
+  /** `org_sso` is missing: the OpenID Connect form is locked. */
+  locked: boolean;
+  /** `org_sso` or `saml` is missing: the SAML form is locked. */
+  samlLocked: boolean;
+  upgradeUrl: string | undefined;
+}) {
+  const provider = sso.provider;
+  const [protocol, setProtocol] = useState<Schema<"SsoProtocol">>(provider?.protocol ?? "oidc");
+  const switching = provider !== undefined && protocol !== provider.protocol;
+  return (
+    <>
+      <RadioGroup
+        aria-label="Protocol"
+        value={protocol}
+        onValueChange={(value) => {
+          setProtocol(value === "saml" ? "saml" : "oidc");
+        }}
+      >
+        <div className="flex items-center gap-2">
+          <RadioGroupItem value="oidc" id="sso-protocol-oidc" />
+          <Label htmlFor="sso-protocol-oidc">OpenID Connect</Label>
+        </div>
+        <div className="flex items-center gap-2">
+          <RadioGroupItem value="saml" id="sso-protocol-saml" />
+          <Label htmlFor="sso-protocol-saml">SAML 2.0</Label>
+        </div>
+      </RadioGroup>
+      {provider && switching ? (
+        <p role="note" className="text-body text-muted-foreground">
+          {provider.enforced
+            ? "Turn off enforcement before switching the protocol."
+            : "Saving replaces the current provider. Members link again at their next sign-in, and the provider must be tested and enabled again."}
+        </p>
+      ) : null}
+      {protocol === "saml" ? (
+        <>
+          {samlLocked && !locked ? <LockedFeature feature="saml" upgradeUrl={upgradeUrl} /> : null}
+          <SamlProviderForm org={org} sso={sso} locked={samlLocked} />
+          <SamlSpCard sp={sso.saml_sp} />
+        </>
+      ) : (
+        <OidcSection org={org} sso={sso} locked={locked} />
+      )}
+    </>
+  );
+}
+
+/** The OpenID Connect form and the callback URL (D-P-52). */
+function OidcSection({
   org,
   sso,
   locked,
@@ -53,11 +115,12 @@ export function ProviderSection({
   const [touched, setTouched] = useState<Partial<Record<Field, true>>>({});
   const save = $api.useMutation("put", "/api/v1/orgs/{org}/sso/provider");
 
-  // Required fields: the issuer and client id always, the secret only when creating.
+  // Required fields: the issuer and client id always, the secret unless the saved provider is
+  // OpenID Connect (a new provider, or one switched from SAML, needs a secret).
   const required: Partial<Record<Field, string>> = {
     ...(issuer.trim() === "" ? { issuer: "Enter the issuer URL." } : {}),
     ...(clientId.trim() === "" ? { clientId: "Enter a client ID." } : {}),
-    ...(provider === undefined && clientSecret === ""
+    ...(provider?.protocol !== "oidc" && clientSecret === ""
       ? { clientSecret: "Enter a client secret." }
       : {}),
   };
@@ -164,7 +227,7 @@ export function ProviderSection({
           value={clientSecret}
           disabled={locked || save.isPending}
           error={fields.client_secret ?? shownRequired("clientSecret")}
-          placeholder={provider ? "Stored; leave blank to keep it" : undefined}
+          placeholder={provider?.protocol === "oidc" ? "Stored; leave blank to keep it" : undefined}
           onChange={(value) => {
             setClientSecret(value);
             setTouched((current) => ({ ...current, clientSecret: true }));
@@ -217,8 +280,8 @@ export function ProviderSection({
   );
 }
 
-/** Removes the org's identity provider, after the issuer is typed (D-P-52). */
-export function ProviderRemoval({ org, issuer }: { org: string; issuer: string }) {
+/** Removes the org's identity provider, after its confirm text is typed (D-P-52). */
+export function ProviderRemoval({ org, confirmText }: { org: string; confirmText: string }) {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const remove = $api.useMutation("delete", "/api/v1/orgs/{org}/sso/provider");
@@ -241,8 +304,8 @@ export function ProviderRemoval({ org, issuer }: { org: string; issuer: string }
         onOpenChange={setOpen}
         title="Remove the identity provider?"
         description="Sign-in through this provider stops and the identities linked to it are deleted. Turn enforcement off first."
-        expected={issuer}
-        inputLabel={`Type "${issuer}" to confirm`}
+        expected={confirmText}
+        inputLabel={`Type "${confirmText}" to confirm`}
         confirmLabel="Remove provider"
         pending={remove.isPending}
         error={removeError}
