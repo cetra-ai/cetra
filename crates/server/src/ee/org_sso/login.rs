@@ -145,9 +145,19 @@ async fn authorize(
     let redirect_uri = state.config.public_url.join("/api/auth/callback/sso");
     let csrf = new_opaque_token().map_err(internal)?.plaintext;
     let nonce = new_opaque_token().map_err(internal)?.plaintext;
-    // SA2.5 starts SAML logins here; until then a SAML provider has no OIDC redirect.
-    let ProviderKind::Oidc(oidc) = &provider.kind else {
-        return unavailable();
+    let oidc = match &provider.kind {
+        ProviderKind::Oidc(oidc) => oidc,
+        ProviderKind::Saml(saml) => {
+            return crate::ee::org_sso::saml::begin(
+                &state,
+                route.org_id,
+                saml,
+                ip,
+                test_owner,
+                state_cookie::safe_redirect(query.redirect.as_deref()),
+            )
+            .await;
+        }
     };
     let (location, verifier) = match oidc
         .authorization_url(&redirect_uri, &csrf, &nonce, now)
