@@ -89,7 +89,7 @@ fn dropped_resource_key(key: &str) -> bool {
         "container.id",
         "service.instance.id",
     ];
-    EXACT.contains(&key) || key.starts_with("host.image.")
+    EXACT.contains(&key) || key.starts_with("host.image.") || key.starts_with("telemetry.distro.")
 }
 
 fn rewrite_endpoints(request: &mut ExportTraceServiceRequest, ctx: &ScrubContext) {
@@ -586,6 +586,8 @@ mod tests {
                         string_attr("container.id", "abc"),
                         string_attr("service.instance.id", "inst"),
                         string_attr("telemetry.sdk.language", "python"),
+                        string_attr("telemetry.distro.name", "cetra"),
+                        string_attr("telemetry.distro.version", "0.1.0rc2"),
                         string_attr("custom.flag", "yes"),
                     ],
                     ..Resource::default()

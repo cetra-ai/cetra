@@ -184,6 +184,10 @@ pub struct Turn {
     pub api: Api,
     /// Model id sent back on the response.
     pub model: String,
+    /// The real host the program calls for this turn (D-IN-3); the mock checks the
+    /// request's `Host` header against it. Absent: no check.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Assistant message. Required for chat turns and absent for embeddings.
     #[serde(default)]
     pub message: Option<Message>,
@@ -433,6 +437,11 @@ impl Scenario {
             if turn.chunks < 1 {
                 return Err(format!("turns[{index}].chunks must be at least 1"));
             }
+            if let Some(host) = &turn.host
+                && !is_dns_name(host)
+            {
+                return Err(format!("turns[{index}].host must be a lowercase DNS name"));
+            }
             if turn.api.is_embedding() {
                 check_embedding(index, turn)?;
             } else {
@@ -558,6 +567,20 @@ fn check_usage(index: usize, turn: &Turn) -> Result<(), String> {
 }
 
 /// A present string counts when it is non-empty. `null` and `""` do not.
+/// A lowercase DNS name: 1 to 253 bytes of `a-z`, `0-9`, `-` and `.`, with at least one `.`,
+/// and neither end is `.` or `-`.
+fn is_dns_name(host: &str) -> bool {
+    let bytes = host.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 253
+        && bytes.contains(&b'.')
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+        && !matches!(bytes.first(), Some(b'.' | b'-'))
+        && !matches!(bytes.last(), Some(b'.' | b'-'))
+}
+
 fn present_text(text: Option<&str>) -> bool {
     text.is_some_and(|text| !text.is_empty())
 }
@@ -749,9 +772,37 @@ mod tests {
     }
 
     #[test]
+    fn turn_host_must_be_a_lowercase_dns_name() {
+        for host in ["openrouter.ai", "api.novita.ai", "a-b.c1.io"] {
+            let mut value = chat();
+            value["turns"][0]["host"] = json!(host);
+            assert!(load_value(value).is_ok(), "{host} should be accepted");
+        }
+        for host in [
+            "OpenRouter.ai",
+            "openrouter.ai:443",
+            "https://openrouter.ai",
+            "localhost",
+            ".openrouter.ai",
+            "openrouter.ai.",
+            "-openrouter.ai",
+            "",
+        ] {
+            let mut value = chat();
+            value["turns"][0]["host"] = json!(host);
+            assert_reason(value, "turns[0].host must be a lowercase DNS name");
+        }
+        let long = format!("{}.com", "a".repeat(250));
+        let mut value = chat();
+        value["turns"][0]["host"] = json!(long);
+        assert_reason(value, "turns[0].host must be a lowercase DNS name");
+    }
+
+    #[test]
     fn defaults_apply() {
         let scenario = load_value(embedding("openai.embeddings")).expect("defaults");
         let turn = &scenario.turns[0];
+        assert!(turn.host.is_none());
         assert_eq!(turn.ttft_ms, 30);
         assert_eq!(turn.chunk_delay_ms, 5);
         assert_eq!(turn.chunks, 3);

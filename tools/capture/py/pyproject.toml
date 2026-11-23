@@ -32,6 +32,11 @@ dependencies = [
   # 2.14.0 (2026-11-07) is the first release that accepts the pinned 1.45.2.
   "google-adk==2.14.0",
   "openinference-instrumentation-google-adk==1.1.0",
+  # The OpenAI client's HTTP layer (openai 3.x is built on httpx2). The harness's real-host
+  # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
+  "httpx2==2.16.0",
+  # The SDK under test, from this repository (editable), so the harness uses its runtime.
+  "cetra-sdk",
 ]
 
 [dependency-groups]
@@ -46,6 +51,9 @@ exclude-newer = "7 days" # D74/D117: no release younger than 7 days
 # google-adk 2.14.0 was uploaded on 2026-11-07. The 7-day cutoff excludes it,
 # and 2.13.0 cannot share this project's OpenTelemetry 1.45 pin.
 exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z" }
+
+[tool.uv.sources]
+cetra-sdk = { path = "../../../sdks/python", editable = true }
 
 [tool.uv.build-backend]
 module-name = "capture_py"

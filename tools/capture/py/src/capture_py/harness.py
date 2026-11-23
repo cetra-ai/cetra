@@ -6,6 +6,10 @@ import importlib.metadata
 import json
 import os
 
+import httpx2
+from cetra._config import resolve_config
+from cetra._instrument import enable_for, resolve
+from cetra._runtime import Runtime, install
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.resources import Resource
@@ -31,6 +35,53 @@ def mock_url(path: str = "") -> str:
     A missing ``CETRA_CAPTURE_MOCK_URL`` raises ``KeyError`` naming that variable.
     """
     return os.environ["CETRA_CAPTURE_MOCK_URL"] + path
+
+
+class RealHostTransport(httpx2.BaseTransport):
+    """Sends each request to the capture mock, keeping its path, query and headers (D-IN-3).
+
+    The client keeps the real base URL, so the instrumentation records the real host,
+    and the request's ``Host`` header still names it for the mock's check.
+    """
+
+    def __init__(self) -> None:
+        self._mock = httpx2.URL(mock_url())
+        self._inner = httpx2.HTTPTransport()
+
+    def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+        request.url = request.url.copy_with(
+            scheme=self._mock.scheme, host=self._mock.host, port=self._mock.port
+        )
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def real_host_client() -> httpx2.Client:
+    """An ``httpx2.Client`` whose requests reach the mock under their real host."""
+    return httpx2.Client(transport=RealHostTransport())
+
+
+def cetra_runtime(instrument: list[str]) -> TracerProvider:
+    """Start cetra's SDK runtime with ``instrument`` on, exporting to the capture receiver.
+
+    This uses cetra's private test seam, as ``sdks/python/tests/conftest.py`` does. The
+    exporter is the harness's (uncompressed, no API key), so the spans reach the receiver
+    while ``CetraSpanProcessor`` stamps them as the SDK does. ``base_url`` is never
+    contacted.
+    """
+    config = resolve_config(
+        api_key="sk-cetra-capture",
+        base_url="http://127.0.0.1:9",
+        instrument=instrument,
+        env={},
+    )
+    classes = resolve(config.instrument)
+    runtime = Runtime.create(config, exporter=OTLPSpanExporter())
+    install(runtime)
+    enable_for(runtime, classes)
+    return runtime.provider
 
 
 def receiver_base_url() -> str:

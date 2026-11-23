@@ -11,9 +11,8 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes, HttpBody};
 use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::Response;
-use axum::routing::post;
 use http_body::Frame;
 use serde_json::{Map, Value};
 use tokio::time::Sleep;
@@ -74,15 +73,9 @@ impl Mock {
 
     /// Routes the mock. The router holds its own `Arc` clone.
     pub fn router(self: &std::sync::Arc<Self>) -> axum::Router {
-        let posted = post(handle).fallback(unknown);
         axum::Router::new()
-            .route("/v1/chat/completions", posted.clone())
-            .route("/v1/responses", posted.clone())
-            .route("/v1/embeddings", posted.clone())
-            .route("/v1/messages", posted.clone())
-            .route("/v1beta/models/{model_action}", posted)
             .route("/api/hello", axum::routing::head(hello))
-            .fallback(unknown)
+            .fallback(handle)
             .with_state(std::sync::Arc::clone(self))
     }
 
@@ -123,25 +116,14 @@ async fn hello() -> StatusCode {
     StatusCode::OK
 }
 
-async fn unknown(
-    State(mock): State<std::sync::Arc<Mock>>,
-    request: axum::extract::Request,
-) -> Response {
-    let message = format!(
-        "cetra-capture mock: no route {} {}",
-        request.method(),
-        request.uri().path()
-    );
-    mock.push_error(message.clone());
-    error_response(StatusCode::NOT_FOUND, &message)
-}
-
 impl Mock {
     async fn respond(&self, request: axum::extract::Request) -> Response {
         let label = format!("{} {}", request.method(), request.uri().path());
         let path = request.uri().path().to_owned();
         let query = request.uri().query().map(str::to_owned);
-        let Some(route) = classify(&path) else {
+        let host = request_host(request.headers());
+        let posted = *request.method() == Method::POST;
+        let Some(route) = classify(&path).filter(|_| posted) else {
             let message = format!("cetra-capture mock: no route {label}");
             self.push_error(message.clone());
             return error_response(StatusCode::NOT_FOUND, &message);
@@ -167,6 +149,14 @@ impl Mock {
             Take::Turn { index, turn } => (index, turn),
             Take::Reject { status, message } => return error_response(status, &message),
         };
+        if let Some(expected) = &turn.host
+            && host.as_deref() != Some(expected.as_str())
+        {
+            let got = host.as_deref().unwrap_or("-");
+            let message = format!("turn {index}: expected host {expected}, got {got}");
+            self.push_error(message.clone());
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &message);
+        }
         self.lock().served.push(Served {
             turn: index,
             api: turn.api,
@@ -260,23 +250,47 @@ impl Route {
     }
 }
 
+/// Matches a POST path by suffix (D-IN-4), so an OpenAI-compatible base URL with a
+/// prefix (`/api/v1/chat/completions`, `/openai/deployments/d/chat/completions`) and a
+/// Gemini model under a project path both route. `path` has no query.
 fn classify(path: &str) -> Option<Route> {
-    match path {
-        "/v1/chat/completions" => Some(Route::Chat),
-        "/v1/responses" => Some(Route::Responses),
-        "/v1/embeddings" => Some(Route::Embeddings),
-        "/v1/messages" => Some(Route::Messages),
-        other => {
-            let action = other.strip_prefix("/v1beta/models/")?.rsplit_once(':')?.1;
-            match action {
-                "generateContent" => Some(Route::Generate),
-                "streamGenerateContent" => Some(Route::GenerateStream),
-                "embedContent" => Some(Route::Embed),
-                "batchEmbedContents" => Some(Route::EmbedBatch),
-                _ => None,
-            }
+    for (suffix, route) in [
+        ("/chat/completions", Route::Chat),
+        ("/responses", Route::Responses),
+        ("/embeddings", Route::Embeddings),
+        ("/messages", Route::Messages),
+    ] {
+        if path.ends_with(suffix) {
+            return Some(route);
         }
     }
+    let (prefix, action) = path.rsplit_once(':')?;
+    let model = prefix.rsplit_once("/models/")?.1;
+    if model.is_empty() || model.contains('/') {
+        return None;
+    }
+    match action {
+        "generateContent" => Some(Route::Generate),
+        "streamGenerateContent" => Some(Route::GenerateStream),
+        "embedContent" => Some(Route::Embed),
+        "batchEmbedContents" => Some(Route::EmbedBatch),
+        _ => None,
+    }
+}
+
+/// The request's `Host` header, lowercased, without a `:port`. `None` when the header is
+/// missing or not ASCII.
+fn request_host(headers: &HeaderMap) -> Option<String> {
+    let value = headers
+        .get(header::HOST)?
+        .to_str()
+        .ok()?
+        .to_ascii_lowercase();
+    let name = match value.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name,
+        _ => value.as_str(),
+    };
+    Some(name.to_owned())
 }
 
 struct Facts {
@@ -535,6 +549,7 @@ mod tests {
         Turn {
             api,
             model: "mock-model".to_owned(),
+            host: None,
             message: Some(Message {
                 text: Some("Hi".to_owned()),
                 reasoning: None,
@@ -557,6 +572,7 @@ mod tests {
         Turn {
             api,
             model: "mock-embed".to_owned(),
+            host: None,
             message: None,
             finish: None,
             usage: Usage {
@@ -570,17 +586,33 @@ mod tests {
         }
     }
 
+    fn request_with_host(method: &str, uri: &str, host: Option<&str>, body: &str) -> Request<Body> {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(host) = host {
+            builder = builder.header(header::HOST, host);
+        }
+        builder.body(Body::from(body.to_owned())).unwrap()
+    }
+
     fn request(method: &str, uri: &str, body: &str) -> Request<Body> {
-        Request::builder()
-            .method(method)
-            .uri(uri)
-            .body(Body::from(body.to_owned()))
-            .unwrap()
+        request_with_host(method, uri, None, body)
     }
 
     async fn send(mock: &std::sync::Arc<Mock>, method: &str, uri: &str, body: &str) -> Response {
         mock.router()
             .oneshot(request(method, uri, body))
+            .await
+            .unwrap()
+    }
+
+    async fn send_with_host(
+        mock: &std::sync::Arc<Mock>,
+        host: Option<&str>,
+        uri: &str,
+        body: &str,
+    ) -> Response {
+        mock.router()
+            .oneshot(request_with_host("POST", uri, host, body))
             .await
             .unwrap()
     }
@@ -642,9 +674,33 @@ mod tests {
                 false,
             ),
             (
+                "/api/v1/chat/completions",
+                r#"{"stream":false}"#,
+                chat_turn(Api::OpenaiChat, 0, 0),
+                false,
+            ),
+            (
+                "/openai/deployments/d/chat/completions?api-version=2024-10-21",
+                r#"{"stream":false}"#,
+                chat_turn(Api::OpenaiChat, 0, 0),
+                false,
+            ),
+            (
+                "/compatible-mode/v1/embeddings",
+                r#"{"input":"one"}"#,
+                embed_turn(Api::OpenaiEmbeddings),
+                false,
+            ),
+            (
                 "/v1/messages",
                 "{}",
                 chat_turn(Api::AnthropicMessages, 0, 0),
+                false,
+            ),
+            (
+                "/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-flash:generateContent",
+                "{}",
+                chat_turn(Api::GeminiGenerateContent, 0, 0),
                 false,
             ),
             (
@@ -833,6 +889,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_turn_host_must_match_the_request_host() {
+        let mut turn = chat_turn(Api::OpenaiChat, 0, 0);
+        turn.host = Some("openrouter.ai".to_owned());
+        for host in ["openrouter.ai", "openrouter.ai:443"] {
+            let mock = Mock::new(vec![turn.clone()]);
+            let response = send_with_host(&mock, Some(host), "/v1/chat/completions", "{}").await;
+            assert_eq!(response.status(), 200, "{host}");
+            let log = mock.finish();
+            assert_eq!(log.served.len(), 1, "{host}");
+            assert!(log.errors.is_empty(), "{host}: {:?}", log.errors);
+        }
+
+        let mock = Mock::new(vec![turn.clone(), turn.clone(), turn.clone()]);
+        let wrong =
+            send_with_host(&mock, Some("127.0.0.1:1234"), "/v1/chat/completions", "{}").await;
+        assert_eq!(wrong.status(), 500);
+        let wrong_body: Value = serde_json::from_slice(&bytes(wrong).await).unwrap();
+        assert_eq!(
+            wrong_body["error"]["message"],
+            "turn 0: expected host openrouter.ai, got 127.0.0.1"
+        );
+        let missing = send_with_host(&mock, None, "/v1/chat/completions", "{}").await;
+        assert_eq!(missing.status(), 500);
+        let missing_body: Value = serde_json::from_slice(&bytes(missing).await).unwrap();
+        assert_eq!(
+            missing_body["error"]["message"],
+            "turn 1: expected host openrouter.ai, got -"
+        );
+        let ok = send_with_host(&mock, Some("openrouter.ai"), "/v1/chat/completions", "{}").await;
+        assert_eq!(ok.status(), 200);
+        let log = mock.finish();
+        assert_eq!(
+            log.served,
+            vec![Served {
+                turn: 2,
+                api: Api::OpenaiChat,
+                stream: false
+            }]
+        );
+        assert_eq!(
+            log.errors,
+            vec![
+                "turn 0: expected host openrouter.ai, got 127.0.0.1",
+                "turn 1: expected host openrouter.ai, got -",
+            ]
+        );
+
+        let mock = Mock::new(vec![turn]);
+        let missing_header = send_with_host(&mock, None, "/v1/chat/completions", "{}").await;
+        assert_eq!(missing_header.status(), 500);
+        let log = mock.finish();
+        assert_eq!(
+            log.errors,
+            vec!["turn 0: expected host openrouter.ai, got -"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_get_to_a_chat_path_is_404() {
+        let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
+        let get = send(&mock, "GET", "/v1/chat/completions", "").await;
+        assert_eq!(get.status(), 404);
+        let get_body: Value = serde_json::from_slice(&bytes(get).await).unwrap();
+        assert_eq!(
+            get_body["error"]["message"],
+            "cetra-capture mock: no route GET /v1/chat/completions"
+        );
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(
+            log.errors,
+            vec![
+                "cetra-capture mock: no route GET /v1/chat/completions",
+                "1 turns not served",
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn unknown_routes_are_404_and_logged() {
         let mock = Mock::new(vec![chat_turn(Api::OpenaiChat, 0, 0)]);
         let get = send(&mock, "GET", "/v1/chat/completions", "").await;
@@ -852,6 +987,10 @@ mod tests {
         )
         .await;
         assert_eq!(action.status(), 404);
+        let extra = send(&mock, "POST", "/v1/chat/completions/extra", "{}").await;
+        assert_eq!(extra.status(), 404);
+        let nested = send(&mock, "POST", "/models/a/b:generateContent", "{}").await;
+        assert_eq!(nested.status(), 404);
         let log = mock.finish();
         assert!(log.served.is_empty());
         assert_eq!(
@@ -860,6 +999,8 @@ mod tests {
                 "cetra-capture mock: no route GET /v1/chat/completions",
                 "cetra-capture mock: no route POST /v1/other",
                 "cetra-capture mock: no route POST /v1beta/models/gemini-2.5-flash:countTokens",
+                "cetra-capture mock: no route POST /v1/chat/completions/extra",
+                "cetra-capture mock: no route POST /models/a/b:generateContent",
                 "1 turns not served",
             ]
         );
