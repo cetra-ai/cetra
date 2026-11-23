@@ -639,11 +639,15 @@ mod tests {
 
         // Before expiry, and in grace, the token's domains count.
         assert_eq!(
-            app.state.entitlements.sso_domains(org, at("2025-12-15T00:00:00Z")),
+            app.state
+                .entitlements
+                .sso_domains(org, at("2025-12-15T00:00:00Z")),
             domains
         );
         assert_eq!(
-            app.state.entitlements.sso_domains(org, at("2026-01-15T00:00:00Z")),
+            app.state
+                .entitlements
+                .sso_domains(org, at("2026-01-15T00:00:00Z")),
             domains
         );
         // From grace_ends_at on, none.

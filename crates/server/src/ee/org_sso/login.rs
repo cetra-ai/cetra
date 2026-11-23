@@ -1111,14 +1111,8 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    crate::ee::scim::store::put_org_scim(
-                        conn,
-                        org,
-                        true,
-                        crate::api::account::OrgRole::Viewer,
-                        now,
-                    )
-                    .await?;
+                    crate::ee::scim::store::put_org_scim(conn, org, true, OrgRole::Viewer, now)
+                        .await?;
                     Ok(())
                 })
             })

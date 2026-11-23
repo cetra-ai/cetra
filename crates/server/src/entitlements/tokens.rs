@@ -193,7 +193,13 @@ mod tests {
             "2099-02-01T00:00:00Z",
             &["project_roles"],
             &json!({}),
-            &[" Beta.EXAMPLE. ", "acme.test", "bad domain", "10.0.0.1", "acme.test"],
+            &[
+                " Beta.EXAMPLE. ",
+                "acme.test",
+                "bad domain",
+                "10.0.0.1",
+                "acme.test",
+            ],
         );
         let (_, grant) = grant_from_token(&token, &origin(), &Limits::default()).unwrap();
         assert_eq!(

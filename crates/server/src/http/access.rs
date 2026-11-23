@@ -1891,7 +1891,12 @@ mod tests {
         let scim = format!("Bearer {token}");
 
         let anonymous = app.request(Method::GET, "/t/scim").send().await;
-        assert_outcome(&anonymous, StatusCode::UNAUTHORIZED, "denied-401", "anonymous");
+        assert_outcome(
+            &anonymous,
+            StatusCode::UNAUTHORIZED,
+            "denied-401",
+            "anonymous",
+        );
         let allowed = app
             .request(Method::GET, "/t/scim")
             .header("authorization", &scim)
@@ -1903,31 +1908,56 @@ mod tests {
             .header("cookie", &people.ada.0)
             .send()
             .await;
-        assert_outcome(&session, StatusCode::FORBIDDEN, "denied-403", "session on a scim route");
+        assert_outcome(
+            &session,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "session on a scim route",
+        );
         let user = app
             .request(Method::GET, "/t/user")
             .header("authorization", &scim)
             .send()
             .await;
-        assert_outcome(&user, StatusCode::FORBIDDEN, "denied-403", "scim on a user route");
+        assert_outcome(
+            &user,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "scim on a user route",
+        );
         let pat = app
             .request(Method::GET, "/t/pat")
             .header("authorization", &scim)
             .send()
             .await;
-        assert_outcome(&pat, StatusCode::FORBIDDEN, "denied-403", "scim on a pat route");
+        assert_outcome(
+            &pat,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "scim on a pat route",
+        );
         let org_route = app
             .request(Method::GET, "/t/orgs/acme")
             .header("authorization", &scim)
             .send()
             .await;
-        assert_outcome(&org_route, StatusCode::NOT_FOUND, "denied-404", "scim on an org route");
+        assert_outcome(
+            &org_route,
+            StatusCode::NOT_FOUND,
+            "denied-404",
+            "scim on an org route",
+        );
         let project = app
             .request(Method::GET, "/t/projects/support-bot")
             .header("authorization", &scim)
             .send()
             .await;
-        assert_outcome(&project, StatusCode::NOT_FOUND, "denied-404", "scim on a project route");
+        assert_outcome(
+            &project,
+            StatusCode::NOT_FOUND,
+            "denied-404",
+            "scim on a project route",
+        );
     }
 
     #[test]

@@ -3402,8 +3402,8 @@ mod tests {
                     sqlx::query("DROP TABLE audit_events")
                         .execute(&mut *conn)
                         .await
-                        .map_err(crate::meta::MetaError::from)?;
-                    Ok::<_, crate::meta::MetaError>(())
+                        .map_err(MetaError::from)?;
+                    Ok::<_, MetaError>(())
                 })
             })
             .await

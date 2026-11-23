@@ -568,14 +568,9 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let org = crate::meta::orgs::insert_org(
-                        conn,
-                        OrgId::new_v7(),
-                        "Acme",
-                        "acme",
-                        now,
-                    )
-                    .await?;
+                    let org =
+                        crate::meta::orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", now)
+                            .await?;
                     let owner = crate::meta::users::insert_user(
                         conn,
                         crate::meta::users::NewUser {

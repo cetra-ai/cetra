@@ -400,7 +400,10 @@ fn checked_routes() -> Vec<RouteDef> {
         .into_iter()
         .filter(|route| {
             route.documented
-                || matches!(route.access, Access::Key { .. } | Access::Pat | Access::Scim)
+                || matches!(
+                    route.access,
+                    Access::Key { .. } | Access::Pat | Access::Scim
+                )
         })
         .collect()
 }

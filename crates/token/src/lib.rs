@@ -752,12 +752,18 @@ mod tests {
         assert!(parsed.sso_domains.is_empty());
 
         // Domains round-trip through a signed token.
-        let claims = Claims::Org(base(vec!["acme.test".to_owned(), "acme.example".to_owned()]));
+        let claims = Claims::Org(base(vec![
+            "acme.test".to_owned(),
+            "acme.example".to_owned(),
+        ]));
         let token = sign(&dev_key(), "dev-1", &claims).unwrap();
         assert_eq!(verify(&token).unwrap().claims, claims);
         let payload = token.split('.').nth(2).unwrap();
         let json = String::from_utf8(URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
-        assert!(json.contains(r#""sso_domains":["acme.test","acme.example"]"#), "{json}");
+        assert!(
+            json.contains(r#""sso_domains":["acme.test","acme.example"]"#),
+            "{json}"
+        );
     }
 
     #[test]

@@ -147,6 +147,9 @@ use super::prompts::{
 };
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
+use super::scim::{
+    CreateScimTokenRequest, CreatedScimToken, ScimSettings, ScimToken, UpdateScimSettings,
+};
 use super::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
     ScoreDefinitionListParams, ScoreDirection, UpdateScoreDefinitionRequest,
@@ -154,9 +157,6 @@ use super::score_definitions::{
 use super::scores::{
     FeedbackRequest, FeedbackResult, FeedbackValue, ScoreBatch, ScoreCreate, ScoreListParams,
     ScoreWriteResult,
-};
-use super::scim::{
-    CreateScimTokenRequest, CreatedScimToken, ScimSettings, ScimToken, UpdateScimSettings,
 };
 use super::sessions::{SessionDetail, SessionListParams, SessionSort, SessionSummary};
 use super::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};

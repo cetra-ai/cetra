@@ -1623,18 +1623,28 @@ mod tests {
 
         assert_eq!(budget_once(&app.state, now).await.expect("budget"), 1);
 
-        let rows: Vec<(String, Option<String>, Option<String>, String, String, String)> =
-            sqlx::query_as(
-                "SELECT actor_kind, org_id, project_id, target_kind, target_id, details \
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, org_id, project_id, target_kind, target_id, details \
                  FROM audit_events WHERE action = 'online_rule.resumed'",
-            )
-            .fetch_all(app.state.meta.reader())
-            .await
-            .expect("read the audit rows");
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .expect("read the audit rows");
         assert_eq!(rows.len(), 1, "{rows:?}");
         let (actor_kind, org_id, project_id, target_kind, target_id, details) = &rows[0];
         assert_eq!(actor_kind, "system");
-        assert_eq!(project_id.as_deref(), Some(seeded.project.id.to_string().as_str()));
+        assert_eq!(
+            project_id.as_deref(),
+            Some(seeded.project.id.to_string().as_str())
+        );
         let project_org: String = sqlx::query_scalar("SELECT org_id FROM projects WHERE id = ?")
             .bind(seeded.project.id.to_string())
             .fetch_one(app.state.meta.reader())
