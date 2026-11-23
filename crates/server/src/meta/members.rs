@@ -308,7 +308,26 @@ pub(crate) async fn set_project_override(
     Ok(())
 }
 
-/// Deletes the project override.
+/// The override of `user` on `project`, read on the writer connection.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or the stored role is unknown.
+pub(crate) async fn project_override_tx(
+    conn: &mut SqliteConnection,
+    project: ProjectId,
+    user: Uuid,
+) -> Result<Option<ProjectOverride>, MetaError> {
+    let role: Option<String> =
+        sqlx::query_scalar("SELECT role FROM project_members WHERE project_id = ? AND user_id = ?")
+            .bind(project.to_string())
+            .bind(user.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+    role.map(|role| decode_override(&role)).transpose()
+}
+
+/// Deletes the project override. Returns `true` when a row was deleted.
 ///
 /// # Errors
 ///
@@ -317,13 +336,13 @@ pub(crate) async fn remove_project_override(
     conn: &mut SqliteConnection,
     project_id: ProjectId,
     user_id: Uuid,
-) -> Result<(), MetaError> {
-    sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
+) -> Result<bool, MetaError> {
+    let result = sqlx::query("DELETE FROM project_members WHERE project_id = ? AND user_id = ?")
         .bind(project_id.to_string())
         .bind(user_id.to_string())
         .execute(&mut *conn)
         .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// Overrides on the project, ordered by user id.

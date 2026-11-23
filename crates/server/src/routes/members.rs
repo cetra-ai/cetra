@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 use crate::api::account::OrgRole;
 use crate::api::common::{Page, PageParams, ProblemCode};
+use crate::audit::catalog::MemberAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::api::members::{
     MemberUser, OrgMember, ProjectMember, ProjectRoleOverride, UpdateOrgMemberRequest,
 };
@@ -118,6 +120,7 @@ async fn update_org_member(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
     error::Json(body): error::Json<UpdateOrgMemberRequest>,
 ) -> Result<error::Json<OrgMember>, ApiError> {
@@ -166,6 +169,18 @@ async fn update_org_member(
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(MemberAction::RoleChanged {
+                        old_role: roles::org_role_str(target_role),
+                        new_role: roles::org_role_str(role),
+                    })
+                    .org(org_id)
+                    .target(TargetKind::User, target),
+                    now,
+                )
+                .await?;
                 Ok(RoleChange::Done)
             })
         })
@@ -176,13 +191,6 @@ async fn update_org_member(
         RoleChange::Forbidden => return Err(forbidden()),
         RoleChange::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
     }
-    tracing::info!(
-        target: "audit",
-        org_id = %org_id,
-        actor_id = %actor,
-        target_id = %target,
-        "member role changed"
-    );
     let member = find_member(&state, org_id, target).await?;
     Ok(error::Json(org_member(&member)))
 }
@@ -191,11 +199,13 @@ async fn remove_org_member(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
 ) -> Result<StatusCode, ApiError> {
     let user = principal::session_user(&principal)?;
     let actor = user.id;
     let org_id = access.org.id;
+    let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -216,6 +226,17 @@ async fn remove_org_member(
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(MemberAction::Removed {
+                        role: roles::org_role_str(target_role),
+                    })
+                    .org(org_id)
+                    .target(TargetKind::User, target),
+                    now,
+                )
+                .await?;
                 Ok(MemberChange::Done)
             })
         })
@@ -225,13 +246,6 @@ async fn remove_org_member(
         MemberChange::Missing => return Err(ApiError::NotFound),
         MemberChange::Forbidden => return Err(forbidden()),
     }
-    tracing::info!(
-        target: "audit",
-        org_id = %org_id,
-        actor_id = %actor,
-        target_id = %target,
-        "member removed"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -415,6 +429,19 @@ mod tests {
             .unwrap();
     }
 
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
+                .bind(action)
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
+    }
+
     async fn create_org(app: &TestApp, cookie: &str, name: &str) -> OrgMembership {
         let response = app
             .request(Method::POST, "/api/v1/orgs")
@@ -559,7 +586,13 @@ mod tests {
         let promoted: OrgMember = promoted.json();
         assert_eq!(promoted.role, OrgRole::Admin);
         assert_eq!(promoted.user.email, "member@example.com");
-        assert!(logs.contains("member role changed"));
+        assert_eq!(
+            audit_rows(&app, "member.role_changed").await,
+            vec![(
+                Some(member_id.to_string()),
+                serde_json::json!({ "old_role": "member", "new_role": "admin" })
+            )]
+        );
         assert!(!logs.contains("member@example.com"));
         assert!(!logs.contains("admin@example.com"));
         let body: Value = serde_json::to_value(&promoted).unwrap();
@@ -685,6 +718,50 @@ mod tests {
             stuck.problem().detail.as_deref(),
             Some("an org needs an owner")
         );
+    }
+
+    #[tokio::test]
+    async fn removal_is_recorded_with_the_role() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{member_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
+        assert_eq!(
+            audit_rows(&app, "member.removed").await,
+            vec![(
+                Some(member_id.to_string()),
+                serde_json::json!({ "role": "member" })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_last_owner_removal_records_nothing() {
+        let app = TestApp::new().await;
+        let (ada_id, ada) = signed_in(&app, "ada@example.com").await;
+        create_org(&app, &ada, "Acme").await;
+
+        let refused = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(refused.status, 409);
+        assert!(audit_rows(&app, "member.removed").await.is_empty());
     }
 
     /// Review 2026-11-15 #5: a disabled owner counted toward the last-owner rule, so the only

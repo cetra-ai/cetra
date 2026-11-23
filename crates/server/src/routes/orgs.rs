@@ -10,6 +10,8 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
+use crate::audit::catalog::OrgAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::auth::principal::{self, Principal};
 use crate::demo::{is_demo_org, orgs_for};
@@ -94,6 +96,7 @@ async fn list_orgs(
 async fn create_org(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateOrgRequest>,
 ) -> Result<Response, ApiError> {
     let user = principal::session_user(&principal)?;
@@ -121,11 +124,19 @@ async fn create_org(
                     }
                 };
                 add_org_member(conn, org.id, user_id, OrgRole::Owner, now).await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(OrgAction::Created)
+                        .org(org.id)
+                        .target(TargetKind::Org, org.id),
+                    now,
+                )
+                .await?;
                 Ok(org)
             })
         })
         .await?;
-    tracing::info!(target: "audit", %user_id, org_id = %org.id, "org created");
     let demo = is_demo_org(&state.config, org.id);
     Ok((
         StatusCode::CREATED,
@@ -145,6 +156,7 @@ async fn get_org(
 async fn update_org(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<UpdateOrgRequest>,
 ) -> Result<error::Json<OrgMembership>, ApiError> {
     let name = trimmed_name(&body.name)?;
@@ -153,7 +165,20 @@ async fn update_org(
     let now = state.clock.now_ns();
     state
         .meta
-        .write(move |conn| Box::pin(async move { orgs::rename_org(conn, id, &stored, now).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                orgs::rename_org(conn, id, &stored, now).await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(OrgAction::Renamed)
+                        .org(id)
+                        .target(TargetKind::Org, id),
+                    now,
+                )
+                .await
+            })
+        })
         .await?;
     let demo = is_demo_org(&state.config, access.org.id);
     let mut org = access.org;
@@ -328,6 +353,19 @@ mod tests {
             .unwrap();
     }
 
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
+                .bind(action)
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
+    }
+
     #[tokio::test]
     async fn ada_creates_orgs_and_lists_only_hers() {
         let app = TestApp::new().await;
@@ -347,7 +385,10 @@ mod tests {
         assert_eq!(org.role, OrgRole::Owner);
         assert_eq!(org.name, "Widgets");
         assert_eq!(org.slug, "widgets");
-        assert!(logs.contains("org created"));
+        let created_rows = audit_rows(&app, "org.created").await;
+        assert_eq!(created_rows.len(), 1);
+        assert_eq!(created_rows[0].0, Some(org.id.to_string()));
+        assert_eq!(created_rows[0].1, serde_json::json!({}));
         assert!(!logs.contains("Widgets"));
         assert!(!logs.contains("widgets"));
         assert!(!logs.contains("ada@example.com"));
@@ -488,6 +529,33 @@ mod tests {
         assert_eq!(renamed.name, "Renamed");
         assert_eq!(renamed.slug, "acme");
         assert_eq!(renamed.role, OrgRole::Admin);
+    }
+
+    #[tokio::test]
+    async fn rename_is_recorded_without_names() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let created: OrgMembership = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme" }))
+            .send()
+            .await
+            .json();
+        let renamed = app
+            .request(Method::PATCH, "/api/v1/orgs/acme")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Globex" }))
+            .send()
+            .await;
+        assert_eq!(renamed.status, 200);
+
+        let rows = audit_rows(&app, "org.renamed").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, Some(created.id.to_string()));
+        assert_eq!(rows[0].1, serde_json::json!({}));
+        assert!(!rows[0].1.to_string().contains("Globex"));
+        assert_eq!(audit_rows(&app, "org.created").await.len(), 1);
     }
 
     #[tokio::test]

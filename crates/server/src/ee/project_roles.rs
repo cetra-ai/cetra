@@ -12,7 +12,9 @@ use axum::routing::{delete, put};
 use crate::api::account::OrgRole;
 use crate::api::entitlements::Feature;
 use crate::api::members::{ProjectMember, ProjectRoleOverride, SetProjectOverrideRequest};
-use crate::auth::roles::{ProjectOverride, ProjectPerm};
+use crate::audit::catalog::MemberAction;
+use crate::audit::{self, Event, TargetKind};
+use crate::auth::roles::{ProjectOverride, ProjectPerm, project_override_str};
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -48,6 +50,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 async fn set_project_override(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
     error::Json(body): error::Json<SetProjectOverrideRequest>,
 ) -> Result<error::Json<ProjectMember>, ApiError> {
@@ -55,6 +58,7 @@ async fn set_project_override(
     let org_id = access.project.org_id;
     let project_id = access.project.id;
     let override_role = stored_override(body.role);
+    let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -65,7 +69,22 @@ async fn set_project_override(
                 if matches!(role, OrgRole::Owner | OrgRole::Admin) {
                     return Ok(MemberChange::Forbidden);
                 }
+                let old = members::project_override_tx(conn, project_id, target).await?;
                 members::set_project_override(conn, project_id, target, override_role).await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(MemberAction::OverrideSet {
+                        project_id: project_id.as_uuid(),
+                        old_role: old.map(project_override_str),
+                        new_role: project_override_str(override_role),
+                    })
+                    .org(org_id)
+                    .project(project_id)
+                    .target(TargetKind::User, target),
+                    now,
+                )
+                .await?;
                 Ok(MemberChange::Done)
             })
         })
@@ -91,6 +110,7 @@ async fn set_project_override(
 async fn remove_project_override(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
 ) -> Result<StatusCode, ApiError> {
     let org_id = access.project.org_id;
@@ -99,11 +119,28 @@ async fn remove_project_override(
     if belongs.is_none() {
         return Err(ApiError::NotFound);
     }
+    let now = state.clock.now_ns();
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                members::remove_project_override(conn, project_id, target).await?;
+                let old = members::project_override_tx(conn, project_id, target).await?;
+                // Removing no override is a no-op and records nothing.
+                if members::remove_project_override(conn, project_id, target).await? {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(MemberAction::OverrideRemoved {
+                            project_id: project_id.as_uuid(),
+                            old_role: old.map(project_override_str),
+                        })
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::User, target),
+                        now,
+                    )
+                    .await?;
+                }
                 Ok(())
             })
         })
@@ -192,6 +229,19 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
+                .bind(action)
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
     }
 
     async fn create_org(app: &TestApp, cookie: &str, name: &str) -> OrgMembership {
@@ -322,6 +372,78 @@ mod tests {
             .json();
         assert!(listed.data.iter().all(|project| project.id != hidden.id));
         assert!(listed.data.iter().any(|project| project.id == visible.id));
+    }
+
+    #[tokio::test]
+    async fn override_set_records_old_and_new() {
+        let key = license_key_until(
+            &["project_roles"],
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+        );
+        let app = TestApp::with_config(move |config| {
+            config.license_key = Some(Secret::new(key));
+        })
+        .await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+        let project = create_project(&app, &ada, "acme", "Support").await;
+        let path = format!("/api/v1/projects/{}/members/{member_id}", project.id);
+        let set = |role: &'static str| {
+            app.request(Method::PUT, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "role": role }))
+                .send()
+        };
+
+        assert_eq!(set("viewer").await.status, 200);
+        assert_eq!(set("member").await.status, 200);
+
+        let project_id = project.id.to_string();
+        assert_eq!(
+            audit_rows(&app, "member.override_set").await,
+            vec![
+                (
+                    Some(member_id.to_string()),
+                    serde_json::json!({
+                        "project_id": project_id,
+                        "old_role": null,
+                        "new_role": "viewer",
+                    })
+                ),
+                (
+                    Some(member_id.to_string()),
+                    serde_json::json!({
+                        "project_id": project_id,
+                        "old_role": "viewer",
+                        "new_role": "member",
+                    })
+                ),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn removing_no_override_records_nothing() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+        let project = create_project(&app, &ada, "acme", "Support").await;
+
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/projects/{}/members/{member_id}", project.id),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
+        assert!(audit_rows(&app, "member.override_removed").await.is_empty());
     }
 
     #[tokio::test]
