@@ -7,6 +7,7 @@ pub(crate) mod config_view;
 pub(crate) mod crash;
 pub(crate) mod facts;
 pub(crate) mod heartbeat;
+pub(crate) mod host;
 pub(crate) mod instance;
 pub(crate) mod otlp;
 pub mod panic;

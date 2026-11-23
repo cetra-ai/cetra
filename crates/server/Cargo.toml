@@ -42,6 +42,7 @@ unicode-normalization.workspace = true
 argon2.workspace = true
 rand.workspace = true
 subtle.workspace = true
+sysinfo.workspace = true
 prometheus-client.workspace = true
 sha2.workspace = true
 chrono.workspace = true
