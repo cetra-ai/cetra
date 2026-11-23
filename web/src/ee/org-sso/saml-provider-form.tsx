@@ -18,11 +18,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { storeOrgSso } from "@/ee/org-sso/cache";
-import {
-  attributesBody,
-  ENTITY_ID_CHANGE_DETAIL,
-  splitCertificates,
-} from "@/ee/org-sso/saml";
+import { attributesBody, ENTITY_ID_CHANGE_DETAIL, splitCertificates } from "@/ee/org-sso/saml";
 
 const JIT_ROLES: Schema<"JitRole">[] = ["viewer", "member"];
 const JIT_ROLE_LABELS: Record<Schema<"JitRole">, string> = {

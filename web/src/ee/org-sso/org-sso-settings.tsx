@@ -30,8 +30,7 @@ export function OrgSsoSettings({ org }: { org: string }) {
   }
 
   const sso = query.data;
-  const statusLocked =
-    locked || (sso.provider?.protocol === "saml" && entitlements.locked("saml"));
+  const statusLocked = locked || (sso.provider?.protocol === "saml" && entitlements.locked("saml"));
   return (
     <div className="flex flex-col gap-6">
       {locked ? <LockedFeature feature="org_sso" upgradeUrl={entitlements.upgradeUrl} /> : null}

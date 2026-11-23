@@ -485,15 +485,12 @@ it.each([
   "sso_unavailable",
   "saml_invalid",
   "saml_unsupported",
-] as const)(
-  "explains the %s error from the URL",
-  async (code) => {
-    signedOut();
-    withConfig({ sso_discovery: true });
-    await renderApp(`/login?error=${code}`);
-    expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
-  },
-);
+] as const)("explains the %s error from the URL", async (code) => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  await renderApp(`/login?error=${code}`);
+  expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
+});
 
 it("starts the only provider at once, keeping the redirect", async () => {
   signedOut();

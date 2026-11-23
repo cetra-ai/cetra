@@ -63,7 +63,11 @@ async function openPage({
   sso = samlSso,
   features = ["org_sso", "saml"],
   role = "owner",
-}: { sso?: object; features?: string[]; role?: string } = {}) {
+}: {
+  sso?: object;
+  features?: string[];
+  role?: string;
+} = {}) {
   server.use(
     meAs(role),
     http.get("/api/v1/orgs/:org/sso", () => HttpResponse.json(sso)),
@@ -138,16 +142,12 @@ it("shows the service provider details", async () => {
   await openPage();
 
   await screen.findByRole("heading", { name: "Service provider details", level: 2 });
-  expect(document.getElementById("saml-entity-id")).toHaveTextContent(
-    ssoFixture.saml_sp.entity_id,
-  );
+  expect(document.getElementById("saml-entity-id")).toHaveTextContent(ssoFixture.saml_sp.entity_id);
   expect(document.getElementById("saml-acs-url")).toHaveTextContent(ssoFixture.saml_sp.acs_url);
   expect(document.getElementById("saml-metadata-url")).toHaveTextContent(
     ssoFixture.saml_sp.entity_id,
   );
-  expect(document.getElementById("saml-start-url")).toHaveTextContent(
-    ssoFixture.saml_sp.start_url,
-  );
+  expect(document.getElementById("saml-start-url")).toHaveTextContent(ssoFixture.saml_sp.start_url);
   expect(screen.getByRole("button", { name: "Copy acs url" })).toBeInTheDocument();
 });
 
@@ -158,7 +158,7 @@ it("sends pasted metadata XML", async () => {
   const { user } = await openPage({ sso: ssoFixture });
   await user.click(await screen.findByRole("radio", { name: "SAML 2.0" }));
   await user.click(screen.getByRole("tab", { name: "Metadata XML" }));
-  await user.click(screen.getByLabelText("Metadata XML"));
+  await user.click(screen.getByRole("textbox", { name: "Metadata XML" }));
   await user.paste("<EntityDescriptor/>");
   await user.click(screen.getByRole("button", { name: "Save" }));
 
@@ -485,9 +485,7 @@ it("removal asks for the IdP entity ID", async () => {
   await user.click(await screen.findByRole("button", { name: "Remove provider…" }));
 
   const dialog = await screen.findByRole("alertdialog");
-  expect(
-    within(dialog).getByLabelText(`Type "${IDP_ENTITY_ID}" to confirm`),
-  ).toBeInTheDocument();
+  expect(within(dialog).getByLabelText(`Type "${IDP_ENTITY_ID}" to confirm`)).toBeInTheDocument();
 });
 
 it("asks before leaving the SAML form with unsaved changes", async () => {

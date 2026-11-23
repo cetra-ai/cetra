@@ -36,18 +36,15 @@ export function SamlMetadataCard({ saml }: { saml: Schema<"OrgSsoSaml"> }) {
       ) : null}
       {saml.certificates_changed_at ? (
         <p role="note" className="text-body text-muted-foreground">
-          Certificates changed on{" "}
-          <TimeText value={saml.certificates_changed_at} style="datetime" />.
+          Certificates changed on <TimeText value={saml.certificates_changed_at} style="datetime" />
+          .
         </p>
       ) : null}
       <ul aria-label="Trusted certificates" className="flex flex-col gap-2">
         {saml.certificates.map((certificate) => {
           const state = certificateState(certificate, Date.now());
           return (
-            <li
-              key={certificate.sha256}
-              className="flex flex-wrap items-center gap-2 text-body"
-            >
+            <li key={certificate.sha256} className="flex flex-wrap items-center gap-2 text-body">
               <span>
                 SHA-256{" "}
                 <code title={certificate.sha256} className="font-mono">

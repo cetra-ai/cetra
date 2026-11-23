@@ -57,7 +57,8 @@ const REFRESH_ERROR_MESSAGES: Record<Schema<"SamlRefreshError">, string> = {
   too_large: "The metadata is larger than 1 MiB.",
   denied: "The metadata URL is not allowed by this instance's network policy.",
   unusable: "The metadata could not be used.",
-  entity_id_changed: "The metadata now names another entity ID. Save it again to accept the change.",
+  entity_id_changed:
+    "The metadata now names another entity ID. Save it again to accept the change.",
 };
 
 /** The message for a stored refresh failure (D-SA-11). */
@@ -66,9 +67,7 @@ export function refreshErrorMessage(error: Schema<"SamlRefreshError">): string {
 }
 
 /** The attributes object of a PUT body: only the non-blank, trimmed names. */
-export function attributesBody(
-  names: Schema<"SamlAttributeNames">,
-): Schema<"SamlAttributeNames"> {
+export function attributesBody(names: Schema<"SamlAttributeNames">): Schema<"SamlAttributeNames"> {
   const body: Schema<"SamlAttributeNames"> = {};
   const keys = ["email", "display_name", "first_name", "last_name"] as const;
   for (const key of keys) {
