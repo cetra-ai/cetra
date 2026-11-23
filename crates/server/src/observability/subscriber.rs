@@ -1,4 +1,4 @@
-//! The `tracing` subscriber of `cetra serve` (track TL § Architecture): one registry, one layer per sink, each with its own filter. The stdout layer is `log.level` with `rmcp` capped (unchanged output). The OTLP log layer is `self_monitoring.level` with the same cap, minus the exporter's own stack. Later milestones add their layer to [`build`]'s list and their flush to [`Observability::shutdown`]. The flush runs after `serve::run` returns, outside spec 12's 60 s shutdown bound.
+//! The `tracing` subscriber of `cetra serve` (track TL § Architecture): one registry, one layer per sink, each with its own filter. The stdout layer is `log.level` with `rmcp` capped (unchanged output). The OTLP log layer is `self_monitoring.level` with the same cap, minus the exporter's own stack. Later milestones add their layer to [`build`]'s list and their flush to [`Observability::shutdown`]. The flush runs after `serve::run` returns, outside spec 12's 60 s shutdown bound. The ring buffer layer (track TL M3) keeps the stdout-level lines as JSON for the admin socket's `debug_info`.
 
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use crate::observability::switchboard::NOTICE_DIRECTIVE;
 
 use super::ObservabilityError;
 use super::otlp::{EXPORT_FAILURE_TARGET, LogPipeline};
+use super::ring::{self, LogRing};
 
 /// How long [`Observability::shutdown`] waits for the export to flush.
 pub(crate) const FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
@@ -52,12 +53,19 @@ pub(crate) type ComposedSubscriber = Layered<Vec<BoxedLayer>, Registry>;
 #[derive(Debug)]
 pub struct Observability {
     logs: Option<LogPipeline>,
+    /// The ring buffer of the last log lines (track TL M3), installed by [`init`].
+    ring: LogRing,
 }
 
 impl Observability {
     /// Whether log records are exported.
     pub fn exporting_logs(&self) -> bool {
         self.logs.is_some()
+    }
+
+    /// The ring buffer this subscriber writes.
+    pub(crate) fn log_ring(&self) -> &LogRing {
+        &self.ring
     }
 
     /// Flushes and stops the export on a blocking thread, waiting at most [`FLUSH_TIMEOUT`]
@@ -87,6 +95,7 @@ pub fn init(config: &ServerConfig, format: LogFormat) -> Result<Observability, O
     subscriber
         .try_init()
         .map_err(|_| ObservabilityError::AlreadyInstalled)?;
+    ring::install(observability.ring.clone());
     if let Some(pipeline) = &observability.logs {
         tracing::info!(
             host = pipeline.host(),
@@ -122,6 +131,15 @@ pub(crate) fn build(
     let export_level_filter =
         export_filter(&config.self_monitoring.level).map_err(ObservabilityError::ExportLevel)?;
     let mut layers: Vec<BoxedLayer> = vec![stdout];
+    // The ring keeps what stdout shows, minus the libraries' own lines, as JSON whatever
+    // the stdout format (track TL M3).
+    let ring = LogRing::new();
+    let ring_filter = log_filter(&config.log.level).map_err(ObservabilityError::LogLevel)?;
+    // Events only: the ring formats events, and a span it enabled would cost a registry slot
+    // and a fields extension per request with nothing recorded (M2's notes for M3).
+    let ring_targets =
+        filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target()));
+    layers.push(ring.layer(FilterExt::<Registry>::and(ring_filter, ring_targets)));
     let logs = match config.self_monitoring.logs_endpoint() {
         Some(endpoint) => {
             let pipeline = LogPipeline::new(&config.self_monitoring, endpoint, runtime)?;
@@ -138,7 +156,7 @@ pub(crate) fn build(
     };
     Ok((
         tracing_subscriber::registry().with(layers),
-        Observability { logs },
+        Observability { logs, ring },
     ))
 }
 
@@ -172,6 +190,17 @@ fn export_target_allowed(target: &str, level: Level) -> bool {
         return false;
     }
     !(target.starts_with("rmcp") && level > Level::WARN)
+}
+
+/// Whether an event of `target` may enter the ring buffer, which goes into a file meant for a
+/// public issue: not the exporter stack of [`EXPORT_DROPPED_TARGETS`] (HTTP, TLS and
+/// OpenTelemetry crates, whose `debug`/`trace` output can carry headers and URLs) and not
+/// `sqlx` (statement text), whatever `log.level` lets through. The export's own failure
+/// lines ([`EXPORT_FAILURE_TARGET`]) are kept: they help a bug report. The `rmcp` cap is in
+/// the stdout filter already.
+fn ring_target_allowed(target: &str) -> bool {
+    target == EXPORT_FAILURE_TARGET
+        || (export_target_allowed(target, Level::ERROR) && !target.starts_with("sqlx"))
 }
 
 #[cfg(test)]
@@ -607,5 +636,185 @@ mod tests {
         let started = Instant::now();
         observability.shutdown().await;
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    /// The lines the ring holds, parsed as JSON.
+    fn ring_values(observability: &Observability) -> Vec<serde_json::Value> {
+        observability
+            .log_ring()
+            .snapshot()
+            .lines
+            .iter()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn ring_has(observability: &Observability, canary: &str) -> bool {
+        observability
+            .log_ring()
+            .snapshot()
+            .lines
+            .iter()
+            .any(|line| line.contains(canary))
+    }
+
+    #[tokio::test]
+    async fn the_ring_keeps_stdout_level_lines_as_json() {
+        let config = load_from(Some("[log]\nlevel = \"info\"\n"), &[]).unwrap();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Json,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+
+        test_support::ensure_global_subscriber();
+        let guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+        tracing::info!("ring-canary");
+        tracing::debug!("ring-debug");
+        tracing::warn!(target: "rmcp::service", "rmcp-warn");
+        tracing::info!(target: "rmcp::service", "rmcp-info");
+        drop(guard);
+
+        let lines = observability.log_ring().snapshot().lines;
+        assert!(
+            lines.iter().any(|line| line.contains("ring-canary")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("rmcp-warn")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("ring-debug")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("rmcp-info")),
+            "{lines:?}"
+        );
+        for value in ring_values(&observability) {
+            for key in ["timestamp", "level", "fields", "target"] {
+                assert!(value.get(key).is_some(), "{key} missing from {value}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ring_is_json_when_stdout_is_pretty() {
+        let config = load_from(None, &[]).unwrap();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+
+        test_support::ensure_global_subscriber();
+        let guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+        tracing::info!("pretty-canary");
+        drop(guard);
+
+        let lines = observability.log_ring().snapshot().lines;
+        let line = lines
+            .iter()
+            .find(|line| line.contains("pretty-canary"))
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(value.get("fields").is_some(), "{value}");
+    }
+
+    #[test]
+    fn the_ring_enables_no_span() {
+        let ring = LogRing::new();
+        let layer = ring.layer(FilterExt::<Registry>::and(
+            log_filter("info").unwrap(),
+            filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target())),
+        ));
+        let dispatch = Dispatch::new(tracing_subscriber::registry().with(layer));
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        assert!(tracing::info_span!("ring-span").is_disabled());
+        {
+            let _entered = tracing::info_span!("ring-span").entered();
+            tracing::info!("ring-event");
+        }
+        drop(guard);
+
+        let lines = ring.snapshot().lines;
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert!(value.get("span").is_none(), "{value}");
+        assert!(value.get("spans").is_none(), "{value}");
+    }
+
+    #[test]
+    fn ring_target_allowed_drops_library_lines() {
+        for target in [
+            "hyper_util::client",
+            "h2::codec",
+            "reqwest::connect",
+            "rustls::conn",
+            "opentelemetry_sdk",
+            "sqlx::query",
+        ] {
+            assert!(!ring_target_allowed(target), "{target}");
+        }
+        for target in [
+            "cetra_self_monitoring",
+            "cetra_server::serve",
+            "cetra_storage::wal",
+            "rmcp::service",
+        ] {
+            assert!(ring_target_allowed(target), "{target}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ring_drops_library_lines_at_debug() {
+        let config = load_from(Some("[log]\nlevel = \"debug\"\n"), &[]).unwrap();
+        let stdout = Buffer::default();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&stdout),
+            Handle::current(),
+        )
+        .unwrap();
+
+        test_support::ensure_global_subscriber();
+        let guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+        tracing::debug!(target: "hyper_util::client", "hyper-canary");
+        tracing::debug!(target: "sqlx::query", "sqlx-canary");
+        tracing::debug!("cetra-canary");
+        drop(guard);
+
+        assert!(ring_has(&observability, "cetra-canary"));
+        assert!(!ring_has(&observability, "hyper-canary"));
+        assert!(!ring_has(&observability, "sqlx-canary"));
+        let logs = stdout.text();
+        assert!(logs.contains("hyper-canary"), "{logs}");
+        assert!(logs.contains("sqlx-canary"), "{logs}");
+        assert!(logs.contains("cetra-canary"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn the_notice_reaches_the_ring_at_warn() {
+        let config = load_from(Some("[log]\nlevel = \"warn\"\n"), &[]).unwrap();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+
+        test_support::ensure_global_subscriber();
+        let guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+        tracing::info!(target: NOTICE_TARGET, "notice-canary");
+        drop(guard);
+
+        assert!(ring_has(&observability, "notice-canary"));
     }
 }
