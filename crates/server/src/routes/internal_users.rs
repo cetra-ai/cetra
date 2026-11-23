@@ -18,9 +18,7 @@ use crate::http::error::{self, ApiError, field_error};
 use crate::meta::MetaError;
 use crate::meta::identities::{identity_user, user_identities};
 use crate::meta::members::count_owners;
-use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::{self, normalize_email, user_by_email, user_by_id};
-use crate::meta::web_sessions::delete_user_sessions;
 use cetra_core::ids::OrgId;
 
 /// The internal user routes. The control plane holds a `control_plane` token with scope `users`.
@@ -105,8 +103,7 @@ async fn revoke_access(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                delete_user_sessions(conn, user, None).await?;
-                let hashes = revoke_user_tokens(conn, user, now).await?;
+                let hashes = users::revoke_access_tx(conn, user, now).await?;
                 let action = if disable {
                     // An already disabled user keeps the instant it was first disabled.
                     let disabled_at: Option<i64> =

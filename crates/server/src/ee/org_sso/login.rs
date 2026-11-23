@@ -33,9 +33,7 @@ use crate::http::error::{self, ApiError};
 use crate::http::restore::refuse_outbound;
 use crate::meta::users::EmailVerifiedVia;
 use crate::meta::users::{NewUser, UserRow, normalize_email};
-use crate::meta::{
-    MetaError, identities, invites, members, orgs, personal_tokens, users, web_sessions,
-};
+use crate::meta::{MetaError, identities, invites, members, orgs, users};
 use crate::routes::oauth::redirect;
 
 /// The callback's provider segment and the state cookie's provider.
@@ -498,14 +496,9 @@ async fn admit(
                 now,
             )
             .await?;
-            if !user.email_proven() {
-                // D148's defence against a pre-registered account: the unverified password and
-                // its sessions and tokens go when the provider links it.
-                web_sessions::delete_user_sessions(conn, user.id, None).await?;
-                revoked = personal_tokens::revoke_user_tokens(conn, user.id, now).await?;
-                users::set_password_hash(conn, user.id, None, now).await?;
-                users::set_email_verified(conn, user.id, now, EmailVerifiedVia::Idp).await?;
-            }
+            // D148's defence against a pre-registered account: an unproven account's password,
+            // sessions and tokens go when the provider links it. A proven one is untouched.
+            revoked = users::reset_unproven_tx(conn, &user, now).await?;
             linked = true;
             user.id
         }
