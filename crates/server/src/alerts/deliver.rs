@@ -7,6 +7,7 @@ use cetra_eval::{EgressError, EgressRequest, SIGNATURE_HEADER, Secret, sign_payl
 use futures::StreamExt;
 use reqwest::Url;
 use reqwest::header::{HeaderName, HeaderValue};
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::alerts::channel::{ChannelConfig, open_config};
@@ -19,6 +20,7 @@ use crate::meta::alerts::{
     Attempt, DueBody, DueDelivery, DueIssues, EventRow, due_deliveries, finish_delivery, prune,
 };
 use crate::meta::members::verified_member_emails;
+use crate::observability::spans;
 
 /// Deliveries sent at once (D-K-7).
 pub(crate) const CONCURRENCY: usize = 4;
@@ -309,9 +311,28 @@ enum Outcome {
     Failed,
 }
 
-/// Makes one attempt and records it. `None` when the final write fails; the row stays pending
-/// and the next pass retries it.
+/// [`deliver_one_once`] in an `alerts.deliver` span with its outcome.
 async fn deliver_one(state: &AppState, due: &DueDelivery, now: i64) -> Option<Outcome> {
+    let span = spans::alert_deliver(
+        due.id,
+        due.channel_id,
+        due.channel_kind.as_str(),
+        due.attempts.saturating_add(1),
+    );
+    let outcome = deliver_one_once(state, due, now).instrument(span.clone()).await;
+    let label = match outcome {
+        Some(Outcome::Sent) => "sent",
+        Some(Outcome::Retried) => "retry",
+        Some(Outcome::Failed) => "failed",
+        None => "write_failed",
+    };
+    span.record(spans::OUTCOME, label);
+    outcome
+}
+
+/// Makes one attempt and records it. Runs inside its span (see [`deliver_one`]). `None` when the
+/// final write fails; the row stays pending and the next pass retries it.
+async fn deliver_one_once(state: &AppState, due: &DueDelivery, now: i64) -> Option<Outcome> {
     let attempt = attempt_of(state, due, now).await;
     let (outcome, error) = match &attempt {
         Attempt::Sent => (Outcome::Sent, None),

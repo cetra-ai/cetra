@@ -8,6 +8,7 @@ use cetra_storage::{
     TimeWindow, alert_value,
 };
 use futures::StreamExt;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use crate::alerts::condition::measure;
@@ -20,6 +21,7 @@ use crate::meta::alerts::{
     Evaluation, EventDetails, Recorded, RuleRow, due_rules, record_evaluation,
 };
 use crate::meta::issue_links::{issue_scope_ids, source_scope_ids};
+use crate::observability::spans;
 
 /// Rules evaluated at once (D-K-3).
 pub(crate) const CONCURRENCY: usize = 4;
@@ -185,8 +187,38 @@ pub(crate) async fn evaluate_once(state: &AppState, now: i64) -> Result<Evaluate
     Ok(report)
 }
 
-/// Evaluates one rule. Returns its id, whether its query failed, and the write's result.
+/// [`evaluate_rule_once`] in an `alerts.evaluate` span with its outcome.
 async fn evaluate_rule(
+    state: &AppState,
+    org: OrgId,
+    rule: RuleRow,
+    now: i64,
+) -> (Uuid, bool, Result<Recorded, MetaError>) {
+    let span = spans::alert_evaluate(rule.id, rule.project_id);
+    let result = evaluate_rule_once(state, org, rule, now)
+        .instrument(span.clone())
+        .await;
+    span.record(
+        spans::OUTCOME,
+        evaluation_outcome(result.1, result.2.as_ref()),
+    );
+    result
+}
+
+/// The `outcome` of a rule's span: `write_failed`, `query_failed`, `event`, `stale` or `ok`.
+fn evaluation_outcome(query_failed: bool, written: Result<&Recorded, &MetaError>) -> &'static str {
+    match (query_failed, written) {
+        (_, Err(_)) => "write_failed",
+        (true, Ok(_)) => "query_failed",
+        (false, Ok(Recorded::Event { .. })) => "event",
+        (false, Ok(Recorded::Stale)) => "stale",
+        (false, Ok(Recorded::Written)) => "ok",
+    }
+}
+
+/// Evaluates one rule, inside its span (see [`evaluate_rule`]). Returns its id, whether its query
+/// failed, and the write's result.
+async fn evaluate_rule_once(
     state: &AppState,
     org: OrgId,
     rule: RuleRow,
@@ -385,6 +417,29 @@ mod tests {
     use crate::test_support::hook_receiver::HookReceiver;
     use crate::test_support::issues::{issue_row, occurrence, put_issue, put_source, source_row};
     use crate::test_support::{TestApp, assert_logs_clean, dataset_span, set_limits};
+
+    #[test]
+    fn evaluation_outcome_names_each_case() {
+        let event = Recorded::Event {
+            event_id: Uuid::nil(),
+            deliveries: 1,
+        };
+        assert_eq!(evaluation_outcome(false, Ok(&Recorded::Written)), "ok");
+        assert_eq!(evaluation_outcome(false, Ok(&Recorded::Stale)), "stale");
+        assert_eq!(evaluation_outcome(false, Ok(&event)), "event");
+        assert_eq!(
+            evaluation_outcome(true, Ok(&Recorded::Written)),
+            "query_failed"
+        );
+        assert_eq!(
+            evaluation_outcome(true, Err(&MetaError::NotInitialized)),
+            "write_failed"
+        );
+        assert_eq!(
+            evaluation_outcome(false, Err(&MetaError::NotInitialized)),
+            "write_failed"
+        );
+    }
 
     const MINUTE: Duration = Duration::from_secs(60);
     const MINUTE_NS: i64 = 60_000_000_000;
