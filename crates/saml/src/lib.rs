@@ -9,6 +9,9 @@ mod metadata;
 mod request;
 pub(crate) mod xml;
 
+#[cfg(any(test, feature = "test-idp"))]
+pub mod test_idp;
+
 pub use cert::IdpCertificate;
 pub use metadata::{
     IdpMetadata, MAX_CERTIFICATES, MAX_METADATA_BYTES, MetadataError, parse_metadata,

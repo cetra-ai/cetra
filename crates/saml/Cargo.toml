@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish.workspace = true
 license = "Elastic-2.0"
 
+[features]
+# The test IdP for this crate's tests and the server's (track SA M2). Never enabled in release builds.
+test-idp = []
+
 [dependencies]
 base64.workspace = true
 bergshamra.workspace = true
