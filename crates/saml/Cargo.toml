@@ -1,0 +1,23 @@
+[package]
+name = "cetra-saml"
+description = "SAML 2.0 service provider: IdP metadata, AuthnRequest, response validation (track SA, D-SA-8)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "Elastic-2.0"
+
+[dependencies]
+base64.workspace = true
+bergshamra.workspace = true
+chrono.workspace = true
+flate2.workspace = true
+hex.workspace = true
+rsa.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+x509-cert.workspace = true
+
+[lints]
+workspace = true
