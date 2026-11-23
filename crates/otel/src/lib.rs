@@ -30,7 +30,10 @@ mod warn;
 pub mod fuzz_entry;
 
 pub use agents::{AgentContext, AgentContexts, canonical_repository};
-pub use cost::{PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows, exact_pattern};
+pub use cost::{
+    PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows, exact_pattern,
+    publisher_candidates,
+};
 pub use decode::{decode_json, decode_protobuf};
 pub use error::{DecodeError, JsonErrorCategory, PriceError};
 pub use logs::{count_genai_log_records, decode_logs_json, decode_logs_protobuf};

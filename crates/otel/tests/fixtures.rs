@@ -223,7 +223,13 @@ fn prices() {
                     span.provider.as_deref(),
                     span.start_time,
                 )
-            });
+            }) || pick_price_or_publisher(
+                &rows,
+                model,
+                span.provider.as_deref(),
+                span.start_time,
+            )
+            .is_some();
             if !matched {
                 failures.push(format!(
                     "{}: no price row matches model {model}",
@@ -688,7 +694,13 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
                         span.provider.as_deref(),
                         span.start_time,
                     )
-                })
+                }) || pick_price_or_publisher(
+                    rows,
+                    model,
+                    span.provider.as_deref(),
+                    span.start_time,
+                )
+                .is_some()
             });
             if priced && matched {
                 failures.push(format!(
@@ -716,7 +728,8 @@ fn check_computed(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Ve
         ));
         return;
     };
-    let Some(row) = pick_price(rows, model, span.provider.as_deref(), span.start_time) else {
+    let Some(row) = pick_price_or_publisher(rows, model, span.provider.as_deref(), span.start_time)
+    else {
         failures.push(format!(
             "{label}: {} no price row for model {model}",
             span.span_id
@@ -863,6 +876,21 @@ fn pick_price<'a>(
     matches.first().copied()
 }
 
+/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13).
+fn pick_price_or_publisher<'a>(
+    rows: &'a [PriceRow],
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<&'a PriceRow> {
+    pick_price(rows, model, provider, start_time).or_else(|| {
+        let (publisher, names) = cetra_otel::publisher_candidates(provider?, model)?;
+        names
+            .iter()
+            .find_map(|name| pick_price(rows, name, Some(publisher), start_time))
+    })
+}
+
 fn price_row_matches(
     row: &PriceRow,
     pattern: &Regex,
@@ -882,7 +910,8 @@ fn price_row_matches(
 }
 
 /// Mirrors `cost.rs` `same_provider` (D-B1-11): `gcp.gen_ai` prices with either Google
-/// platform, every other provider matches exactly.
+/// platform, every other provider matches exactly. The gateway fallback (D-IN-13) is
+/// `pick_price_or_publisher`, which mirrors `cost.rs` `publisher_row`.
 fn same_provider(row_provider: &str, span_provider: &str) -> bool {
     row_provider == span_provider
         || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))

@@ -30,6 +30,24 @@ const OUTPUT_KEYS: &[&str] = &["llm.cost.completion", "gen_ai.usage.output_cost"
 const COST_DETAILS: &str = "langfuse.observation.cost_details";
 /// Semconv provider for any Google GenAI endpoint. See [`same_provider`].
 const GCP_GEN_AI: &str = "gcp.gen_ai";
+/// Gateways whose spans fall back to the model publisher's price (D-IN-13). Sorted.
+const GATEWAY_PROVIDERS: &[&str] = &[
+    "cloudflare_ai_gateway",
+    "helicone",
+    "openrouter",
+    "portkey",
+    "vercel_ai_gateway",
+];
+/// The vendor segment of a gateway model name → the publisher's provider (D-IN-13). Sorted by vendor.
+const PUBLISHER_VENDORS: &[(&str, &str)] = &[
+    ("anthropic", "anthropic"),
+    ("cohere", "cohere"),
+    ("deepseek", "deepseek"),
+    ("google", "gcp.gemini"),
+    ("mistralai", "mistral_ai"),
+    ("openai", "openai"),
+    ("x-ai", "x_ai"),
+];
 
 /// Who owns a price row. Project beats org, which beats built-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
@@ -252,7 +270,9 @@ pub(crate) fn apply(
     let Some(model) = charge.model else {
         return none();
     };
-    let Some(matched) = lookup(prices, model, charge.provider, charge.start_time) else {
+    let matched = lookup(prices, model, charge.provider, charge.start_time)
+        .or_else(|| publisher_row(prices, model, charge));
+    let Some(matched) = matched else {
         return none();
     };
     let inferred = match charge.provider {
@@ -282,6 +302,46 @@ fn none() -> Priced {
         source: Some(CostSource::None),
         ..Priced::default()
     }
+}
+
+/// The row of the model's publisher, for a gateway span that no row of its own prices (D-IN-13).
+fn publisher_row<'a>(
+    prices: &'a PriceTable,
+    model: &str,
+    charge: &Charge<'_>,
+) -> Option<&'a PriceRow> {
+    let (publisher, names) = publisher_candidates(charge.provider?, model)?;
+    names
+        .iter()
+        .find_map(|name| lookup(prices, name, Some(publisher), charge.start_time))
+}
+
+/// For a gateway span, the publisher's provider and the model names to try, in order (D-IN-13,
+/// spec 02 § Cost computation step 2). `None` when `provider` is not a gateway, or when `model`
+/// is not `vendor/name` with a vendor in [`PUBLISHER_VENDORS`], or when the name is `:free` or empty.
+#[must_use]
+pub fn publisher_candidates(provider: &str, model: &str) -> Option<(&'static str, Vec<String>)> {
+    if GATEWAY_PROVIDERS.binary_search(&provider).is_err() {
+        return None;
+    }
+    let (vendor, name) = model.split_once('/')?;
+    let vendor = vendor.to_ascii_lowercase();
+    let index = PUBLISHER_VENDORS
+        .binary_search_by_key(&vendor.as_str(), |&(known, _)| known)
+        .ok()?;
+    let publisher = PUBLISHER_VENDORS[index].1;
+    if name.ends_with(":free") {
+        return None;
+    }
+    let name = name.split_once(':').map_or(name, |(before, _)| before);
+    if name.is_empty() {
+        return None;
+    }
+    let mut candidates = vec![name.to_owned()];
+    if name.contains('.') {
+        candidates.push(name.replace('.', "-"));
+    }
+    Some((publisher, candidates))
 }
 
 struct Reported {
@@ -913,13 +973,22 @@ mod tests {
     }
 
     fn priced_of(prices: &PriceTable, model: &str, tokens: i64) -> Priced {
+        priced_with(prices, None, model, tokens)
+    }
+
+    fn priced_with(
+        prices: &PriceTable,
+        provider: Option<&str>,
+        model: &str,
+        tokens: i64,
+    ) -> Priced {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(&[], &mut warnings);
         apply(
             &mut bag,
             &Charge {
                 kind: SpanKind::Llm,
-                provider: None,
+                provider,
                 model: Some(model),
                 start_time: 0,
                 usage: &usage_input(tokens),
@@ -927,6 +996,120 @@ mod tests {
             prices,
             &mut warnings,
         )
+    }
+
+    #[test]
+    fn publisher_candidates_follow_the_vendor_table() {
+        assert_eq!(
+            publisher_candidates("openrouter", "openai/gpt-4o-mini"),
+            Some(("openai", vec!["gpt-4o-mini".to_owned()]))
+        );
+        assert_eq!(
+            publisher_candidates("openrouter", "anthropic/claude-sonnet-4.5"),
+            Some((
+                "anthropic",
+                vec![
+                    "claude-sonnet-4.5".to_owned(),
+                    "claude-sonnet-4-5".to_owned()
+                ]
+            ))
+        );
+        assert_eq!(
+            publisher_candidates("openrouter", "x-ai/grok-4:nitro"),
+            Some(("x_ai", vec!["grok-4".to_owned()]))
+        );
+        assert_eq!(
+            publisher_candidates("vercel_ai_gateway", "OpenAI/gpt-4o"),
+            Some(("openai", vec!["gpt-4o".to_owned()]))
+        );
+        assert_eq!(
+            publisher_candidates("openrouter", "meta-llama/llama-3.3-70b"),
+            None
+        );
+        assert_eq!(
+            publisher_candidates("openrouter", "openai/gpt-oss-20b:free"),
+            None
+        );
+        assert_eq!(publisher_candidates("openrouter", "gpt-4o"), None);
+        assert_eq!(publisher_candidates("openrouter", "openai/"), None);
+        assert_eq!(publisher_candidates("groq", "openai/gpt-oss-120b"), None);
+    }
+
+    #[test]
+    fn a_gateway_span_is_priced_by_the_publisher_row() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        let priced = priced_with(&prices, Some("openrouter"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.provider, None);
+    }
+
+    #[test]
+    fn a_gateway_row_beats_the_publisher_fallback() {
+        let prices = table(vec![
+            row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 1.0),
+            row(
+                &exact_pattern("openai/gpt-4o-mini"),
+                PriceScope::Builtin,
+                Some("openrouter"),
+                0,
+                9.0,
+            ),
+        ]);
+        let priced = priced_with(&prices, Some("openrouter"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.input, Some(9.0));
+    }
+
+    #[test]
+    fn the_fallback_never_uses_another_reseller() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("groq"),
+            0,
+            1.0,
+        )]);
+        let priced = priced_with(&prices, Some("openrouter"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.input, None);
+    }
+
+    #[test]
+    fn a_non_gateway_span_gets_no_fallback() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        let priced = priced_with(&prices, Some("novita"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.input, None);
+    }
+
+    #[test]
+    fn dots_become_dashes_in_the_second_candidate() {
+        let prices = table(vec![row(
+            "claude-sonnet-4-5",
+            PriceScope::Builtin,
+            Some("anthropic"),
+            0,
+            3.0,
+        )]);
+        let priced = priced_with(
+            &prices,
+            Some("openrouter"),
+            "anthropic/claude-sonnet-4.5",
+            1_000_000,
+        );
+        assert_eq!(priced.input, Some(3.0));
     }
 
     #[test]
