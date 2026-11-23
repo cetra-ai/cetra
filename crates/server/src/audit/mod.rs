@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod catalog;
+pub(crate) mod retention;
 #[cfg(test)]
 mod tests;
 

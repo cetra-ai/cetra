@@ -497,6 +497,20 @@ impl Default for EvalConfig {
     }
 }
 
+/// `[audit]` (track EA, D-EA-7).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AuditConfig {
+    /// Days an audit record is kept. Default 365; 0 keeps records forever; otherwise 30 or more.
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self { retention_days: 365 }
+    }
+}
+
 /// `[issues]` (track IC, D-IC-12).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -716,6 +730,9 @@ pub struct ServerConfig {
     /// `[eval]` worker settings.
     #[serde(default)]
     pub eval: EvalConfig,
+    /// `[audit]` retention (track EA).
+    #[serde(default)]
+    pub audit: AuditConfig,
     /// `[issues]` worker settings (track IC).
     #[serde(default)]
     pub issues: IssuesConfig,
@@ -1121,6 +1138,12 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
         return Err(ConfigError::Invalid {
             key: "issues.workers",
             reason: "must be between 1 and 64",
+        });
+    }
+    if config.audit.retention_days != 0 && config.audit.retention_days < 30 {
+        return Err(ConfigError::Invalid {
+            key: "audit.retention_days",
+            reason: "must be 0 or at least 30",
         });
     }
     Ok(())
@@ -2362,6 +2385,36 @@ mod tests {
                 ),
                 "{toml}: {error}"
             );
+        }
+    }
+
+    #[test]
+    fn audit_retention_defaults_to_365() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.audit.retention_days, 365);
+    }
+
+    #[test]
+    fn audit_retention_refuses_29() {
+        let error = load_from(Some("[audit]\nretention_days = 29\n"), &[]).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                ConfigError::Invalid {
+                    key: "audit.retention_days",
+                    ..
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn audit_retention_accepts_0_and_30() {
+        for days in [0, 30] {
+            let toml = format!("[audit]\nretention_days = {days}\n");
+            let config = load_from(Some(toml.as_str()), &[]).unwrap();
+            assert_eq!(config.audit.retention_days, days);
         }
     }
 

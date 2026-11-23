@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use cetra_core::ids::{OrgId, ProjectId, TraceId};
+use cetra_core::ids::{ProjectId, TraceId};
 use cetra_storage::error::{DeletionError, QueryError};
 use cetra_storage::{
     Deletion, DeletionScope, DeletionStatus, MAX_FILTER_DELETION_TRACES, RunError,
@@ -17,6 +17,9 @@ use cetra_storage::{
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+use crate::audit::catalog::{DeletionAction, OrgAction, ProjectAction};
+use crate::audit::retention::delete_org_records;
+use crate::audit::{self, Ctx, Event, TargetKind};
 use crate::http::AppState;
 use crate::meta::MetaError;
 use crate::meta::deletions::{
@@ -179,30 +182,6 @@ fn priority(row: &DeletionRow) -> u8 {
     }
 }
 
-/// A project or org whose data and `meta.db` rows are gone.
-#[derive(Debug, Clone)]
-pub(crate) struct Dropped {
-    pub(crate) deletion_id: Uuid,
-    pub(crate) org_id: OrgId,
-    /// The dropped projects (one for a project drop; every project of the org for an org drop).
-    pub(crate) projects: Vec<ProjectId>,
-    /// The org itself is gone.
-    pub(crate) whole_org: bool,
-}
-
-/// Records the audit event of a drop, once, after its `meta.db` transaction committed
-/// (D-M-17). The control plane does not hook in here: it pulls the applied `project`/`org`
-/// rows of `deletions` (request R5, track P's M4), which are kept forever.
-pub(crate) fn on_dropped(dropped: &Dropped) {
-    if dropped.whole_org {
-        tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, projects = dropped.projects.len(), "org dropped");
-    } else {
-        for project in &dropped.projects {
-            tracing::info!(target: "audit", deletion_id = %dropped.deletion_id, org_id = %dropped.org_id, project_id = %project, "project dropped");
-        }
-    }
-}
-
 /// Asks for the deletion of copies committed after `parent`'s cut-off (D-M-6): a judge trace
 /// and the target it scored. Stores the follow-up row, wakes the worker and writes the audit
 /// event `deletion requested` with `follow_up_of = parent`.
@@ -231,26 +210,25 @@ pub(crate) async fn follow_up(
     };
     let id = Uuid::now_v7();
     let now = state.clock.now_ns();
-    let (org, actor_kind, actor_id) = (row.org_id, row.actor_kind, row.actor_id);
+    let org = row.org_id;
     let traces = traces.to_vec();
     state
         .meta
         .write(move |conn| {
-            Box::pin(async move { insert_follow_up(conn, &row, id, &traces, now).await })
+            Box::pin(async move {
+                insert_follow_up(conn, &row, id, &traces, now).await?;
+                let event = Event::new(DeletionAction::Requested {
+                    kind: DeletionKind::TraceIds.as_str(),
+                    follow_up_of: Some(parent),
+                })
+                .org(org)
+                .project(project)
+                .target(TargetKind::Deletion, id);
+                audit::record(conn, &Ctx::system(), event, now).await
+            })
         })
         .await?;
     state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        follow_up_of = %parent,
-        kind = DeletionKind::TraceIds.as_str(),
-        org_id = %org,
-        project_id = %project,
-        actor_kind = actor_kind.as_str(),
-        actor_id = %actor_id,
-        "deletion requested"
-    );
     Ok(())
 }
 
@@ -360,14 +338,30 @@ async fn fail(state: &AppState, row: &DeletionRow, reason: FailReason) {
         state.deletions.failed(row.id, state.clock.now_ns());
         return;
     }
-    let id = row.id;
+    let (id, kind, org, project) = (row.id, row.kind, row.org_id, row.project_id);
+    let now = state.clock.now_ns();
     let written = state
         .meta
-        .write(move |conn| Box::pin(async move { mark_failed(conn, id, reason).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                if !mark_failed(conn, id, reason).await? {
+                    return Ok(false);
+                }
+                let mut event = Event::new(DeletionAction::Failed {
+                    kind: kind.as_str(),
+                })
+                .org(org)
+                .target(TargetKind::Deletion, id);
+                if let Some(project) = project {
+                    event = event.project(project);
+                }
+                audit::record(conn, &Ctx::system(), event, now).await?;
+                Ok(true)
+            })
+        })
         .await;
     match written {
         Ok(true) => {
-            tracing::info!(target: "audit", deletion_id = %row.id, error = reason.as_str(), "deletion failed");
             state.deletions.settled(row.id);
         }
         Ok(false) => {
@@ -387,15 +381,26 @@ async fn fail(state: &AppState, row: &DeletionRow, reason: FailReason) {
 
 /// Sets `row` applied at `at`. Logs the audit event when the row changed.
 async fn applied_now(state: &AppState, row: &DeletionRow, at: i64) -> Result<(), MetaError> {
-    let id = row.id;
-    let changed = state
+    let (id, kind, org, project) = (row.id, row.kind, row.org_id, row.project_id);
+    state
         .meta
-        .write(move |conn| Box::pin(async move { mark_applied(conn, id, at).await }))
-        .await?;
-    if changed {
-        tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-    }
-    Ok(())
+        .write(move |conn| {
+            Box::pin(async move {
+                if !mark_applied(conn, id, at).await? {
+                    return Ok(());
+                }
+                let mut event = Event::new(DeletionAction::Applied {
+                    kind: kind.as_str(),
+                })
+                .org(org)
+                .target(TargetKind::Deletion, id);
+                if let Some(project) = project {
+                    event = event.project(project);
+                }
+                audit::record(conn, &Ctx::system(), event, at).await
+            })
+        })
+        .await
 }
 
 /// One step of a `trace_ids`, `filter` or `user` row.
@@ -538,7 +543,6 @@ async fn register(
     state.live.publish_resync(project);
     state.clear_answers(project);
     tracing::info!(
-        target: "audit",
         deletion_id = %row.id,
         trace_count = trace_count,
         session_count = session_count,
@@ -586,13 +590,21 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
         .drop_project(project)
         .await
         .map_err(|_| Step::RetryForever("storage", None))?;
-    let id = row.id;
-    let dropped = state
+    let (id, org) = (row.id, row.org_id);
+    state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 delete_project(conn, project).await?;
-                mark_dropped(conn, id, now).await
+                let dropped = mark_dropped(conn, id, now).await?;
+                if dropped {
+                    let event = Event::new(ProjectAction::Dropped)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Project, project);
+                    audit::record(conn, &Ctx::system(), event, now).await?;
+                }
+                Ok(dropped)
             })
         })
         .await
@@ -608,15 +620,6 @@ async fn drop_project_step(state: &AppState, row: &DeletionRow, now: i64) -> Res
         let _writes = state.ingest.prices().lock_writes().await;
         state.ingest.prices().forget_project(project);
     }
-    if dropped {
-        tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(&Dropped {
-            deletion_id: row.id,
-            org_id: row.org_id,
-            projects: vec![project],
-            whole_org: false,
-        });
-    }
     Ok(())
 }
 
@@ -631,11 +634,13 @@ pub(crate) async fn request_org_drop(
     state: &AppState,
     org: &OrgRow,
     actor: (ActorKind, Uuid),
+    ctx: &Ctx,
 ) -> Result<Option<DeletionRow>, MetaError> {
     let (actor_kind, actor_id) = actor;
     let id = Uuid::now_v7();
     let now = state.clock.now_ns();
     let org_id = org.id;
+    let ctx = ctx.clone();
     let new = NewDeletion {
         id,
         org_id,
@@ -662,6 +667,13 @@ pub(crate) async fn request_org_drop(
                 let projects = project_ids_of_org(&mut *conn, org_id).await?;
                 let row = insert_deletion(conn, &new).await?;
                 insert_projects(conn, id, &projects).await?;
+                let event = Event::new(DeletionAction::Requested {
+                    kind: DeletionKind::Org.as_str(),
+                    follow_up_of: None,
+                })
+                .org(org_id)
+                .target(TargetKind::Deletion, id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Some(row))
             })
         })
@@ -670,15 +682,6 @@ pub(crate) async fn request_org_drop(
         return Ok(None);
     };
     state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        kind = DeletionKind::Org.as_str(),
-        org_id = %org_id,
-        actor_kind = actor_kind.as_str(),
-        actor_id = %actor_id,
-        "deletion requested"
-    );
     Ok(Some(row))
 }
 
@@ -712,12 +715,19 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         .map_err(|error| forever_meta(&error))?;
     let id = row.id;
     let org = row.org_id;
-    let dropped = state
+    state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 delete_org(conn, org).await?;
-                mark_dropped(conn, id, now).await
+                let dropped = mark_dropped(conn, id, now).await?;
+                if dropped {
+                    delete_org_records(conn, org.as_uuid()).await?;
+                    // An instance record: the org's own records are gone (D-EA-7).
+                    let event = Event::new(OrgAction::Dropped).target(TargetKind::Org, org);
+                    audit::record(conn, &Ctx::system(), event, now).await?;
+                }
+                Ok(dropped)
             })
         })
         .await
@@ -733,15 +743,6 @@ async fn drop_org_step(state: &AppState, row: &DeletionRow, now: i64) -> Result<
         let _writes = state.ingest.prices().lock_writes().await;
         state.ingest.prices().forget_org(row.org_id);
     }
-    if dropped {
-        tracing::info!(target: "audit", deletion_id = %row.id, "deletion applied");
-        on_dropped(&Dropped {
-            deletion_id: row.id,
-            org_id: row.org_id,
-            projects,
-            whole_org: true,
-        });
-    }
     Ok(())
 }
 
@@ -751,7 +752,7 @@ mod tests {
 
     use axum::http::{Method, StatusCode};
     use cetra_core::batch::spans_to_record_batch;
-    use cetra_core::ids::{ProjectId, SpanId, TraceId};
+    use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
     use cetra_core::names::metadata_key;
     use cetra_core::span::Span;
     use cetra_otel::AgentContext;
@@ -759,6 +760,7 @@ mod tests {
     use cetra_storage::error::{AppendError, DeletionError};
 
     use super::*;
+    use crate::audit::catalog::InstanceAction;
     use crate::meta::agent_contexts::{AgentContextRow, load_contexts, upsert_context};
     use crate::meta::annotation_queues::{
         AddedByKind, NewItem, NewQueue, QueueCreate, Target, insert_items_tx, insert_queue_tx,
@@ -1489,7 +1491,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn drop_hook_logs_once() {
+    async fn drop_records_once() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
         let (doomed, _key) = app.add_project(&seeded, "doomed", None).await;
@@ -1500,16 +1502,78 @@ mod tests {
             ..RequestDetails::default()
         };
         insert(&app, new, &[]).await;
+        let dropped_rows = "SELECT COUNT(*) FROM audit_events \
+                            WHERE action = 'project.dropped' AND target_id = ?";
 
-        let ((), logs) = capture_logs(async { worker(&app).await }).await;
-        let lines = logs
-            .lines()
-            .filter(|line| line.contains("audit") && line.contains("project dropped"))
-            .count();
-        assert_eq!(lines, 1, "{logs}");
+        worker(&app).await;
+        assert_eq!(
+            count_rows(&app, dropped_rows, doomed.id.to_string()).await,
+            1
+        );
 
-        let ((), again) = capture_logs(async { worker(&app).await }).await;
-        assert!(!again.contains("project dropped"), "{again}");
+        worker(&app).await;
+        assert_eq!(
+            count_rows(&app, dropped_rows, doomed.id.to_string()).await,
+            1
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_applied_org_drop_deletes_its_records_and_records_the_drop() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let (p1, _) = app.add_project(&seeded, "p1", None).await;
+        let (org, other) = (seeded.org_id, OrgId::from_uuid(Uuid::now_v7()));
+        let now = app.state.clock.now_ns();
+        for record_org in [org, other] {
+            crate::audit::record_alone(
+                &app.state.meta,
+                &Ctx::system(),
+                Event::new(ProjectAction::Created)
+                    .org(record_org)
+                    .project(p1.id),
+                now,
+            )
+            .await
+            .unwrap();
+        }
+        crate::audit::record_alone(
+            &app.state.meta,
+            &Ctx::system(),
+            Event::new(InstanceAction::InitApplied),
+            now,
+        )
+        .await
+        .unwrap();
+
+        let mut new = new_row(&app, &p1, DeletionKind::Org);
+        new.request = RequestDetails {
+            name: Some("Acme".to_owned()),
+            slug: Some("acme".to_owned()),
+            ..RequestDetails::default()
+        };
+        let (id, p1_id) = (new.id, p1.id);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    insert_deletion(conn, &new).await?;
+                    insert_projects(conn, id, &[p1_id]).await
+                })
+            })
+            .await
+            .unwrap();
+
+        worker(&app).await;
+
+        assert_eq!(deletion_row(&app, id).await.state, DeletionState::Applied);
+        let by_org = "SELECT COUNT(*) FROM audit_events WHERE org_id = ?";
+        assert_eq!(count_rows(&app, by_org, org.to_string()).await, 0);
+        assert_eq!(count_rows(&app, by_org, other.to_string()).await, 1);
+        let dropped = "SELECT COUNT(*) FROM audit_events \
+                       WHERE org_id IS NULL AND action = 'org.dropped' \
+                       AND target_kind = 'org' AND target_id = ?";
+        assert_eq!(count_rows(&app, dropped, org.to_string()).await, 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1677,7 +1741,7 @@ mod tests {
         let ((), logs) = capture_logs(async { worker(&app).await }).await;
         assert!(
             logs.lines()
-                .any(|line| line.contains("audit") && line.contains("deletion registered")),
+                .any(|line| line.contains("deletion registered")),
             "{logs}"
         );
         for needle in ["user-secret-7", "session-secret-9", trace.as_str()] {

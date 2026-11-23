@@ -122,6 +122,9 @@ const NOTICES_EVERY: Duration = Duration::from_secs(60);
 /// How often expired web sessions are deleted.
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
+/// How often audit records older than `audit.retention_days` are deleted (D-EA-7).
+const AUDIT_PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
+
 /// Why `cetra serve` stopped before it was listening, or the accept loop failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
@@ -610,6 +613,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     if !state.config.restore_mode {
         tasks.push(spawn_notices(state.clone()));
         tasks.push(spawn_org_sso_recheck(state.clone()));
+        tasks.push(spawn_audit_purge(state.clone()));
     }
     tasks.push(spawn_org_sso(state.clone()));
     if state.config.restore_mode {
@@ -762,6 +766,33 @@ fn spawn_purge(state: AppState) -> JoinHandle<()> {
                 Ok(_) => {}
                 Err(error) => {
                     tracing::error!(error = %error, "session purge failed");
+                }
+            }
+        }
+    })
+}
+
+fn spawn_audit_purge(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUDIT_PURGE_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = state.clock.now_ns();
+            let purged = crate::audit::retention::purge(
+                &state.meta,
+                state.config.audit.retention_days,
+                now,
+            )
+            .await;
+            match purged {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "purged old audit records");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "audit purge failed");
                 }
             }
         }
@@ -1188,9 +1219,10 @@ mod tests {
         ));
     }
 
-    /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send
-    /// (evaluation and delivery), usage notices (email) and the org-SSO recheck (DNS). The eval
-    /// dispatcher and backfill runner live in `eval_tasks`, which is not counted here.
+    /// Restore mode starts five fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS) and the audit
+    /// purge (a restored copy keeps its records unchanged). The eval dispatcher and backfill
+    /// runner live in `eval_tasks`, which is not counted here.
     #[tokio::test]
     async fn restore_mode_skips_the_sending_and_dns_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -1202,7 +1234,7 @@ mod tests {
         let restored = bind(restore, None).await.unwrap();
         let restore_tasks = restored.tasks.len();
         restored.shutdown().await.unwrap();
-        assert_eq!(normal_tasks - restore_tasks, 4);
+        assert_eq!(normal_tasks - restore_tasks, 5);
     }
 
     #[tokio::test]
