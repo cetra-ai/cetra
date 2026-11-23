@@ -319,9 +319,9 @@ describes: the copy then cannot send anything.
 
 ## Restore mode (restore drills)
 
-`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)). It sends nothing to us either: the heartbeat and crash reports are off in restore mode ([Telemetry](/docs/self-hosting/telemetry/)). Use it
+`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)). Use it
 for a copy of an installation that you start to check a restore, for example a drill that runs a copy of a
-cell.
+cell. It sends nothing to us either: the heartbeat and crash reports are off in restore mode ([Telemetry](/docs/self-hosting/telemetry/)).
 
 With restore mode on, the server:
 
