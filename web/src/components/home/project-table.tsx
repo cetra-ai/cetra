@@ -55,7 +55,7 @@ export function ProjectTable({
               </TableCell>
               <TableCell className="font-mono">{project.slug}</TableCell>
               <TableCell>
-                <Badge variant="secondary">{project.role ? roleLabel(project.role) : ""}</Badge>
+                {project.role ? <Badge variant="secondary">{roleLabel(project.role)}</Badge> : null}
               </TableCell>
               <TableCell>{formatRetention(project.retention_days)}</TableCell>
               <TableCell className="text-right tabular-nums">

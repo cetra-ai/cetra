@@ -24,9 +24,12 @@ function fixtureActivity(id: string): Schema<"ProjectActivity"> {
 }
 
 /** Renders the table with a root route, so its name links resolve. */
-async function renderTable(activityOf: (id: string) => ActivityState) {
+async function renderTable(
+  activityOf: (id: string) => ActivityState,
+  rows: readonly Schema<"Project">[] = projects,
+) {
   const rootRoute = createRootRoute({
-    component: () => <ProjectTable org="acme" rows={projects} activity={activityOf} />,
+    component: () => <ProjectTable org="acme" rows={rows} activity={activityOf} />,
   });
   const router = createRouter({
     routeTree: rootRoute,
@@ -74,5 +77,17 @@ describe("ProjectTable", () => {
     const table = await screen.findByRole("table", { name: "Projects" });
     const support = within(table).getByRole("row", { name: /Support bot/ });
     expect(within(support).getAllByText("—")).toHaveLength(4);
+  });
+
+  it("shows no role badge for a project without a role", async () => {
+    const roleless = projects.map((project) => {
+      const { role: _role, ...rest } = project;
+      return rest;
+    });
+    await renderTable(() => ({ state: "none" }), roleless);
+
+    const table = await screen.findByRole("table", { name: "Projects" });
+    const support = within(table).getByRole("row", { name: /Support bot/ });
+    expect(support.querySelector('[data-slot="badge"]')).toBeNull();
   });
 });

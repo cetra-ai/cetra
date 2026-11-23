@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::time::Duration;
 
 use axum::extract::{Extension, State};
 use axum::routing::get;
@@ -19,7 +20,7 @@ use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
 use crate::meta::projects::ProjectRow;
 use crate::routes::projects::visible_projects;
-use crate::routes::read::{Deadline, open_query};
+use crate::routes::read::{Deadline, READ_TIMEOUT, open_query};
 
 /// Most project ids in one request: one page of the project list.
 const MAX_IDS: usize = 50;
@@ -33,6 +34,9 @@ const CONCURRENCY: usize = 4;
 const ERROR_CONDITION: &str = "status = 'error'";
 /// The 400 message on `ids`. It names no value.
 const IDS_MESSAGE: &str = "ids must be 1 to 50 distinct project ids";
+/// The longest one project's query may run, so one slow project cannot use up the request's
+/// 30 s deadline and leave the projects queued behind it `unavailable` (review, D-C-27).
+const PROJECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// `GET /api/v1/orgs/{org}/projects/activity`.
 pub(crate) fn routes() -> Vec<RouteDef> {
@@ -167,7 +171,10 @@ async fn project_activity(
     window: storage::TimeWindow,
     deadline: Deadline,
 ) -> Result<ProjectActivity, &'static str> {
-    let timeout = deadline.remaining().map_err(|_| "timeout")?;
+    let timeout = deadline
+        .remaining()
+        .map_err(|_| "timeout")?
+        .min(PROJECT_TIMEOUT);
     let ctx = open_query(state, project.org_id, project.id, None)
         .await
         .map_err(|_| "open")?;
@@ -200,8 +207,8 @@ async fn project_activity(
     ))
 }
 
-/// Keeps the request order. A failed project is logged with its id and reason, and listed in
-/// `unavailable` (OH-4).
+/// Keeps the request order. A failed project is listed in `unavailable` (OH-4) and logged at debug
+/// with its id and reason; the request logs once at warn with the count of such projects.
 fn split(
     results: Vec<(ProjectId, Result<ProjectActivity, &'static str>)>,
 ) -> (Vec<ProjectActivity>, Vec<ProjectId>) {
@@ -211,10 +218,16 @@ fn split(
         match outcome {
             Ok(activity) => data.push(activity),
             Err(reason) => {
-                tracing::warn!(project_id = %id, reason, "project activity failed");
+                tracing::debug!(project_id = %id, reason, "project activity failed");
                 unavailable.push(id);
             }
         }
+    }
+    if !unavailable.is_empty() {
+        tracing::warn!(
+            unavailable = unavailable.len(),
+            "project activity unavailable for some projects"
+        );
     }
     (data, unavailable)
 }
@@ -706,6 +719,12 @@ mod tests {
         let ids: Vec<ProjectId> = data.iter().map(|entry| entry.project_id).collect();
         assert_eq!(ids, vec![a, c]);
         assert_eq!(unavailable, vec![b]);
+    }
+
+    #[test]
+    fn the_project_timeout_is_under_the_request_deadline() {
+        assert!(PROJECT_TIMEOUT < READ_TIMEOUT);
+        assert!(PROJECT_TIMEOUT > Duration::ZERO);
     }
 
     #[test]

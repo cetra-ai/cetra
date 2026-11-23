@@ -1,4 +1,4 @@
-import { useQueries } from "@tanstack/react-query";
+import { keepPreviousData, useQueries } from "@tanstack/react-query";
 import { projectActivityQuery } from "@/api/queries";
 import type { Schema } from "@/api/types";
 import { formatCost } from "@/lib/format";
@@ -40,6 +40,7 @@ export function useProjectActivity(
         chunk.map((project) => project.id),
       ),
       staleTime: ACTIVITY_STALE_MS,
+      placeholderData: keepPreviousData,
       refetchInterval: ACTIVITY_REFETCH_MS,
     })),
   });

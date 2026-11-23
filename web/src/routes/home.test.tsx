@@ -260,6 +260,35 @@ it("loads the next project page", async () => {
   expect(requests[1]?.searchParams.get("limit")).toBe("50");
 });
 
+it("says the search covers only loaded projects when more pages exist", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/projects", ({ request }) => {
+      const url = new URL(request.url);
+      if (url.searchParams.get("cursor") === "c2") {
+        return HttpResponse.json({ data: [project("Second", "second")], next_cursor: null });
+      }
+      return HttpResponse.json({ data: [project("First", "first", 30)], next_cursor: "c2" });
+    }),
+  );
+
+  const { user } = await renderApp("/acme");
+  expect(screen.queryByText(/The search covers the loaded projects/)).not.toBeInTheDocument();
+  await user.type(screen.getByRole("textbox", { name: "Search projects" }), "zzz");
+  expect(screen.getByText("No projects match the search.")).toBeInTheDocument();
+  expect(
+    screen.getByText("The search covers the loaded projects. Load more to search the rest."),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Load more" })).toBeInTheDocument();
+});
+
+it("hides the search hint when there is no next page", async () => {
+  const { user } = await renderApp("/acme");
+  await user.type(screen.getByRole("textbox", { name: "Search projects" }), "zzz");
+  expect(screen.getByText("No projects match the search.")).toBeInTheDocument();
+  expect(screen.queryByText(/The search covers the loaded projects/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Load more" })).not.toBeInTheDocument();
+});
+
 it("shows skeletons while the project list is loading", async () => {
   let release: () => void = () => {};
   const gate = new Promise<void>((resolve) => {

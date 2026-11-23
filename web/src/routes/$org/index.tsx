@@ -124,6 +124,11 @@ function OrgHome() {
             ))}
           </ul>
         )}
+        {projects.hasNextPage && search !== "" ? (
+          <p className="text-caption text-muted-foreground">
+            The search covers the loaded projects. Load more to search the rest.
+          </p>
+        ) : null}
         {projects.hasNextPage ? (
           <Button
             type="button"
