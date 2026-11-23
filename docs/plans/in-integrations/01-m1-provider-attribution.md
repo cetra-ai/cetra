@@ -37,6 +37,7 @@ Not in M1:
 - Provider pages, the index regrouping, `check-integrations.mjs`, the Cohere and Ollama mock routes, and new registry rows (M2).
 - Gateway pages and gateway-reported cost (M5).
 - OpenAI v2 captured cases. OpenAI v2 writes no host, and cetra's stamp is tied to the OpenInference `openai` instrumentor (D-IN-18), so an OpenAI v2 span on an unknown host stays `openai`. A captured case would pin only that, and would fail `captured_llm_spans_are_priced_by_the_builtin_snapshot`. The design's "six cases" becomes four (D-IN-19).
+- Region- or deployment-prefixed cloud names (`aws.bedrock` `us-east-1/…`, `azure.ai.openai` `eu/…`): they stay out of the snapshot (D-IN-14).
 - TypeScript changes: OpenInference JS already writes `server.address` (`spikes/m1-ts-host-stamp.md`).
 
 ## Decisions this plan relies on
@@ -50,30 +51,31 @@ Not in M1:
 | D-IN-14 | The converter keeps names with `/` after the provider prefix; every snapshot provider is a fixed point of rule 12. |
 | D-IN-15 | New aliases; framework names in `gen_ai.system` are skipped. |
 | D-IN-18 | The Python SDK stamps `server.address` on OpenAI-client spans when `instrument` names `openai`. |
-| D-IN-19 (new, this plan) | M1's captured cases are four: OpenRouter and Novita through cetra's SDK with OpenInference, and through OpenLLMetry. The OpenInference cases run through cetra's runtime (the test seam `Runtime.create(config, exporter=…)`), so they pin the stamp. LiteLLM's `clf_ai_gateway` is renamed `cloudflare_ai_gateway` by the converter and by rule 12. The mock checks a turn's `host` against the request's `Host` header. |
+| D-IN-19 (recorded in the design) | M1's captured cases are four: OpenRouter and Novita through cetra's SDK with OpenInference, and through OpenLLMetry. The OpenInference cases run through cetra's runtime (the test seam `Runtime.create(config, exporter=…)`), so they pin the stamp. LiteLLM's `clf_ai_gateway` is renamed `cloudflare_ai_gateway` by the converter and by rule 12. The mock checks a turn's `host` against the request's `Host` header. |
 
 User answers that apply: D-IN-18's SDK host stamp (the user, 2026-11-23).
 
 ## Versions
 
 No new third-party dependency.
-- `tools/capture/py` gains direct dependencies on `httpx`, at exactly the version already in `tools/capture/py/uv.lock`, and on `cetra-sdk` as a path dependency on `../../../sdks/python`.
+- `tools/capture/py` gains direct dependencies on `httpx2` (not `httpx`: openai 3.x is built on `httpx2`, and `httpx` is its legacy shim), at exactly the version already in `tools/capture/py/uv.lock` (2.16.0 at writing), and on `cetra-sdk` as an editable path dependency on `../../../sdks/python`.
+- The SDK tests (IN1.5) use `httpx2`, which `sdks/python`'s dev group already installs through `openai`. No `pyproject.toml` change there.
 - The price snapshot source stays LiteLLM commit `4b498d1bba768bd81e4a434a14ea7ae2870dd01f`, the current snapshot's source, so the refresh diff shows only the converter fix.
 
-The implementer reports the `httpx` version used.
+The implementer reports the `httpx2` version used.
 
 ## Phases and dependencies
 
 | Phase | Edits | Depends on |
 |---|---|---|
-| IN1.1 Host rule, aliases, framework names | `crates/otel/src/context.rs`, `crates/otel/src/normalize.rs`, `docs/spec/02-ingestion.md` (§ Model, provider, usage, rule 12) | — |
+| IN1.1 Host rule, aliases, framework names | `crates/otel/src/context.rs`, `crates/otel/src/normalize.rs`, `docs/spec/02-ingestion.md` (§ Model, provider, usage, rule 12), `website/src/content/docs/docs/reference/attributes.md`, `skills/cetra/references/attributes.md` (generated) | — |
 | IN1.2 Gateway pricing | `crates/otel/src/cost.rs`, `crates/otel/src/lib.rs`, `crates/otel/tests/fixtures.rs`, `docs/spec/02-ingestion.md` (§ Cost computation step 2) | IN1.1 |
 | IN1.3 Price converter and snapshot | `crates/otel/tests/prices.rs`, `crates/otel/prices/builtin.json`, `crates/otel/src/context.rs` (one test), `docs/spec/02-ingestion.md` (built-in prices paragraph) | IN1.2 |
-| IN1.4 Capture harness | `tools/capture/src/{scenario,mock,write}.rs`, `tools/capture/src/wire/{openai,anthropic,gemini}.rs`, `tools/capture/py/{pyproject.toml,uv.lock}`, `tools/capture/py/src/capture_py/harness.py` | — |
-| IN1.5 SDK host stamp | `sdks/python/src/cetra/{_host.py (new),_instrument.py,_processor.py}`, `sdks/python/tests/test_instrument.py`, `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/opentelemetry.mdx` | — |
-| IN1.6 Captured cases | `tools/capture/py/scenarios/{openinference,openllmetry}/{openrouter-chat,novita-chat}/`, `fixtures/otlp/{openinference,openllmetry}/{openrouter-chat,novita-chat}/`, `fixtures/otlp/prices.json`, `docs/spec/02-ingestion.md` (§ Testing), `CHANGELOG.md`, `docs/roadmap.md`, `docs/mvp-decisions.md` (D-IN-19) | IN1.1–IN1.5 |
+| IN1.4 Capture harness | `tools/capture/src/{scenario,mock,write}.rs`, `tools/capture/src/wire/{openai,anthropic,gemini}.rs`, `tools/capture/py/{pyproject.toml,uv.lock}`, `tools/capture/py/src/capture_py/harness.py`, `tools/capture/src/scrub.rs`, `tools/packaging/release-prep.sh` | — |
+| IN1.5 SDK host stamp | `sdks/python/src/cetra/{_host.py (new),_instrument.py,_processor.py}`, `sdks/python/tests/test_instrument.py`, `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/opentelemetry.mdx`, `skills/cetra/references/python-opentelemetry.md` (generated) | — |
+| IN1.6 Captured cases | `tools/capture/py/scenarios/{openinference,openllmetry}/{openrouter-chat,novita-chat}/`, `fixtures/otlp/{openinference,openllmetry}/{openrouter-chat,novita-chat}/`, `fixtures/otlp/prices.json`, `docs/spec/02-ingestion.md` (§ Testing), `CHANGELOG.md`, `docs/roadmap.md` | IN1.1–IN1.5 |
 
-IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingestion.md` and `crates/otel`. IN1.4 and IN1.5 can run alongside them, in their own worktrees cut from the same base. IN1.6 runs last.
+IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingestion.md` and `crates/otel`. IN1.4 and IN1.5 can run alongside them, in their own worktrees cut from the same base. IN1.6 runs last. IN1.4's `uv lock` records `cetra-sdk` as an editable path dependency, so IN1.5's code reaches the capture environment without a re-lock.
 
 **Rules for every phase.** Run only the tests named in "Done when", not the full suites (the machine is shared). Compile Rust once, right before the commit. Change no file outside the phase's Edit list. Commit once, with the given subject. If a step is unclear or contradicts the code, stop and report instead of improvising.
 
@@ -83,7 +85,7 @@ IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingesti
 
 **Goal:** the provider comes from the endpoint's host when the instrumentation left it empty or `openai`, and rule 12 knows the new names.
 
-**Edit:** `crates/otel/src/context.rs`, `crates/otel/src/normalize.rs`, `docs/spec/02-ingestion.md`.
+**Edit:** `crates/otel/src/context.rs`, `crates/otel/src/normalize.rs`, `docs/spec/02-ingestion.md`, `website/src/content/docs/docs/reference/attributes.md`, `skills/cetra/references/attributes.md` (generated).
 
 **Steps.**
 
@@ -218,13 +220,15 @@ IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingesti
    fields.provider = crate::context::endpoint_provider(&bag, span_kind, fields.provider.take());
    ```
 
-   Import what is needed. Nothing else in `normalize.rs` changes.
+   Import what is needed. Nothing else in `normalize.rs` changes. `context.rs` imports only `Convention` from `cetra_core::enums`; add `SpanKind` to that import.
 
 6. Spec 02:
    - In § Model, provider, usage, the `provider` row: after `ai.model.provider` (rule 12), add "then the endpoint (§ Provider from the endpoint)". Replace the sentence about `gen_ai.system = gcp.vertex.agent` with: "A `gen_ai.system` value in rule 12's framework-name table is skipped and stays unread (D-B1-8, D-IN-15)."
    - Add a subsection `### Provider from the endpoint` right after that table, before `### Token semantics`. It states the rule of step 3 in prose (D-IN-2) and gives the host table of step 3 as a two-column table (Host, Provider).
    - In rule 12's "Exact:" bullet, add the aliases of step 2 and the `vertex_ai-*` prefix.
    - Add a bullet to rule 12: "Framework names, never providers: `autogen`, `gcp.vertex.agent`, `spring_ai`. A `gen_ai.system` value in this list (compared lowercased) is skipped (D-IN-15)."
+
+7. In `website/src/content/docs/docs/reference/attributes.md`, where the provider sources are listed, add `server.address`, `url.full` and `gen_ai.openai.api_base` as endpoint sources ("on model calls whose provider is missing or `openai`, the endpoint's host names the provider"), in the page's wording. Then run `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` and commit the regenerated `skills/cetra/references/attributes.md`.
 
 **Tests** (in `context.rs` `mod tests`, using the existing `filled` and `string_attr` helpers; add a helper `endpoint(attrs: &[KeyValue], kind: SpanKind, provider: Option<&str>) -> Option<String>` that builds an `AttrBag` the way `filled` does and calls `endpoint_provider`):
 - `provider_uses_precedence_and_the_alias_table`: add rows for every new alias of step 2 (one row per left-hand value), and `vertex_ai-anthropic_models` → `gcp.vertex_ai`.
@@ -235,16 +239,17 @@ IN1.1 → IN1.2 → IN1.3 run in order, because they share `docs/spec/02-ingesti
 - `endpoint_rule_applies_to_llm_and_embedding_spans_only`: `server.address=api.groq.com` with provider `None` gives `groq` for `Llm` and `Embedding`, and `None` for `Tool` and `Span`.
 - `endpoint_rule_replaces_only_empty_or_openai`: provider `openai` → `groq`; provider `anthropic` stays `anthropic`; provider `None` → `groq`.
 - `endpoint_rule_reads_keys_in_order`: `server.address=api.groq.com` plus `gen_ai.openai.api_base=https://api.novita.ai/openai/` → `groq`. Only `url.full=https://api.novita.ai/openai/chat/completions` → `novita`. Only `gen_ai.openai.api_base=https://openrouter.ai/api/v1/` → `openrouter`. `server.address=localhost` with provider `openai` → `openai`. `server.address=""` and `url.full=https://api.x.ai/v1` → `x_ai` (an empty string yields no host, so the next key is read).
-- `endpoint_keys_are_not_consumed`: after the rule, `bag.state(key)` is `Some(Use::Unread)` for the key that matched.
+- `endpoint_keys_are_not_consumed`: builds its own bag so it can call `bag.state`; after the rule, `bag.state(key)` is `Some(Use::Unread)` for the key that matched.
 
 **Done when:**
 
 ```bash
 cargo nextest run -p cetra-otel --lib context::tests
 cargo nextest run -p cetra-otel --test golden --test fixtures
+cd website && node scripts/skill-references.mjs
 ```
 
-Both pass. No `expected.json` changes: no existing captured span carries a host in the table.
+All pass (the last checks the references are current). No `expected.json` changes: no existing captured span carries a host in the table.
 
 **Commit:** `Derive the provider from the endpoint host and add rule 12 aliases`
 
@@ -300,11 +305,30 @@ Both pass. No `expected.json` changes: no existing captured span carries a host 
 
 3. In `lib.rs`, add `publisher_candidates` to the existing `pub use cost::{…}` list.
 
-4. In `crates/otel/tests/fixtures.rs`, where `check_computed` (or its caller) calls `pick_price(rows, model, provider, start_time)`: when that returns `None` and `provider` is `Some(p)`, call `cetra_otel::publisher_candidates(p, model)` and try `pick_price(rows, name, Some(publisher), start_time)` for each name in order. Update the comment above `same_provider` to say the file mirrors `cost.rs`, including the gateway fallback (D-IN-13).
+4. In `crates/otel/tests/fixtures.rs`, add this helper next to `pick_price`, and replace EVERY call of `pick_price` that starts from a span's model and provider (in the `prices` test and in `check_computed`, and any other such caller) with it:
+
+   ```rust
+   /// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13).
+   fn pick_price_or_publisher<'a>(
+       rows: &'a [PriceRow],
+       model: &str,
+       provider: Option<&str>,
+       start_time: i64,
+   ) -> Option<&'a PriceRow> {
+       pick_price(rows, model, provider, start_time).or_else(|| {
+           let (publisher, names) = cetra_otel::publisher_candidates(provider?, model)?;
+           names
+               .iter()
+               .find_map(|name| pick_price(rows, name, Some(publisher), start_time))
+       })
+   }
+   ```
+
+   Update the comment above `same_provider` to say the file mirrors `cost.rs`, including the gateway fallback (D-IN-13).
 
 5. Spec 02 § Cost computation step 2: after the sentence "There is no other fallback: a row never prices a span of another provider, …", add: "Gateways are the exception (D-IN-13). When no row matches a span whose provider is `cloudflare_ai_gateway`, `helicone`, `openrouter`, `portkey` or `vercel_ai_gateway`, and its model is `vendor/name` with `vendor` in this table (`anthropic` → `anthropic`, `cohere` → `cohere`, `deepseek` → `deepseek`, `google` → `gcp.gemini`, `mistralai` → `mistral_ai`, `openai` → `openai`, `x-ai` → `x_ai`), the lookup is repeated for that publisher's provider with `name` cut at its first `:`, then with `.` replaced by `-`. A model ending in `:free` is not priced this way. The span keeps its gateway provider."
 
-**Tests** (in `cost.rs` `mod tests`, using `row`, `table` and `priced_of`):
+**Tests** (in `cost.rs` `mod tests`, using `row`, `table` and `priced_of`). Add a helper `priced_with(prices: &PriceTable, provider: Option<&str>, model: &str, tokens: i64) -> Priced`, built like `priced_of` but passing `provider`, and make `priced_of` call `priced_with(prices, None, model, tokens)`. Rows come from the existing `row(pattern, scope, provider, valid_from, price_input)` helper, whose `model_name` equals the pattern (a row for `openai/gpt-4o-mini` uses the pattern produced by `regex::escape("openai/gpt-4o-mini")`):
 - `publisher_candidates_follow_the_vendor_table`:
   - (`openrouter`, `openai/gpt-4o-mini`) → (`openai`, [`gpt-4o-mini`]);
   - (`openrouter`, `anthropic/claude-sonnet-4.5`) → (`anthropic`, [`claude-sonnet-4.5`, `claude-sonnet-4-5`]);
@@ -341,13 +365,17 @@ All pass.
 
 **Steps.**
 
-1. Replace `model_name` in `prices.rs` with:
+1. Replace `model_name` in `prices.rs` with the code below. Its caller in `convert_entry` becomes `model_name(key, litellm_provider, litellm_provider.map(row_provider).as_deref())`.
 
    ```rust
-   fn model_name(key: &str, provider: Option<&str>) -> Option<String> {
+   /// The LiteLLM key without its `<litellm_provider>/` prefix (D-IN-14). A name that still
+   /// contains `/` is kept, except for a cloud platform, where the prefix is a region or a
+   /// deployment (`us-east-1/…`), and for a key that had no provider prefix.
+   fn model_name(key: &str, provider: Option<&str>, row: Option<&str>) -> Option<String> {
        let stripped = provider.and_then(|provider| key.strip_prefix(&format!("{provider}/")));
        let name = stripped.unwrap_or(key);
-       if name.is_empty() || (stripped.is_none() && name.contains('/')) {
+       let cloud = provider_rank(row) == 1;
+       if name.is_empty() || (name.contains('/') && (stripped.is_none() || cloud)) {
            None
        } else {
            Some(name.to_owned())
@@ -355,20 +383,23 @@ All pass.
    }
    ```
 
+   `provider_rank` is 1 exactly for `gcp.vertex_ai`, `aws.bedrock`, `azure.ai.openai`, `azure.ai.inference` and `ibm.watsonx.ai`; watsonx's `watsonx/ibm/granite-…` names therefore stay skipped, which is intended.
+
 2. In `row_provider`, add the arm `"clf_ai_gateway" => "cloudflare_ai_gateway",` (before the catch-all).
 
-3. Update the header comment (lines 1–22): the second bullet becomes "The model name is the LiteLLM key with a leading `<litellm_provider>/` removed; what is left may contain `/` (`groq/openai/gpt-oss-120b` gives `openai/gpt-oss-120b`, the id the client sends). A key without that prefix that contains `/` is skipped (D-IN-14)." Add `clf_ai_gateway` → `cloudflare_ai_gateway` where the comment describes `row_provider`.
+3. Update the header comment (lines 1–22): the second bullet becomes "The model name is the LiteLLM key with a leading `<litellm_provider>/` removed; what is left may contain `/` (`groq/openai/gpt-oss-120b` gives `openai/gpt-oss-120b`, the id the client sends). A key without that prefix that contains `/` is skipped, and so is a nested name of a cloud platform (Vertex AI, Bedrock, Azure, watsonx), whose prefix is a region or a deployment (D-IN-14)." Add `clf_ai_gateway` → `cloudflare_ai_gateway` where the comment describes `row_provider`.
 
 4. In `conversion_follows_the_litellm_rules`, add to the input JSON:
    - `"novita/deepseek/deepseek-v3.2"` with `litellm_provider: "novita"`, `mode: "chat"`, `input_cost_per_token: 2.7e-7`, `output_cost_per_token: 4.1e-7`;
-   - `"stray/name"` with `litellm_provider: "novita"`, `mode: "chat"`, `input_cost_per_token: 1e-6`.
+   - `"stray/name"` with `litellm_provider: "novita"`, `mode: "chat"`, `input_cost_per_token: 1e-6`;
+   - `"bedrock/us-east-1/anthropic.claude-x"` with `litellm_provider: "bedrock"`, `mode: "chat"`, `input_cost_per_token: 1e-6`; it must produce no row.
 
    The existing `"openrouter/openai/gpt-4o"` entry now converts to the row `("openai/gpt-4o", Some("openrouter"))`. Update the expected sorted `(model_name, provider)` list with the rows the conversion now returns:
-   - `("deepseek/deepseek-v3.2", Some("novita"))`;
-   - `("openai/gpt-4o", Some("openrouter"))`;
-   - no row for `stray/name`.
+   - `("deepseek/deepseek-v3.2", Some("novita"))`, right after the `("deep", …)` entry;
+   - `("openai/gpt-4o", Some("openrouter"))`, between `("no-provider", None)` and `("other", …)`;
+   - no row for `stray/name` or for the bedrock key.
 
-   Assert the novita row's `price_input` is `0.27` and `price_output` is `0.41`. Set the `collisions` assertion to the value the conversion returns, and state the old and new values in the phase report.
+   Assert the novita row's prices with the file's existing per-token to per-million helper (e.g. `Some(million(2.7e-7))` and `Some(million(4.1e-7))`; use whatever the test already uses), not literal `0.27` and `0.41`. `collisions` stays 2. Set the `collisions` assertion to the value the conversion returns, and state the old and new values in the phase report.
 
 5. In `provider_mapping_covers_the_litellm_names`, add `("clf_ai_gateway", "cloudflare_ai_gateway")`.
 
@@ -383,7 +414,7 @@ All pass.
    just prices-update target/litellm/model_prices_and_context_window.json
    ```
 
-   Record the three numbers the refresh prints (`litellm price rows`, `collisions`, `bytes`) for the commit message.
+   Record the three numbers the refresh prints (`litellm price rows`, `collisions`, `bytes`) for the commit message, and the old values (1941 rows, 763,010 bytes). If the new file is larger than 2,000,000 bytes, stop and report the per-provider counts of added rows instead of committing.
 
 8. In `crates/otel/src/context.rs` `mod tests`, add one test:
 
@@ -400,7 +431,7 @@ All pass.
 
    If it fails for a provider name, stop and report the names. Do not change the alias table or the converter to make it pass.
 
-9. Spec 02, the built-in prices paragraph (§ Cost computation, "Built-in prices: a snapshot of LiteLLM's …"): add that the model name keeps any `/` left after the provider prefix (D-IN-14), that `clf_ai_gateway` becomes `cloudflare_ai_gateway`, and that every snapshot provider is a fixed point of rule 12.
+9. Spec 02, the built-in prices paragraph (§ Cost computation, "Built-in prices: a snapshot of LiteLLM's …"): add that the model name keeps any `/` left after the provider prefix (D-IN-14) except on a cloud platform, where the prefix is a region or a deployment, that `clf_ai_gateway` becomes `cloudflare_ai_gateway`, and that every snapshot provider is a fixed point of rule 12.
 
 **Tests:** `conversion_follows_the_litellm_rules` and `provider_mapping_covers_the_litellm_names` (updated), `builtin_snapshot_is_valid` (with the new required models, and the compiled pattern set still within the 16 MiB limit), and `every_snapshot_provider_is_a_fixed_point_of_rule_12`.
 
@@ -412,14 +443,14 @@ cargo nextest run -p cetra-otel --lib context::tests
 cargo nextest run -p cetra-otel --test golden
 ```
 
-All pass. `golden` covers `captured_llm_spans_are_priced_by_the_builtin_snapshot`. `git diff --stat crates/otel/prices/builtin.json` shows only additions, plus at most the renamed `clf_ai_gateway` rows.
+All pass. `golden` covers `captured_llm_spans_are_priced_by_the_builtin_snapshot`. `git diff --stat crates/otel/prices/builtin.json` shows only added rows plus `clf_ai_gateway` rows renamed `cloudflare_ai_gateway`.
 
 **Commit:** `Keep LiteLLM vendor/model price rows in the snapshot`
 
 Commit body:
 
 ```
-Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <collisions> collisions, <bytes> bytes.
+Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows (was 1941), <collisions> collisions, <bytes> bytes (was 763,010).
 ```
 
 ---
@@ -430,7 +461,8 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
 
 **Edit:**
 - `tools/capture/src/scenario.rs`, `tools/capture/src/mock.rs`, `tools/capture/src/write.rs`, `tools/capture/src/wire/openai.rs`, `tools/capture/src/wire/anthropic.rs`, `tools/capture/src/wire/gemini.rs`;
-- `tools/capture/py/pyproject.toml`, `tools/capture/py/uv.lock`, `tools/capture/py/src/capture_py/harness.py`.
+- `tools/capture/py/pyproject.toml`, `tools/capture/py/uv.lock`, `tools/capture/py/src/capture_py/harness.py`;
+- `tools/capture/src/scrub.rs`, `tools/packaging/release-prep.sh`.
 
 **Steps.**
 
@@ -447,7 +479,8 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
 
 2. `mock.rs` routing:
    - Keep `HEAD /api/hello`.
-   - Every other request goes to one handler. A `POST` whose path `classify` recognises is served as today. Anything else gets the existing unknown-route behaviour (404, and the error `cetra-capture mock: no route {METHOD} {path}`).
+   - Replace the five `.route(…)` calls with one fallback handler (`.fallback(handle)`).
+   - In `respond`, first check `request.method() == Method::POST` and that `classify(path)` gives a route. A `POST` whose path `classify` recognises is served as today. Anything else is answered exactly as `unknown` does today (404, and the error `cetra-capture mock: no route {METHOD} {path}`).
    - Replace `classify` with:
 
    ```rust
@@ -479,22 +512,22 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
 
    `path` is the URI path, without the query.
 
-3. `mock.rs` host check: after a turn is taken and its `api` matches the route, if `turn.host` is `Some(expected)`, compare it with the request's `Host` header, with any `:port` removed and lowercased. On a mismatch or a missing header:
+3. `mock.rs` host check: copy the `Host` header into a local `Option<String>` (lowercased, `:port` removed) BEFORE the body is read (`request.into_body()` consumes the request). After `take` returns `Take::Turn { index, turn }` and the existing `api` check passes, if `turn.host` is `Some(expected)` and the copied header is not equal to it:
    - the turn is consumed;
-   - the error `cetra-capture mock: turn {index} expected host {expected}, got {got}` is logged (`got` is `-` when the header is missing);
-   - the request is answered as an `api` mismatch is answered today.
+   - `turn {index}: expected host {expected}, got {got}` is logged in the existing mismatch message format (`got` is `-` when the header is missing);
+   - the request is answered through the same `error_response` path as the `api` mismatch, with status 500.
 
    With `turn.host` absent, nothing is checked.
 
 4. `pyproject.toml`:
-   - Add `"httpx==<version>"` to `dependencies`, where `<version>` is the `httpx` version already in `tools/capture/py/uv.lock`.
-   - Add `"cetra-sdk"` to `dependencies`, with `[tool.uv.sources]` `cetra-sdk = { path = "../../../sdks/python" }`.
+   - Add `"httpx2==<version>"` to `dependencies`, where `<version>` is the `httpx2` version already in `tools/capture/py/uv.lock`.
+   - Add `"cetra-sdk"` to `dependencies`, with `[tool.uv.sources]` `cetra-sdk = { path = "../../../sdks/python", editable = true }`.
    - Run `cd tools/capture/py && uv lock`. If the lock fails or changes any existing pin, stop and report the conflict.
 
-5. `harness.py`: add
+5. `harness.py`: add `import httpx2` and
 
    ```python
-   class RealHostTransport(httpx.BaseTransport):
+   class RealHostTransport(httpx2.BaseTransport):
        """Sends each request to the capture mock, keeping its path, query and headers (D-IN-3).
 
        The client keeps the real base URL, so the instrumentation records the real host,
@@ -502,10 +535,10 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
        """
 
        def __init__(self) -> None:
-           self._mock = httpx.URL(mock_url())
-           self._inner = httpx.HTTPTransport()
+           self._mock = httpx2.URL(mock_url())
+           self._inner = httpx2.HTTPTransport()
 
-       def handle_request(self, request: httpx.Request) -> httpx.Response:
+       def handle_request(self, request: httpx2.Request) -> httpx2.Response:
            request.url = request.url.copy_with(
                scheme=self._mock.scheme, host=self._mock.host, port=self._mock.port
            )
@@ -515,9 +548,9 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
            self._inner.close()
 
 
-   def real_host_client() -> httpx.Client:
-       """An ``httpx.Client`` whose requests reach the mock under their real host."""
-       return httpx.Client(transport=RealHostTransport())
+   def real_host_client() -> httpx2.Client:
+       """An ``httpx2.Client`` whose requests reach the mock under their real host."""
+       return httpx2.Client(transport=RealHostTransport())
    ```
 
    Also add `cetra_runtime(instrument: list[str]) -> TracerProvider`:
@@ -529,11 +562,16 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
 
    The module passes ruff and mypy strict.
 
+6. In `scrub.rs` `dropped_resource_key`, also drop keys starting with `telemetry.distro.` (cetra's SDK writes the name and the version; the version would break `check-capture` on every SDK release). Add `telemetry.distro.version` to the input of `resource_attributes_are_dropped_or_pinned_and_the_api_key_goes_with_them` and assert it is gone.
+
+7. In `tools/packaging/release-prep.sh`, after `(cd sdks/python && uv lock)`, add `(cd tools/capture/py && uv lock)`.
+
 **Tests** (Rust, in the existing `mod tests`):
 - `scenario.rs` `turn_host_must_be_a_lowercase_dns_name`: `openrouter.ai` and `api.novita.ai` pass. `OpenRouter.ai`, `openrouter.ai:443`, `https://openrouter.ai`, `localhost`, `.openrouter.ai`, `openrouter.ai.` and `""` fail with the message.
 - `scenario.rs` `defaults_apply`: `host` defaults to `None`.
 - `mock.rs` `each_route_matches_the_renderer`: add rows for `/api/v1/chat/completions` (Chat), `/openai/deployments/d/chat/completions?api-version=2024-10-21` (Chat), `/compatible-mode/v1/embeddings` (Embeddings), `/v1/projects/p/locations/l/publishers/google/models/gemini-2.5-flash:generateContent` (Generate).
-- `mock.rs` `a_turn_host_must_match_the_request_host`: a turn with `host: Some("openrouter.ai")` is served for `Host: openrouter.ai` and for `Host: openrouter.ai:443`. A second scenario's turn is rejected and logged for `Host: 127.0.0.1:1234`, and for a request with no `Host` header.
+- `mock.rs` `a_turn_host_must_match_the_request_host`, using a new helper `request_with_host(method, uri, host: Option<&str>, body)`: a turn with `host: Some("openrouter.ai")` is served for `Host: openrouter.ai` and for `Host: openrouter.ai:443`. With another mock, the turn is rejected (500) and logs `turn 0: expected host openrouter.ai, got 127.0.0.1` for `Host: 127.0.0.1:1234`, and `… got -` for a request with no `Host` header.
+- `mock.rs` `a_get_to_a_chat_path_is_404`: `GET /v1/chat/completions` gets the unknown-route answer and log, and no turn is consumed.
 - `mock.rs` `unknown_routes_are_404_and_logged`: add `/v1/chat/completions/extra` and `/models/a/b:generateContent`.
 
 **Done when:**
@@ -541,9 +579,10 @@ Source: LiteLLM commit 4b498d1bba768bd81e4a434a14ea7ae2870dd01f. <rows> rows, <c
 ```bash
 cargo nextest run -p cetra-capture
 cd tools/capture/py && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy
+bash -n tools/packaging/release-prep.sh
 ```
 
-Both pass.
+All pass.
 
 **Commit:** `Route real hosts to the capture mock and match routes by suffix`
 
@@ -555,7 +594,7 @@ Both pass.
 
 **Edit:**
 - `sdks/python/src/cetra/_host.py` (new), `sdks/python/src/cetra/_instrument.py`, `sdks/python/src/cetra/_processor.py`, `sdks/python/tests/test_instrument.py`;
-- `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/opentelemetry.mdx`.
+- `docs/spec/10-sdk.md`, `website/src/content/docs/docs/reference/python/opentelemetry.mdx`, `skills/cetra/references/python-opentelemetry.md` (generated).
 
 **Steps.**
 
@@ -597,9 +636,11 @@ Both pass.
    - **Idempotent.** Calling `instrument()` twice wraps once, through a module-level `_installed` flag set by `instrument` and cleared by `uninstrument`.
    - **`_host_of(resource)`** returns `str(resource._client.base_url.host).lower()` or `None`. Any `Exception` gives `None`; it never raises.
 
+   Imports of `_host.py`: `functools`, `importlib`, `from collections.abc import Callable`, `from contextvars import ContextVar`, `from typing import Any`, `from cetra._log import logger`. Annotate the wrappers as `Callable[..., Any]`.
+
    No new dependency: plain `functools`, no `wrapt`.
 
-2. `_instrument.py` `enable_for`: after the loop has instrumented the instrumentor whose registry entry is `openai`, create `stamp = HostStamp()`, call `stamp.instrument()`, and append `stamp` to `runtime.instrumentors`. `Runtime.shutdown` already calls `uninstrument()` on each entry. Do it only when `openai` is among the enabled entries, and only once. An empty `instrument` list still imports nothing (the module docstring's rule): import `cetra._host` inside that branch.
+2. `_instrument.py` `enable_for`: keep a local `stamped = False`. Inside the loop, for the class whose entry is `openai` (`_entry_of(cls).name == "openai"`) and when not `stamped`, create `stamp = HostStamp()`, call `stamp.instrument()`, append it to `runtime.instrumentors` and set `stamped`. Do this both after `runtime.instrumentors.append(instance)` and in the branch that skips the instrumentor because the app already instrumented OpenAI (`is_instrumented_by_opentelemetry`). `Runtime.shutdown` already calls `uninstrument()` on each entry. An empty `instrument` list still imports nothing (the module docstring's rule): import `HostStamp` from `cetra._host` inside that branch.
 
 3. `_processor.py` `_stamp`: at the end, add
 
@@ -611,19 +652,27 @@ Both pass.
 
    with `from cetra._host import HOST` at the top. `_host.py` imports only the standard library at module level, so this import stays cheap.
 
-4. Spec 10 § Instrumentors: after the table, add a paragraph stating D-IN-18. When `instrument` names `openai`, the SDK wraps the OpenAI resource `create` methods (chat completions, responses, embeddings, sync and async) outermost. A context variable holds the client's base-URL host during the call, and the span processor sets `server.address` on spans that start during it and have none. The server's endpoint rule (spec 02 § Provider from the endpoint) then sets the provider. Shutdown restores the methods.
+4. Spec 10 § Instrumentors: after the table, add a paragraph stating D-IN-18. When `instrument` names `openai`, the SDK wraps the OpenAI resource `create` methods (chat completions, responses, embeddings, sync and async) outermost. A context variable holds the client's base-URL host during the call, and the span processor sets `server.address` on spans that start during it and have none. The server's endpoint rule (spec 02 § Provider from the endpoint) then sets the provider. Shutdown restores the methods. Other methods (`parse`, `responses.stream`) are not wrapped, so their spans carry no host.
 
-5. `website/.../reference/python/opentelemetry.mdx` § Instrumentation: add two sentences.
+5. `website/src/content/docs/docs/reference/python/opentelemetry.mdx` § Instrumentation: add two sentences.
    - "With `instrument=["openai"]`, cetra records the host of the OpenAI client's base URL as `server.address`, so calls to OpenRouter, Novita or another provider behind the OpenAI client show that provider."
    - "The host is the only part of the URL that is recorded."
 
-**Tests** (in `test_instrument.py`, using the `memory` and `spans` fixtures; the client uses `http_client=httpx.Client(transport=httpx.MockTransport(handler))`, where `handler` returns a canned chat completion, embedding or response JSON):
+   Then run `cd website && CETRA_DOCS_WRITE=1 node scripts/skill-references.mjs` and commit the regenerated `skills/cetra/references/python-opentelemetry.md`.
+
+**Tests** (in `test_instrument.py`, using the `memory` and `spans` fixtures; the client uses `http_client=httpx2.Client(transport=httpx2.MockTransport(handler))` (`import httpx2`: the SDK's lock has `httpx2`, not `httpx`), where `handler` returns a canned chat completion, embedding or response JSON):
 - `test_openai_span_records_the_client_host`: `start(instrument=["openai"])`, a client with `base_url="https://api.novita.ai/openai"`, one chat completion. The LLM span has `server.address == "api.novita.ai"`.
-- `test_async_openai_span_records_the_client_host`: the same with `AsyncOpenAI` and `httpx.AsyncClient(transport=httpx.MockTransport(handler))`, run with `asyncio.run`.
-- `test_streaming_span_records_the_client_host`: `stream=True` (the handler answers `text/event-stream` with two chunks and `[DONE]`). The span has `server.address`.
+- `test_async_openai_span_records_the_client_host`: the same with `AsyncOpenAI` and `httpx2.AsyncClient(transport=httpx2.MockTransport(handler))`, run with `asyncio.run`.
+- `test_streaming_span_records_the_client_host`: `stream=True`. The handler answers `content-type: text/event-stream` with this body (a Python string with `\n` escapes):
+
+  ```
+  data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"},"finish_reason":null}]}\n\ndata: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n
+  ```
+
+  The test consumes the stream (`for _ in stream: pass`) so the span ends. The span has `server.address`.
 - `test_embeddings_span_records_the_client_host`: `client.embeddings.create(...)` with base URL `https://api.deepinfra.com/v1/openai` gives `api.deepinfra.com`.
 - `test_host_is_not_stamped_outside_a_call`: a manual `cetra` span outside any OpenAI call has no `server.address`.
-- `test_existing_server_address_is_kept`: inside `HOST.set("api.novita.ai")`, a span started with `attributes={"server.address": "custom"}` keeps `custom`.
+- `test_existing_server_address_is_kept`: `token = HOST.set("api.novita.ai")`, then `runtime.tracer.start_span("x", attributes={"server.address": "custom"}).end()`, with `HOST.reset(token)` in `finally`. The span keeps `custom`.
 - `test_no_stamp_without_the_openai_instrumentor`: `start(instrument=[])`. `openai.resources.chat.completions.Completions.create` is the original function.
 - `test_shutdown_uninstruments`: extend it so that `Completions.create` and `AsyncCompletions.create` are the originals after `runtime_module.shutdown()`, and are not while running.
 
@@ -631,6 +680,7 @@ Both pass.
 
 ```bash
 cd sdks/python && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy && uv run pytest tests/test_instrument.py
+cd website && node scripts/skill-references.mjs
 ```
 
 All pass.
@@ -644,9 +694,9 @@ All pass.
 **Goal:** four captured cases pin attribution and pricing for OpenRouter and Novita.
 
 **Edit:**
-- `tools/capture/py/scenarios/openinference/openrouter-chat/`, `…/openinference/novita-chat/`, `…/openllmetry/openrouter-chat/`, `…/openllmetry/novita-chat/` (each with `scenario.json`, `main.py`, and a module);
+- `tools/capture/py/scenarios/openinference/openrouter-chat/`, `…/openinference/novita-chat/`, `…/openllmetry/openrouter-chat/`, `…/openllmetry/novita-chat/` (each with `scenario.json`, `main.py`, and a module named `openinference_openrouter_chat.py`, `openinference_novita_chat.py`, `openllmetry_openrouter_chat.py` or `openllmetry_novita_chat.py`, because mypy needs unique module names; each `main.py` is `from <module> import main` plus `if __name__ == "__main__": main()`);
 - the four matching `fixtures/otlp/<group>/<case>/` directories (written by `just capture` and `just fixtures-bless`, never by hand), and `fixtures/otlp/prices.json`;
-- `docs/spec/02-ingestion.md` (§ Testing), `CHANGELOG.md`, `docs/roadmap.md`, `docs/mvp-decisions.md`.
+- `docs/spec/02-ingestion.md` (§ Testing), `CHANGELOG.md`, `docs/roadmap.md`.
 
 **Steps.**
 
@@ -665,9 +715,9 @@ All pass.
    - Turn: `api` `openai.chat`, `message.text` `"The capital of France is Paris."`, `finish` `stop`, `usage` `{input: 14, output: 8}`.
    - `spec_refs`: `02 § Model, provider, usage`, `02 § Provider from the endpoint`, `02 § Cost computation`.
    - `libraries`: the twin case's list. The OpenInference cases add `cetra-sdk`; `instrumentation` stays the instrumentor package.
-   - `notes` say which attribute carries the host (`server.address` from cetra's stamp, or OpenLLMetry's `gen_ai.openai.api_base`) and what the provider and cost resolve to.
+   - `notes` say which attribute carries the host (`server.address` from cetra's stamp, or OpenLLMetry's `gen_ai.openai.api_base`) and what the provider and cost resolve to. The notes of `openllmetry/openrouter-chat` add that OpenLLMetry already writes `gen_ai.provider.name=openrouter` itself, so that case pins gateway pricing, not the endpoint rule.
 
-2. Add a row to `fixtures/otlp/prices.json` (canonical format; `just fixtures-fmt`): `model_name` `deepseek/deepseek-v3.2`, `match_pattern` `deepseek/deepseek\-v3\.2`, `provider` `novita`, `valid_from` `1970-01-01T00:00:00.000000000Z`, `price_input` 0.27, `price_output` 0.41, the other prices and `tiers` null. The OpenRouter cases are priced by the existing `gpt-4o-mini` row through D-IN-13.
+2. Add a row to `fixtures/otlp/prices.json` (canonical format; `just fixtures-fmt`): `model_name` `deepseek/deepseek-v3.2`, `match_pattern` `deepseek/deepseek\-v3\.2`, `provider` `novita`, `valid_from` `1970-01-01T00:00:00.000000000Z`, `price_input` 0.269, `price_output` 0.4 (the snapshot's real Novita price), the other prices and `tiers` null. The OpenRouter cases are priced by the existing `gpt-4o-mini` row through D-IN-13.
 
 3. Capture and bless:
 
@@ -689,12 +739,10 @@ All pass.
    - Add a row or a note in the matrix table: "OpenAI client to OpenRouter and Novita: OpenInference through cetra's SDK, OpenLLMetry (D-IN-19)".
 
 5. `CHANGELOG.md` `[Unreleased]`:
-   - Under `### Added` (create the heading): "Calls through the OpenAI client to OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and other providers show that provider, read from the endpoint's host; the Python SDK records the OpenAI client's host for this."
+   - Under `### Added` (create the heading above `### Changed` in `[Unreleased]`): "Calls through the OpenAI client to OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and other providers show that provider, read from the endpoint's host; the Python SDK records the OpenAI client's host for this."
    - Under `### Fixed`: "OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic, watsonx and Together models that were missing."
 
-6. `docs/roadmap.md`, IN row: Plan cell adds "M1: [`01-m1-provider-attribution.md`](plans/in-integrations/01-m1-provider-attribution.md)". Status becomes "**M1 implemented** (provider from the endpoint, gateway pricing, snapshot fix, capture host routing, SDK host stamp)."
-
-7. `docs/mvp-decisions.md` § Track IN: add D-IN-19 with the text of this plan's decision table row.
+6. `docs/roadmap.md`, IN row: Plan cell adds "M1: [`01-m1-provider-attribution.md`](plans/in-integrations/01-m1-provider-attribution.md)". Status becomes "**M1 implemented** (provider from the endpoint, gateway pricing, snapshot fix, capture host routing, SDK host stamp)." The Decisions cell becomes `` `D-IN-1`–`D-IN-19` ``.
 
 **Tests:** the golden test covers the four new cases, and `captured_llm_spans_are_priced_by_the_builtin_snapshot` checks them against the refreshed snapshot. The fixtures test checks `prices.json` and the cases.
 
@@ -703,9 +751,10 @@ All pass.
 ```bash
 cargo nextest run -p cetra-otel --test golden --test fixtures
 cargo run -q -p cetra-capture -- run openinference/openrouter-chat openinference/novita-chat openllmetry/openrouter-chat openllmetry/novita-chat --check
+cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run mypy
 ```
 
-Both pass. (The capture check re-runs the four scenarios and compares them.)
+All pass. (The capture check re-runs the four scenarios and compares them.)
 
 **Commit:** `Capture OpenRouter and Novita through OpenInference and OpenLLMetry`
 
