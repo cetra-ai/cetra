@@ -34,6 +34,11 @@ Auto-instrumentation is optional, one extra per library:
 | `cohere` | `cetra-sdk[cohere]` |
 | `ollama` | `cetra-sdk[ollama]` |
 | `together` | `cetra-sdk[together]` |
+| `instructor` | `cetra-sdk[instructor]` |
+| `agno` | `cetra-sdk[agno]` |
+| `smolagents` | `cetra-sdk[smolagents]` |
+| `haystack` | `cetra-sdk[haystack]` |
+| `beeai` | `cetra-sdk[beeai]` |
 
 `cetra-sdk[all]` installs every instrumentor. The core package pulls in only
 `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`

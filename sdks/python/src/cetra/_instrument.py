@@ -124,6 +124,36 @@ REGISTRY: dict[str, Instrumentor] = {
             module="openinference.instrumentation.together",
             cls="TogetherInstrumentor",
         ),
+        Instrumentor(
+            name="instructor",
+            extra="instructor",
+            module="openinference.instrumentation.instructor",
+            cls="InstructorInstrumentor",
+        ),
+        Instrumentor(
+            name="agno",
+            extra="agno",
+            module="openinference.instrumentation.agno",
+            cls="AgnoInstrumentor",
+        ),
+        Instrumentor(
+            name="smolagents",
+            extra="smolagents",
+            module="openinference.instrumentation.smolagents",
+            cls="SmolagentsInstrumentor",
+        ),
+        Instrumentor(
+            name="haystack",
+            extra="haystack",
+            module="openinference.instrumentation.haystack",
+            cls="HaystackInstrumentor",
+        ),
+        Instrumentor(
+            name="beeai",
+            extra="beeai",
+            module="openinference.instrumentation.beeai",
+            cls="BeeAIInstrumentor",
+        ),
     )
 }
 
