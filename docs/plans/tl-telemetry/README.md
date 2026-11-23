@@ -1,6 +1,6 @@
 # Track TL — cetra's own telemetry and error reporting: design
 
-Status: **draft for the user's review** (2026-11-23). Decisions `D-TL-<n>` (`docs/mvp-decisions.md` § Track TL). "(user)" marks the user's answers of 2026-11-23. One Sonnet cold review done and fixed (`side-session-notes/…/tl-design-review.md`).
+Status: **approved by the user** (2026-11-23), with every open question answered as proposed (§ Answers). Decisions `D-TL-<n>` (`docs/mvp-decisions.md` § Track TL). "(user)" marks the user's answers of 2026-11-23. One Sonnet cold review done and fixed (`side-session-notes/…/tl-design-review.md`).
 
 Today `cetra serve` sends nothing anywhere: it writes logs to stdout and serves Prometheus `/metrics` when `metrics_addr` is set (D-N-28). This track adds six things, each documented and switchable:
 
@@ -303,7 +303,19 @@ Delivers: `telemetry.crash_reports`, the report type, the crash layer, the panic
 
 Delivers: the event catalog, `analytics::record` in the API handlers, `POST /api/v1/analytics/events` and its OpenAPI entry, the `analytics` flag in `GET /api/auth/config`, the web client (page views by route template and UI-only events), the PostHog sink and `[analytics]` config, the feature counters and the heartbeat's `usage` field, the leak and golden tests, the Telemetry docs page section, TL-Q4. Depends on M4 (heartbeat, switchboard). Leaves out: dashboards in PostHog (Q).
 
-## Open questions for the user
+## Answers (user, 2026-11-23)
+
+The user approved the design with each proposal below.
+
+1. **Naming:** `[self_monitoring]` for the operator's export and `[telemetry]` for what goes to us; `[analytics]` for PostHog.
+2. **Heartbeat fields:** the `features` list of § 5 and `deployment` (docker, kubernetes, binary) as written.
+3. **Debug bundle and hosts:** host names, bucket names and paths are kept; the user reviews the file.
+4. **Export defaults:** exported logs at `warn`, traces at 10 %.
+5. **Milestone order:** M1, then M2–M6 as the dependencies allow; independent milestones may run in parallel.
+6. **Cloud analytics opt-out:** no account switch for now; `DNT` and `Sec-GPC` are honoured.
+
+## Questions asked during the design (kept for the record)
+
 
 1. **Naming.** `[self_monitoring]` for the operator's export (spec 12's heading) and `[telemetry]` for what goes to us. OK, or `[otel]` / `[otlp_export]`?
 2. **Heartbeat fields.** Is the `features` list right, and is `deployment` (docker/kubernetes/binary) acceptable?
