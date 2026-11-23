@@ -4,4 +4,5 @@
 //! `<telemetry.endpoint>/v1/crash` by a background task. Nothing in a report comes from a
 //! message or a field value.
 
+pub(crate) mod limiter;
 pub(crate) mod report;
