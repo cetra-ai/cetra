@@ -1068,3 +1068,55 @@ This phase is the **coordinating session's**, not an implementer's.
 **Done when:** `just check-rust` and `just deny` pass, the review's findings are fixed, and the notes file exists.
 
 **Commit:** `Seed the SAML fuzz corpora` (step 1), and one commit per fix phase with the fix brief's subject; `Record cetra-saml's footprint and M1 status` (steps 4, 7).
+
+---
+
+## SA1.9 — Hardening from the security review
+
+Added after the SA1.8 security review (Sonnet, 2026-11-23): no critical or high finding. These are its medium and low findings, applied before M2 relies on the crate.
+
+**Goal:** close the review's findings in `cetra-saml` and its fuzz reach.
+
+**Edit:** `crates/saml/src/{xml.rs,cert.rs,metadata.rs,request.rs,response.rs,hostile_tests.rs,fuzz_entry.rs}`, `fuzz/Cargo.toml`, `fuzz/fuzz_targets/saml_assertion.rs` (new), `justfile` (fuzz lists only), `.github/workflows/nightly.yml` (fuzz matrix only). Nothing else; M2 phases run at the same time on other files.
+
+**Steps:**
+
+1. **Per-tag attribute pre-scan (review M1).** uppsala checks duplicate attributes and namespace declarations in O(n²) per start tag, so the post-parse 64-attribute check comes too late. In `xml::parse_strict`, after the DOCTYPE check and before parsing, scan the text once:
+   - for each `<` that is not followed by `!` or `?`, up to the next `>`, count the occurrences of `="` and `='`;
+   - more than `MAX_ATTRIBUTES + 16` (namespace declarations count too) → `ParseFailure::Xml`.
+
+   Tests: `a_tag_with_too_many_attributes_is_refused_before_parsing` (one tag with 25 000 `aN="1"` attributes → `Xml`, and the test must finish fast; do not time it); `a_tag_with_many_namespace_declarations_is_refused` (100 `xmlns:pN="u"` → `Xml`).
+2. **Fuzz reach (review M2).** In `response.rs`, move everything after `check_signatures` into a private `fn check_after_signature(doc: &Document<'_>, root: NodeId, assertion: NodeId, expected: &ExpectedResponse<'_>) -> Result<Assertion, ResponseError>`, which `validate_response` calls (behaviour unchanged). Add:
+   ```rust
+   /// `validate_response` without the signature checks, for the fuzzer only.
+   #[cfg(any(test, fuzzing))]
+   pub(crate) fn validate_unsigned(received: &ReceivedResponse, expected: &ExpectedResponse<'_>) -> Result<Assertion, ResponseError>;
+   ```
+   It runs the same steps as `validate_response` with the `check_signatures` call left out.
+   - `fuzz_entry.rs`: `saml_response` also calls `let _ = decode_response(text);` on the input before its existing work. Add `pub fn saml_assertion(data: &[u8])`, which calls `validate_unsigned` with the same `expected` as `saml_response`, so mutated inputs reach the NameID, confirmation, conditions and attribute code. Add `saml_assertion_corpus_replays`. `write_seed_corpus` also writes `fuzz/corpus/saml_assertion/` with the unsigned seeds: `unsigned` (`Signing::None`), `persistent-name-id` (format persistent), `attributes` (four attributes), `two-confirmations` (the confirmation duplicated with Method `urn:oasis:names:tc:SAML:2.0:cm:holder-of-key` first).
+   - `fuzz/fuzz_targets/saml_assertion.rs` like the other two; a `[[bin]]` in `fuzz/Cargo.toml`; `saml_assertion` appended to `fuzz_targets` in `justfile` and to the `262144` arm of `_fuzz-max-len`; appended to the nightly matrix.
+3. **Request ID check (L1).** At the top of `validate_response` (and `validate_unsigned`): `if !crate::is_valid_request_id(expected.request_id) { return Err(ResponseError::InResponseTo); }`. Test: `an_empty_request_id_never_matches` (with `InResponseTo=""` set on both elements of a response built with `response_in_response_to: Some(String::new())`, `confirmation_in_response_to: Some(String::new())`, checked with `request_id: ""` → `InResponseTo`).
+4. **Explicit bergshamra policy (L2).** Replace `DsigContext::new(keys)` with `DsigContext::new(keys).with_trusted_keys_only(true).with_strict_verification(true).with_require_reference_digests(true)`, with the comment `// The defaults of 0.12.0, stated so a version bump cannot weaken them (D-SA-9).`. Test: `a_trusted_certificate_in_keyinfo_with_another_key_is_refused` (the attacker signs with its key, KeyInfo carries the IdP's certificate → `SignatureInvalid`; build the KeyInfo by replacing the attacker certificate's base64 in the signed XML with the IdP's, which also breaks nothing else since KeyInfo is not signed).
+5. **Destination on signed Responses (L3).** In `check_response_level`: when a Signature is a direct child of the Response, `Destination` is required (missing → `Destination`). Test: `a_signed_response_needs_a_destination` (`Signing::Response`, `destination: None` → `Destination`); `an_assertion_signed_response_may_omit_destination` (default signing, `destination: None` → accepted).
+6. **SSO URL normalization (L4).** In `metadata.rs`'s `check_sso_url`, refuse any `char::is_control` in the raw string (`SsoUrl`) and store `url.as_str()` (the normalized form) instead of the input. In `request.rs`, `authn_request_redirect_url` also refuses userinfo and fragments in `sso_url` and control characters in all three inputs (`Url`), and writes the normalized `sso_url` into `Destination`. Tests: `a_sso_url_with_a_tab_is_refused`; `the_destination_matches_the_redirect_target`.
+7. **Assertion statements and conditions (L5).** In `check_after_signature`: the Assertion must have at least one `AuthnStatement` child (`NS_ASSERTION`), else a new variant `ResponseError::NoAuthnStatement` with message `"the assertion has no authentication statement"`. In `check_conditions`: every element child of `Conditions` must be `AudienceRestriction`, `OneTimeUse` or `ProxyRestriction` in `NS_ASSERTION`, else `Conditions`. Tests: `an_assertion_without_authn_statement_is_refused` (hand-written unsigned XML through `validate_unsigned`), `an_unknown_condition_is_refused` (same approach).
+8. **Debug of identifiers (L6).** Replace `#[derive(Debug)]` on `ExpectedResponse` with a manual `Debug` printing `sp_entity_id_len`, `acs_url_len`, `idp` and `now_ns`; `AuthnRequest`'s manual `Debug` prints `request_id_len` instead of `request_id`. Update the plan's privacy note accordingly (done in this plan: the SP's own URLs are no longer printed either).
+9. **Metadata certificate limits (L7).** In `parse_metadata`, read certificates only at `KeyDescriptor/KeyInfo/X509Data/X509Certificate` (each step `children_named`, `NS_DSIG` for the last three), and stop with `TooManyCertificates` once 16 certificates have been read across all descriptors, before parsing the 17th. In `cert.rs`, `from_pem` refuses input longer than 65 536 bytes (`Certificate`). Tests: `a_certificate_outside_keyinfo_is_ignored`, `seventeen_certificates_are_too_many`, `an_oversized_pem_is_refused`.
+10. **Control characters in SP values (L8).** `sp_metadata_xml` is infallible by signature; leave it. In `authn_request_redirect_url` (step 6) the control-character refusal covers `sp_entity_id` and `acs_url`.
+11. **Hostile layout tests that reach `check_signatures` (review, test quality).** Add to `hostile_tests.rs`, each with a single Assertion so `one_assertion` passes:
+    - `signature_under_status` (the Assertion signature moved inside `<samlp:Status>`) → `SignatureLayout`;
+    - `two_signatures_under_the_assertion` (a copy of the Assertion's signature inserted next to it) → `SignatureLayout`;
+    - `signature_inside_advice` (an `<saml:Advice>` added in the Assertion after the Issuer, holding a copy of the signature) → `SignatureLayout`;
+    - `one_transform_only` and `three_transforms` and `reordered_transforms` → `Algorithm`;
+    - `two_references` (a second `<ds:Reference>` copied into SignedInfo) → `SignatureLayout`;
+    - `hmac_signature_method` (SignatureMethod replaced by `http://www.w3.org/2000/09/xmldsig#hmac-sha1`) → `Algorithm`;
+    - `an_rsa_response_against_an_ec_only_set` → `SignatureInvalid`;
+    - `a_second_audience_restriction_without_the_sp` (hand-written, through `validate_unsigned`) → `Audience`;
+    - `a_bearer_confirmation_after_a_holder_of_key_one_is_accepted` and `a_wrong_recipient_on_one_of_two_confirmations_is_accepted` (through `validate_unsigned`);
+    - `an_issue_instant_exactly_five_minutes_old_is_accepted` and `six_minutes_old_is_refused`; `confirmation_expired_by_61_seconds_is_refused` already exists in SA1.5's list; add `conditions_not_before_61_seconds_ahead_is_refused` if missing.
+
+**Tests:** as listed in each step. All existing tests must keep passing.
+
+**Done when:** written and committed (the coordinating session then runs `cargo test -p cetra-saml --all-features`, clippy, `just fuzz-seed`, and commits the new corpus).
+
+**Commit:** `Harden cetra-saml after its security review`
