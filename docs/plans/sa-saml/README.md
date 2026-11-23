@@ -4,7 +4,7 @@ Design doc. The user reviews it before any plan is written. Each milestone gets 
 
 **Status:** design approved by the user on 2026-11-23. M1's plan: [`01-m1-crate.md`](01-m1-crate.md).
 
-**Decisions:** `D-SA-1` to `D-SA-19`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
+**Decisions:** `D-SA-1` to `D-SA-21`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
 
 **Research:** the crate survey and the competitor comparison of 2026-11-23 are summarised in § Library and § Competitors. Versions were looked up that day; each plan looks them up again.
 
@@ -247,7 +247,7 @@ Each decision is also in `docs/mvp-decisions.md` § Track SA.
 
 The table lives in the one server process; a single binary shares it with nothing.
 
-**Bounds.** At most 50 pending entries per client IP and 1 000 per org. A new entry evicts the oldest one of its IP, or of its org, when either is full. The start also shares D-P-60's per-IP bucket. An attacker therefore cannot fill an org's table from a few addresses without pushing out only their own entries first.
+**Bounds.** At most 50 pending entries per client network (IPv6 counted by its /64), 1 000 per org and 100 000 in all. A new entry evicts the oldest one of its IP, or of its org, when either is full. The start also shares D-P-60's per-IP bucket. An attacker therefore cannot fill an org's table from a few addresses without pushing out only their own entries first.
 
 **The binder cookie.** The binder travels in a cookie `HttpOnly; Secure; SameSite=None` whose path is the org's ACS path, so two orgs' logins in one browser do not clash. It is needed because the IdP's cross-site POST does not carry the `SameSite=Lax` OAuth state cookie. It is cleared once used.
 
@@ -290,6 +290,8 @@ Every signing certificate in it is trusted, so an IdP that publishes its next ce
 | D-SA-17 | **Storage: one provider row, protocol-specific tables.** `org_sso_providers` keeps `enabled`, `enforced`, `jit_role`, `last_login_at` and `display_name` for both protocols and gains `protocol` (`oidc` or `saml`); its OIDC columns become nullable, with a `CHECK` that ties them to the protocol. The SAML configuration is in `org_sso_saml` (keyed by the provider row, cascade), and its certificates are rows of `org_sso_saml_certificates`, not a JSON column. Domain routing, flags, `set_last_login`, deletion and break-glass therefore work unchanged for both protocols. The migration rebuilds `org_sso_providers`, which is allowed before the first public release (`PRE_RELEASE_NON_ADDITIVE`, with an altering-case test). If a public release ships before M2, the same change becomes a format change with a `META_FORMAT_VERSION` bump. | A SAML table with its own flags (the code survey found eight functions and callers hard-wired to `org_sso_providers`, each of which would have to cover two tables); placeholder values in the OIDC columns for SAML rows. |
 | D-SA-18 | **Settings API.** `PUT /api/v1/orgs/{org}/sso/saml` saves a SAML provider: create, replace, or switch from OIDC. `PUT …/sso/provider` stays the OIDC save, and switches back from SAML. `GET`, `PATCH`, `DELETE …/sso/provider` and the domain routes are unchanged. The SAML body takes a display name, the JIT role, exactly one metadata source (a URL, pasted XML, or the entity ID, SSO URL and certificates), optional attribute names, and `confirm_entity_id_change`, which an entity ID change needs (it deletes identities, D-SA-11). The `OrgSso` response gains `saml_sp` (the values to copy into the IdP), and `OrgSsoProvider` gains `protocol` and a `saml` object; its `issuer` and `client_id` become optional (OIDC only). | One PUT with a tagged union, which would change every OIDC client's body. |
 | D-SA-19 | **URLs and https.** A SAML provider needs `public_url` to be `https`, with no exception: the binder cookie must be `Secure; SameSite=None`, and tests use an https public URL. A metadata URL follows the OIDC issuer rule (`issuer_problem`): `https`, or `http` on a loopback host, then the egress policy, which refuses loopback unless `allow_private_network_egress` is set. Replaces D-SA-10's debug-build exception. | A debug-build exception for http public URLs (nothing else in the server is debug-only). |
+| D-SA-20 | **`__Host-` cookies (M4 security review).** The binder and restart cookies are `__Host-cetra_saml` and `__Host-cetra_saml_restart`, with `Path=/`, `Secure`, `HttpOnly` and `SameSite=None`. A request carrying two binder cookies is refused. One SAML login can be in flight per browser at a time. Amends D-SA-10's ACS-path scoping. | Path-scoped cookies without a prefix: a sibling subdomain could toss a binder with `Domain=` and force a login CSRF. |
+| D-SA-21 | **Entity-ID changes (M4 security review).** An IdP entity-ID change is refused while SSO is enforced. A confirmed change turns the provider off until a new test sign-in, as a protocol switch does. Amends D-SA-11. | Keeping the flags (enforcing against an IdP nobody has tested); resetting enforcement silently. |
 
 ## Open questions for the user
 
