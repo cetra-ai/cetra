@@ -180,29 +180,44 @@ function LoginPage() {
       <FormError message={search.error ? oauthErrorMessage(search.error) : undefined} />
       <FormSuccess message={search.signed_out ? "You're signed out." : undefined} />
       {emailFirst && step === "email" ? (
-        <form noValidate onSubmit={onDiscover} className="flex flex-col gap-4">
-          <TextField
-            id="email"
-            label="Email"
-            type="email"
-            autoComplete="email"
-            required
-            value={email}
-            onChange={setEmail}
-            disabled={discover.isPending || redirecting}
-            error={clientErrors.email}
-          />
-          <FormError
-            message={
-              discover.error
-                ? problemOf(discover.error)?.status === 429
-                  ? RATE_LIMITED
-                  : "Sign-in failed. Try again."
-                : undefined
-            }
-          />
-          <SubmitButton pending={discover.isPending || redirecting}>Continue</SubmitButton>
-        </form>
+        <>
+          <form noValidate onSubmit={onDiscover} className="flex flex-col gap-4">
+            <TextField
+              id="email"
+              label="Email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={setEmail}
+              disabled={discover.isPending || redirecting}
+              error={clientErrors.email}
+            />
+            <FormError
+              message={
+                discover.error
+                  ? problemOf(discover.error)?.status === 429
+                    ? RATE_LIMITED
+                    : "Sign-in failed. Try again."
+                  : undefined
+              }
+            />
+            <SubmitButton pending={discover.isPending || redirecting}>Continue</SubmitButton>
+          </form>
+          <Link
+            to="/login"
+            search={{
+              password: true,
+              redirect: search.redirect,
+              email: email.trim() || undefined,
+            }}
+            className={AUTH_LINK_CLASS}
+          >
+            {config.password_enabled
+              ? "Sign in with a password instead"
+              : "Instance admin? Sign in with a password"}
+          </Link>
+        </>
       ) : (
         <>
           <ProviderButtons providers={config.providers} redirect={search.redirect} />
