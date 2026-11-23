@@ -382,6 +382,15 @@ impl TestApp {
         )
         .expect("org SSO state");
         let limits = Limits::new(&config.demo);
+        // Counting off, as in any debug build; tests turn it on with `Analytics::set_counting`.
+        let (analytics, analytics_worker) = crate::analytics::Analytics::with_flush_interval(
+            &config,
+            Duration::from_millis(50),
+            false,
+        );
+        if let Some(worker) = analytics_worker {
+            drop(tokio::spawn(worker.run()));
+        }
         let state = AppState::new(AppInner {
             config,
             meta,
@@ -423,6 +432,7 @@ impl TestApp {
             eval,
             pending: crate::eval::pending::PendingTraces::default(),
             telemetry,
+            analytics,
         });
         state
             .org_sso

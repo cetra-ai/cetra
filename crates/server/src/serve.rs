@@ -479,6 +479,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         usize::try_from(config.issues.workers).unwrap_or(usize::MAX),
     ));
     let limits = Limits::new(&config.demo);
+    let (analytics, analytics_worker) = crate::analytics::Analytics::new(&config);
     let state = AppState::new(AppInner {
         config,
         meta,
@@ -518,6 +519,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         issue_score_rules: crate::issues::triggers::ScoreRules::default(),
         issue_workers,
         issue_wake: tokio::sync::Notify::new(),
+        analytics,
     });
     crate::ee::sso_enforcement::warn_if_unlicensed(&state);
     if let Err(error) = crate::bootstrap::prepare(&state).await {
@@ -622,6 +624,14 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let decision = crate::observability::switchboard::for_config(&state.config);
     if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {
         tasks.push(task);
+    }
+    // Feature counts for the heartbeat's `usage` (track TL M6), loaded and saved while it runs.
+    if let Some(task) = crate::analytics::counters::start(&state, decision).await {
+        tasks.push(task);
+    }
+    // Per-user product events to the operator's PostHog, when `[analytics]` is set (D-TL-14).
+    if let Some(worker) = analytics_worker {
+        tasks.push(tokio::spawn(worker.run()));
     }
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
@@ -1192,6 +1202,19 @@ mod tests {
             txt_resolver(&restore),
             crate::ee::org_sso::dns::TxtResolver::Unconfigured
         ));
+    }
+
+    /// With `[analytics]` unset and the heartbeat off in a test build, neither the PostHog worker
+    /// nor the counter saver starts, and `serve` starts and shuts down as before (track TL M6).
+    #[tokio::test]
+    async fn serve_starts_without_analytics() {
+        let dir = tempfile::tempdir().unwrap();
+        bind(config(dir.path()), None)
+            .await
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
     }
 
     /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send

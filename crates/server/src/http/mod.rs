@@ -111,6 +111,8 @@ pub(crate) struct AppInner {
     pub(crate) issue_workers: Arc<tokio::sync::Semaphore>,
     /// Wakes the IC candidate loop: a candidate was queued, or a worker finished.
     pub(crate) issue_wake: tokio::sync::Notify,
+    /// Product analytics: feature counters and the PostHog sink (track TL M6).
+    pub(crate) analytics: crate::analytics::Analytics,
 }
 
 impl AppState {
@@ -195,6 +197,8 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        // DNT and Sec-GPC for the length of the request (D-TL-15).
+        .layer(middleware::from_fn(crate::analytics::actor::privacy_signal))
         .layer(middleware::from_fn(log_request))
         .layer(middleware::from_fn_with_state(
             state.clone(),
