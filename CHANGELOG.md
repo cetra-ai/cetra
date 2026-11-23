@@ -25,6 +25,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 ### Fixed
 
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
+- Selecting another member while the member panel is open no longer adds a second Role card.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

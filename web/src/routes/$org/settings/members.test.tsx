@@ -82,6 +82,18 @@ it("opens a member's panel from the URL", async () => {
   expect(await screen.findByRole("form", { name: "Role of bob@example.com" })).toBeInTheDocument();
 });
 
+it("switching members keeps one role card", async () => {
+  const { user } = await openMember("bob@example.com");
+  const grid = screen.getByRole("grid", { name: "Members" });
+  const row = within(grid).getByRole("row", { name: /ada@example.com/ });
+  await user.click(within(row).getByText("ada@example.com"));
+
+  await screen.findByRole("form", { name: "Role of ada@example.com" });
+  const forms = screen.getAllByRole("form", { name: /^Role of / });
+  expect(forms).toHaveLength(1);
+  expect(within(forms[0]).getByRole("combobox")).toHaveTextContent("Owner");
+});
+
 it("filters members by name or email", async () => {
   const { user } = await renderApp(MEMBERS);
   const grid = await screen.findByRole("grid", { name: "Members" });
