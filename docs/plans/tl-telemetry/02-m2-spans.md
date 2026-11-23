@@ -23,9 +23,10 @@ Incoming `traceparent` headers are ignored (D-TL-7).
 **Choices this plan applies.** The design records them: `README.md` § "Details settled while planning", bullet "Server spans (M2)".
 - Events recorded on spans pass the log-export filter.
 - `with_error_events_to_status` stays off. An ERROR event still marks its span failed.
-- `/healthz` and `/readyz` get no span.
+- `/healthz`, `/readyz` and `POST /api/v1/analytics/events` get no `http.request` span. The analytics route comes with M6: the UI posts to it every 5 s per open tab. The match is on the route template string, so it works before and after M6 lands.
 - No per-read `query` span; the SQL console and MCP tool calls get one.
 - One span per unit of work (`issues.candidate`, not `issues.pass`).
+- `otlp.export` covers **trace** exports only, over HTTP and gRPC, and has **no `signal` attribute**. This departs from the design's § 2 table. OTLP logs and metrics are admitted and dropped (D-G-40): over HTTP they get only their `http.request` span, over gRPC no span.
 - Ratio 0 builds no span layer.
 - No trace ids in log records.
 - `http.request` ends at the response head, and a 5xx marks it failed.
@@ -174,11 +175,13 @@ TL2.4 span catalog ───────────────────┼�
                                       │                     └─► TL2.11 eval, issues, backup spans
 TL2.6 storage catalog and flush ─► TL2.7 compaction and GC spans
 TL2.12 docs and specs   (after TL2.2 and TL2.4)
+TL2.9 ─► M6's TL6.10 and TL6.11   (the coordinator runs TL2.9 first; M6 quotes its result)
 ```
 
 - TL2.1, TL2.2, TL2.4 and TL2.6 have disjoint files and can run in parallel.
 - TL2.8 to TL2.11 have disjoint files and can run in parallel.
 - TL2.6 and TL2.7 never touch server files.
+- **TL2.9 runs before M6's TL6.10 and TL6.11.** Those phases edit `run_sql` and the `McpServer { … }` literal and quote TL2.9's final text, which TL2.9 gives in full. When TL2.9 runs, `run_sql` and the literal are still M1-era code.
 
 | Phase | Files | Shared with other milestones |
 |---|---|---|
@@ -476,7 +479,7 @@ M3 or M5 may already have edited this file. The `post` refactor (step 5) replace
        headers: &HeaderMap,
        runtime: &Handle,
        encoded: &[u8],
-   ) -> impl Future<Output = Result<(), Failure>> + Send + 'static {
+   ) -> impl Future<Output = Result<(), Failure>> + Send + use<> {
        let spawned = gzip(encoded).map(|body| {
            let builder = client.post(url).headers(headers.clone()).body(body);
            runtime.spawn(async move { builder.send().await.map(|response| response.status()) })
@@ -489,7 +492,7 @@ M3 or M5 may already have edited this file. The `post` refactor (step 5) replace
        }
    }
    ```
-   Under edition 2024, `impl Trait` in return position captures every lifetime of the arguments. The returned future owns everything it uses, so `'static` holds. If rustc nevertheless rejects the `'static` bound, write the return type `impl Future<Output = Result<(), Failure>> + Send + use<>`, and report it.
+   `+ use<>` (stable since Rust 1.82): the returned future captures none of the argument lifetimes, which edition 2024 would capture by default. It owns everything it uses, so it is `'static`.
 5. **The log exporter uses it.** Replace the body of `OtlpLogExporter`'s `export` with the code below. It does what M1's steps 1–5 did; the log line and the error are unchanged.
    ```rust
        fn export(&self, batch: LogBatch<'_>) -> impl Future<Output = OTelSdkResult> + Send {
@@ -1674,8 +1677,9 @@ The tests:
       ```rust
       /// One `info` event per request, and the `http.request` span around the handler and that
       /// event, so events inside nest under it (track TL M2). The route is the matched template (D150); the URL,
-      /// its query and the body are never recorded. The health probes get no span: orchestrators
-      /// poll them every few seconds. A 5xx marks the span failed.
+      /// its query and the body are never recorded. The health probes get no span, nor does the
+      /// UI's analytics beacon (track TL M6): they are polled every few seconds. A 5xx marks the
+      /// span failed.
       async fn log_request(request: Request, next: Next) -> Response {
           let method = request.method().clone();
           let route = request
@@ -1683,7 +1687,10 @@ The tests:
               .get::<MatchedPath>()
               .map_or("<unmatched>", MatchedPath::as_str)
               .to_owned();
-          let span = if matches!(route.as_str(), "/healthz" | "/readyz") {
+          let span = if matches!(
+              route.as_str(),
+              "/healthz" | "/readyz" | "/api/v1/analytics/events"
+          ) {
               tracing::Span::none()
           } else {
               spans::http_request(&method, &route)
@@ -1795,7 +1802,7 @@ The tests:
   3. The body is `{"prompt":"secret prompt text","key":"sk-cetra-planted22222222222222222222222222"}`, with `.origin(None)` as `json_rejections_hide_the_input` does.
   4. `captured.text()` contains none of `sk-cetra-planted`, `user@example.com` and `secret prompt text`.
   5. The `http.request` span exists, with route `/spans/{id}`.
-- `health_probes_have_no_span`: `GET /healthz` and `GET /readyz` inside `capture_spans` give no `http.request` span.
+- `health_probes_have_no_span`: `GET /healthz` and `GET /readyz` inside `capture_spans` give no `http.request` span. A test route registered at `/api/v1/analytics/events` with `TestApp::with_routes(Router::new().route("/api/v1/analytics/events", post(|| async { StatusCode::NO_CONTENT })))` and requested with `POST` and `.origin(None)` also gives none. Write it with `with_routes` even if M6's real route exists. If `with_routes` conflicts with M6's route of the same path (axum panics on a duplicate route), request the real route instead, with the session cookie of `app.seed()`, and report.
 - `an_incoming_traceparent_is_ignored`:
   1. `GET /spans/1` with the header `traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01`.
   2. The span's `trace_id` is not the bytes of `0af7651916cd43dd8448eb211c80319c`.
@@ -1838,7 +1845,7 @@ The tests:
 - `crates/server/src/routes/sql.rs`
 - `crates/server/src/mcp/mod.rs`
 
-Both files are shared with M6, which may have added `analytics::record(…)` calls in `run_sql` or `call_tool`, or fields to `McpServer`. M2's edits add span lines around the existing calls. Keep M6's calls and fields where they are, inside or outside the instrumented futures, and add `request_span` beside its fields.
+Both files are shared with M6. **This phase runs before M6's TL6.10 and TL6.11**, which edit `run_sql`, `call_tool` and the `McpServer { … }` literal, and quote the final text below. So when this phase runs, the anchors are the current code: `run_sql` as at `crates/server/src/routes/sql.rs:208-238`, and `let server = McpServer { state, user };` in `mcp`. If M6's analytics lines are already there (the order was changed), keep them, add only the span lines, and report.
 
 **Steps.**
 1. `routes/sql.rs`: add `use tracing::Instrument as _;` and `use crate::observability::spans;`. In `run_sql`:
@@ -1890,9 +1897,72 @@ Both files are shared with M6, which may have added `analytics::record(…)` cal
           }
       ```
       If `run_sql`'s existing statements differ from the ones these replace (`demo`, `log_end`, `log_failure` and their arguments), keep the existing ones and only add the span lines. Report the difference.
+   3. **The exact final text of `run_sql` after this phase** (M6's TL6.11 quotes it). The signature and doc are unchanged:
+      ```rust
+      async fn run_sql(
+          State(state): State<AppState>,
+          Extension(access): Extension<ProjectAccess>,
+          visitor: Option<Extension<DemoVisitor>>,
+          headers: HeaderMap,
+          error::Json(body): error::Json<SqlQueryRequest>,
+      ) -> Result<Response, ApiError> {
+          let started = Instant::now();
+          let query_len = body.query.len();
+          let format = negotiate(&headers);
+          let Some(export) = format.export() else {
+              let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL);
+              span.record(spans::PROJECT_ID, tracing::field::display(access.project.id));
+              let demo = visitor.map(|_| &state.config.demo);
+              let result = run_json(&state, &access, body, demo)
+                  .instrument(span.clone())
+                  .await;
+              match &result {
+                  Ok(result) => {
+                      span.record(spans::ROWS, spans::count(result.rows.len()));
+                      span.record(spans::OUTCOME, "ok");
+                  }
+                  Err(error) => {
+                      span.record(spans::OUTCOME, failure_kind(error));
+                  }
+              }
+              log_end(access.project.id, "json", query_len, started, &result);
+              return result.map(|result| error::Json(result).into_response());
+          };
+          let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL_EXPORT);
+          span.record(spans::PROJECT_ID, tracing::field::display(access.project.id));
+          match start_export(&state, &access, body, format, export, started)
+              .instrument(span.clone())
+              .await
+          {
+              Ok(response) => {
+                  span.record(spans::OUTCOME, "ok");
+                  Ok(response)
+              }
+              Err(error) => {
+                  span.record(spans::OUTCOME, failure_kind(&error));
+                  log_failure(
+                      access.project.id,
+                      format.label(),
+                      query_len,
+                      started,
+                      &error,
+                  );
+                  Err(error)
+              }
+          }
+      }
+      ```
+      `rustfmt --edition 2024` may reflow lines; the statements are these.
 2. `mcp/mod.rs`: add `use tracing::Instrument as _;` and `use crate::observability::spans;`.
    1. Add the field `request_span: tracing::Span` to `McpServer`, with the doc `/// The request's `http.request` span: rmcp runs a tool call in a spawned task, so the call's span names it as its parent explicitly.`
-   2. In `mcp`, change `let server = McpServer { state, user };` to `let server = McpServer { state, user, request_span: tracing::Span::current() };`.
+   2. In `mcp`, change `let server = McpServer { state, user };` to the line below. **This is the exact final text after this phase** (M6's TL6.10 quotes it and adds its own field):
+      ```rust
+          let server = McpServer {
+              state,
+              user,
+              request_span: tracing::Span::current(),
+          };
+      ```
    3. In `call_tool`:
       1. Right after `let started = Instant::now();`, add `let span = spans::query(&self.request_span, spans::QUERY_MCP);`.
       2. In the `tokio::select!`:
@@ -2207,7 +2277,7 @@ Both files are shared with M6, which may have added `analytics::record(…)` cal
        `/api/v1/projects/{project}/traces`. Spans of the libraries cetra uses are not exported.
      - **Incoming `traceparent` headers are ignored.** A request always starts a new trace: a
        caller cannot attach cetra's spans to its own trace.
-     - **The health probes** `/healthz` and `/readyz` get no span.
+     - **The health probes** `/healthz` and `/readyz`, and the UI's usage beacon `POST /api/v1/analytics/events`, get no span.
      - **No `OTEL_*` variable is read**, as for logs.
      - **Another cetra instance** can receive these traces: it stores OTLP traces (not logs).
        Point it at a different instance. An instance that receives its own export creates one
@@ -2218,7 +2288,7 @@ Both files are shared with M6, which may have added `analytics::record(…)` cal
      | Span | Covers | Attributes |
      |---|---|---|
      | `http.request` | One HTTP request, up to the response head | `http.request.method`, `http.route` (template), `http.response.status_code` |
-     | `otlp.export` | One OTLP trace export, over HTTP (inside `http.request`) or gRPC | `protocol`, `project_id`, `spans`, `rejected`, `bytes`, `outcome` |
+     | `otlp.export` | One OTLP **trace** export, over HTTP (inside `http.request`) or gRPC. OTLP logs and metrics, which cetra drops, get no `otlp.export` span (over HTTP, only their `http.request`) | `protocol`, `project_id`, `spans`, `rejected`, `bytes`, `outcome` |
      | `query` | One SQL console query (`kind` `sql` or `sql_export`) or MCP tool call (`kind` `mcp`) | `kind`, `project_id`, `tool`, `rows`, `outcome` |
      | `eval.job` | One evaluation job | `job_id`, `project_id`, `evaluator_id`, `kind`, `outcome` |
      | `alerts.evaluate` | One alert rule's evaluation | `rule_id`, `project_id`, `outcome` |
@@ -2254,7 +2324,8 @@ Both files are shared with M6, which may have added `analytics::record(…)` cal
       > - The spans and their attribute keys are constants of two catalogs (`crates/server/src/observability/spans.rs`, `crates/storage/src/spans.rs`), listed on the Monitoring page. Values are ids, counts, fixed words and durations (D-TL-4). Only spans with a `cetra_` target are exported.
       > - Events that pass the log export's filter are recorded on their span; an ERROR event, or a 5xx on `http.request`, sets the span's status to error. No thread, code-location or target attributes.
       > - The stdout layer sees events only, so spans never change stdout lines.
-      > - No propagator: an incoming `traceparent` is ignored (D-TL-7). `/healthz` and `/readyz` get no span.
+      > - No propagator: an incoming `traceparent` is ignored (D-TL-7). `/healthz`, `/readyz` and `POST /api/v1/analytics/events` get no span.
+      > - `otlp.export` covers trace exports only (HTTP and gRPC), without a `signal` attribute: OTLP logs and metrics are dropped (D-G-40).
       > - At exit, logs and spans flush in parallel within the same 2 s.
       ```
       If the line `> Server spans over OTLP: track TL M2 (D-TL-4).` is not there, insert the block after M1's blockquote anyway and report.
@@ -2281,8 +2352,8 @@ Every attribute's type is a string unless the table says int (`i64`). In each At
 
 | Span | Started in (file, function) | Attributes (type, source) |
 |---|---|---|
-| `http.request` | `server/src/http/mod.rs`, `log_request` (no span for `/healthz`, `/readyz`) | `otel.kind` = `server`; `http.request.method`: `telemetry::Method::of` as `Debug` (`GET` … `other`); `http.route`: `MatchedPath` or `<unmatched>`; `http.response.status_code`: int (recorded), the response status; `otel.status_code`: `error` (recorded) on 5xx |
-| `otlp.export` | `server/src/routes/otlp.rs`, `export`; `server/src/ingest/grpc.rs`, `GrpcTraces::export` | `otel.kind` = `server` (gRPC) or `internal` (HTTP); `protocol` = `http`/`grpc`; `project_id` (recorded): the key's project; `spans`, `rejected`, `bytes`: ints (recorded) from the commit receipt and the request size; `outcome` (recorded): `IngestOutcome` as `Debug` (`ok`, `invalid`, `too_large`, `rate_limited`, `quota`, `unavailable`, `disk_full`) |
+| `http.request` | `server/src/http/mod.rs`, `log_request` (no span for `/healthz`, `/readyz`, `/api/v1/analytics/events`) | `otel.kind` = `server`; `http.request.method`: `telemetry::Method::of` as `Debug` (`GET` … `other`); `http.route`: `MatchedPath` or `<unmatched>`; `http.response.status_code`: int (recorded), the response status; `otel.status_code`: `error` (recorded) on 5xx |
+| `otlp.export` (trace exports only; no `signal` attribute, unlike the design's first table) | `server/src/routes/otlp.rs`, `export`; `server/src/ingest/grpc.rs`, `GrpcTraces::export` | `otel.kind` = `server` (gRPC) or `internal` (HTTP); `protocol` = `http`/`grpc`; `project_id` (recorded): the key's project; `spans`, `rejected`, `bytes`: ints (recorded) from the commit receipt and the request size; `outcome` (recorded): `IngestOutcome` as `Debug` (`ok`, `invalid`, `too_large`, `rate_limited`, `quota`, `unavailable`, `disk_full`) |
 | `query` | `server/src/routes/sql.rs`, `run_sql`; `server/src/mcp/mod.rs`, `McpServer::call_tool` (explicit parent: the request span) | `kind` = `sql`/`sql_export`/`mcp`; `project_id` (recorded, SQL); `tool` (recorded, MCP): the static tool name from `run_tool`; `rows`: int (recorded, SQL JSON); `outcome` (recorded): `ok`, `failure_kind` (SQL), `error`/`cancelled`/`unknown_tool` (MCP) |
 | `eval.job` | `server/src/eval/dispatch.rs`, `run_claimed` | `job_id`, `project_id`, `evaluator_id`: the job row; `kind`: `job_kind(row.kind)`; `outcome` (recorded): `recorded` (the run's own result, success or failure, was written to `meta.db`)/`record_failed`/`panicked` |
 | `alerts.evaluate` | `server/src/alerts/evaluate.rs`, `evaluate_rule` (wrapper) | `rule_id`, `project_id`; `outcome` (recorded): `evaluation_outcome` |
