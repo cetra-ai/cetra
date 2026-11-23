@@ -93,6 +93,8 @@ pub enum Codec {
     /// Compressed with zstd and the dictionary of the payload run that holds the segment. Only
     /// payload frames use it.
     ZstdDict = 2,
+    /// An LZ4 block. Only narrow chunks use it.
+    Lz4 = 3,
 }
 
 impl Codec {
@@ -102,6 +104,7 @@ impl Codec {
             0 => Some(Self::Raw),
             1 => Some(Self::Zstd),
             2 => Some(Self::ZstdDict),
+            3 => Some(Self::Lz4),
             _ => None,
         }
     }
@@ -132,7 +135,12 @@ pub(crate) fn encode_segment(
     out: &mut Out,
 ) -> Result<SegmentRef> {
     let compressed = compress_for(kind, body, prefer, codec)?;
-    write_body(kind, body, compressed.as_deref(), out)
+    write_body(
+        kind,
+        body,
+        compressed.as_ref().map(|(c, b)| (*c, b.as_slice())),
+        out,
+    )
 }
 
 /// The zstd form of `body` that [`encode_segment`] would store, or `None` when it would store
@@ -142,20 +150,37 @@ pub(crate) fn compress_for(
     body: &[u8],
     prefer: Codec,
     codec: &mut SegmentCodec,
-) -> Result<Option<Vec<u8>>> {
+) -> Result<Option<(Codec, Vec<u8>)>> {
     if body.len() > MAX_SEGMENT_RAW as usize {
         return Err(StrataError::Unsupported {
             what: format!("segment body of {} bytes", body.len()),
         });
     }
-    Ok(match prefer {
-        Codec::Zstd => codec.compressor.compress(body).ok().filter(|c| match kind {
-            // A narrow chunk is decompressed on every scan: zstd must save at least 30%.
-            Kind::NarrowChunk => c.len() * 100 <= body.len() * 70,
-            _ => c.len() < body.len(),
-        }),
-        // A dictionary needs the run's encoder: `write_segment` stores such bodies.
-        Codec::Raw | Codec::ZstdDict => None,
+    if kind != Kind::NarrowChunk {
+        return Ok(match prefer {
+            Codec::Zstd => codec
+                .compressor
+                .compress(body)
+                .ok()
+                .filter(|c| c.len() < body.len())
+                .map(|c| (Codec::Zstd, c)),
+            // A dictionary needs the run's encoder: `write_segment` stores such bodies.
+            Codec::Raw | Codec::ZstdDict | Codec::Lz4 => None,
+        });
+    }
+    // A narrow chunk is decompressed on every scan: a codec must save at least 30%, and LZ4,
+    // which decompresses several times faster, is kept unless zstd is a fifth smaller still.
+    let saves = |c: &Vec<u8>| c.len() * 100 <= body.len() * 70;
+    let lz4 = Some(lz4_flex::block::compress(body)).filter(saves);
+    let zstd = match prefer {
+        Codec::Zstd => codec.compressor.compress(body).ok().filter(saves),
+        Codec::Raw | Codec::ZstdDict | Codec::Lz4 => None,
+    };
+    Ok(match (lz4, zstd) {
+        (Some(l), Some(z)) if z.len() * 100 <= l.len() * 80 => Some((Codec::Zstd, z)),
+        (Some(l), _) => Some((Codec::Lz4, l)),
+        (None, Some(z)) => Some((Codec::Zstd, z)),
+        (None, None) => None,
     })
 }
 
@@ -163,11 +188,11 @@ pub(crate) fn compress_for(
 pub(crate) fn write_body(
     kind: Kind,
     body: &[u8],
-    compressed: Option<&[u8]>,
+    compressed: Option<(Codec, &[u8])>,
     out: &mut Out,
 ) -> Result<SegmentRef> {
     match compressed {
-        Some(c) => write_segment(kind, Codec::Zstd, body.len(), c, out),
+        Some((codec, c)) => write_segment(kind, codec, body.len(), c, out),
         None => write_segment(kind, Codec::Raw, body.len(), body, out),
     }
 }
@@ -311,6 +336,15 @@ pub(crate) fn decode_segment_with(
             }
             Ok(body)
         }
+        Codec::Lz4 => {
+            // The raw length is capped above, so the output buffer is bounded.
+            let body = lz4_flex::block::decompress(stored, raw_len as usize)
+                .map_err(|_| corrupt("segment decompress"))?;
+            if body.len() != raw_len as usize {
+                return Err(corrupt("segment decompress"));
+            }
+            Ok(body)
+        }
     }
 }
 
@@ -330,6 +364,58 @@ mod tests {
         let mut codec = SegmentCodec::new(1).unwrap();
         let seg = encode_segment(kind, body, prefer, &mut codec, &mut out).unwrap();
         (out.0, seg)
+    }
+
+    #[test]
+    fn a_narrow_chunk_prefers_lz4_unless_zstd_is_a_fifth_smaller() {
+        let mut codec = SegmentCodec::new(1).unwrap();
+        // One random kilobyte repeated: both codecs keep about a kilobyte, so LZ4.
+        let mut y = 99u64;
+        let block: Vec<u8> = (0..1_024)
+            .map(|_| {
+                y = y.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                (y >> 33) as u8
+            })
+            .collect();
+        let repeats: Vec<u8> = block.iter().copied().cycle().take(32_768).collect();
+        let (chosen, _) = compress_for(Kind::NarrowChunk, &repeats, Codec::Zstd, &mut codec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chosen, Codec::Lz4);
+        // Skewed bytes without repeats: only zstd's entropy coding shrinks them.
+        let mut x = 1u64;
+        let skewed: Vec<u8> = (0..32_768)
+            .map(|_| {
+                x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                if x >> 61 == 0 {
+                    (x >> 40) as u8
+                } else {
+                    (x >> 62) as u8
+                }
+            })
+            .collect();
+        let (chosen, _) = compress_for(Kind::NarrowChunk, &skewed, Codec::Zstd, &mut codec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(chosen, Codec::Zstd);
+        // Both decode back.
+        for body in [&repeats, &skewed] {
+            let (file, seg) = encode(Kind::NarrowChunk, body, Codec::Zstd, 0);
+            let decoded = decode_segment(&file, seg.offset, Kind::NarrowChunk).unwrap();
+            assert_eq!(&decoded, body);
+        }
+        // Raw bytes that neither codec shrinks by 30% are stored raw.
+        let random: Vec<u8> = (0..4_096)
+            .map(|_| {
+                x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+                (x >> 33) as u8
+            })
+            .collect();
+        assert!(
+            compress_for(Kind::NarrowChunk, &random, Codec::Zstd, &mut codec)
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn corrupt_what(err: StrataError) -> &'static str {
@@ -370,7 +456,7 @@ mod tests {
         #[test]
         fn random_headers_with_correct_checksums_never_panic(
             kind in 1u8..=9,
-            codec in 0u8..=1,
+            codec in 0u8..=3,
             huge in 0u8..10,
             small_raw in 0u32..=(1 << 20),
             huge_raw in (MAX_SEGMENT_RAW + 1)..=u32::MAX,

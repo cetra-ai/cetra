@@ -2398,6 +2398,7 @@ dependencies = [
  "datafusion",
  "fmt-testdata",
  "futures",
+ "lz4_flex",
  "memchr",
  "object_store",
  "parquet",

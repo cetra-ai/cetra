@@ -13,6 +13,9 @@ bytes = "1.12"
 futures = "0.3.34"
 zstd = { version = "0.13", features = ["experimental"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+# Narrow chunks compressed with LZ4 when it saves nearly as much as zstd: it decompresses
+# several times faster. Block format only, with bounds-checked decoding.
+lz4_flex = { version = "0.14.2", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }
 thiserror = "2.0"
 memchr = "2"
 xorf = { version = "0.13.0", default-features = false, features = ["binary-fuse"] }

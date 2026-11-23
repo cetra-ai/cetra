@@ -445,7 +445,6 @@ fn decode_delta<T: Wrapping>(c: &mut Cursor<'_>, n: usize, base: u64, at: u64) -
         false,
     )
     .map_err(|_| corrupt("delta first values"))?;
-    // The steps at the column's width, the reference already added.
     let reference_t = T::low(reference);
     let mut steps: Vec<T> = if width == 0 {
         vec![reference_t; n]
@@ -458,19 +457,29 @@ fn decode_delta<T: Wrapping>(c: &mut Cursor<'_>, n: usize, base: u64, at: u64) -
         return Err(corrupt("delta patches"));
     }
     let rows = c.bytes(count * 2, "delta patch rows")?;
-    let values = c.bytes(count * 8, "delta patch values")?;
-    for (row, value) in rows
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .zip(values.as_chunks::<8>().0)
-    {
+    let patch_base = c.u64("delta patch base")?;
+    let patch_width = c.u8("delta patch width")?;
+    if patch_width > 64 {
+        return Err(corrupt("delta patch width"));
+    }
+    let packed = c.bytes(
+        (count * usize::from(patch_width)).div_ceil(64) * 8,
+        "delta patch values",
+    )?;
+    let values = unpack_block(packed, count, patch_width, false)
+        .map_err(|_| corrupt("delta patch values"))?;
+    // Patch rows are ascending and past the first 32, as the writer stores them.
+    let mut last = None;
+    for (row, value) in rows.as_chunks::<2>().0.iter().zip(values) {
         let row = usize::from(u16::from_le_bytes(*row));
+        if row < 32 || last.is_some_and(|last| row <= last) {
+            return Err(corrupt("delta patch row"));
+        }
+        last = Some(row);
         let slot = steps
             .get_mut(row)
-            .filter(|_| row >= 32)
             .ok_or_else(|| corrupt("delta patch row"))?;
-        *slot = T::low(reference.wrapping_add(u64::from_le_bytes(*value)));
+        *slot = T::low(reference.wrapping_add(patch_base.wrapping_add(value)));
     }
     // In place: the first row becomes the first values, and each later row the sum of its steps
     // and the row before, carried in a 32-lane accumulator the compiler keeps in registers.

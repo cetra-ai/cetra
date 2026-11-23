@@ -58,9 +58,12 @@ const CHUNK_DICT_SAMPLE_BYTES: usize = 1 << 20;
 /// at most this share (in percent) of what they take without it.
 const CHUNK_DICT_MAX_SHARE: usize = 95;
 
-/// One encoded chunk of a narrow column: its rows, its chunk and the zstd form of its body that
-/// the writer stores when it has no chunk dictionary.
-type Encoded = (std::ops::Range<usize>, EncodedChunk, Option<Vec<u8>>);
+/// The compressed form of a chunk body and its codec (zstd or LZ4), if any.
+type Compressed = Option<(Codec, Vec<u8>)>;
+
+/// One encoded chunk of a narrow column: its rows, its chunk and the compressed form of its body
+/// that the writer stores when it has no chunk dictionary.
+type Encoded = (std::ops::Range<usize>, EncodedChunk, Compressed);
 
 /// A chunk dictionary, and each chunk's body compressed with it (`None` for a chunk stored
 /// without it).
@@ -112,7 +115,7 @@ fn chunk_dictionary(chunks: &[Encoded], level: i32) -> Result<Option<ChunkDict>>
         let stored = chunks
             .get(i)
             .and_then(|(_, _, compressed)| compressed.as_ref())
-            .map_or(body.len(), Vec::len);
+            .map_or(body.len(), |(_, c)| c.len());
         without += stored;
         let c = compressor
             .compress(body)
@@ -783,12 +786,16 @@ fn write_narrow(
     for range in ranges {
         let slice = array.slice(range.start, range.len());
         // The first candidate decodes fastest; a later one must save at least 30% to replace it.
-        let mut best: Option<(EncodedChunk, Option<Vec<u8>>, usize)> = None;
+        let mut best: Option<(EncodedChunk, Compressed, usize)> = None;
         for candidate in encode_chunk_candidates(&slice, dict.as_ref(), config)? {
             let (compressed, stored) = match &candidate.body {
+                // A delta chunk is stored as is: on vortex-queries, zstd on them saved a tenth of
+                // the files' size (6.1 GB to 5.5 GB) and its decompression took a quarter of a
+                // full scan (`real-data.md`).
+                Some(body) if candidate.encoding == Encoding::ForDelta => (None, body.len()),
                 Some(body) => {
                     let c = compress_for(Kind::NarrowChunk, body, Codec::Zstd, codec)?;
-                    let stored = c.as_ref().map_or(body.len(), Vec::len);
+                    let stored = c.as_ref().map_or(body.len(), |(_, c)| c.len());
                     (c, stored)
                 }
                 None => (None, 0),
@@ -833,7 +840,12 @@ fn write_narrow(
                 (seg.offset, seg.len)
             }
             (Some(body), None) => {
-                let seg = write_body(Kind::NarrowChunk, &body, compressed.as_deref(), out)?;
+                let seg = write_body(
+                    Kind::NarrowChunk,
+                    &body,
+                    compressed.as_ref().map(|(c, b)| (*c, b.as_slice())),
+                    out,
+                )?;
                 (seg.offset, seg.len)
             }
             (None, _) => (0, 0),
@@ -1401,9 +1413,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after integer chunks gained the `ForDelta` candidate. A change to this value
-    /// means the output changed.
-    const GOLDEN: u64 = 0x6220_0835_a970_221e;
+    /// Recorded after narrow chunks gained LZ4 and delta patches were bit-packed. A change to
+    /// this value means the output changed.
+    const GOLDEN: u64 = 0x55b2_f341_10d3_3d18;
 
     #[test]
     fn golden_output_hash() {

@@ -304,7 +304,8 @@ fn constant_numeric(num: Numeric, value: u64) -> EncodedChunk {
     chunk
 }
 
-/// Bytes of one patch of a `ForDelta` chunk: a `u16` row and a `u64` value.
+/// Bytes of one patch of a `ForDelta` chunk at most: a `u16` row and a 64-bit value. Patch
+/// values are bit-packed from their minimum, so most take far less.
 const PATCH_BYTES: usize = 10;
 
 /// The `ForDelta` encoding of an integer chunk without nulls of a whole number of 1,024-value
@@ -314,7 +315,8 @@ const PATCH_BYTES: usize = 10;
 ///
 /// Body: `u8 width · u64 reference · u8 first width · the first 32 values less the chunk's min,
 /// packed in order · n steps in lanes (none at width 0; the first 32 are 0) · u32 patch count ·
-/// u16 rows · u64 values`. A value is `value[i - 32] + reference + step[i]`, wrapping.
+/// u16 rows · u64 patch base · u8 patch width · the patch values less the base, packed in order`.
+/// A value is `value[i - 32] + reference + step[i]`, wrapping, and a patched step is its value.
 fn encode_delta(array: &dyn Array, num: Numeric) -> Result<Option<EncodedChunk>> {
     let n = array.len();
     if num.class != Class::Int
@@ -389,9 +391,17 @@ fn encode_delta(array: &dyn Array, num: Numeric) -> Result<Option<EncodedChunk>>
     for (row, _) in &patches {
         body.extend_from_slice(&row.to_le_bytes());
     }
-    for (_, value) in &patches {
-        body.extend_from_slice(&value.to_le_bytes());
-    }
+    // The patch values from their least, as signed numbers: steps that all go far down (a
+    // counter that wraps) or all far up pack into a few bits each, often none.
+    let patch_base = patches.iter().map(|(_, v)| *v as i64).min().unwrap_or(0) as u64;
+    let offsets: Vec<u64> = patches
+        .iter()
+        .map(|(_, v)| v.wrapping_sub(patch_base))
+        .collect();
+    let patch_width = width_for(offsets.iter().copied().max().unwrap_or(0));
+    body.extend_from_slice(&patch_base.to_le_bytes());
+    body.push(patch_width);
+    super::bitpack::pack(&offsets, patch_width, &mut body);
     let mut chunk = EncodedChunk::bare(Encoding::ForDelta, flags::HAS_ZONE);
     set_prefix(&mut chunk.min, &min.to_le_bytes());
     set_prefix(&mut chunk.max, &max.to_le_bytes());
@@ -1158,10 +1168,13 @@ mod tests {
         // each step down: 64 patches.
         assert_eq!(body[0], 0);
         assert_eq!(u64::from_le_bytes(body[1..9].try_into().unwrap()), 32);
-        let patches_at = body.len() - 64 * PATCH_BYTES - 4;
+        // The tail: the count, 64 rows, the patch base and a width of 0: every wrap steps down by
+        // the same amount, so the patch values take no bits.
+        let patches_at = body.len() - 4 - 64 * 2 - 8 - 1;
         let count = u32::from_le_bytes(body[patches_at..patches_at + 4].try_into().unwrap());
         assert_eq!(count, 64);
-        assert!(body.len() < 2_048 * 10 / 8 / 2, "{} bytes", body.len());
+        assert_eq!(body[body.len() - 1], 0);
+        assert!(body.len() < 200, "{} bytes", body.len());
     }
 
     #[test]
@@ -1213,16 +1226,27 @@ mod tests {
         let mut wide = body.clone();
         wide[0] = 33;
         assert!(decode(&wide).is_err());
-        let rows_at = body.len() - 64 * PATCH_BYTES;
+        let rows_at = body.len() - 64 * 2 - 8 - 1;
         let mut early = body.clone();
         early[rows_at..rows_at + 2].copy_from_slice(&5u16.to_le_bytes());
         assert!(decode(&early).is_err());
+        // Patch rows out of order, or repeated, are an error.
+        let mut repeated = body.clone();
+        let second = rows_at + 2;
+        let first_row: [u8; 2] = body[rows_at..rows_at + 2].try_into().unwrap();
+        repeated[second..second + 2].copy_from_slice(&first_row);
+        assert!(decode(&repeated).is_err());
         // Sums wrap at the column's width: a patch outside an Int32 still decodes to Int32s
         // (the segment checksum, not the decoder, catches a corrupt body).
         let mut big = body.clone();
-        let values_at = body.len() - 64 * 8;
-        big[values_at..values_at + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
+        let base_at = body.len() - 8 - 1;
+        big[base_at..base_at + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
         assert!(decode(&big).is_ok());
+        // A patch width above 64 is an error.
+        let mut wide_patch = body.clone();
+        let last = wide_patch.len() - 1;
+        wide_patch[last] = 65;
+        assert!(decode(&wide_patch).is_err());
     }
 
     #[test]
