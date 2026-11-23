@@ -405,14 +405,17 @@ const DEFAULT_TELEMETRY_ENDPOINT: &str = "https://telemetry.cetra.sh";
 const TELEMETRY_VALUES: &str =
     "accepted values are off, false and 0 (any case); unset or empty leaves the config in charge";
 
-/// `[telemetry]`: what cetra sends to us (D-TL-1, D-TL-8). The switchboard can turn it off
-/// whatever these say (D-TL-11).
+/// `[telemetry]` controls the heartbeat and crash reports: what cetra sends to us (D-TL-1,
+/// D-TL-8). The switchboard can turn it off whatever these say (D-TL-11).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TelemetryConfig {
     /// The daily anonymous heartbeat. Default true.
     #[serde(default = "default_heartbeat")]
     pub heartbeat: bool,
+    /// Opt-in crash reports to `<endpoint>/v1/crash` (D-TL-5). Default false.
+    #[serde(default)]
+    pub crash_reports: bool,
     /// Base URL of the relay; the heartbeat goes to `<endpoint>/v1/heartbeat`. `https`, or
     /// `http` to a loopback IP. Stored without a trailing slash.
     #[serde(default = "default_telemetry_endpoint")]
@@ -427,6 +430,7 @@ impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
             heartbeat: default_heartbeat(),
+            crash_reports: false,
             endpoint: default_telemetry_endpoint(),
             env: crate::observability::switchboard::TelemetryEnv::default(),
         }
@@ -2412,6 +2416,7 @@ mod tests {
     fn telemetry_defaults() {
         let config = load_from(None, &[]).unwrap();
         assert!(config.telemetry.heartbeat);
+        assert!(!config.telemetry.crash_reports);
         assert_eq!(config.telemetry.endpoint, "https://telemetry.cetra.sh");
         assert_eq!(config.telemetry.env, TelemetryEnv::default());
     }
@@ -2474,6 +2479,19 @@ mod tests {
     fn telemetry_heartbeat_from_toml() {
         let config = load_from(Some("[telemetry]\nheartbeat = false\n"), &[]).unwrap();
         assert!(!config.telemetry.heartbeat);
+    }
+
+    #[test]
+    fn telemetry_crash_reports_from_toml() {
+        let config = load_from(Some("[telemetry]\ncrash_reports = true\n"), &[]).unwrap();
+        assert!(config.telemetry.crash_reports);
+    }
+
+    #[test]
+    fn telemetry_crash_reports_from_env() {
+        let env = [("CETRA_TELEMETRY__CRASH_REPORTS", "true")];
+        let config = load_from(None, &env).unwrap();
+        assert!(config.telemetry.crash_reports);
     }
 
     #[test]

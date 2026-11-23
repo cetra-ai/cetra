@@ -18,7 +18,7 @@ use crate::observability::buckets::{
 };
 use crate::observability::facts::{self, Deployment, Profile};
 use crate::observability::instance;
-use crate::observability::switchboard::{Decision, NOTICE_TARGET, Switch};
+use crate::observability::switchboard::{Decision, NOTICE_TARGET, Switch, for_config};
 
 /// The payload's schema version (TL-Q1: the relay refuses other versions).
 pub(crate) const HEARTBEAT_SCHEMA: u32 = 1;
@@ -33,7 +33,7 @@ pub(crate) enum StorageKind {
     S3,
 }
 
-/// Which features the instance uses. M5 adds `crash_reports_on`.
+/// Which features the instance uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) struct Features {
     /// `smtp_url` is set.
@@ -56,6 +56,8 @@ pub(crate) struct Features {
     pub(crate) annotation_queues: bool,
     /// cetra exports its own telemetry over OTLP (`self_monitoring.exports()`).
     pub(crate) self_monitoring: bool,
+    /// Crash reports are on: the switchboard's decision, not only the config (D-TL-5).
+    pub(crate) crash_reports_on: bool,
 }
 
 /// The heartbeat body (D-TL-8). Field order is the JSON key order.
@@ -129,6 +131,7 @@ pub(crate) fn features(config: &ServerConfig, tables: TableFlags) -> Features {
         prompts: tables.prompts,
         annotation_queues: tables.annotation_queues,
         self_monitoring: config.self_monitoring.exports(),
+        crash_reports_on: for_config(config).crash_reports == Switch::On,
     }
 }
 
@@ -486,7 +489,7 @@ mod tests {
     ];
 
     /// The keys of `features`, in order.
-    const FEATURE_KEYS: [&str; 10] = [
+    const FEATURE_KEYS: [&str; 11] = [
         "email",
         "github_sign_in",
         "google_sign_in",
@@ -497,6 +500,7 @@ mod tests {
         "prompts",
         "annotation_queues",
         "self_monitoring",
+        "crash_reports_on",
     ];
 
     /// The fixed heartbeat of the golden test.
@@ -527,6 +531,7 @@ mod tests {
                 prompts: true,
                 annotation_queues: false,
                 self_monitoring: false,
+                crash_reports_on: false,
             },
         }
     }
@@ -577,7 +582,8 @@ mod tests {
     "datasets": false,
     "prompts": true,
     "annotation_queues": false,
-    "self_monitoring": false
+    "self_monitoring": false,
+    "crash_reports_on": false
   }
 }"#;
         assert_eq!(
@@ -811,6 +817,7 @@ mod tests {
             prompts: false,
             annotation_queues: false,
             self_monitoring: false,
+            crash_reports_on: false,
         };
         assert_eq!(features(&config, TableFlags::default()), none);
 
@@ -852,6 +859,19 @@ mod tests {
                 google_sign_in: true,
                 oidc_sign_in: true,
                 self_monitoring: true,
+                ..none
+            }
+        );
+        config.telemetry.crash_reports = true;
+        assert_eq!(
+            features(&config, TableFlags::default()),
+            Features {
+                email: true,
+                github_sign_in: true,
+                google_sign_in: true,
+                oidc_sign_in: true,
+                self_monitoring: true,
+                crash_reports_on: true,
                 ..none
             }
         );
@@ -1250,6 +1270,7 @@ mod tests {
         let app = TestApp::new().await;
         let decision = Decision {
             heartbeat: Switch::Off(OffReason::DoNotTrack),
+            crash_reports: Switch::Off(OffReason::DoNotTrack),
         };
         let (handle, logs) = capture_logs(start(&app.state, decision)).await;
         assert!(handle.is_none());
@@ -1266,6 +1287,7 @@ mod tests {
         let app = TestApp::new().await;
         let decision = Decision {
             heartbeat: Switch::On,
+            crash_reports: Switch::Off(OffReason::Config),
         };
         let (handle, logs) = capture_logs(start(&app.state, decision)).await;
         let handle = handle.expect("the heartbeat task is spawned");

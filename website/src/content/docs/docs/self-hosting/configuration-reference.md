@@ -217,9 +217,10 @@ Export cetra's own logs to an OTLP/HTTP endpoint you choose (Sentry, Grafana Clo
 
 ## `[telemetry]`
 
-What cetra sends to us: an anonymous heartbeat once a day. [Telemetry](/docs/self-hosting/telemetry/) lists every field. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1`, restore mode, CI environments and debug builds turn it off whatever these settings say. `CETRA_TELEMETRY` is not the environment form of a setting: its only accepted values are `off`, `false` and `0`, and any other value stops cetra at startup.
+What cetra sends to us: an anonymous heartbeat once a day, and crash reports if you turn them on. [Telemetry](/docs/self-hosting/telemetry/) lists every field. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1`, restore mode, CI environments and debug builds turn it off whatever these settings say. `CETRA_TELEMETRY` is not the environment form of a setting: its only accepted values are `off`, `false` and `0`, and any other value stops cetra at startup.
 
 | Key | Environment | Type | Default | Description |
 |---|---|---|---|---|
 | `telemetry.heartbeat` | | boolean | `true` | Send the anonymous daily heartbeat. |
+| `telemetry.crash_reports` | | boolean | `false` | Send crash reports: each panic and error event as a code location and function names, never a message or a value. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1` and restore mode turn it off; CI environments and debug builds do not. See [Crash reports](/docs/self-hosting/telemetry/#crash-reports). |
 | `telemetry.endpoint` | | URL | `"https://telemetry.cetra.sh"` | Where the heartbeat goes, as `<endpoint>/v1/heartbeat`. `https`, or `http` to a loopback IP address such as `127.0.0.1` (not the name `localhost`). No user info, query or fragment. For a relay of your own. |

@@ -127,11 +127,13 @@ pub(crate) enum Switch {
     Off(OffReason),
 }
 
-/// What may go to us. M5 adds `crash_reports`.
+/// What may go to us.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Decision {
     /// The daily heartbeat (D-TL-8).
     pub(crate) heartbeat: Switch,
+    /// Crash reports (D-TL-5).
+    pub(crate) crash_reports: Switch,
 }
 
 /// Everything [`decide`] looks at.
@@ -145,19 +147,31 @@ pub(crate) struct Inputs {
     pub(crate) debug_build: bool,
     /// `telemetry.heartbeat`.
     pub(crate) heartbeat: bool,
+    /// `telemetry.crash_reports`.
+    pub(crate) crash_reports: bool,
 }
 
 /// The switchboard (D-TL-11). Total: every input gives a decision, so there is no error
 /// path that could leave something on.
 pub(crate) fn decide(inputs: &Inputs) -> Decision {
-    let heartbeat = match shared_off(inputs) {
+    let shared = shared_off(inputs);
+    let heartbeat = match shared {
         Some(reason) => Switch::Off(reason),
         None if inputs.debug_build => Switch::Off(OffReason::DebugBuild),
         None if inputs.env.ci => Switch::Off(OffReason::Ci),
         None if !inputs.heartbeat => Switch::Off(OffReason::Config),
         None => Switch::On,
     };
-    Decision { heartbeat }
+    // Rule 4 (debug builds, CI) is heartbeat only: crash reports run only when asked for.
+    let crash_reports = match shared {
+        Some(reason) => Switch::Off(reason),
+        None if !inputs.crash_reports => Switch::Off(OffReason::Config),
+        None => Switch::On,
+    };
+    Decision {
+        heartbeat,
+        crash_reports,
+    }
 }
 
 /// The decision for this process: [`decide`] over `config` and this build.
@@ -167,6 +181,7 @@ pub(crate) fn for_config(config: &crate::config::ServerConfig) -> Decision {
         restore_mode: config.restore_mode,
         debug_build: cfg!(debug_assertions),
         heartbeat: config.telemetry.heartbeat,
+        crash_reports: config.telemetry.crash_reports,
     })
 }
 
@@ -193,6 +208,7 @@ mod tests {
             restore_mode: false,
             debug_build: false,
             heartbeat: true,
+            crash_reports: false,
         }
     }
 
@@ -313,6 +329,7 @@ mod tests {
             restore_mode: true,
             debug_build: true,
             heartbeat: true,
+            crash_reports: false,
         };
         assert_eq!(
             decide(&inputs).heartbeat,
@@ -331,6 +348,7 @@ mod tests {
             restore_mode: true,
             debug_build: true,
             heartbeat: true,
+            crash_reports: false,
         };
         assert_eq!(
             decide(&inputs).heartbeat,
@@ -349,6 +367,7 @@ mod tests {
             restore_mode: true,
             debug_build: true,
             heartbeat: true,
+            crash_reports: false,
         };
         assert_eq!(
             decide(&inputs).heartbeat,
@@ -464,6 +483,122 @@ mod tests {
         assert_eq!(
             for_config(&config).heartbeat,
             Switch::Off(OffReason::CetraTelemetry)
+        );
+    }
+
+    #[test]
+    fn crash_reports_are_off_by_default() {
+        assert_eq!(
+            decide(&clear()).crash_reports,
+            Switch::Off(OffReason::Config)
+        );
+    }
+
+    #[test]
+    fn crash_reports_on_when_asked() {
+        let inputs = Inputs {
+            crash_reports: true,
+            ..clear()
+        };
+        assert_eq!(decide(&inputs).crash_reports, Switch::On);
+    }
+
+    #[test]
+    fn crash_reports_follow_rules_one_to_three() {
+        let asked = Inputs {
+            crash_reports: true,
+            ..clear()
+        };
+        let forced = Inputs {
+            env: TelemetryEnv {
+                forced_off: true,
+                ..TelemetryEnv::default()
+            },
+            ..asked
+        };
+        assert_eq!(
+            decide(&forced).crash_reports,
+            Switch::Off(OffReason::CetraTelemetry)
+        );
+        let do_not_track = Inputs {
+            env: TelemetryEnv {
+                do_not_track: true,
+                ..TelemetryEnv::default()
+            },
+            ..asked
+        };
+        assert_eq!(
+            decide(&do_not_track).crash_reports,
+            Switch::Off(OffReason::DoNotTrack)
+        );
+        let restored = Inputs {
+            restore_mode: true,
+            ..asked
+        };
+        assert_eq!(
+            decide(&restored).crash_reports,
+            Switch::Off(OffReason::RestoreMode)
+        );
+        let both = Inputs {
+            restore_mode: true,
+            env: TelemetryEnv {
+                forced_off: true,
+                ..TelemetryEnv::default()
+            },
+            ..asked
+        };
+        assert_eq!(
+            decide(&both).crash_reports,
+            Switch::Off(OffReason::CetraTelemetry)
+        );
+    }
+
+    #[test]
+    fn crash_reports_ignore_debug_builds_and_ci() {
+        let inputs = Inputs {
+            env: TelemetryEnv {
+                ci: true,
+                ..TelemetryEnv::default()
+            },
+            debug_build: true,
+            crash_reports: true,
+            ..clear()
+        };
+        let decision = decide(&inputs);
+        assert_eq!(decision.crash_reports, Switch::On);
+        assert_eq!(decision.heartbeat, Switch::Off(OffReason::DebugBuild));
+    }
+
+    #[test]
+    fn the_two_switches_decide_independently() {
+        let heartbeat_off = Inputs {
+            heartbeat: false,
+            crash_reports: true,
+            ..clear()
+        };
+        let decision = decide(&heartbeat_off);
+        assert_eq!(decision.heartbeat, Switch::Off(OffReason::Config));
+        assert_eq!(decision.crash_reports, Switch::On);
+        let crash_off = Inputs {
+            heartbeat: true,
+            crash_reports: false,
+            ..clear()
+        };
+        let decision = decide(&crash_off);
+        assert_eq!(decision.heartbeat, Switch::On);
+        assert_eq!(decision.crash_reports, Switch::Off(OffReason::Config));
+    }
+
+    #[test]
+    fn for_config_reads_crash_reports() {
+        let dir = std::path::Path::new("unused-by-config");
+        let mut config = crate::test_support::config(dir);
+        config.telemetry.crash_reports = true;
+        assert_eq!(for_config(&config).crash_reports, Switch::On);
+        config.restore_mode = true;
+        assert_eq!(
+            for_config(&config).crash_reports,
+            Switch::Off(OffReason::RestoreMode)
         );
     }
 
