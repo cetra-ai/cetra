@@ -128,7 +128,7 @@ Vercel tool-call parts use `args` (v4) or `input` (v5+). Tool-result parts use `
 |---|---|
 | `request_model` | `gen_ai.request.model`, `llm.model_name`, `embedding.model_name`, `ai.model.id`, `langfuse.observation.model.name` |
 | `response_model` | `gen_ai.response.model`, `ai.response.model`, `llm.response.model_name` (D-B1-9) |
-| `provider` | `gen_ai.provider.name`, `gen_ai.system`, `llm.provider`, `llm.system`, `ai.model.provider` (rule 12), else inferred from model name via price table. `gen_ai.system = gcp.vertex.agent` (Google ADK's framework name) is skipped and stays unread (D-B1-8) |
+| `provider` | `gen_ai.provider.name`, `gen_ai.system`, `llm.provider`, `llm.system`, `ai.model.provider` (rule 12), then the endpoint (§ Provider from the endpoint), else inferred from model name via price table. A `gen_ai.system` value in rule 12's framework-name table is skipped and stays unread (D-B1-8, D-IN-15) |
 | `operation` | `gen_ai.operation.name` |
 | `input_tokens` | `gen_ai.usage.input_tokens`, `llm.token_count.prompt`, `gen_ai.usage.prompt_tokens`, `ai.usage.inputTokens`, `ai.usage.promptTokens`; on `embedding` spans only, `ai.usage.tokens` (Vercel embed's one count, D-B1-6) |
 | `output_tokens` | `gen_ai.usage.output_tokens`, `llm.token_count.completion`, `gen_ai.usage.completion_tokens`, `ai.usage.outputTokens`, `ai.usage.completionTokens` |
@@ -142,6 +142,48 @@ Vercel tool-call parts use `args` (v4) or `input` (v5+). Tool-result parts use `
 `langfuse.observation.usage_details` is a JSON object, read after the attribute sources above and only for a column those sources left empty. `input`, `output`, and `total` fill those columns. `input_cached_tokens`, else `cache_read_input_tokens`, fills cache read. `cache_creation_input_tokens` fills cache write. `output_reasoning_tokens`, else `reasoning_tokens`, fills reasoning. The `input` count excludes cache (see the token table). The SDK's OpenAI wrapper copies the OpenAI usage object instead (D-B1-1): each OpenAI key is read when its Langfuse key is absent. `prompt_tokens` fills input and includes cache, `completion_tokens` fills output, `total_tokens` fills total, `prompt_tokens_details.cached_tokens` fills cache read, and `completion_tokens_details.reasoning_tokens` fills reasoning. The attribute is consumed when it fills a column. A value that is not a JSON object stays in `attributes`.
 
 `gcp.vertex.agent.llm_response` may carry `usage_metadata`. It is read after the attribute sources and after `usage_details`, and only for a column those left empty. `prompt_token_count` fills input, `candidates_token_count` fills output, `thoughts_token_count` fills reasoning, `cached_content_token_count` fills cache read, and `total_token_count` fills total. `candidates_token_count` excludes thoughts, so reasoning is added to the output (see the token table). The attribute is the response payload and is not consumed by this read. `gen_ai.usage.*` on the same span stays inclusive (D113).
+
+### Provider from the endpoint
+
+When the provider is still empty after the sources above, or is `openai`, and the span is an `llm` or `embedding` span, the endpoint names the provider (D-IN-2). The host comes from the first of `server.address`, `url.full` and `gen_ai.openai.api_base` that holds a string, in that order. A URL is reduced to its host: scheme, user-info, port, path, query, fragment and a trailing dot are dropped, and the host is lowercased. If the host is in the table below, it is the provider; a `*.` entry matches a host that ends with the rest after a dot. The first matching entry wins. A provider that another source named (other than `openai`) is kept. The three host keys stay in `attributes`.
+
+| Host | Provider |
+|---|---|
+| `openrouter.ai` | `openrouter` |
+| `api.groq.com` | `groq` |
+| `api.x.ai` | `x_ai` |
+| `api.deepseek.com` | `deepseek` |
+| `api.fireworks.ai` | `fireworks_ai` |
+| `api.together.xyz` | `together_ai` |
+| `api.together.ai` | `together_ai` |
+| `api.novita.ai` | `novita` |
+| `dashscope.aliyuncs.com` | `dashscope` |
+| `dashscope-intl.aliyuncs.com` | `dashscope` |
+| `router.huggingface.co` | `huggingface` |
+| `api.cloudflare.com` | `cloudflare` |
+| `*.cloud.databricks.com` | `databricks` |
+| `*.azuredatabricks.net` | `databricks` |
+| `api.cerebras.ai` | `cerebras` |
+| `api.perplexity.ai` | `perplexity` |
+| `api.moonshot.ai` | `moonshot` |
+| `api.moonshot.cn` | `moonshot` |
+| `api.z.ai` | `zai` |
+| `open.bigmodel.cn` | `zai` |
+| `api.sambanova.ai` | `sambanova` |
+| `api.studio.nebius.com` | `nebius` |
+| `api.tokenfactory.nebius.com` | `nebius` |
+| `api.mistral.ai` | `mistral_ai` |
+| `*.openai.azure.com` | `azure.ai.openai` |
+| `api.deepinfra.com` | `deepinfra` |
+| `inference.baseten.co` | `baseten` |
+| `api.hyperbolic.xyz` | `hyperbolic` |
+| `integrate.api.nvidia.com` | `nvidia_nim` |
+| `api.minimax.io` | `minimax` |
+| `ai-gateway.vercel.sh` | `vercel_ai_gateway` |
+| `oai.helicone.ai` | `helicone` |
+| `ai-gateway.helicone.ai` | `helicone` |
+| `api.portkey.ai` | `portkey` |
+| `gateway.ai.cloudflare.com` | `cloudflare_ai_gateway` |
 
 ### Token semantics
 
@@ -203,7 +245,8 @@ These rules resolve ambiguities in the tables above. They were fixed while writi
 10. **Payload format for non-message values:** a value that parses as a JSON object or array is `json`; any other string is `text`. So Vercel `ai.prompt` (JSON object string) is `json`, and `ai.response.text` on a non-`llm` span is `text`.
 11. **Context fields consumed from metadata-like sources** (`ai.telemetry.metadata.sessionId`/`userId`, `traceloop.association.properties.session_id`/`user_id`, …) fill `session_id`/`user_id` and are **not** duplicated in the `metadata` map. Their sibling keys do go to `metadata`, with the source prefix stripped (`ai.telemetry.metadata.feature` → `feature`).
 12. **`provider`** is lowercased, then mapped through an alias table owned by `cetra-otel`. Exact keys are applied first. Unknown values are kept lowercased.
-    - Exact: `openai.chat`, `openai.responses` → `openai`; `anthropic.messages` → `anthropic`; `xai` → `x_ai`; `gemini` → `gcp.gemini`; `google` → `gcp.gen_ai`; `vertexai`, `vertex_ai` → `gcp.vertex_ai`; `azure`, `az.ai.openai` → `azure.ai.openai`; `az.ai.inference` → `azure.ai.inference`; `mistralai` → `mistral_ai`; `aws` → `aws.bedrock`. These are the names instrumentations write (Google ADK and the Google GenAI SDK, OpenInference, Azure and AWS). They are checked before the well-known list.
+    - Exact: `openai.chat`, `openai.responses` → `openai`; `anthropic.messages` → `anthropic`; `xai` → `x_ai`; `gemini` → `gcp.gemini`; `google` → `gcp.gen_ai`; `vertexai`, `vertex_ai` → `gcp.vertex_ai`, and any value that starts with `vertex_ai-` (LiteLLM's `vertex_ai-anthropic_models`) → `gcp.vertex_ai`; `azure`, `az.ai.openai` → `azure.ai.openai`; `az.ai.inference` → `azure.ai.inference`; `mistralai`, `mistral` → `mistral_ai`; `aws`, `bedrock` → `aws.bedrock`; `fireworks` → `fireworks_ai`; `together`, `togetherai` → `together_ai`; `watsonx`, `ibm` → `ibm.watsonx.ai`; `oracle` → `oci`; `azure_ai` → `azure.ai.inference`; `ollama_chat` → `ollama`; `cohere_chat` → `cohere`; `text-completion-openai` → `openai`; `clf_ai_gateway` → `cloudflare_ai_gateway` (D-IN-15). These are the names instrumentations write (Google ADK and the Google GenAI SDK, OpenInference, Azure and AWS). They are checked before the well-known list.
+    - Framework names, never providers: `autogen`, `gcp.vertex.agent`, `spring_ai`. A `gen_ai.system` value in this list (compared lowercased) is skipped and stays unread, so the next source or the endpoint decides (D-IN-15, D-B1-8).
     - Semconv well-known values are kept as they are: `aws.bedrock`, `azure.ai.openai`, `azure.ai.inference`, `gcp.vertex_ai`, `gcp.gemini`, `gcp.gen_ai`, `x_ai`, `ibm.watsonx.ai`, `mistral_ai`, `groq`, `deepseek`, `perplexity`, `cohere`, `anthropic`, `openai`.
     - Vercel ids, applied only to a value read from `ai.model.provider`: `google.generative-ai` → `gcp.gemini`; `google.vertex.*` → `gcp.vertex_ai`; `amazon-bedrock` → `aws.bedrock`; `azure.*` → `azure.ai.openai`; `xai.*` → `x_ai`; `mistral.*` → `mistral_ai`; otherwise `<name>.<anything>` → `<name>`. A semconv value such as `aws.bedrock` is not passed through these rules.
 13. **`conventions`** are listed in precedence order (§ Convention detection), without duplicates.

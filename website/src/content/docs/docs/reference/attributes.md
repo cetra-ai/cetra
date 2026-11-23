@@ -76,6 +76,12 @@ When a span carries no cetra attribute for a field, cetra reads the field from t
 | `gen_ai.response.time_to_first_chunk` | Time to first token |
 | `gen_ai.conversation.id` | Session |
 
+### Endpoint
+
+| Attribute | Feeds |
+|---|---|
+| `server.address`, `url.full`, `gen_ai.openai.api_base` | Provider, when the provider is missing or `openai` on an `llm` or `embedding` span. The host names the provider, for example `openrouter.ai` gives `openrouter`. |
+
 ### OpenInference
 
 | Attribute | Feeds |

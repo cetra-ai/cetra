@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use cetra_core::enums::Convention;
+use cetra_core::enums::{Convention, SpanKind};
 use cetra_core::names::{attr, metadata_key};
 use serde_json::Value as Json;
 
@@ -41,8 +41,52 @@ const PROVIDER: &[Source] = &[
 /// Vercel v7 `context` call option, recorded under `ai.settings.`.
 const VERCEL_CONTEXT: &str = "ai.settings.context.";
 
-/// Google ADK sets `gen_ai.system` to its own framework name, not a provider.
-const ADK_FRAMEWORK: &str = "gcp.vertex.agent";
+/// Values of `gen_ai.system` that name a framework, never a provider (D-B1-8,
+/// D-IN-15). Compared after lowercasing. Sorted (test `framework_names_are_sorted`).
+const FRAMEWORK_NAMES: &[&str] = &["autogen", "gcp.vertex.agent", "spring_ai"];
+
+/// Keys that carry the endpoint, in order (D-IN-2). Read with `get`, never consumed.
+const HOST_KEYS: &[&str] = &["server.address", "url.full", "gen_ai.openai.api_base"];
+
+/// Endpoint host → provider (D-IN-2). An entry starting with `*.` matches a host
+/// that ends with the rest preceded by a dot. The first match wins.
+const ENDPOINT_PROVIDERS: &[(&str, &str)] = &[
+    ("openrouter.ai", "openrouter"),
+    ("api.groq.com", "groq"),
+    ("api.x.ai", "x_ai"),
+    ("api.deepseek.com", "deepseek"),
+    ("api.fireworks.ai", "fireworks_ai"),
+    ("api.together.xyz", "together_ai"),
+    ("api.together.ai", "together_ai"),
+    ("api.novita.ai", "novita"),
+    ("dashscope.aliyuncs.com", "dashscope"),
+    ("dashscope-intl.aliyuncs.com", "dashscope"),
+    ("router.huggingface.co", "huggingface"),
+    ("api.cloudflare.com", "cloudflare"),
+    ("*.cloud.databricks.com", "databricks"),
+    ("*.azuredatabricks.net", "databricks"),
+    ("api.cerebras.ai", "cerebras"),
+    ("api.perplexity.ai", "perplexity"),
+    ("api.moonshot.ai", "moonshot"),
+    ("api.moonshot.cn", "moonshot"),
+    ("api.z.ai", "zai"),
+    ("open.bigmodel.cn", "zai"),
+    ("api.sambanova.ai", "sambanova"),
+    ("api.studio.nebius.com", "nebius"),
+    ("api.tokenfactory.nebius.com", "nebius"),
+    ("api.mistral.ai", "mistral_ai"),
+    ("*.openai.azure.com", "azure.ai.openai"),
+    ("api.deepinfra.com", "deepinfra"),
+    ("inference.baseten.co", "baseten"),
+    ("api.hyperbolic.xyz", "hyperbolic"),
+    ("integrate.api.nvidia.com", "nvidia_nim"),
+    ("api.minimax.io", "minimax"),
+    ("ai-gateway.vercel.sh", "vercel_ai_gateway"),
+    ("oai.helicone.ai", "helicone"),
+    ("ai-gateway.helicone.ai", "helicone"),
+    ("api.portkey.ai", "portkey"),
+    ("gateway.ai.cloudflare.com", "cloudflare_ai_gateway"),
+];
 
 const OPERATION: &[Source] = &[span("gen_ai.operation.name", Convention::Genai)];
 
@@ -248,20 +292,81 @@ fn prompt(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> (Option<String>, Op
     (Some(name), version)
 }
 
-/// Rule 12 over [`PROVIDER`]. ADK's `gen_ai.system = gcp.vertex.agent` is
-/// skipped and left unread, so the next source or the price table decides
-/// (D-B1-8).
+/// Rule 12 over [`PROVIDER`]. A `gen_ai.system` value that names a framework
+/// ([`FRAMEWORK_NAMES`], D-IN-15, D-B1-8) is skipped and left unread, so the
+/// next source or the price table decides.
 fn provider(bag: &mut AttrBag<'_>, resource: &ResourceView<'_>) -> Option<String> {
     let sources: Vec<Source> = PROVIDER
         .iter()
         .copied()
         .filter(|source| {
             source.key != "gen_ai.system"
-                || bag.get(source.key).and_then(as_str) != Some(ADK_FRAMEWORK)
+                || bag.get(source.key).and_then(as_str).is_none_or(|value| {
+                    FRAMEWORK_NAMES
+                        .binary_search(&value.to_lowercase().as_str())
+                        .is_err()
+                })
         })
         .collect();
     first_string(bag, resource, &sources).map(|resolved| {
         canonical_provider(&resolved.value, resolved.source.key == "ai.model.provider")
+    })
+}
+
+/// The provider after the endpoint rule (D-IN-2, spec 02 § Provider from the endpoint).
+/// `provider` is the value `fill` resolved. Only `llm` and `embedding` spans whose
+/// provider is empty or `openai` change; the host keys stay in `attributes`.
+pub(crate) fn endpoint_provider(
+    bag: &AttrBag<'_>,
+    kind: SpanKind,
+    provider: Option<String>,
+) -> Option<String> {
+    if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
+        return provider;
+    }
+    if provider.as_deref().is_some_and(|value| value != "openai") {
+        return provider;
+    }
+    let host = HOST_KEYS
+        .iter()
+        .find_map(|key| bag.get(key).and_then(as_str).and_then(host_of));
+    match host.as_deref().and_then(match_endpoint) {
+        Some(name) => Some(name.to_owned()),
+        None => provider,
+    }
+}
+
+/// The lowercased host of a bare host or a URL: no scheme, user-info, port, path,
+/// query, fragment or trailing dot. `None` when nothing is left.
+fn host_of(value: &str) -> Option<String> {
+    let rest = value.trim();
+    let rest = rest.split_once("://").map_or(rest, |(_, after)| after);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map_or(bracketed, |(inside, _)| inside)
+    } else {
+        authority
+            .split_once(':')
+            .map_or(authority, |(name, _)| name)
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    (!host.is_empty()).then_some(host)
+}
+
+fn match_endpoint(host: &str) -> Option<&'static str> {
+    ENDPOINT_PROVIDERS.iter().find_map(|(pattern, provider)| {
+        let matched = match pattern.strip_prefix("*.") {
+            Some(suffix) => host
+                .strip_suffix(suffix)
+                .is_some_and(|head| head.len() > 1 && head.ends_with('.')),
+            None => host == *pattern,
+        };
+        matched.then_some(*provider)
     })
 }
 
@@ -275,6 +380,9 @@ fn string_field(
 
 fn canonical_provider(value: &str, from_vercel: bool) -> String {
     let lower = value.to_lowercase();
+    if lower.starts_with("vertex_ai-") {
+        return "gcp.vertex_ai".to_owned();
+    }
     if let Some(alias) = exact_alias(&lower) {
         return alias.to_owned();
     }
@@ -301,6 +409,17 @@ fn exact_alias(value: &str) -> Option<&'static str> {
         "az.ai.inference" => "azure.ai.inference",
         "mistralai" => "mistral_ai",
         "aws" => "aws.bedrock",
+        "fireworks" => "fireworks_ai",
+        "together" | "togetherai" => "together_ai",
+        "watsonx" | "ibm" => "ibm.watsonx.ai",
+        "oracle" => "oci",
+        "bedrock" => "aws.bedrock",
+        "azure_ai" => "azure.ai.inference",
+        "mistral" => "mistral_ai",
+        "ollama_chat" => "ollama",
+        "cohere_chat" => "cohere",
+        "text-completion-openai" => "openai",
+        "clf_ai_gateway" => "cloudflare_ai_gateway",
         _ => return None,
     })
 }
@@ -803,6 +922,161 @@ mod tests {
     }
 
     #[test]
+    fn framework_names_are_sorted() {
+        assert!(FRAMEWORK_NAMES.is_sorted());
+        assert!(FRAMEWORK_NAMES.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+
+    #[test]
+    fn framework_names_in_gen_ai_system_are_skipped() {
+        let attrs = [string_attr("gen_ai.system", "autogen")];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+
+        let (fields, _) = filled(&[string_attr("gen_ai.system", "AutoGen")], &[]);
+        assert_eq!(fields.provider, None);
+
+        let attrs = [
+            string_attr("gen_ai.system", "spring_ai"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+    }
+
+    /// The endpoint rule over one span: the attributes, its kind and the provider
+    /// `fill` resolved.
+    fn endpoint(attrs: &[KeyValue], kind: SpanKind, provider: Option<&str>) -> Option<String> {
+        let mut warnings = Warnings::default();
+        let bag = AttrBag::new(attrs, &mut warnings);
+        endpoint_provider(&bag, kind, provider.map(str::to_owned))
+    }
+
+    #[test]
+    fn host_of_reads_hosts_and_urls() {
+        assert_eq!(host_of("api.groq.com").as_deref(), Some("api.groq.com"));
+        assert_eq!(
+            host_of("https://OpenRouter.ai/api/v1/").as_deref(),
+            Some("openrouter.ai")
+        );
+        assert_eq!(
+            host_of("http://user:pw@api.novita.ai:8443/openai?x=1#f").as_deref(),
+            Some("api.novita.ai")
+        );
+        assert_eq!(
+            host_of("https://x.openai.azure.com./openai").as_deref(),
+            Some("x.openai.azure.com")
+        );
+        assert_eq!(host_of("http://[::1]:11434/v1").as_deref(), Some("::1"));
+        assert_eq!(host_of(""), None);
+        assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn match_endpoint_uses_exact_hosts_and_label_suffixes() {
+        assert_eq!(match_endpoint("openrouter.ai"), Some("openrouter"));
+        assert_eq!(match_endpoint("api.openrouter.ai"), None);
+        assert_eq!(
+            match_endpoint("res.openai.azure.com"),
+            Some("azure.ai.openai")
+        );
+        assert_eq!(match_endpoint("openai.azure.com"), None);
+        assert_eq!(match_endpoint("evilopenai.azure.com"), None);
+        assert_eq!(
+            match_endpoint("a.b.cloud.databricks.com"),
+            Some("databricks")
+        );
+        assert_eq!(match_endpoint("api.openai.com"), None);
+    }
+
+    #[test]
+    fn endpoint_rule_applies_to_llm_and_embedding_spans_only() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        for kind in [SpanKind::Llm, SpanKind::Embedding] {
+            assert_eq!(endpoint(&attrs, kind, None).as_deref(), Some("groq"));
+        }
+        for kind in [SpanKind::Tool, SpanKind::Span] {
+            assert_eq!(endpoint(&attrs, kind, None), None);
+        }
+    }
+
+    #[test]
+    fn endpoint_rule_replaces_only_empty_or_openai() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, Some("openai")).as_deref(),
+            Some("groq")
+        );
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, Some("anthropic")).as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            endpoint(&attrs, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+    }
+
+    #[test]
+    fn endpoint_rule_reads_keys_in_order() {
+        let both = [
+            string_attr("server.address", "api.groq.com"),
+            string_attr("gen_ai.openai.api_base", "https://api.novita.ai/openai/"),
+        ];
+        assert_eq!(
+            endpoint(&both, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+
+        let url_only = [string_attr(
+            "url.full",
+            "https://api.novita.ai/openai/chat/completions",
+        )];
+        assert_eq!(
+            endpoint(&url_only, SpanKind::Llm, None).as_deref(),
+            Some("novita")
+        );
+
+        let base_only = [string_attr(
+            "gen_ai.openai.api_base",
+            "https://openrouter.ai/api/v1/",
+        )];
+        assert_eq!(
+            endpoint(&base_only, SpanKind::Llm, None).as_deref(),
+            Some("openrouter")
+        );
+
+        let local = [string_attr("server.address", "localhost")];
+        assert_eq!(
+            endpoint(&local, SpanKind::Llm, Some("openai")).as_deref(),
+            Some("openai")
+        );
+
+        let empty_first = [
+            string_attr("server.address", ""),
+            string_attr("url.full", "https://api.x.ai/v1"),
+        ];
+        assert_eq!(
+            endpoint(&empty_first, SpanKind::Llm, None).as_deref(),
+            Some("x_ai")
+        );
+    }
+
+    #[test]
+    fn endpoint_keys_are_not_consumed() {
+        let attrs = [string_attr("server.address", "api.groq.com")];
+        let mut warnings = Warnings::default();
+        let bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            endpoint_provider(&bag, SpanKind::Llm, None).as_deref(),
+            Some("groq")
+        );
+        assert_eq!(bag.state("server.address"), Some(Use::Unread));
+    }
+
+    #[test]
     fn request_model_uses_precedence() {
         let attrs = [
             string_attr("ai.model.id", "vercel"),
@@ -898,6 +1172,29 @@ mod tests {
             ("gen_ai.provider.name", "aws", "aws.bedrock"),
             ("ai.model.provider", "gemini", "gcp.gemini"),
             ("ai.model.provider", "azure", "azure.ai.openai"),
+            // LiteLLM and gateway names (D-IN-15).
+            ("gen_ai.provider.name", "fireworks", "fireworks_ai"),
+            ("gen_ai.provider.name", "together", "together_ai"),
+            ("gen_ai.provider.name", "togetherai", "together_ai"),
+            ("gen_ai.provider.name", "watsonx", "ibm.watsonx.ai"),
+            ("gen_ai.provider.name", "ibm", "ibm.watsonx.ai"),
+            ("gen_ai.provider.name", "oracle", "oci"),
+            ("gen_ai.provider.name", "bedrock", "aws.bedrock"),
+            ("gen_ai.provider.name", "azure_ai", "azure.ai.inference"),
+            ("gen_ai.provider.name", "mistral", "mistral_ai"),
+            ("gen_ai.provider.name", "ollama_chat", "ollama"),
+            ("gen_ai.provider.name", "cohere_chat", "cohere"),
+            ("gen_ai.provider.name", "text-completion-openai", "openai"),
+            (
+                "gen_ai.provider.name",
+                "clf_ai_gateway",
+                "cloudflare_ai_gateway",
+            ),
+            (
+                "gen_ai.provider.name",
+                "vertex_ai-anthropic_models",
+                "gcp.vertex_ai",
+            ),
         ];
         for (key, raw, expected) in cases {
             let (fields, _) = filled(&[string_attr(key, raw)], &[]);

@@ -259,6 +259,7 @@ fn accept_span(
     };
     let mut fields = fill(&mut bag, &resource.view, &mut warnings);
     agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);
+    fields.provider = crate::context::endpoint_provider(&bag, span_kind, fields.provider.take());
     let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
         Some(counted) => counted,
         None => usage(
