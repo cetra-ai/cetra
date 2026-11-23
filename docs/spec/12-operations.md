@@ -15,7 +15,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `grpc_addr` | `CETRA_GRPC_ADDR` | `0.0.0.0:4317` (empty = disabled; a config key from track G M3) |
 | `otlp_http_addr` | `CETRA_OTLP_HTTP_ADDR` | `0.0.0.0:4318` (empty = disabled) |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | unset (off). Prometheus `/metrics`; no authentication, bind it to a private address (D-N-28) |
-| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) |
+| `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) The self-monitoring export to the operator's own endpoint stays on (D-TL-1). |
 | `storage.object_store` | `CETRA_OBJECT_STORE` | `file://<data_dir>/objects`. A set value is `file://<absolute path>` or `s3://<bucket>[/<prefix>]` |
 | `storage.s3.region` | | unset: the `AWS_REGION` environment variable (not an alias; the loader has none) |
 | `storage.s3.endpoint` | | unset (MinIO, R2, …) |
@@ -68,10 +68,12 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `eval.workers` | | `16` (1–256, D-I-6) |
 | `security.allow_private_network_egress` | | `false` (D166) |
 | `log.format` / `log.level` | `CETRA_LOG` | `pretty` on TTY else `json` / `info` |
+| `self_monitoring.otlp_endpoint` / `self_monitoring.otlp_headers` | | unset (off) / unset. Base `http(s)` URL without user info, query or fragment, `/v1/logs` appended; headers `name=value,…` (secret, percent-decoded, ≤ 32 and 8192 bytes) (D-TL-1) |
+| `self_monitoring.logs` / `self_monitoring.level` / `self_monitoring.resource` | | `true` / `"warn"` / `""` (`key=value,…` resource attributes) |
 
 The storage engine's settings form the `[storage]` section, with one sub-table per area (`wal`, `s3`, `flush`, `memtable`, `compaction`, `query`, `gc`, `deletion`, `anchor`); spec 03 names them without the `storage.` prefix. Sizes are strings with a binary unit (`"256MiB"`, `"1GiB"`) and durations are strings with a unit (`"2ms"`, `"120s"`, `"24h"`) (D90). The `[ingest]` and `[media]` sections use the same formats. S3 credentials are the standard `AWS_*` environment variables and are not config keys. The full list, with defaults, is the `StorageConfig` doc in `cetra-storage`, and the site's configuration reference, which `config::tests::the_configuration_reference_matches_the_loader` checks against the loader. Memory, disk and file-descriptor needs of the storage engine, and a profile for small machines, are in spec 03 § 10 Resource needs.
 
-TLS: terminated by a reverse proxy in the reference setups. cetra has no `tls.*` keys and no telemetry key: the loader refuses them as unknown keys.
+TLS: terminated by a reverse proxy in the reference setups. cetra has no `tls.*` keys: the loader refuses them as unknown keys. Its own logs are exported with `[self_monitoring]` (§ Self-monitoring, D-TL-1).
 
 ## Packaging
 
@@ -91,7 +93,7 @@ A file lock (`flock` on `<data_dir>/LOCK`) prevents two processes from opening t
 ## Process lifecycle
 
 - **Startup:** load config → check that `meta.db` is not of a newer format or schema (04 § Format versions; the preflight, before anything else of the data directory opens) → lock data dir and open storage (`catalog.db`, replay WAL) → open `meta.db` + migrations → (log the setup URL if no user exists) → start background tasks (among them the deletion worker, every 2 s and on each request, and the hourly retention task, D-M-3, D-M-10) → bind ports → `/readyz` = 200 (D137). After `meta.db`: finish an interrupted key rotation, load or generate the encryption key, and verify its check value (D-I-1, D-I-3). Then `running` eval jobs go back to `queued` (a job interrupted a fourth time fails), `running` backfills are marked `failed` (`interrupted`, D-I-39), and the eval dispatcher, janitor, pruner, budget ticker, the trigger's flusher and sweeper and the backfill runner start, each running one pass at once (D-I-12). Pending traces are loaded from `pending_traces` before the ports open (D-I-8); when the rules cannot be read, their rows are held until the first sweep sets the tracked projects. Coding-agent contexts are loaded from `agent_contexts` before the ports open (D-CA-9); a failed load starts empty.
-- **Shutdown (SIGTERM/SIGINT):** close live streams, stop accepting connections, drain in-flight requests (≤ 20 s), stop the usage loop (≤ 2 s; a flush in progress commits first), stop the eval loops (the backfill runner stops between pages; if a page read is still in flight when the eval loops' drain ends, the runner is aborted with them; either way the backfill stays `running` and the next start fails it as `interrupted`, D-I-39) and give eval workers 3 s, then abort them (their jobs stay `running` until the next start re-queues them, D-I-12), wait for detached OTLP commits (≤ 5 s, D-G-38) and flush the trigger's pending map in full, every take, so the traces those commits recorded are kept (D-I-8), flush `last_used` and usage counters, flush memtables (best effort ≤ 30 s), close SQLite. The bounded steps add up to 60 s, the whole grace period of the container and chart; the pending-map, `last_used` and usage flushes and the SQLite close are short meta writes outside that bound.
+- **Shutdown (SIGTERM/SIGINT):** close live streams, stop accepting connections, drain in-flight requests (≤ 20 s), stop the usage loop (≤ 2 s; a flush in progress commits first), stop the eval loops (the backfill runner stops between pages; if a page read is still in flight when the eval loops' drain ends, the runner is aborted with them; either way the backfill stays `running` and the next start fails it as `interrupted`, D-I-39) and give eval workers 3 s, then abort them (their jobs stay `running` until the next start re-queues them, D-I-12), wait for detached OTLP commits (≤ 5 s, D-G-38) and flush the trigger's pending map in full, every take, so the traces those commits recorded are kept (D-I-8), flush `last_used` and usage counters, flush memtables (best effort ≤ 30 s), close SQLite. Then the self-monitoring export is flushed (≤ 2 s, on a blocking thread), also when start-up fails after the config loaded (track TL M1). The bounded steps add up to 60 s, the whole grace period of the container and chart; the pending-map, `last_used` and usage flushes and the SQLite close are short meta writes outside that bound, and so is the self-monitoring flush.
 - `/healthz`: the process is alive, and no storage failure that only a restart clears is set (a WAL, a local object fsync or a catalog commit failed, D-R-6); otherwise 503 `busy` naming them, so a liveness probe restarts the server (D-N-35). `/readyz`: `meta.db` answers, neither WAL has failed, no local object fsync or catalog commit has failed (D-R-6), free disk is above `storage.min_free_bytes`, and the object store answers (a HEAD of the marker `_probe/readyz`, or a PUT of it when the HEAD fails; 2 s timeout; the result is reused for 10 s; D-N-36). A failure answers 503 `busy` naming the failed checks (D182, D-N-30). Liveness probes use `/healthz`: a full disk or an unreachable bucket takes the server out of rotation but must not restart it.
 
 ## Licence keys, plans and entitlements (track P)
@@ -124,7 +126,14 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 > - `/readyz` as § Process lifecycle describes it.
 > - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work, so assistant turns and the assistant's setting test are refused with `503` (D-AS-16).
 >
-> OTel self-traces stay deferred (D38).
+> Server spans over OTLP: track TL M2 (D-TL-4).
+
+> **Built in TL M1 (D-TL-1 to D-TL-3):**
+> - `[self_monitoring]` exports `tracing` events that pass `self_monitoring.level` (default `warn`, `rmcp` capped at `warn`) as OTLP log records, protobuf and gzip over HTTP, to `<otlp_endpoint>/v1/logs`, with the operator's `otlp_headers`. Redirects off, 10 s timeout, batches of up to 512 records every second, queue of 2048. No `OTEL_*` variable is read (the resource starts empty; every batch setting is explicit).
+> - Resource: `service.name = "cetra"`, `service.version`, `service.instance.id` (UUIDv7 per process start), `host.arch`, `os.type`, then `self_monitoring.resource`.
+> - The export drops the exporter's own stack (`opentelemetry*`, `hyper*`, `reqwest`, `h2`, `tower*`, `rustls*`) and its failure lines (target `cetra_self_monitoring`, logged on stdout at most once a minute).
+> - The panic hook of `cetra serve` chains the default hook and emits an ERROR event `panic` with the location only, never the message.
+> - The export runs in restore mode too: it goes to the operator's own endpoint (D-N-25 covers outbound work for tenants and to us).
 
 ## Backups (documented procedure, D37)
 

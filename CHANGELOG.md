@@ -10,6 +10,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 ### Added
 
 - The organization home shows a card per project with its last 24 hours (traces, error rate, LLM cost, an hourly chart with errors, the last ingest time), a cards/table switch, a search box, and this month's usage against the plan. `GET /api/v1/orgs/{org}/projects/activity` serves the cards.
+- `cetra serve` can export its own logs to an OTLP/HTTP endpoint you choose, such as Sentry, Grafana Cloud or an OpenTelemetry Collector: set `self_monitoring.otlp_endpoint` and usually `self_monitoring.otlp_headers`. Off by default; warnings and errors are exported unless `self_monitoring.level` says otherwise. A panic is also logged as an ERROR event with its code location.
 
 ### Changed
 

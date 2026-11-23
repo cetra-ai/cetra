@@ -1,10 +1,11 @@
 ---
 title: "Monitoring"
-description: "Check cetra's health, scrape its Prometheus metrics and set up alerts on them."
+description: "Check cetra's health, scrape its Prometheus metrics, export its logs over OTLP and set up alerts."
 ---
 
 cetra has two health endpoints on the HTTP port (8080), and an optional Prometheus endpoint on its
-own port. Both are described here.
+own port. cetra can also export its own logs to an OTLP endpoint when you configure one. All three are
+described here.
 
 ## Health endpoints
 
@@ -120,6 +121,95 @@ Two things to know when reading them:
 - HTTP metrics count only the final response of a request (2xx to 5xx).
 - HTTP ingest answers 401 and 403 are counted in `cetra_http_requests_total`, not in
   `cetra_ingest_requests_total`. The `unauthorized` ingest outcome is for gRPC.
+
+## Export logs over OTLP
+
+cetra can send its own log events (warnings and errors by default) to an OTLP/HTTP endpoint you
+choose: Sentry, Grafana Cloud, an OpenTelemetry Collector, or any backend that accepts OTLP logs
+over HTTP. It is off until you set `self_monitoring.otlp_endpoint`.
+
+```toml
+[self_monitoring]
+otlp_endpoint = "https://otlp.example.com/otlp"   # cetra posts to <endpoint>/v1/logs
+otlp_headers = "authorization=Bearer <token>"     # a secret; name=value pairs, comma-separated
+level = "warn"                                    # which events are exported
+resource = "deployment.environment=prod"          # extra resource attributes
+```
+
+The environment form of each key is `CETRA_SELF_MONITORING__` followed by the key in upper case,
+for example `CETRA_SELF_MONITORING__OTLP_ENDPOINT`. Every key is in the
+[configuration reference](/docs/self-hosting/configuration-reference/#self_monitoring).
+
+- **What is sent.** One OTLP log record per event that passes `level`: the message, the event's
+  fields, its level, its target (as the scope name) and its event name (`event <file>:<line>`
+  of cetra's source). The resource holds `service.name = "cetra"`,
+  `service.version`, `service.instance.id` (new at each start), `host.arch`, `os.type`, and the
+  attributes of `resource`, which replace cetra's own on the same key. The records carry what the
+  server's stdout carries, and stdout never carries prompts, completions, attribute values,
+  secrets, API keys or email addresses. `rmcp` events are capped at `warn`, as for stdout.
+- **How.** Protobuf, gzip-compressed, `POST <otlp_endpoint>/v1/logs`, batched every second, with
+  the headers of `otlp_headers`. Redirects are not followed; a request times out after 10 s. A
+  failed export prints one warning on stdout at most once a minute and is not retried.
+- **Panics** also appear as an ERROR event `panic` with the code location. The panic message
+  stays on stderr only.
+- **At shutdown**, cetra flushes what is queued for at most 2 s, also when it fails to start (the
+  start-up error is exported as `cetra serve failed`).
+- **Restore mode** does not stop the export: it goes to your own endpoint.
+- **No `OTEL_*` variable is read.** Variables such as `OTEL_EXPORTER_OTLP_HEADERS` set for other
+  programs on the host change nothing.
+- **Another cetra instance is not a destination for these logs**: cetra drops the OTLP logs it
+  receives. Send them to a logs backend, or through a Collector.
+
+### Sentry
+
+In Sentry, open your project's settings, then **Client Keys (DSN)**. The DSN looks like
+`https://<public key>@o<org id>.ingest.<region>sentry.io/<project id>`; organizations in the EU
+have `ingest.de.sentry.io`. Use its parts:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=https://o<org id>.ingest.de.sentry.io/api/<project id>/integration/otlp
+CETRA_SELF_MONITORING__OTLP_HEADERS="x-sentry-auth=sentry sentry_key=<public key>"
+```
+
+The records should arrive as Sentry logs (check in your project).
+
+### Grafana Cloud
+
+In your Grafana Cloud stack, open **Connections**, then **OpenTelemetry (OTLP)**. It shows the OTLP
+endpoint of your stack's region and generates a token. The header is `Authorization: Basic` with
+the base64 of `<instance id>:<token>`; the `%20` form that Grafana's snippet shows works too:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=https://otlp-gateway-<region>.grafana.net/otlp
+CETRA_SELF_MONITORING__OTLP_HEADERS="Authorization=Basic%20<base64 of instance id:token>"
+```
+
+### OpenTelemetry Collector
+
+Point cetra at the Collector's OTLP/HTTP receiver (port 4318) and let the Collector add
+authentication, filter or forward to several backends:
+
+```bash
+CETRA_SELF_MONITORING__OTLP_ENDPOINT=http://otel-collector:4318
+```
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+exporters:
+  debug: {}
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+Replace the `debug` exporter with your backend's. The endpoint may be a private address:
+self-monitoring is operator configuration and skips the private-network egress guard.
 
 ## Alert examples
 
