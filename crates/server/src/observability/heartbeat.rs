@@ -971,7 +971,7 @@ mod tests {
         base: String,
         requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
         elsewhere: Arc<AtomicUsize>,
-        task: tokio::task::JoinHandle<()>,
+        task: JoinHandle<()>,
     }
 
     #[derive(Clone)]

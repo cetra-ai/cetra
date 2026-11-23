@@ -49,7 +49,7 @@ impl TestServer {
         )
         .unwrap();
         let config = ServerConfig::load(Some(&config_path)).unwrap();
-        let running = serve::bind(config, None).await.unwrap();
+        let running = Box::pin(serve::bind(config, None)).await.unwrap();
         let url = format!("http://{}", running.local_addr);
 
         let client = reqwest::Client::new();

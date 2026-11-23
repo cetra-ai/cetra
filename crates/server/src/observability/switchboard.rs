@@ -231,8 +231,7 @@ mod tests {
     #[test]
     fn the_error_never_carries_the_value() {
         let err = TelemetryEnv::from_pairs(&[("CETRA_TELEMETRY", "planted-value-7f3")])
-            .err()
-            .expect("an invalid value is an error");
+            .expect_err("an invalid value is an error");
         assert!(!err.to_string().contains("planted-value-7f3"));
     }
 

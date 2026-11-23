@@ -2000,37 +2000,13 @@ fn parse_pairs(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
         if name.is_empty() {
             return Err("a name is empty");
         }
-        let value = percent_decode(value.trim()).ok_or("a value is not valid percent-encoding")?;
+        let value = percent_decode(value.trim()).map_err(|()| "a value is not valid percent-encoding")?;
         pairs.push((name.to_owned(), value));
     }
     if pairs.len() > MAX_PAIRS {
         return Err("at most 32 entries");
     }
     Ok(pairs)
-}
-
-/// `%XX` sequences decoded; any other byte kept. `None` for a bad sequence or a result that
-/// is not UTF-8.
-fn percent_decode(raw: &str) -> Option<String> {
-    let bytes = raw.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while let Some(&byte) = bytes.get(index) {
-        if byte == b'%' {
-            let high = bytes
-                .get(index + 1)
-                .and_then(|b| char::from(*b).to_digit(16))?;
-            let low = bytes
-                .get(index + 2)
-                .and_then(|b| char::from(*b).to_digit(16))?;
-            decoded.push(u8::try_from(high * 16 + low).ok()?);
-            index += 3;
-        } else {
-            decoded.push(byte);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
 }
 
 /// `self_monitoring.otlp_headers` as `(lower-case name, value)` pairs, in order.

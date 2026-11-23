@@ -174,7 +174,7 @@ async fn start(dir: &Path, extra_config: &str) -> Server {
     )
     .unwrap();
     let config = cetra_server::config::ServerConfig::load(Some(&config_path)).unwrap();
-    let running = cetra_server::serve::bind(config, Some(cetra_ui::router()))
+    let running = Box::pin(cetra_server::serve::bind(config, Some(cetra_ui::router())))
         .await
         .unwrap();
     let http = format!("http://{}", running.local_addr);
