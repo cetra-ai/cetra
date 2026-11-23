@@ -65,7 +65,7 @@ Nobody buckets counts, nobody ships a support bundle, and only MLflow honours `D
 ### Where the code goes
 
 - `crates/server/src/observability/` (new module): the OTLP exporters and pipeline, the ring buffer layer, the crash layer and panic hook, the heartbeat, the switchboard (who may send what) and the redacted config view. The server owns it because the heartbeat reads `meta.db` and the debug info reads storage. The existing `telemetry.rs` (Prometheus) keeps its name and role.
-- `crates/cli/src/main.rs`: `init_tracing` assembles the subscriber from the server module's layers; the `debug-bundle` subcommand lives in `crates/cli/src/debug_bundle.rs`.
+- `crates/server/src/observability/subscriber.rs` assembles the subscriber (`subscriber::init`), which the CLI calls in place of its `init_tracing`; the `debug-bundle` subcommand lives in `crates/cli/src/debug_bundle.rs`.
 - `crates/server/src/admin_socket.rs`: a `debug_info` command (additive within protocol 1, D-R-36). The socket is backup-specific today (`parse` names `backup`, `AdminResponse::Done` carries a `BackupReport`), so M3 generalizes the request parsing and adds a response variant, with a response size cap.
 - `crates/server/src/config.rs`: the `[self_monitoring]` and `[telemetry]` tables; `CETRA_TELEMETRY` joins the filtered names; `self_monitoring.otlp_headers` joins the secret paths.
 - No change to `cetra-core`, to `cetra-storage`'s public API beyond reading the existing `StorageStats`, or to `meta.db`'s schema (the instance id and heartbeat time are `instance_settings` rows, listed in spec 04).
