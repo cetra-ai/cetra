@@ -29,6 +29,7 @@ Then:
 - [Object storage](/docs/self-hosting/s3/): Parquet files and media in an S3-compatible bucket.
 - [Backup and restore](/docs/self-hosting/backup/): back up and restore, and restore mode for restore drills.
 - [Monitoring](/docs/self-hosting/monitoring/): health checks, Prometheus metrics and alert examples.
+- [Telemetry](/docs/self-hosting/telemetry/): the anonymous daily heartbeat, field by field, and how to turn it off.
 - [Upgrade](/docs/self-hosting/upgrade/): upgrade to a new release.
 
 Licences: the core is MIT; the `ee` directories are under the Elastic License 2.0 and their

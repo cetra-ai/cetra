@@ -166,6 +166,7 @@ export default defineConfig({
                     { label: "Email (SMTP)", link: "/docs/self-hosting/email/" },
                     { label: "Object storage (S3)", link: "/docs/self-hosting/s3/" },
                     { label: "Security", link: "/docs/self-hosting/security/" },
+                    { label: "Telemetry", link: "/docs/self-hosting/telemetry/" },
                     { label: "Resources", link: "/docs/self-hosting/resources/" },
                   ],
                 },

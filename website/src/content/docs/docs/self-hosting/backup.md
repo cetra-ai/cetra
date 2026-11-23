@@ -319,7 +319,7 @@ describes: the copy then cannot send anything.
 
 ## Restore mode (restore drills)
 
-`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)). Use it
+`restore_mode = true` (or `CETRA_RESTORE_MODE=true`) starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)). It sends nothing to us either: the heartbeat and crash reports are off in restore mode ([Telemetry](/docs/self-hosting/telemetry/)). Use it
 for a copy of an installation that you start to check a restore, for example a drill that runs a copy of a
 cell.
 
@@ -332,6 +332,7 @@ With restore mode on, the server:
 - makes no org-SSO domain check and no DNS lookup;
 - sends no usage notices;
 - keeps exporting its own logs to `self_monitoring.otlp_endpoint`, when it is set: that endpoint is yours.
+- sends no heartbeat and no crash report to us (see [Telemetry](/docs/self-hosting/telemetry/)).
 
 User-triggered outbound calls answer `503` with code `restore_mode`: the channel and connection tests, evaluator
 test runs, manual evaluation runs, backfills, the org-SSO provider check and domain verification, the SMTP
