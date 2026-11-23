@@ -8,6 +8,8 @@ pub(crate) mod heartbeat;
 pub(crate) mod instance;
 pub(crate) mod otlp;
 pub mod panic;
+pub(crate) mod ring;
+pub(crate) mod scrub;
 pub mod subscriber;
 pub(crate) mod switchboard;
 
