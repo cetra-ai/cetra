@@ -6,6 +6,7 @@ import importlib.metadata
 import json
 import os
 
+import httpx
 import httpx2
 from cetra._config import resolve_config
 from cetra._instrument import enable_for, resolve
@@ -61,6 +62,28 @@ class RealHostTransport(httpx2.BaseTransport):
 def real_host_client() -> httpx2.Client:
     """An ``httpx2.Client`` whose requests reach the mock under their real host."""
     return httpx2.Client(transport=RealHostTransport())
+
+
+class RealHostHttpxTransport(httpx.BaseTransport):
+    """``RealHostTransport`` for SDKs built on ``httpx`` rather than ``httpx2`` (D-IN-3)."""
+
+    def __init__(self) -> None:
+        self._mock = httpx.URL(mock_url())
+        self._inner = httpx.HTTPTransport()
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        request.url = request.url.copy_with(
+            scheme=self._mock.scheme, host=self._mock.host, port=self._mock.port
+        )
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+def real_host_httpx_client() -> httpx.Client:
+    """An ``httpx.Client`` whose requests reach the mock under their real host."""
+    return httpx.Client(transport=RealHostHttpxTransport())
 
 
 def cetra_runtime(instrument: list[str]) -> TracerProvider:

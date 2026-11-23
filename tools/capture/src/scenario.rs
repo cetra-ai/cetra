@@ -244,6 +244,12 @@ pub enum Api {
     /// Gemini `embedContent` and `batchEmbedContents`.
     #[serde(rename = "gemini.embed_content")]
     GeminiEmbedContent,
+    /// Cohere Chat (v2).
+    #[serde(rename = "cohere.chat")]
+    CohereChat,
+    /// Ollama Chat.
+    #[serde(rename = "ollama.chat")]
+    OllamaChat,
 }
 
 impl Api {
@@ -253,6 +259,22 @@ impl Api {
             Self::OpenaiChat | Self::OpenaiResponses | Self::OpenaiEmbeddings => Provider::OpenAi,
             Self::AnthropicMessages => Provider::Anthropic,
             Self::GeminiGenerateContent | Self::GeminiEmbedContent => Provider::Gemini,
+            Self::CohereChat => Provider::Cohere,
+            Self::OllamaChat => Provider::Ollama,
+        }
+    }
+
+    /// The serde name, which is how a scenario's `api` field spells the endpoint.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenaiChat => "openai.chat",
+            Self::OpenaiResponses => "openai.responses",
+            Self::OpenaiEmbeddings => "openai.embeddings",
+            Self::AnthropicMessages => "anthropic.messages",
+            Self::GeminiGenerateContent => "gemini.generate_content",
+            Self::GeminiEmbedContent => "gemini.embed_content",
+            Self::CohereChat => "cohere.chat",
+            Self::OllamaChat => "ollama.chat",
         }
     }
 
@@ -270,6 +292,10 @@ pub enum Provider {
     Anthropic,
     /// `generativelanguage.googleapis.com`.
     Gemini,
+    /// `api.cohere.com`.
+    Cohere,
+    /// `ollama.com`.
+    Ollama,
 }
 
 impl Provider {
@@ -279,6 +305,8 @@ impl Provider {
             Self::OpenAi => "api.openai.com",
             Self::Anthropic => "api.anthropic.com",
             Self::Gemini => "generativelanguage.googleapis.com",
+            Self::Cohere => "api.cohere.com",
+            Self::Ollama => "ollama.com",
         }
     }
 }
@@ -502,6 +530,26 @@ fn check_chat(index: usize, turn: &Turn) -> Result<(), String> {
             "turns[{index}].message needs text, reasoning, or a tool call"
         ));
     }
+    if matches!(turn.api, Api::CohereChat | Api::OllamaChat) {
+        if !message.tool_calls.is_empty() {
+            return Err(format!(
+                "turns[{index}].message.tool_calls are not supported by {}",
+                turn.api.name()
+            ));
+        }
+        if present_text(message.reasoning.as_deref()) {
+            return Err(format!(
+                "turns[{index}].message.reasoning is not supported by {}",
+                turn.api.name()
+            ));
+        }
+        if !matches!(finish, Finish::Stop | Finish::Length) {
+            return Err(format!(
+                "turns[{index}].finish must be stop or length for {}",
+                turn.api.name()
+            ));
+        }
+    }
     let has_tools = !message.tool_calls.is_empty();
     if has_tools != matches!(finish, Finish::ToolCalls) {
         return Err(format!(
@@ -549,6 +597,20 @@ fn check_usage(index: usize, turn: &Turn) -> Result<(), String> {
         }
         Provider::Anthropic if usage.reasoning != 0 => {
             return Err(format!("turns[{index}].usage.reasoning must be 0"));
+        }
+        Provider::Cohere | Provider::Ollama => {
+            for (field, value) in [
+                ("cache_read", usage.cache_read),
+                ("cache_write", usage.cache_write),
+                ("reasoning", usage.reasoning),
+            ] {
+                if value != 0 {
+                    return Err(format!(
+                        "turns[{index}].usage.{field} is not reported by {}",
+                        turn.api.name()
+                    ));
+                }
+            }
         }
         Provider::OpenAi | Provider::Anthropic | Provider::Gemini => {}
     }
@@ -755,6 +817,8 @@ mod tests {
         assert_eq!(scenario.turns[0].api.provider().host(), "api.openai.com");
         assert_eq!(Provider::Anthropic.host(), "api.anthropic.com");
         assert_eq!(Provider::Gemini.host(), "generativelanguage.googleapis.com");
+        assert_eq!(Provider::Cohere.host(), "api.cohere.com");
+        assert_eq!(Provider::Ollama.host(), "ollama.com");
         assert_eq!(scenario.turns[0].finish, Some(Finish::ToolCalls));
         assert_eq!(
             scenario.timestamp_attributes[0].format,
@@ -971,6 +1035,68 @@ mod tests {
         let mut value = embedding("gemini.embed_content");
         value["turns"][0]["usage"]["input"] = json!(6);
         assert_reason(value, "turns[0].usage must be all zero");
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("cohere.chat");
+        value["turns"][0]["usage"]["cache_read"] = json!(1);
+        assert_reason(
+            value,
+            "turns[0].usage.cache_read is not reported by cohere.chat",
+        );
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["message"]["tool_calls"] =
+            json!([{ "id": "call_1", "name": "get_weather", "arguments": {} }]);
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(
+            value,
+            "turns[0].message.tool_calls are not supported by ollama.chat",
+        );
+    }
+
+    #[test]
+    fn cohere_and_ollama_chat_have_no_reasoning_and_only_stop_or_length() {
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("cohere.chat");
+        value["turns"][0]["message"]["reasoning"] = json!("thinking");
+        assert_reason(
+            value,
+            "turns[0].message.reasoning is not supported by cohere.chat",
+        );
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["finish"] = json!("tool_calls");
+        assert_reason(
+            value,
+            "turns[0].finish must be stop or length for ollama.chat",
+        );
+
+        let mut value = chat();
+        value["turns"][0]["api"] = json!("ollama.chat");
+        value["turns"][0]["finish"] = json!("length");
+        load_value(value).expect("ollama.chat may stop at the length limit");
+    }
+
+    #[test]
+    fn api_name_is_the_serde_name() {
+        let apis = [
+            Api::OpenaiChat,
+            Api::OpenaiResponses,
+            Api::OpenaiEmbeddings,
+            Api::AnthropicMessages,
+            Api::GeminiGenerateContent,
+            Api::GeminiEmbedContent,
+            Api::CohereChat,
+            Api::OllamaChat,
+        ];
+        for api in apis {
+            assert_eq!(
+                serde_json::to_value(api).expect("serialize"),
+                json!(api.name())
+            );
+        }
     }
 
     #[test]

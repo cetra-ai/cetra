@@ -35,6 +35,9 @@ dependencies = [
   # The OpenAI client's HTTP layer (openai 3.x is built on httpx2). The harness's real-host
   # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
   "httpx2==2.16.0",
+  # The HTTP layer of SDKs built on httpx rather than httpx2. The harness's plain-httpx
+  # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
+  "httpx==0.28.1",
   # The SDK under test, from this repository (editable), so the harness uses its runtime.
   "cetra-sdk",
 ]

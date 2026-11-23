@@ -231,6 +231,10 @@ enum Route {
     GenerateStream,
     Embed,
     EmbedBatch,
+    /// Cohere Chat v2. Non-streaming in M2.
+    CohereChat,
+    /// Ollama Chat. Non-streaming in M2.
+    OllamaChat,
 }
 
 impl Route {
@@ -242,6 +246,8 @@ impl Route {
             Self::Messages => Api::AnthropicMessages,
             Self::Generate | Self::GenerateStream => Api::GeminiGenerateContent,
             Self::Embed | Self::EmbedBatch => Api::GeminiEmbedContent,
+            Self::CohereChat => Api::CohereChat,
+            Self::OllamaChat => Api::OllamaChat,
         }
     }
 
@@ -255,6 +261,8 @@ impl Route {
 /// Gemini model under a project path both route. `path` has no query.
 fn classify(path: &str) -> Option<Route> {
     for (suffix, route) in [
+        ("/v2/chat", Route::CohereChat),
+        ("/api/chat", Route::OllamaChat),
         ("/chat/completions", Route::Chat),
         ("/responses", Route::Responses),
         ("/embeddings", Route::Embeddings),
@@ -314,7 +322,11 @@ fn read_facts(route: Route, body: &Map<String, Value>) -> Result<Facts, ()> {
         Route::Embed => (1, false, false, false),
         Route::Generate => (0, false, false, false),
         Route::GenerateStream => (0, false, false, true),
-        Route::Chat | Route::Responses | Route::Messages => (0, false, false, stream_field),
+        Route::Chat
+        | Route::Responses
+        | Route::Messages
+        | Route::CohereChat
+        | Route::OllamaChat => (0, false, false, stream_field),
     };
     Ok(Facts {
         stream,
@@ -378,6 +390,8 @@ fn render(turn: &Turn, index: usize, facts: &Facts) -> Rendered {
         Api::GeminiEmbedContent => {
             crate::wire::gemini::embed_content(turn, facts.inputs, facts.batch)
         }
+        Api::CohereChat => crate::wire::cohere::chat(turn, &ids),
+        Api::OllamaChat => crate::wire::ollama::chat(turn, &ids),
     }
 }
 
@@ -389,13 +403,15 @@ fn api_name(api: Api) -> &'static str {
         Api::AnthropicMessages => "anthropic.messages",
         Api::GeminiGenerateContent => "gemini.generate_content",
         Api::GeminiEmbedContent => "gemini.embed_content",
+        Api::CohereChat => "cohere.chat",
+        Api::OllamaChat => "ollama.chat",
     }
 }
 
 fn line_end(api: Api) -> &'static str {
     match api.provider() {
         Provider::Gemini => "\r\n",
-        Provider::OpenAi | Provider::Anthropic => "\n",
+        Provider::OpenAi | Provider::Anthropic | Provider::Cohere | Provider::Ollama => "\n",
     }
 }
 
@@ -473,7 +489,7 @@ fn request_id_header(api: Api) -> Option<&'static str> {
     match api.provider() {
         Provider::OpenAi => Some("x-request-id"),
         Provider::Anthropic => Some("request-id"),
-        Provider::Gemini => None,
+        Provider::Gemini | Provider::Cohere | Provider::Ollama => None,
     }
 }
 
@@ -733,6 +749,18 @@ mod tests {
                 embed_turn(Api::GeminiEmbedContent),
                 false,
             ),
+            (
+                "/v2/chat",
+                r#"{"stream":false}"#,
+                chat_turn(Api::CohereChat, 0, 0),
+                false,
+            ),
+            (
+                "/api/chat",
+                r#"{"stream":false}"#,
+                chat_turn(Api::OllamaChat, 0, 0),
+                false,
+            ),
         ];
         for (uri, body, turn, stream) in cases {
             let mock = Mock::new(vec![turn.clone()]);
@@ -748,7 +776,7 @@ mod tests {
                     assert_eq!(headers["request-id"], "req_capture_1", "{uri}");
                     assert!(headers.get("x-request-id").is_none());
                 }
-                Provider::Gemini => {
+                Provider::Gemini | Provider::Cohere | Provider::Ollama => {
                     assert!(headers.get("x-request-id").is_none());
                     assert!(headers.get("request-id").is_none());
                 }
@@ -810,6 +838,33 @@ mod tests {
                 let inputs = value["requests"].as_array().map(Vec::len).unwrap_or(1);
                 crate::wire::gemini::embed_content(turn, inputs, batch)
             }
+            Api::CohereChat => crate::wire::cohere::chat(turn, &ids),
+            Api::OllamaChat => crate::wire::ollama::chat(turn, &ids),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_streaming_request_to_cohere_or_ollama_is_refused() {
+        for (uri, api) in [
+            ("/v2/chat", Api::CohereChat),
+            ("/api/chat", Api::OllamaChat),
+        ] {
+            let mock = Mock::new(vec![chat_turn(api, 0, 0), chat_turn(api, 0, 0)]);
+            let refused = send(&mock, "POST", uri, r#"{"stream":true}"#).await;
+            assert_eq!(refused.status(), 500, "{uri}");
+            let refused_body: Value = serde_json::from_slice(&bytes(refused).await).unwrap();
+            assert_eq!(
+                refused_body["error"]["message"], "turn 0: response did not match the route",
+                "{uri}"
+            );
+            let ok = send(&mock, "POST", uri, r#"{"stream":false}"#).await;
+            assert_eq!(ok.status(), 200, "{uri}");
+            let log = mock.finish();
+            assert_eq!(
+                log.errors,
+                vec!["turn 0: response did not match the route"],
+                "{uri}"
+            );
         }
     }
 
