@@ -1026,7 +1026,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(rendered.subject, "Audit stream failing for Acme");
-        assert!(rendered.text.contains("siem.example.com"), "{}", rendered.text);
+        assert!(
+            rendered.text.contains("siem.example.com"),
+            "{}",
+            rendered.text
+        );
         assert!(rendered.text.contains("25 hours"), "{}", rendered.text);
         assert!(
             rendered
@@ -1035,7 +1039,11 @@ mod tests {
             "{}",
             rendered.text
         );
-        assert!(rendered.html.contains("siem.example.com"), "{}", rendered.html);
+        assert!(
+            rendered.html.contains("siem.example.com"),
+            "{}",
+            rendered.html
+        );
     }
 
     #[tokio::test]

@@ -187,7 +187,9 @@ async fn admin_rotate(
     rotate(&state, None, ctx).await
 }
 
-async fn admin_test(State(state): State<AppState>) -> Result<error::Json<AuditStreamTest>, ApiError> {
+async fn admin_test(
+    State(state): State<AppState>,
+) -> Result<error::Json<AuditStreamTest>, ApiError> {
     probe(&state, None).await
 }
 
@@ -349,10 +351,7 @@ struct Upsert<'a> {
 
 /// What a PUT left: a new destination with its secret (201), or the updated one (200).
 enum Saved {
-    Created {
-        stream: AuditStream,
-        secret: String,
-    },
+    Created { stream: AuditStream, secret: String },
     Updated(AuditStream),
 }
 
@@ -518,9 +517,9 @@ async fn remove(state: &AppState, org: Option<OrgId>, ctx: Ctx) -> Result<Status
     }
 }
 
-/// `POST …/secret`: a new signing secret, shown in this response only. The URL, the header and
-/// `enabled` are kept; `update_config` clears the failure state and any lost-records flag, as an
-/// edit does.
+/// `POST …/secret`: a new signing secret, shown in this response only. The URL, the header,
+/// `enabled`, the failure state and any lost-records flag are kept: only the sealed config is
+/// replaced (`set_secret`), so a rotation neither retries at once nor hides lost records.
 async fn rotate(
     state: &AppState,
     org: Option<OrgId>,
@@ -549,15 +548,7 @@ async fn rotate(
                     Ok(sealed) => sealed,
                     Err(error) => return Ok(Err(ApiError::Internal(Box::new(error)))),
                 };
-                stream_store::update_config(
-                    conn,
-                    row.id,
-                    &row.url_host,
-                    &sealed,
-                    row.enabled,
-                    now,
-                )
-                .await?;
+                stream_store::set_secret(conn, row.id, &sealed, now).await?;
                 let event = scoped(Event::new(AuditAction::StreamSecretRotated), org)
                     .target(TargetKind::AuditStream, row.id);
                 record(conn, &ctx, event, now).await?;
@@ -565,9 +556,7 @@ async fn rotate(
             })
         })
         .await?;
-    Ok(error::Json(RotatedAuditStreamSecret {
-        secret: outcome?,
-    }))
+    Ok(error::Json(RotatedAuditStreamSecret { secret: outcome? }))
 }
 
 /// `POST …/test`: one signed test line, sent now. The cursor does not move. The answer says only
@@ -747,7 +736,11 @@ mod tests {
             Method::PUT,
             &path,
             &seeded.cookie,
-            Some(&put_body(Some("Authorization"), Some("Splunk token-value"), true)),
+            Some(&put_body(
+                Some("Authorization"),
+                Some("Splunk token-value"),
+                true,
+            )),
         )
         .await;
         assert_eq!(
@@ -780,7 +773,12 @@ mod tests {
             Some(&put_body(Some("Authorization"), None, true)),
         )
         .await;
-        assert_eq!(updated.status, 200, "{}", String::from_utf8_lossy(&updated.body));
+        assert_eq!(
+            updated.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&updated.body)
+        );
         let updated: Value = updated.json();
         assert!(updated.get("secret").is_none());
         assert_eq!(updated["header_name"], "Authorization");
@@ -795,7 +793,9 @@ mod tests {
         let path = org_path(&seeded);
         let put = put_body(None, None, true);
         assert_eq!(
-            send(&app, Method::GET, &path, &admin.cookie, None).await.status,
+            send(&app, Method::GET, &path, &admin.cookie, None)
+                .await
+                .status,
             403
         );
         assert_eq!(
@@ -884,7 +884,12 @@ mod tests {
         let seeded = app.seed().await;
         let put = put_body(Some("Authorization"), Some("instance-header-marker"), true);
         let created = send(&app, Method::PUT, INSTANCE_PATH, &seeded.cookie, Some(&put)).await;
-        assert_eq!(created.status, 201, "{}", String::from_utf8_lossy(&created.body));
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
         assert!(!String::from_utf8_lossy(&created.body).contains("instance-header-marker"));
         let fetched = send(&app, Method::GET, INSTANCE_PATH, &seeded.cookie, None).await;
         assert_eq!(fetched.status, 200);
@@ -917,7 +922,12 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(rotated.status, 200, "{}", String::from_utf8_lossy(&rotated.body));
+        assert_eq!(
+            rotated.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&rotated.body)
+        );
         let rotated: Value = rotated.json();
         let second = rotated["secret"].as_str().expect("a secret");
         assert_eq!(second.len(), 43);
@@ -934,11 +944,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rotating_keeps_the_lost_records_flag() {
+        let (app, seeded) = licensed().await;
+        let path = org_path(&seeded);
+        let created = send(
+            &app,
+            Method::PUT,
+            &path,
+            &seeded.cookie,
+            Some(&put_body(None, None, true)),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+
+        // Retention deleted undelivered records, and the endpoint is failing.
+        let org = Some(seeded.org_id);
+        let row = stream_store::destination(app.state.meta.reader(), org)
+            .await
+            .expect("read")
+            .expect("the destination exists");
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    stream_store::flag_lost(conn, org, row.cursor_seq + 5).await?;
+                    stream_store::mark_failed(
+                        conn,
+                        row.id,
+                        row.updated_at,
+                        1,
+                        90,
+                        "the endpoint answered 500",
+                        10,
+                    )
+                    .await?;
+                    Ok::<(), MetaError>(())
+                })
+            })
+            .await
+            .expect("prepared");
+
+        let rotated = send(
+            &app,
+            Method::POST,
+            &format!("{path}/secret"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(
+            rotated.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&rotated.body)
+        );
+
+        // The lost-records flag and the failure state survive the rotation.
+        let fetched = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(fetched.status, 200);
+        let fetched: Value = fetched.json();
+        assert_eq!(fetched["status"]["lost_records"], true);
+        assert_eq!(fetched["status"]["last_error"], "the endpoint answered 500");
+        assert!(fetched["status"]["failing_since"].is_string());
+    }
+
+    #[tokio::test]
     async fn test_send_reports_reachability_only() {
         // A local receiver answers 202. The API refuses plain http, so the row is written directly.
         let receiver = HookReceiver::start(vec![202]).await;
-        let app = TestApp::with_config(|config| config.security.allow_private_network_egress = true)
-            .await;
+        let app =
+            TestApp::with_config(|config| config.security.allow_private_network_egress = true)
+                .await;
         let seeded = app.seed().await;
         write_destination(&app, None, &receiver.url("/ingest")).await;
         let response = send(
@@ -949,13 +1025,22 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
-        assert_eq!(response.json::<Value>(), json!({"reached": true, "status": 202}));
+        assert_eq!(
+            response.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(
+            response.json::<Value>(),
+            json!({"reached": true, "status": 202})
+        );
         assert_eq!(receiver.received().len(), 1);
 
-        // A closed port is not reached, and no status is given.
-        let app = TestApp::with_config(|config| config.security.allow_private_network_egress = true)
-            .await;
+        // A closed port is not reached, and no status is given (omitted, not `null`: spec 09).
+        let app =
+            TestApp::with_config(|config| config.security.allow_private_network_egress = true)
+                .await;
         let seeded = app.seed().await;
         write_destination(&app, None, "http://127.0.0.1:1/ingest").await;
         let response = send(
@@ -967,10 +1052,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.status, 200);
-        assert_eq!(
-            response.json::<Value>(),
-            json!({"reached": false, "status": null})
-        );
+        assert_eq!(response.json::<Value>(), json!({"reached": false}));
     }
 
     #[tokio::test]
@@ -981,9 +1063,15 @@ mod tests {
         write_destination(&app, Some(seeded.org_id), "https://siem.example.com/ingest").await;
         let path = org_path(&seeded);
         assert_eq!(
-            send(&app, Method::PUT, &path, &seeded.cookie, Some(&put_body(None, None, true)))
-                .await
-                .status,
+            send(
+                &app,
+                Method::PUT,
+                &path,
+                &seeded.cookie,
+                Some(&put_body(None, None, true))
+            )
+            .await
+            .status,
             403
         );
         assert_eq!(
@@ -1022,9 +1110,15 @@ mod tests {
             403
         );
         assert_eq!(
-            send(&app, Method::POST, &format!("{path}/secret"), &seeded.cookie, None)
-                .await
-                .status,
+            send(
+                &app,
+                Method::POST,
+                &format!("{path}/secret"),
+                &seeded.cookie,
+                None
+            )
+            .await
+            .status,
             403
         );
     }
@@ -1065,7 +1159,12 @@ mod tests {
             Some(&put_body(None, None, false)),
         )
         .await;
-        assert_eq!(created.status, 201, "{}", String::from_utf8_lossy(&created.body));
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
         let created: Value = created.json();
         assert_eq!(created["stream"]["enabled"], false);
     }
@@ -1103,7 +1202,11 @@ mod tests {
         .expect("rows");
         assert_eq!(
             actions,
-            vec!["audit.stream_set", "audit.stream_set", "audit.stream_removed"]
+            vec![
+                "audit.stream_set",
+                "audit.stream_set",
+                "audit.stream_removed"
+            ]
         );
 
         // The records name the host and the header's presence, never the URL path or the value.

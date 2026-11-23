@@ -1,6 +1,5 @@
 {
   "url_host": "siem.example.com",
-  "header_name": null,
   "enabled": true,
   "status": {
     "last_success_at": "2026-11-23T09:30:00.000000000Z",

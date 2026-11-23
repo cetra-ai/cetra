@@ -1,7 +1,10 @@
 //! Audit record and export request types (track EA M3, D-EA-3, D-EA-20, plan P-1 to P-3).
 
+use std::fmt;
+
 use cetra_core::time_serde;
 use serde::{Deserialize, Deserializer, Serialize, de};
+use url::Url;
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
@@ -204,12 +207,14 @@ pub struct AuditExportParams {
 }
 
 /// The SIEM stream destination of an org or of the instance (track EA M4, D-EA-11). The URL,
-/// the signing secret and the header value are never returned.
+/// the signing secret and the header value are never returned. An absent optional field is
+/// omitted, never `null` (spec 09).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditStream {
     /// The endpoint's host.
     pub url_host: String,
-    /// The optional header's name. Its value is never returned.
+    /// The optional header's name. Its value is never returned. Omitted when there is none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header_name: Option<String>,
     /// Whether records are sent.
     pub enabled: bool,
@@ -219,14 +224,23 @@ pub struct AuditStream {
 /// How the stream is doing. Records are sent oldest first, at least once.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct AuditStreamStatus {
-    /// The last delivery the endpoint accepted. Null until the first one.
-    #[serde(default, with = "optional_time")]
+    /// The last delivery the endpoint accepted. Omitted until the first one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_time"
+    )]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_success_at: Option<i64>,
     /// The class of the last failure, when the last attempt failed. Never a URL or a value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
-    /// When the current run of failures began. Null when the last attempt worked.
-    #[serde(default, with = "optional_time")]
+    /// When the current run of failures began. Omitted when the last attempt worked.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "optional_time"
+    )]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub failing_since: Option<i64>,
     /// Records not yet accepted by the endpoint.
@@ -253,6 +267,23 @@ pub struct PutAuditStream {
     pub enabled: bool,
 }
 
+impl fmt::Debug for PutAuditStream {
+    /// Prints the endpoint's host and the header's name only: the URL (beyond its host) and the
+    /// header's value are never logged (D-I-2).
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let url_host = Url::parse(&self.url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_owned))
+            .unwrap_or_default();
+        formatter
+            .debug_struct("PutAuditStream")
+            .field("url", &url_host)
+            .field("header_name", &self.header_name)
+            .field("enabled", &self.enabled)
+            .finish_non_exhaustive()
+    }
+}
+
 /// `201` of the create: the destination, and its signing secret, which is shown only here.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct CreatedAuditStream {
@@ -273,6 +304,26 @@ pub struct RotatedAuditStreamSecret {
 pub struct AuditStreamTest {
     /// Whether the endpoint answered.
     pub reached: bool,
-    /// The HTTP status it answered with, when it answered.
+    /// The HTTP status it answered with. Omitted when it did not answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PutAuditStream;
+
+    #[test]
+    fn the_put_body_debug_omits_the_url_and_the_header_value() {
+        let body: PutAuditStream = serde_json::from_str(
+            r#"{"url":"https://siem.example.com/ingest?route=audit","header_name":"Authorization",
+                "header_value":"Splunk token-value","enabled":true}"#,
+        )
+        .expect("body");
+        let printed = format!("{body:?}");
+        assert_eq!(
+            printed,
+            r#"PutAuditStream { url: "siem.example.com", header_name: Some("Authorization"), enabled: true, .. }"#
+        );
+    }
 }

@@ -223,9 +223,9 @@ async fn send(state: &AppState, row: &DestinationRow, now: i64) -> Result<Outcom
             let moved = state
                 .meta
                 .write(move |conn| {
-                    Box::pin(async move {
-                        stream_store::mark_sent(conn, id, read, last, now).await
-                    })
+                    Box::pin(
+                        async move { stream_store::mark_sent(conn, id, read, last, now).await },
+                    )
                 })
                 .await?;
             if !moved {
@@ -454,9 +454,7 @@ async fn alert_owners(
             let owners: Vec<String> = org_members(state.meta.reader(), org)
                 .await?
                 .into_iter()
-                .filter(|member| {
-                    member.role == OrgRole::Owner && member.user.disabled_at.is_none()
-                })
+                .filter(|member| member.role == OrgRole::Owner && member.user.disabled_at.is_none())
                 .map(|member| member.user.email)
                 .collect();
             let url = state
@@ -614,12 +612,7 @@ mod tests {
         let app = TestApp::with_config(entitled).await;
         let seeded = app.seed().await;
         let receiver = HookReceiver::start(vec![200]).await;
-        let id = destination(
-            &app,
-            Some(seeded.org_id),
-            config(&receiver.url("/ingest")),
-        )
-        .await;
+        let id = destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
         insert_records(&app, 3, Some(seeded.org_id), 1000).await;
         let now = app.state.clock.now_ns();
 
@@ -630,24 +623,38 @@ mod tests {
         assert_eq!(received.len(), 1);
         let request = &received[0];
         let body = lines(&request.body);
-        let seqs: Vec<i64> = body.iter().map(|line| line["seq"].as_i64().unwrap()).collect();
+        let seqs: Vec<i64> = body
+            .iter()
+            .map(|line| line["seq"].as_i64().unwrap())
+            .collect();
         assert_eq!(seqs.len(), 3);
         assert!(seqs.windows(2).all(|pair| pair[0] < pair[1]), "{seqs:?}");
         assert_eq!(body[0]["org_id"], json!(seeded.org_id.to_string()));
         assert_eq!(body[0]["at"], "1970-01-01T00:00:00.000Z");
         assert_eq!(
-            request.headers.get("content-type").unwrap().to_str().unwrap(),
+            request
+                .headers
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "application/x-ndjson"
         );
-        let signature = request.headers.get(SIGNATURE_HEADER).unwrap().to_str().unwrap();
-        let expected = sign_payload(
-            &Secret::new(SECRET.to_owned()),
-            now / SECOND,
-            &request.body,
-        )
-        .unwrap();
+        let signature = request
+            .headers
+            .get(SIGNATURE_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let expected =
+            sign_payload(&Secret::new(SECRET.to_owned()), now / SECOND, &request.body).unwrap();
         assert_eq!(signature, expected);
-        let delivery = request.headers.get(DELIVERY_HEADER).unwrap().to_str().unwrap();
+        let delivery = request
+            .headers
+            .get(DELIVERY_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert_eq!(delivery, format!("{id}:{}-{}", seqs[0], seqs[2]));
         assert_eq!(cursor(&app, Some(seeded.org_id)).await, seqs[2]);
     }
@@ -660,10 +667,12 @@ mod tests {
         destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
         insert_records(&app, 2, Some(seeded.org_id), 1000).await;
         let now = app.state.clock.now_ns();
+        // The cursor starts at the table's highest `seq` at creation (the seeded login is seq 1).
+        let start = cursor(&app, Some(seeded.org_id)).await;
 
         let report = deliver_once(&app.state, now).await.unwrap();
         assert_eq!(report.failed, 1);
-        assert_eq!(cursor(&app, Some(seeded.org_id)).await, 0);
+        assert_eq!(cursor(&app, Some(seeded.org_id)).await, start);
 
         // The first backoff is 30 s: a pass before it sends nothing, one after it succeeds.
         deliver_once(&app.state, now + SECOND).await.unwrap();
@@ -671,7 +680,7 @@ mod tests {
         let report = deliver_once(&app.state, now + 31 * SECOND).await.unwrap();
         assert_eq!(report.sent, 1);
         assert_eq!(receiver.received().len(), 2);
-        assert!(cursor(&app, Some(seeded.org_id)).await > 0);
+        assert!(cursor(&app, Some(seeded.org_id)).await > start);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -728,13 +737,14 @@ mod tests {
         destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
         insert_records(&app, 2, Some(seeded.org_id), 1000).await;
         let now = app.state.clock.now_ns();
+        let start = cursor(&app, Some(seeded.org_id)).await;
 
         let report = deliver_once(&app.state, now).await.unwrap();
 
         assert_eq!(report.skipped, 1);
         assert_eq!(report.sent, 0);
         assert!(receiver.received().is_empty());
-        assert_eq!(cursor(&app, Some(seeded.org_id)).await, 0);
+        assert_eq!(cursor(&app, Some(seeded.org_id)).await, start);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -749,13 +759,14 @@ mod tests {
         destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
         insert_records(&app, 2, Some(seeded.org_id), 1000).await;
         let now = app.state.clock.now_ns();
+        let start = cursor(&app, Some(seeded.org_id)).await;
 
         let report = deliver_once(&app.state, now).await.unwrap();
 
         // The egress client refuses in restore mode, so the attempt fails and nothing is sent.
         assert_eq!(report.failed, 1);
         assert!(receiver.received().is_empty());
-        assert_eq!(cursor(&app, Some(seeded.org_id)).await, 0);
+        assert_eq!(cursor(&app, Some(seeded.org_id)).await, start);
     }
 
     /// Grants `org` `features` and `limits` the way a licence token does (`set_limits`).
@@ -789,12 +800,24 @@ mod tests {
     async fn purging_undelivered_records_flags_the_destination() {
         let app = TestApp::with_config(entitled).await;
         let seeded = app.seed().await;
-        grant(&app, seeded.org_id, &["audit_log"], &json!({"audit_retention_days": 30}));
-        destination(&app, Some(seeded.org_id), config("https://siem.example.com/ingest")).await;
+        grant(
+            &app,
+            seeded.org_id,
+            &["audit_log"],
+            &json!({"audit_retention_days": 30}),
+        );
+        destination(
+            &app,
+            Some(seeded.org_id),
+            config("https://siem.example.com/ingest"),
+        )
+        .await;
         insert_records(&app, 2, Some(seeded.org_id), 0).await;
         let last = max_seq(&app).await;
 
-        let removed = crate::audit::retention::purge(&app.state, 1000 * DAY).await.unwrap();
+        let removed = crate::audit::retention::purge(&app.state, 1000 * DAY)
+            .await
+            .unwrap();
 
         assert_eq!(removed, 2);
         let row = stream_store::destination(app.state.meta.reader(), Some(seeded.org_id))
@@ -808,14 +831,21 @@ mod tests {
     async fn purging_delivered_records_does_not() {
         let app = TestApp::with_config(entitled).await;
         let seeded = app.seed().await;
-        grant(&app, seeded.org_id, &["audit_log"], &json!({"audit_retention_days": 30}));
+        grant(
+            &app,
+            seeded.org_id,
+            &["audit_log"],
+            &json!({"audit_retention_days": 30}),
+        );
         let receiver = HookReceiver::start(vec![200]).await;
         destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
         insert_records(&app, 2, Some(seeded.org_id), 0).await;
         let now = app.state.clock.now_ns();
         assert_eq!(deliver_once(&app.state, now).await.unwrap().sent, 1);
 
-        let removed = crate::audit::retention::purge(&app.state, 1000 * DAY).await.unwrap();
+        let removed = crate::audit::retention::purge(&app.state, 1000 * DAY)
+            .await
+            .unwrap();
 
         assert_eq!(removed, 2);
         let row = stream_store::destination(app.state.meta.reader(), Some(seeded.org_id))

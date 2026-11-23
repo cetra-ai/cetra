@@ -643,8 +643,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/admin/audit-events/export",
         "get_admin_audit_export",
     ),
-    ("get", "/api/v1/orgs/{org}/audit-stream", "get_org_audit_stream"),
-    ("put", "/api/v1/orgs/{org}/audit-stream", "put_org_audit_stream"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/audit-stream",
+        "get_org_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/audit-stream",
+        "put_org_audit_stream",
+    ),
     (
         "delete",
         "/api/v1/orgs/{org}/audit-stream",
@@ -660,8 +668,16 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/audit-stream/test",
         "test_org_audit_stream",
     ),
-    ("get", "/api/v1/admin/audit-stream", "get_admin_audit_stream"),
-    ("put", "/api/v1/admin/audit-stream", "put_admin_audit_stream"),
+    (
+        "get",
+        "/api/v1/admin/audit-stream",
+        "get_admin_audit_stream",
+    ),
+    (
+        "put",
+        "/api/v1/admin/audit-stream",
+        "put_admin_audit_stream",
+    ),
     (
         "delete",
         "/api/v1/admin/audit-stream",

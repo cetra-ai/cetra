@@ -2541,6 +2541,390 @@
         ]
       }
     },
+    "/api/v1/admin/audit-stream": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Get the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. 404 when no destination is set. 409 when the stored settings cannot be read.",
+        "operationId": "get_admin_audit_stream",
+        "responses": {
+          "200": {
+            "description": "The destination and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Create or update the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Same rules as the organization's stream. The stream carries the instance log only.",
+        "operationId": "put_admin_audit_stream",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAuditStream"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated destination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created destination and its signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAuditStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Remove the instance's audit stream",
+        "description": "Instance admins only, with a session. Works without the licence.",
+        "operationId": "delete_admin_audit_stream",
+        "responses": {
+          "204": {
+            "description": "Removed. The stream stops."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-stream/secret": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Rotate the instance's signing secret",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. The new secret is shown once. 409 when the stored settings cannot be read.",
+        "operationId": "rotate_admin_audit_stream_secret",
+        "responses": {
+          "200": {
+            "description": "The new signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedAuditStreamSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/admin/audit-stream/test": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Send a test line to the instance's audit stream",
+        "description": "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Reports only reachability, as the organization's test does.",
+        "operationId": "test_admin_audit_stream",
+        "responses": {
+          "200": {
+            "description": "Whether the endpoint answered, and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStreamTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/admin/license": {
       "get": {
         "tags": [
@@ -4652,6 +5036,455 @@
             }
           }
         }
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Get the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature (403 `plan_required` otherwise). 404 when no destination is set. 409 when the stored settings cannot be read.",
+        "operationId": "get_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The destination and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Create or update the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature. Creating returns 201 with the signing secret, shown once; updating returns 200 and keeps the secret. The URL must be https and carry no user information; the header is one name and value (400 `field_error`). Records are sent from the destination's creation on: history is not replayed.",
+        "operationId": "put_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutAuditStream"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The updated destination.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStream"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "The created destination and its signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAuditStream"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Remove the organization's audit stream",
+        "description": "Owners only, with a session. Works without the feature, so a lapsed org can still remove it. Records already sent are not affected.",
+        "operationId": "delete_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Removed. The stream stops."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream/secret": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Rotate the organization's signing secret",
+        "description": "Owners only, with a session, and the `audit_log` feature. The new secret is shown once. 409 when the stored settings cannot be read.",
+        "operationId": "rotate_org_audit_stream_secret",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The new signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RotatedAuditStreamSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with the current state.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/audit-stream/test": {
+      "post": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Send a test line to the organization's audit stream",
+        "description": "Owners only, with a session, and the `audit_log` feature. Sends one signed test line now and does not move the cursor. Reports only whether the endpoint answered, and with which status: a connection error reads as not reached.",
+        "operationId": "test_org_audit_stream",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Whether the endpoint answered, and its status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditStreamTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
       }
     },
     "/api/v1/orgs/{org}/deletions": {
@@ -29164,6 +29997,85 @@
           "unresolved"
         ]
       },
+      "AuditStream": {
+        "type": "object",
+        "description": "The SIEM stream destination of an org or of the instance (track EA M4, D-EA-11). The URL,\nthe signing secret and the header value are never returned. An absent optional field is\nomitted, never `null` (spec 09).",
+        "required": [
+          "url_host",
+          "enabled",
+          "status"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether records are sent."
+          },
+          "header_name": {
+            "type": "string",
+            "description": "The optional header's name. Its value is never returned. Omitted when there is none."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AuditStreamStatus"
+          },
+          "url_host": {
+            "type": "string",
+            "description": "The endpoint's host."
+          }
+        }
+      },
+      "AuditStreamStatus": {
+        "type": "object",
+        "description": "How the stream is doing. Records are sent oldest first, at least once.",
+        "required": [
+          "lag",
+          "lost_records"
+        ],
+        "properties": {
+          "failing_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the current run of failures began. Omitted when the last attempt worked."
+          },
+          "lag": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Records not yet accepted by the endpoint.",
+            "minimum": 0
+          },
+          "last_error": {
+            "type": "string",
+            "description": "The class of the last failure, when the last attempt failed. Never a URL or a value."
+          },
+          "last_success_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "The last delivery the endpoint accepted. Omitted until the first one."
+          },
+          "lost_records": {
+            "type": "boolean",
+            "description": "Whether retention deleted records before they were sent."
+          }
+        }
+      },
+      "AuditStreamTest": {
+        "type": "object",
+        "description": "The answer to a test send. Only reachability: connection errors and timeouts both read as\nnot reached (plan P-7).",
+        "required": [
+          "reached"
+        ],
+        "properties": {
+          "reached": {
+            "type": "boolean",
+            "description": "Whether the endpoint answered."
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The HTTP status it answered with. Omitted when it did not answer.",
+            "minimum": 0
+          }
+        }
+      },
       "AuthConfig": {
         "type": "object",
         "description": "Login methods the UI should offer.\n\n`GET /api/auth/config`. Spec 08 § Sign-up policy and spec 09 § Auth.",
@@ -30778,6 +31690,23 @@
           "secret": {
             "type": "string",
             "description": "The bearer value. Shown only in this response."
+          }
+        }
+      },
+      "CreatedAuditStream": {
+        "type": "object",
+        "description": "`201` of the create: the destination, and its signing secret, which is shown only here.",
+        "required": [
+          "stream",
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The signing secret: verify `X-Cetra-Signature` with it. Shown once."
+          },
+          "stream": {
+            "$ref": "#/components/schemas/AuditStream"
           }
         }
       },
@@ -37581,6 +38510,33 @@
         },
         "additionalProperties": false
       },
+      "PutAuditStream": {
+        "type": "object",
+        "description": "`PUT` body of the stream. The URL must be https and carry no user information; the optional\nheader is one name and one value, sealed and never returned. Without `header_value`, a\nstored header keeps its value when the name is unchanged.",
+        "required": [
+          "url",
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether records are sent."
+          },
+          "header_name": {
+            "type": "string",
+            "description": "The optional header's name, for example `Authorization`."
+          },
+          "header_value": {
+            "type": "string",
+            "description": "The header's value, at most 1,024 bytes. Never returned."
+          },
+          "url": {
+            "type": "string",
+            "description": "The endpoint, an https URL of at most 2,048 bytes. Never returned."
+          }
+        },
+        "additionalProperties": false
+      },
       "PutOrgSsoProvider": {
         "type": "object",
         "description": "`PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret.",
@@ -37954,6 +38910,18 @@
           "value_str": {
             "type": "string",
             "description": "The label of a categorical score or the text of a text score. Omitted when none."
+          }
+        }
+      },
+      "RotatedAuditStreamSecret": {
+        "type": "object",
+        "description": "`POST …/secret`: the new signing secret, shown once.",
+        "required": [
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string"
           }
         }
       },

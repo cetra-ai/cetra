@@ -3,7 +3,6 @@
 //! for the instance (`org_id` null). The row keeps the URL host and the bookkeeping in clear; the
 //! URL, the signing secret and the optional header are sealed in `config_enc` (D-I-2), bound to
 //! the row id.
-#![cfg_attr(not(test), allow(dead_code))] // the delivery task and the API use it from E2 and E3 on
 
 use std::fmt;
 
@@ -61,8 +60,6 @@ pub(crate) struct DestinationRow {
     pub(crate) cursor_seq: i64,
     /// Failed attempts since the last success.
     pub(crate) attempts: i64,
-    /// Nanoseconds; the task skips the destination until then.
-    pub(crate) next_attempt_at: i64,
     pub(crate) last_success_at: Option<i64>,
     pub(crate) last_error: Option<String>,
     /// When the current run of failures began.
@@ -71,7 +68,6 @@ pub(crate) struct DestinationRow {
     pub(crate) alerted_at: Option<i64>,
     /// Records above this `seq` were deleted by retention before they were sent (P-5).
     pub(crate) lost_before_seq: Option<i64>,
-    pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
 }
 
@@ -123,11 +119,11 @@ pub(crate) fn open(
 }
 
 const COLUMNS: &str = "id, org_id, url_host, config_enc, enabled, cursor_seq, attempts, \
-    next_attempt_at, last_success_at, last_error, failing_since, alerted_at, lost_before_seq, \
-    created_at, updated_at";
+    last_success_at, last_error, failing_since, alerted_at, lost_before_seq, updated_at";
 
-/// `SELECT` of every column where `filter` holds.
-fn select(filter: &str) -> String {
+/// `SELECT` of every column where `filter` holds. `filter` is always a code literal, never user
+/// input, so the formatted SQL is audited with `AssertSqlSafe` at each call.
+fn select(filter: &'static str) -> String {
     format!("SELECT {COLUMNS} FROM {TABLE} WHERE {filter}")
 }
 
@@ -140,13 +136,11 @@ struct DestinationRecord {
     enabled: i64,
     cursor_seq: i64,
     attempts: i64,
-    next_attempt_at: i64,
     last_success_at: Option<i64>,
     last_error: Option<String>,
     failing_since: Option<i64>,
     alerted_at: Option<i64>,
     lost_before_seq: Option<i64>,
-    created_at: i64,
     updated_at: i64,
 }
 
@@ -174,13 +168,11 @@ fn row_from(record: DestinationRecord) -> Result<DestinationRow, MetaError> {
         enabled: record.enabled != 0,
         cursor_seq: record.cursor_seq,
         attempts: record.attempts,
-        next_attempt_at: record.next_attempt_at,
         last_success_at: record.last_success_at,
         last_error: record.last_error,
         failing_since: record.failing_since,
         alerted_at: record.alerted_at,
         lost_before_seq: record.lost_before_seq,
-        created_at: record.created_at,
         updated_at: record.updated_at,
     })
 }
@@ -197,7 +189,7 @@ pub(crate) async fn destination(
     org: Option<OrgId>,
 ) -> Result<Option<DestinationRow>, MetaError> {
     let sql = select("org_id IS ?");
-    let record: Option<DestinationRecord> = sqlx::query_as(&sql)
+    let record: Option<DestinationRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(scope_of(org))
         .fetch_optional(pool)
         .await?;
@@ -210,7 +202,7 @@ pub(crate) async fn destination_tx(
     org: Option<OrgId>,
 ) -> Result<Option<DestinationRow>, MetaError> {
     let sql = select("org_id IS ?");
-    let record: Option<DestinationRecord> = sqlx::query_as(&sql)
+    let record: Option<DestinationRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(scope_of(org))
         .fetch_optional(&mut *conn)
         .await?;
@@ -262,13 +254,11 @@ pub(crate) async fn insert(
         enabled: true,
         cursor_seq,
         attempts: 0,
-        next_attempt_at: 0,
         last_success_at: None,
         last_error: None,
         failing_since: None,
         alerted_at: None,
         lost_before_seq: None,
-        created_at: now,
         updated_at: now,
     })
 }
@@ -300,6 +290,28 @@ pub(crate) async fn update_config(
     Ok(())
 }
 
+/// Replaces only the sealed config of destination `id` (a secret rotation): the URL, the header,
+/// `enabled`, the cursor, the failure state and any lost-records flag are kept, so a rotation
+/// neither retries at once nor hides lost records. `updated_at` moves past the value the task may
+/// have read (plan P-6), as [`update_config`] does.
+pub(crate) async fn set_secret(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    sealed: &[u8],
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE audit_stream_destinations SET config_enc = ?, \
+         updated_at = max(?, updated_at + 1) WHERE id = ?",
+    )
+    .bind(sealed)
+    .bind(now)
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// Removes the destination of `org` (`None`: the instance). `false` when there was none.
 pub(crate) async fn delete(
     conn: &mut SqliteConnection,
@@ -315,7 +327,10 @@ pub(crate) async fn delete(
 /// Enabled destinations whose next attempt is due.
 pub(crate) async fn due(pool: &SqlitePool, now: i64) -> Result<Vec<DestinationRow>, MetaError> {
     let sql = select("enabled = 1 AND next_attempt_at <= ?");
-    let records: Vec<DestinationRecord> = sqlx::query_as(&sql).bind(now).fetch_all(pool).await?;
+    let records: Vec<DestinationRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(now)
+        .fetch_all(pool)
+        .await?;
     records.into_iter().map(row_from).collect()
 }
 
@@ -418,8 +433,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        DestinationRow, OpenError, StreamConfig, delete, destination, flag_lost, insert, mark_alerted,
-        mark_failed, mark_sent, open, seal, update_config,
+        DestinationRow, OpenError, StreamConfig, delete, destination, due, flag_lost, insert,
+        mark_alerted, mark_failed, mark_sent, open, seal, update_config,
     };
     use crate::audit::catalog::AuthAction;
     use crate::audit::{Ctx, Event, record_alone};
@@ -441,7 +456,11 @@ mod tests {
 
     async fn seed_org(meta: &MetaDb) -> OrgId {
         meta.write(|conn| {
-            Box::pin(async move { Ok(insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1).await?.id) })
+            Box::pin(async move {
+                Ok(insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1)
+                    .await?
+                    .id)
+            })
         })
         .await
         .expect("the org is written")
@@ -454,16 +473,10 @@ mod tests {
         id: Uuid,
         now: i64,
     ) -> Result<DestinationRow, MetaError> {
-        let sealed = seal(
-            &secrets(),
-            &id,
-            &config("https://siem.example.com/ingest"),
-        )
-        .expect("seals");
+        let sealed =
+            seal(&secrets(), &id, &config("https://siem.example.com/ingest")).expect("seals");
         meta.write(move |conn| {
-            Box::pin(async move {
-                insert(conn, id, org, "siem.example.com", &sealed, now).await
-            })
+            Box::pin(async move { insert(conn, id, org, "siem.example.com", &sealed, now).await })
         })
         .await
     }
@@ -557,11 +570,12 @@ mod tests {
         let read_updated_at = read(&meta, Some(org)).await.updated_at;
 
         // An edit in the same clock tick still moves `updated_at`.
-        let sealed = seal(&secrets(), &id, &config("https://siem.example.com/other")).expect("seals");
+        let sealed =
+            seal(&secrets(), &id, &config("https://siem.example.com/other")).expect("seals");
         meta.write(move |conn| {
-            Box::pin(async move {
-                update_config(conn, id, "siem.example.com", &sealed, true, 10).await
-            })
+            Box::pin(
+                async move { update_config(conn, id, "siem.example.com", &sealed, true, 10).await },
+            )
         })
         .await
         .expect("edited");
@@ -576,8 +590,16 @@ mod tests {
         let failing = meta
             .write(move |conn| {
                 Box::pin(async move {
-                    mark_failed(conn, id, read_updated_at, 1, 100, "the endpoint answered 500", 11)
-                        .await
+                    mark_failed(
+                        conn,
+                        id,
+                        read_updated_at,
+                        1,
+                        100,
+                        "the endpoint answered 500",
+                        11,
+                    )
+                    .await
                 })
             })
             .await
@@ -602,8 +624,16 @@ mod tests {
         let first = meta
             .write(move |conn| {
                 Box::pin(async move {
-                    mark_failed(conn, id, read_updated_at, 1, 100, "the endpoint answered 500", 50)
-                        .await
+                    mark_failed(
+                        conn,
+                        id,
+                        read_updated_at,
+                        1,
+                        100,
+                        "the endpoint answered 500",
+                        50,
+                    )
+                    .await
                 })
             })
             .await
@@ -613,8 +643,16 @@ mod tests {
         let second = meta
             .write(move |conn| {
                 Box::pin(async move {
-                    mark_failed(conn, id, read_updated_at, 2, 200, "the endpoint answered 503", 80)
-                        .await
+                    mark_failed(
+                        conn,
+                        id,
+                        read_updated_at,
+                        2,
+                        200,
+                        "the endpoint answered 503",
+                        80,
+                    )
+                    .await
                 })
             })
             .await
@@ -623,8 +661,13 @@ mod tests {
 
         let stored = read(&meta, Some(org)).await;
         assert_eq!(stored.attempts, 2);
-        assert_eq!(stored.next_attempt_at, 200);
-        assert_eq!(stored.last_error.as_deref(), Some("the endpoint answered 503"));
+        // The next attempt is scheduled at 200: `due` gates on it.
+        assert!(due(meta.reader(), 199).await.expect("due").is_empty());
+        assert_eq!(due(meta.reader(), 200).await.expect("due").len(), 1);
+        assert_eq!(
+            stored.last_error.as_deref(),
+            Some("the endpoint answered 503")
+        );
         assert_eq!(stored.failing_since, Some(50));
     }
 
@@ -640,7 +683,16 @@ mod tests {
 
         meta.write(move |conn| {
             Box::pin(async move {
-                mark_failed(conn, id, read_updated_at, 3, 99, "the endpoint answered 500", 5).await?;
+                mark_failed(
+                    conn,
+                    id,
+                    read_updated_at,
+                    3,
+                    99,
+                    "the endpoint answered 500",
+                    5,
+                )
+                .await?;
                 mark_alerted(conn, id, read_updated_at, 6).await?;
                 Ok::<(), MetaError>(())
             })
@@ -661,7 +713,8 @@ mod tests {
         let stored = read(&meta, Some(org)).await;
         assert_eq!(stored.cursor_seq, 7);
         assert_eq!(stored.attempts, 0);
-        assert_eq!(stored.next_attempt_at, 0);
+        // The backoff is cleared too: the destination is due at once.
+        assert_eq!(due(meta.reader(), 0).await.expect("due").len(), 1);
         assert_eq!(stored.last_success_at, Some(9));
         assert_eq!(stored.last_error, None);
         assert_eq!(stored.failing_since, None);

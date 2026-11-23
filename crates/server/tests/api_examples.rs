@@ -764,6 +764,9 @@ fn generated_files_roundtrip() {
             "list_org_audit_events" | "list_admin_audit_events" => {
                 roundtrip::<Page<AuditEvent>>(&example.file);
             }
+            "get_org_audit_stream" | "get_admin_audit_stream" => {
+                roundtrip::<AuditStream>(&example.file);
+            }
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
             "list_assistant_conversations" => {
                 roundtrip::<Page<AssistantConversation>>(&example.file);

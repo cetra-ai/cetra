@@ -244,10 +244,9 @@ impl OrgPerm {
             | Self::ManagePrices
             | Self::ViewDeletions
             | Self::ViewAudit => OrgRole::Admin,
-            Self::Delete
-            | Self::ManageSso
-            | Self::ManageProvisioning
-            | Self::ManageAuditStream => OrgRole::Owner,
+            Self::Delete | Self::ManageSso | Self::ManageProvisioning | Self::ManageAuditStream => {
+                OrgRole::Owner
+            }
         }
     }
 }

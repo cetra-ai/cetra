@@ -82,6 +82,14 @@
     "file": "static/deletion-project.json"
   },
   {
+    "operation_id": "get_admin_audit_stream",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/admin-audit-stream.json"
+  },
+  {
     "operation_id": "get_admin_license",
     "path_params": {},
     "query": {},
@@ -401,6 +409,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "responses/org-assistant.json"
+  },
+  {
+    "operation_id": "get_org_audit_stream",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-audit-stream.json"
   },
   {
     "operation_id": "get_org_entitlements",
