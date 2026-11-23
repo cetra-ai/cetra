@@ -35,8 +35,8 @@ use tokio::net::TcpStream;
 
 use crate::clock::Clock;
 use crate::config::{
-    AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
-    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig,
+    AlertsConfig, AnalyticsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig,
+    IngestConfig, InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig,
     SelfMonitoringConfig, ServerConfig, TelemetryConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
@@ -482,6 +482,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
             endpoint: "http://127.0.0.1:9".to_owned(),
             ..TelemetryConfig::default()
         },
+        analytics: AnalyticsConfig::default(),
     };
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",

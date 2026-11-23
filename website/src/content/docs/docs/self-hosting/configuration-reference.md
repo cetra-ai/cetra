@@ -226,3 +226,12 @@ What cetra sends to us: an anonymous heartbeat once a day, and crash reports if 
 | `telemetry.heartbeat` | | boolean | `true` | Send the anonymous daily heartbeat. |
 | `telemetry.crash_reports` | | boolean | `false` | Send crash reports: each panic and error event as a code location and function names, never a message or a value. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1` and restore mode turn it off; CI environments and debug builds do not. See [Crash reports](/docs/self-hosting/telemetry/#crash-reports). |
 | `telemetry.endpoint` | | URL | `"https://telemetry.cetra.sh"` | Where the heartbeat goes, as `<endpoint>/v1/heartbeat`. `https`, or `http` to a loopback IP address such as `127.0.0.1` (not the name `localhost`). No user info, query or fragment. For a relay of your own. |
+
+## `[analytics]`
+
+Per-user product events sent through the server to a PostHog project of yours. Off while unset; restore mode turns it off. cetra's own cloud sets it. A self-hosted install sends us only bucketed feature counts in the heartbeat: see [Telemetry](/docs/self-hosting/telemetry/#product-analytics).
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `analytics.posthog_host` | | URL | unset (off) | Your PostHog ingestion host, such as `https://eu.i.posthog.com`. cetra posts batches to `<host>/batch/`. `https`, or `http` to a loopback IP address. No user info, query or fragment. Set together with `posthog_key`. |
+| `analytics.posthog_key` | | secret | unset | The PostHog project API key (`phc_…`). Set together with `posthog_host`. |

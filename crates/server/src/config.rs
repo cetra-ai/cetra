@@ -437,6 +437,33 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// The rule `[analytics]` breaks when only one of its keys is set. Static.
+const ANALYTICS_PAIR: &str = "set posthog_host and posthog_key together, or leave both unset";
+
+/// `[analytics]`: per-user product events to the operator's PostHog (track TL M6, D-TL-14).
+/// Off while unset; restore mode turns it off too.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnalyticsConfig {
+    /// PostHog ingestion host, e.g. `https://eu.i.posthog.com`; batches go to `<host>/batch/`.
+    /// `https`, or `http` to a loopback IP. Stored without a trailing slash.
+    #[serde(default)]
+    pub posthog_host: Option<String>,
+    /// The PostHog project API key (`phc_…`).
+    #[serde(default)]
+    pub posthog_key: Option<Secret<String>>,
+}
+
+impl AnalyticsConfig {
+    /// The host and key, when both are set.
+    pub fn posthog(&self) -> Option<(&str, &Secret<String>)> {
+        match (&self.posthog_host, &self.posthog_key) {
+            (Some(host), Some(key)) => Some((host.as_str(), key)),
+            _ => None,
+        }
+    }
+}
+
 fn default_heartbeat() -> bool {
     true
 }
@@ -941,6 +968,9 @@ pub struct ServerConfig {
     /// `[telemetry]`: the heartbeat to us (D-TL-8).
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// `[analytics]`: per-user product events to PostHog (track TL M6).
+    #[serde(default)]
+    pub analytics: AnalyticsConfig,
 }
 
 impl ServerConfig {
@@ -1252,6 +1282,9 @@ fn secret_key(path: &[String]) -> Option<&'static str> {
         [parent, key] if parent == "self_monitoring" && key == "otlp_headers" => {
             Some("self_monitoring.otlp_headers")
         }
+        [parent, key] if parent == "analytics" && key == "posthog_key" => {
+            Some("analytics.posthog_key")
+        }
         [..] if path.last().is_some_and(|key| key == "client_secret") => {
             Some("auth.oidc.client_secret")
         }
@@ -1270,6 +1303,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     validate_orgs(&config.orgs)?;
     validate_demo(&config.demo)?;
     validate_telemetry(&mut config.telemetry)?;
+    validate_analytics(&mut config.analytics)?;
     if config
         .license_key
         .as_ref()
@@ -1873,14 +1907,12 @@ fn validate_demo(demo: &DemoConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// `telemetry.endpoint` (D-TL-10): `https`, or `http` to a loopback IP address; no user info,
-/// query or fragment. Stored without a trailing slash. Reasons are static.
-fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError> {
-    let invalid = |reason| ConfigError::Invalid {
-        key: "telemetry.endpoint",
-        reason,
-    };
-    let url = url::Url::parse(telemetry.endpoint.trim())
+/// An outbound base URL of operator config (`telemetry.endpoint`, `analytics.posthog_host`):
+/// `https`, or `http` to a loopback IP address; no user info, query or fragment. Returned
+/// without a trailing slash. Reasons are static and never quote the input.
+fn outbound_base_url(raw: &str, key: &'static str) -> Result<String, ConfigError> {
+    let invalid = |reason| ConfigError::Invalid { key, reason };
+    let url = url::Url::parse(raw.trim())
         .map_err(|_| invalid("must be an absolute http or https URL"))?;
     let loopback = match url.host() {
         Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
@@ -1899,7 +1931,54 @@ fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError
     {
         return Err(invalid("must not contain user info, a query or a fragment"));
     }
-    telemetry.endpoint = url.as_str().trim_end_matches('/').to_owned();
+    Ok(url.as_str().trim_end_matches('/').to_owned())
+}
+
+/// `telemetry.endpoint` (D-TL-10), by [`outbound_base_url`].
+fn validate_telemetry(telemetry: &mut TelemetryConfig) -> Result<(), ConfigError> {
+    telemetry.endpoint = outbound_base_url(&telemetry.endpoint, "telemetry.endpoint")?;
+    Ok(())
+}
+
+/// `[analytics]`: blank values are unset; both keys or neither; the host by
+/// [`outbound_base_url`]; the key printable ASCII without spaces, at most 256 bytes.
+fn validate_analytics(analytics: &mut AnalyticsConfig) -> Result<(), ConfigError> {
+    if analytics
+        .posthog_host
+        .as_deref()
+        .is_some_and(|host| host.trim().is_empty())
+    {
+        analytics.posthog_host = None;
+    }
+    if analytics
+        .posthog_key
+        .as_ref()
+        .is_some_and(|key| key.expose().trim().is_empty())
+    {
+        analytics.posthog_key = None;
+    }
+    match (&analytics.posthog_host, &analytics.posthog_key) {
+        (None, None) => return Ok(()),
+        (Some(_), Some(_)) => {}
+        _ => {
+            return Err(ConfigError::Invalid {
+                key: "analytics",
+                reason: ANALYTICS_PAIR,
+            });
+        }
+    }
+    if let Some(host) = analytics.posthog_host.take() {
+        analytics.posthog_host = Some(outbound_base_url(&host, "analytics.posthog_host")?);
+    }
+    if let Some(key) = &analytics.posthog_key {
+        let value = key.expose();
+        if value.len() > 256 || !value.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(ConfigError::Invalid {
+                key: "analytics.posthog_key",
+                reason: "must be printable ASCII without spaces, at most 256 bytes",
+            });
+        }
+    }
     Ok(())
 }
 
@@ -2329,6 +2408,7 @@ fn is_secret_path(dotted: &str) -> bool {
             | "init.secret_key"
             | "init.read_key"
             | "self_monitoring.otlp_headers"
+            | "analytics.posthog_key"
     ) || dotted.ends_with(".client_secret")
 }
 
@@ -2376,10 +2456,11 @@ mod tests {
     use figment::error::{Actual, Kind};
 
     use super::{
-        ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
-        MediaConfig, OrgsConfig, Secret, SelfMonitoringConfig, ServerConfig, SmtpUrl,
-        TELEMETRY_VALUES, TelemetryConfig, Tls, TraceSampleRatio, issuer_problem, load_from,
-        oidc_env_name, parse_otlp_endpoint, parse_otlp_headers, parse_resource,
+        ALIASES, ANALYTICS_PAIR, AlertsConfig, AnalyticsConfig, ConfigError, DemoConfig,
+        EmailRecipients, IngestConfig, LogFormat, MediaConfig, OrgsConfig, Secret,
+        SelfMonitoringConfig, ServerConfig, SmtpUrl, TELEMETRY_VALUES, TelemetryConfig, Tls,
+        TraceSampleRatio, issuer_problem, load_from, oidc_env_name, parse_otlp_endpoint,
+        parse_otlp_headers, parse_resource,
     };
     use crate::api::account::SignupPolicy;
     use crate::observability::switchboard::TelemetryEnv;
@@ -2452,6 +2533,7 @@ mod tests {
         assert_eq!(storage.memtable.hard_limit, ByteSize::gib(1));
         assert_eq!(storage.query.metadata_cache_bytes, ByteSize::mib(512));
         assert!(storage.query.target_partitions >= 1);
+        assert_eq!(config.analytics, AnalyticsConfig::default());
     }
 
     #[test]
@@ -2623,6 +2705,161 @@ mod tests {
                 "{raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn analytics_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        assert_eq!(config.analytics.posthog_host, None);
+        assert!(config.analytics.posthog_key.is_none());
+        assert!(config.analytics.posthog().is_none());
+    }
+
+    #[test]
+    fn analytics_loads_from_toml_and_env() {
+        let toml = "[analytics]\nposthog_host = \"https://eu.i.posthog.com/\"\n";
+        let env = [("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123")];
+        let config = load_from(Some(toml), &env).unwrap();
+        assert_eq!(
+            config.analytics.posthog_host.as_deref(),
+            Some("https://eu.i.posthog.com")
+        );
+        let (host, key) = config.analytics.posthog().unwrap();
+        assert_eq!(host, "https://eu.i.posthog.com");
+        assert_eq!(key.expose(), "phc_abc123");
+        assert!(!format!("{config:?}").contains("phc_abc123"));
+    }
+
+    #[test]
+    fn an_all_digit_posthog_key_stays_a_string() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com"),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "12345"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        let key = config.analytics.posthog_key.as_ref().unwrap();
+        assert_eq!(key.expose(), "12345");
+    }
+
+    #[test]
+    fn analytics_needs_both_keys() {
+        let host_only = [("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com")];
+        let result = load_from(None, &host_only);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "analytics", reason }) if *reason == ANALYTICS_PAIR
+            ),
+            "{result:?}"
+        );
+        let key_only = [("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123")];
+        let result = load_from(None, &key_only);
+        assert!(
+            matches!(
+                &result,
+                Err(ConfigError::Invalid { key: "analytics", reason }) if *reason == ANALYTICS_PAIR
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn blank_analytics_values_are_unset() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", ""),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "  "),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert_eq!(config.analytics.posthog_host, None);
+        assert!(config.analytics.posthog_key.is_none());
+    }
+
+    #[test]
+    fn posthog_host_refuses() {
+        let absolute = "must be an absolute http or https URL";
+        let scheme = "must be https, or http to a loopback address";
+        let user_info = "must not contain user info, a query or a fragment";
+        let cases = [
+            ("not a url", absolute),
+            ("http://eu.i.posthog.com", scheme),
+            ("http://localhost:8000", scheme),
+            ("ftp://h.example", scheme),
+            ("https://u:p@h.example", user_info),
+            ("https://h.example/?a=1", user_info),
+            ("https://h.example/#f", user_info),
+        ];
+        for (raw, reason) in cases {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", raw),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+            ];
+            let result = load_from(None, &env);
+            assert!(
+                matches!(
+                    &result,
+                    Err(ConfigError::Invalid { key: "analytics.posthog_host", reason: got })
+                        if *got == reason
+                ),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn posthog_host_accepts_loopback_http() {
+        let env = [
+            ("CETRA_ANALYTICS__POSTHOG_HOST", "http://127.0.0.1:9999/"),
+            ("CETRA_ANALYTICS__POSTHOG_KEY", "phc_abc123"),
+        ];
+        let config = load_from(None, &env).unwrap();
+        assert_eq!(
+            config.analytics.posthog_host.as_deref(),
+            Some("http://127.0.0.1:9999")
+        );
+    }
+
+    #[test]
+    fn posthog_key_refuses_without_quoting_it() {
+        let long = "a".repeat(257);
+        for value in ["phc abc", long.as_str(), "phc\u{7f}x"] {
+            let env = [
+                ("CETRA_ANALYTICS__POSTHOG_HOST", "https://eu.i.posthog.com"),
+                ("CETRA_ANALYTICS__POSTHOG_KEY", value),
+            ];
+            let error = load_from(None, &env).err().unwrap();
+            assert!(
+                matches!(
+                    error,
+                    ConfigError::Invalid {
+                        key: "analytics.posthog_key",
+                        ..
+                    }
+                ),
+                "{error}"
+            );
+            let text = error.to_string();
+            assert!(!text.contains(value), "{text}");
+            assert!(!text.contains("phc"), "{text}");
+        }
+    }
+
+    #[test]
+    fn a_bad_posthog_key_type_is_reported_by_key() {
+        let toml = "[analytics]\nposthog_host = \"https://eu.i.posthog.com\"\nposthog_key = 5\n";
+        let error = load_from(Some(toml), &[]).err().unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "analytics.posthog_key",
+                reason: "expected a string",
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_analytics_key_is_refused() {
+        let result = load_from(Some("[analytics]\nposthog = 1\n"), &[]);
+        assert!(matches!(result, Err(ConfigError::Figment(_))));
     }
 
     #[test]
