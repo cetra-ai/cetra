@@ -43,6 +43,21 @@ test("the Free plan's new limits match the decisions", () => {
   assert.ok(free.rules.includes("1 issue source"));
 });
 
+test("the Starter caps match D178", () => {
+  const d178 = decisions.split("\n").find((line) => line.startsWith("| D178 |"));
+  assert.ok(
+    d178?.includes(
+      "Starter gets 20 alert rules, 10 active online-evaluation rules, 3 annotation queues and 3 issue sources",
+    ),
+    "D178 has no Starter caps",
+  );
+  assert.equal(
+    starter.rules,
+    "20 alert rules, 10 online evaluation rules, 3 annotation queues and 3 issue sources",
+  );
+  assert.equal(pro.rules, "Unlimited rules");
+});
+
 test("seats and projects match D177", () => {
   assert.ok(d177.includes("1 seat, 1 project"));
   assert.ok(d177.includes("unlimited seats"));
@@ -65,7 +80,8 @@ test("Pro matches D177", () => {
   assert.ok(d177.includes("Pro: $150/month"));
   assert.ok(d177.includes("5 years data access"));
   assert.equal(pro.priceMonthly, 150);
-  assert.equal(pro.includedUnits, starter.includedUnits);
+  assert.ok(d177.includes("Pro: $150/month, 400k units/month included"));
+  assert.equal(pro.includedUnits, 400_000);
   assert.equal(pro.dataAccess, "5 years");
 });
 
@@ -79,7 +95,8 @@ test("monthly price", () => {
   assert.equal(monthlyPrice(starter, 200_000), 30);
   assert.equal(monthlyPrice(starter, 300_000), 34);
   assert.equal(monthlyPrice(starter, 1_200_000), 70);
-  assert.equal(monthlyPrice(pro, 1_200_000), 190);
+  assert.equal(monthlyPrice(pro, 400_000), 150);
+  assert.equal(monthlyPrice(pro, 1_200_000), 182);
   assert.equal(monthlyPrice(free, 100_000), 0);
   assert.equal(monthlyPrice(free, 100_001), null);
 });

@@ -58,7 +58,7 @@ export const FEATURE_GROUPS = [
         doc: null,
         source: "D177",
         claim: "100k units/month",
-        cloud: ["100,000", "200,000", "200,000", "Custom"],
+        cloud: ["100,000", "200,000", "400,000", "Custom"],
         selfHosted: ["No limit", "No limit"],
       },
       {
@@ -102,7 +102,7 @@ export const FEATURE_GROUPS = [
       {
         label: "Alert rules",
         doc: "platform/alerts",
-        cloud: ONE_THEN_UNLIMITED,
+        cloud: ["1", "20", U, U],
         selfHosted: [U, U],
       },
       {
@@ -110,19 +110,19 @@ export const FEATURE_GROUPS = [
         doc: null,
         source: "D178",
         claim: "1 active online-evaluation rule",
-        cloud: ONE_THEN_UNLIMITED,
+        cloud: ["1", "10", U, U],
         selfHosted: [U, U],
       },
       {
         label: "Annotation queues",
         doc: "evaluation/annotation-queues",
-        cloud: ONE_THEN_UNLIMITED,
+        cloud: ["1", "3", U, U],
         selfHosted: [U, U],
       },
       {
         label: "Issue sources",
         doc: "evaluation/issues",
-        cloud: ONE_THEN_UNLIMITED,
+        cloud: ["1", "3", U, U],
         selfHosted: [U, U],
       },
       {

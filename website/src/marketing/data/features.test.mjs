@@ -164,19 +164,27 @@ test("the limit rows match the plans", () => {
   assert.equal(PLANS[0].projects, "1 project");
 
   const ruleRows = [
-    ["Alert rules", "1 alert rule"],
-    ["Active online evaluation rules", "1 online evaluation rule"],
-    ["Annotation queues", "1 annotation queue"],
-    ["Issue sources", "1 issue source"],
+    ["Alert rules", "1 alert rule", "20", "20 alert rules"],
+    [
+      "Active online evaluation rules",
+      "1 online evaluation rule",
+      "10",
+      "10 online evaluation rules",
+    ],
+    ["Annotation queues", "1 annotation queue", "3", "3 annotation queues"],
+    ["Issue sources", "1 issue source", "3", "3 issue sources"],
   ];
-  for (const [label, text] of ruleRows) {
+  for (const [label, freeText, starterCell, starterText] of ruleRows) {
     const cells = limitRow(label).cloud;
     assert.equal(cells?.[0], "1", `${label} on Free`);
-    assert.ok(PLANS[0].rules.includes(text), `Free rules should include "${text}"`);
-    assert.equal(cells?.[1], "Unlimited", `${label} on Starter`);
+    assert.ok(PLANS[0].rules.includes(freeText), `Free rules should include "${freeText}"`);
+    assert.equal(cells?.[1], starterCell, `${label} on Starter`);
+    assert.ok(
+      PLANS[1].rules.includes(starterText),
+      `Starter rules should include "${starterText}"`,
+    );
     assert.equal(cells?.[2], "Unlimited", `${label} on Pro`);
   }
-  assert.equal(PLANS[1].rules, "Unlimited rules");
   assert.equal(PLANS[2].rules, "Unlimited rules");
 });
 
