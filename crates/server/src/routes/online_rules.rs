@@ -23,6 +23,8 @@ use crate::api::online_rules::{
     OnlineRulePreview, OnlineRulePreviewRequest, OnlineRuleStats, OnlineRuleStatsResponse,
     PauseReason, RuleJobsHour, RuleScoreStats, RuleSpend, RuleTarget, UpdateOnlineRuleRequest,
 };
+use crate::audit::catalog::OnlineRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::eval::budget::{self, DAY_NS, day_start};
@@ -386,6 +388,7 @@ async fn create_online_rule(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateOnlineRuleRequest>,
 ) -> Result<(StatusCode, error::Json<OnlineRule>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -426,19 +429,25 @@ async fn create_online_rule(
     let limit = rule_limit::limit(&state, org);
     let outcome = state
         .meta
-        .write(move |conn| Box::pin(async move { insert_checked(conn, insert, limit, now).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let out = insert_checked(conn, insert, limit, now).await?;
+                if matches!(out, RuleWrite::Done { .. }) {
+                    let action = OnlineRuleAction::Created { evaluator_id };
+                    let event = Event::new(action)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::OnlineRule, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(out)
+            })
+        })
         .await;
     drop(prices_write);
     let outcome = outcome?;
     match outcome {
         RuleWrite::Done { row, .. } => {
-            tracing::info!(
-                target: "audit",
-                rule_id = %id,
-                project_id = %project,
-                user_id = %user.id,
-                "online rule created"
-            );
             let json = rule_json(&state, &row, &JobCounts::default(), now).await?;
             Ok((StatusCode::CREATED, error::Json(json)))
         }
@@ -453,9 +462,36 @@ async fn update_online_rule(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<UpdateOnlineRuleRequest>,
 ) -> Result<error::Json<OnlineRule>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    // The request fields that were sent, by name (plan P-2): never their values.
+    let mut changed_fields: Vec<&'static str> = Vec::new();
+    if body.name.is_some() {
+        changed_fields.push("name");
+    }
+    if body.filter.is_some() {
+        changed_fields.push("filter");
+    }
+    if body.variable_mapping.is_some() {
+        changed_fields.push("variable_mapping");
+    }
+    if body.sample_rate.is_some() {
+        changed_fields.push("sample_rate");
+    }
+    if body.budget_usd.is_some() {
+        changed_fields.push("budget_usd");
+    }
+    if body.budget_period.is_some() {
+        changed_fields.push("budget_period");
+    }
+    if body.clear_budget {
+        changed_fields.push("clear_budget");
+    }
+    if body.enabled.is_some() {
+        changed_fields.push("enabled");
+    }
+    principal::session_user(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
@@ -492,7 +528,21 @@ async fn update_online_rule(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { update_checked(conn, project, update, limit, now).await })
+            Box::pin(async move {
+                let out = update_checked(conn, project, update, limit, now).await?;
+                if let RuleWrite::Done { budget_resumed, .. } = &out {
+                    let action = OnlineRuleAction::Updated {
+                        fields: changed_fields,
+                        budget_resumed: *budget_resumed,
+                    };
+                    let event = Event::new(action)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::OnlineRule, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(out)
+            })
         })
         .await;
     drop(prices_write);
@@ -510,22 +560,7 @@ async fn update_online_rule(
                 // As a manual resume: the breaker starts over and the dispatcher wakes.
                 state.eval.breakers.reset(id);
                 state.eval.wake();
-                tracing::info!(
-                    target: "audit",
-                    rule_id = %id,
-                    project_id = %project,
-                    user_id = %user.id,
-                    reason = "budget changed",
-                    "online rule resumed"
-                );
             }
-            tracing::info!(
-                target: "audit",
-                rule_id = %id,
-                project_id = %project,
-                user_id = %user.id,
-                "online rule updated"
-            );
             let counts =
                 eval_jobs::counts_since(state.meta.reader(), project, now - DAY_NS).await?;
             let jobs = counts.get(&id).copied().unwrap_or_default();
@@ -544,26 +579,33 @@ async fn delete_online_rule(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
-    let user_id = user.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
     // Jobs and spend of the rule go with it (schema cascade).
     let went = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete_rule(conn, project, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                if !store::delete_rule(conn, project, id).await? {
+                    return Ok(false);
+                }
+                let event = Event::new(OnlineRuleAction::Deleted)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::OnlineRule, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(true)
+            })
+        })
         .await?;
     if !went {
         return Err(ApiError::NotFound);
     }
     state.eval.forget_rule(id);
-    tracing::info!(
-        target: "audit",
-        rule_id = %id,
-        project_id = %project,
-        user_id = %user_id,
-        "online rule deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -572,9 +614,11 @@ async fn resume_online_rule(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
 ) -> Result<error::Json<OnlineRule>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let outcome = state
         .meta
@@ -587,7 +631,14 @@ async fn resume_online_rule(
                     return Ok(Resume::Unchanged(Box::new(row)));
                 }
                 Ok(match store::resume_rule(conn, project, id, now).await? {
-                    Some(row) => Resume::Resumed(Box::new(row)),
+                    Some(row) => {
+                        let event = Event::new(OnlineRuleAction::Resumed { reason: "manual" })
+                            .org(org)
+                            .project(project)
+                            .target(TargetKind::OnlineRule, id);
+                        audit::record(conn, &ctx, event, now).await?;
+                        Resume::Resumed(Box::new(row))
+                    }
                     None => Resume::Missing,
                 })
             })
@@ -599,14 +650,6 @@ async fn resume_online_rule(
         Resume::Resumed(row) => {
             state.eval.breakers.reset(id);
             state.eval.wake();
-            tracing::info!(
-                target: "audit",
-                rule_id = %id,
-                project_id = %project,
-                user_id = %user.id,
-                reason = "manual",
-                "online rule resumed"
-            );
             row
         }
     };
@@ -1047,9 +1090,7 @@ mod tests {
     use crate::meta::model_prices;
     use crate::meta::online_rules::{PAUSE_BUDGET, PAUSE_ERRORS, pause_rule};
     use crate::meta::rule_spend::add_spend;
-    use crate::test_support::{
-        Seeded, TestApp, TestResponse, capture_logs, dataset_span, set_limits,
-    };
+    use crate::test_support::{Seeded, TestApp, TestResponse, dataset_span, set_limits};
     use cetra_core::batch::scores_to_record_batch;
     use cetra_core::enums::ScoreSource;
     use cetra_core::score::{Score, ScoreTarget, ScoreValue};
@@ -2179,19 +2220,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(paused_reason(&app, id).await.as_deref(), Some(PAUSE_BUDGET));
-        let (response, logs) =
-            capture_logs(patch(&app, &seeded, id, &json!({"budget_usd": 9.0}))).await;
+        let response = patch(&app, &seeded, id, &json!({"budget_usd": 9.0})).await;
         assert_eq!(response.status, 200, "{}", text(&response));
         assert_eq!(paused_reason(&app, id).await, None);
-        assert!(
-            logs.contains("online rule resumed") && logs.contains("budget changed"),
-            "{logs}"
-        );
-        // A later budget change finds nothing to clear, so it audits no resume.
-        let (response, logs) =
-            capture_logs(patch(&app, &seeded, id, &json!({"budget_usd": 10.0}))).await;
+        // A later budget change finds nothing to clear, so its record says so.
+        let response = patch(&app, &seeded, id, &json!({"budget_usd": 10.0})).await;
         assert_eq!(response.status, 200, "{}", text(&response));
-        assert!(!logs.contains("budget changed"), "{logs}");
+        let updates: Vec<String> = rule_audit_rows(&app)
+            .await
+            .into_iter()
+            .filter(|row| row.0 == "online_rule.updated")
+            .map(|row| row.1)
+            .collect();
+        assert_eq!(
+            updates,
+            [
+                r#"{"fields":["budget_usd"],"budget_resumed":true}"#,
+                r#"{"fields":["budget_usd"],"budget_resumed":false}"#,
+            ]
+        );
+    }
+
+    /// `(action, details)` of every audit row of an online rule, oldest first.
+    async fn rule_audit_rows(app: &TestApp) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT action, details FROM audit_events WHERE target_kind = 'online_rule' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rule_resume_is_recorded_as_manual() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let evaluator = judge(&app, &seeded).await;
+        let created = create_ok(&app, &seeded, &rule_body(evaluator)).await;
+        let id = id_of(&created);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    pause_rule(conn, id, PAUSE_ERRORS, None, 5)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .unwrap();
+        let response = app
+            .request(
+                Method::POST,
+                &format!("{}/{id}/resume", path(seeded.project.id)),
+            )
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .send()
+            .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let resumes: Vec<String> = rule_audit_rows(&app)
+            .await
+            .into_iter()
+            .filter(|row| row.0 == "online_rule.resumed")
+            .map(|row| row.1)
+            .collect();
+        assert_eq!(resumes, [r#"{"reason":"manual"}"#]);
     }
 
     #[tokio::test]

@@ -16,6 +16,8 @@ use uuid::Uuid;
 use super::execute::{self, ClaimedJob};
 use super::{EvalQueue, budget, lock};
 use crate::api::evaluators::EvaluatorKind;
+use crate::audit::catalog::OnlineRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -531,17 +533,27 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
     let cleared = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { online_rules::clear_budget_pauses(conn, day, month, now).await })
+            Box::pin(async move {
+                let cleared = online_rules::clear_budget_pauses(conn, day, month, now).await?;
+                for rule in &cleared {
+                    // Only rules that still exist have a scope; a deleted one records nothing.
+                    if let Some((org, project)) = audit::scope_of_rule(conn, *rule).await? {
+                        let action = OnlineRuleAction::Resumed {
+                            reason: "budget period",
+                        };
+                        let event = Event::new(action)
+                            .org(org)
+                            .project(project)
+                            .target(TargetKind::OnlineRule, *rule);
+                        audit::record(conn, &audit::Ctx::system(), event, now).await?;
+                    }
+                }
+                Ok(cleared)
+            })
         })
         .await?;
     for rule in &cleared {
         state.eval.budgets.forget(*rule);
-        tracing::info!(
-            target: "audit",
-            rule_id = %rule,
-            reason = "budget period",
-            "online rule resumed"
-        );
     }
     if !cleared.is_empty() {
         state.eval.wake();
@@ -554,7 +566,6 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
         .await?;
     if sources > 0 {
         tracing::info!(
-            target: "audit",
             sources,
             reason = "budget period",
             "issue sources resumed"

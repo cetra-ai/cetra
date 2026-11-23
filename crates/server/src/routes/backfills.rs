@@ -15,6 +15,8 @@ use uuid::Uuid;
 
 use crate::api::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use crate::api::common::{FieldError, Page};
+use crate::audit::catalog::OnlineRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::eval::backfill::{self, BackfillRule, JudgeCost, Window};
@@ -145,16 +147,32 @@ async fn create_backfill(
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(IdPath { id }): error::Path<IdPath>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateBackfillRequest>,
 ) -> Result<(StatusCode, error::Json<Backfill>), ApiError> {
     refuse_outbound(&state, "backfill")?;
     let user_id = principal::session_user(&principal)?.id;
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { create_checked(conn, project, id, &body, user_id, now).await })
+            Box::pin(async move {
+                let out = create_checked(conn, project, id, &body, user_id, now).await?;
+                if let Create::Created(row) = &out {
+                    let action = OnlineRuleAction::BackfillStarted {
+                        backfill_id: row.id,
+                        max_targets: row.max_targets,
+                    };
+                    let event = Event::new(action)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::OnlineRule, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(out)
+            })
         })
         .await?;
     match outcome {
@@ -168,15 +186,6 @@ async fn create_backfill(
         }),
         Create::Created(row) => {
             state.eval.wake_backfills();
-            tracing::info!(
-                target: "audit",
-                backfill_id = %row.id,
-                rule_id = %id,
-                project_id = %project,
-                user_id = %user_id,
-                max_targets = row.max_targets,
-                "online rule backfill started"
-            );
             Ok((StatusCode::ACCEPTED, error::Json(backfill_json(&row)?)))
         }
     }
@@ -342,7 +351,7 @@ mod tests {
     use crate::meta::connections::{ConnectionFields, insert_connection};
     use crate::meta::evaluators::{EvaluatorFields, insert_evaluator};
     use crate::meta::online_rules::PAUSE_ERRORS;
-    use crate::test_support::{Seeded, TestApp, TestResponse, capture_logs, dataset_span};
+    use crate::test_support::{Seeded, TestApp, TestResponse, dataset_span};
 
     /// The judge's prompt maps `input` and `output`.
     const PROMPT: &str = "Question: {{ input }}\nAnswer: {{ output }}";
@@ -922,12 +931,21 @@ mod tests {
         let seeded = app.seed().await;
         let evaluator = judge_with_model(&app, &seeded, PRICED).await;
         let rule = create_rule(&app, &seeded, &trace_rule(evaluator, true)).await;
-        let (response, logs) = capture_logs(create(&app, &seeded, rule, &window_body(10))).await;
+        let response = create(&app, &seeded, rule, &window_body(10)).await;
         assert_eq!(response.status, 202, "{}", text(&response));
         let backfill = id_of(&response.json());
-        assert!(logs.contains("online rule backfill started"), "{logs}");
-        assert!(logs.contains(&backfill.to_string()), "{logs}");
-        assert!(logs.contains(&seeded.user_id.to_string()), "{logs}");
+        let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+            "SELECT action, target_id, details FROM audit_events \
+             WHERE action = 'online_rule.backfill_started'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "one record per backfill");
+        assert_eq!(rows[0].1, Some(rule.to_string()));
+        let details: Value = serde_json::from_str(&rows[0].2).unwrap();
+        assert_eq!(details["backfill_id"], backfill.to_string());
+        assert_eq!(details["max_targets"], 10);
     }
 
     #[tokio::test]
