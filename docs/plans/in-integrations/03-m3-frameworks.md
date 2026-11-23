@@ -46,6 +46,11 @@ Implementer: Haiku, one agent per phase.
 10. **Sidebar.** After adding the pages, sort the whole Frameworks group alphabetically by label (case-insensitive).
 11. **Changelog.** The line says "…with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones)…".
 
+12. **Guardrails sample (second review).** It does not use the hub: hub validators in guardrails-ai 0.11.0 are deprecated packages that pull torch and download a model. The sample defines a local validator with `@register_validator` (`from guardrails.validators import register_validator, Validator, PassResult, FailResult`, or the import path the capture program uses), the same shape as the captured case. It is complete and runnable, and Install has no hub step.
+13. **Temporal sample.** `Client.connect` is a coroutine, so the sample wraps the connection in `async def main()` and calls `asyncio.run(main())`.
+14. **LangGraph TypeScript blocks.** They are copied from `langchain.mdx` with their markers. The `{/* example:integration-langchain */}` block stays as is, because it is byte-compared with the same tested function.
+15. **D-IN-22's text** also says the Guardrails and Temporal pages use `cetra.init(use_global_provider=True, …)`, and why (amendment 1).
+
 ## What it is, and what it is not
 
 When it is done:
