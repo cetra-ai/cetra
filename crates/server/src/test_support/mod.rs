@@ -382,11 +382,14 @@ impl TestApp {
         )
         .expect("org SSO state");
         let limits = Limits::new(&config.demo);
-        // Counting off, as in any debug build; tests turn it on with `Analytics::set_counting`.
+        // Counting on, so handler tests can assert the feature counters; the tests that need
+        // it off (the analytics flag of `GET /api/auth/config`) turn it off with
+        // `Analytics::set_counting`. `Analytics::new` itself follows the switchboard, and a
+        // debug build's heartbeat is off.
         let (analytics, analytics_worker) = crate::analytics::Analytics::with_flush_interval(
             &config,
             Duration::from_millis(50),
-            false,
+            true,
         );
         if let Some(worker) = analytics_worker {
             drop(tokio::spawn(worker.run()));

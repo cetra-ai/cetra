@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use tracing::{Event, Level, Metadata, Subscriber};
 use tracing_subscriber::Layer;
-use tracing_subscriber::filter::filter_fn;
+use tracing_subscriber::filter::{LevelFilter, filter_fn};
 use tracing_subscriber::layer::Context;
 
 use super::Reporter;
@@ -64,10 +64,11 @@ fn reportable(is_event: bool, level: Level, target: &str, has_file: bool) -> boo
 }
 
 /// The crash layer as one of the subscriber's layers, with its own filter: it sees ERROR
-/// events whatever `log.level` says, and no span.
+/// events whatever `log.level` says, and no span. The ERROR hint is the only level the
+/// filter passes; without one the layer would count as TRACE for the whole process.
 pub(crate) fn boxed(reporter: Arc<Reporter>) -> BoxedLayer {
     CrashLayer::new(reporter)
-        .with_filter(filter_fn(is_reported))
+        .with_filter(filter_fn(is_reported).with_max_level_hint(LevelFilter::ERROR))
         .boxed()
 }
 

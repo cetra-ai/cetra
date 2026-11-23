@@ -27,7 +27,8 @@ pub(crate) const MAX_EVENTS: usize = 50;
 pub(crate) const MAX_BODY_BYTES: usize = 64 * 1024;
 /// Longest `org` or `project` value looked up.
 const MAX_KEY_BYTES: usize = 256;
-/// Distinct `(org, project)` pairs resolved per request; events of further pairs are dropped.
+/// Distinct `(org, project)` pairs resolved per request; events of further pairs are counted
+/// but not sent to PostHog.
 const MAX_CONTEXTS: usize = 5;
 
 /// The analytics route.
@@ -86,29 +87,24 @@ async fn post_events(
         };
         let context = if resolving {
             let key = (input.org.clone(), input.project.clone());
-            let cached = match contexts.get(&key) {
+            match contexts.get(&key) {
                 Some(cached) => *cached,
+                None if contexts.len() >= MAX_CONTEXTS => None,
                 None => {
-                    if contexts.len() >= MAX_CONTEXTS {
-                        continue;
-                    }
                     let resolved =
                         resolve(&state, user, input.org.as_deref(), input.project.as_deref()).await;
                     contexts.insert(key, resolved);
                     resolved
                 }
-            };
-            let Some(context) = cached else {
-                continue;
-            };
-            context
+            }
         } else {
-            Context::default()
+            Some(Context::default())
         };
-        record(
-            &state,
-            &event,
-            &Actor {
+        // A context that resolved feeds both sinks; without one the event is only counted
+        // (`record` skips the PostHog sink for an actor without a user), so the heartbeat's
+        // feature counts do not depend on `[analytics]`.
+        let actor = match context {
+            Some(context) => Actor {
                 user_id: Some(user.id),
                 via: None,
                 org_id: context.org_id,
@@ -116,12 +112,22 @@ async fn post_events(
                 project_id: context.project_id,
                 opted_out,
             },
-        );
+            None => Actor {
+                user_id: None,
+                via: None,
+                org_id: None,
+                org_role: None,
+                project_id: None,
+                opted_out,
+            },
+        };
+        record(&state, &event, &actor);
     }
     StatusCode::NO_CONTENT
 }
 
-/// `None`: drop the event (unknown, inactive, or not readable by the user, or a lookup failed).
+/// `None`: the event is counted but not sent to PostHog (the org or project is unknown,
+/// inactive, or not readable by the user, or a lookup failed).
 async fn resolve(
     state: &AppState,
     user: &AuthUser,
@@ -384,29 +390,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_foreign_org_is_dropped() {
+    async fn a_foreign_org_is_counted_but_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         second_org(&app, "other", "bob@example.com").await;
 
+        // The org does not resolve for this user: the event reaches the feature counter only.
         let foreign = json!({ "events": [page(TRACES, "other", None)] });
         assert_eq!(
             post(&app, &seeded.cookie, &foreign).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 0);
+        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
+        let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
+        assert!(sent.is_empty(), "a foreign org's event reached PostHog");
 
         let own = json!({ "events": [page(TRACES, "acme", Some("support-bot"))] });
         assert_eq!(
             post(&app, &seeded.cookie, &own).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
+        assert_eq!(app.state.analytics.counters.get("page.viewed"), 2);
+        let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
+        let events = batch_events(&bodies);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "page.viewed")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]
-    async fn an_unknown_project_is_dropped() {
+    async fn an_unknown_project_is_counted_but_not_sent() {
         let receiver = Receiver::start(200).await;
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
@@ -415,7 +433,12 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 0);
+        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
+        let sent = receiver.wait_for(1, Duration::from_millis(300)).await;
+        assert!(
+            sent.is_empty(),
+            "an unknown project's event reached PostHog"
+        );
     }
 
     #[tokio::test]
@@ -424,7 +447,8 @@ mod tests {
         let app = posthog_app(&receiver).await;
         let seeded = app.seed().await;
         // `acme` resolves; the next four unknown orgs take the remaining context slots and
-        // are dropped; the last two never get a lookup.
+        // do not resolve; the last two never get a lookup. Every valid event is counted;
+        // only the resolved one goes to PostHog.
         let mut events = vec![page(TRACES, "acme", None)];
         for index in 1..=6 {
             events.push(page(TRACES, &format!("unknown-{index}"), None));
@@ -434,7 +458,16 @@ mod tests {
             post(&app, &seeded.cookie, &body).await,
             StatusCode::NO_CONTENT
         );
-        assert_eq!(app.state.analytics.counters.get("page.viewed"), 1);
+        assert_eq!(app.state.analytics.counters.get("page.viewed"), 7);
+        let bodies = receiver.wait_for(1, Duration::from_secs(2)).await;
+        let events = batch_events(&bodies);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"] == "page.viewed")
+                .count(),
+            1
+        );
     }
 
     #[tokio::test]

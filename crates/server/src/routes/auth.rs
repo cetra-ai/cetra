@@ -2912,8 +2912,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_config_says_analytics_is_off_in_a_test_build() {
+    async fn auth_config_says_analytics_is_off_when_nothing_runs() {
+        // `TestApp` counts by default so handler tests can assert the counters; a real debug
+        // build counts nothing, and with no PostHog sink the flag is off.
         let app = TestApp::new().await;
+        app.state.analytics.set_counting(false);
         let config: AuthConfig = app
             .request(Method::GET, "/api/auth/config")
             .send()
@@ -2952,6 +2955,8 @@ mod tests {
             config.restore_mode = true;
         })
         .await;
+        // Restore mode leaves no sink; counting must be off too for the flag to be off.
+        app.state.analytics.set_counting(false);
         let config: AuthConfig = app
             .request(Method::GET, "/api/auth/config")
             .send()

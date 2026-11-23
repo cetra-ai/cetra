@@ -102,19 +102,23 @@ impl Analytics {
         self.limiter.check(&user, now_ns).is_ok()
     }
 
-    /// Turns counting on or off: a test build has the heartbeat off (debug build), so tests of
-    /// the self-hosted path set it by hand.
+    /// Turns counting on or off. `Analytics::new` follows the switchboard's heartbeat
+    /// decision (off in a debug build), while `TestApp` counts by default so handler tests
+    /// can assert the counters; tests that need it off set it by hand.
     #[cfg(test)]
     pub(crate) fn set_counting(&self, on: bool) {
         self.counting.store(on, Ordering::Relaxed);
     }
 }
 
-/// Records one catalog event (design § 6): counts it, and when the PostHog sink runs, the
-/// actor has a user and the request did not opt out, queues it (after the org's
-/// `$groupidentify` when due). Never fails and never blocks.
+/// Records one catalog event (design § 6): counts it while the heartbeat runs (the `counting`
+/// flag; when the heartbeat is off nothing is counted, saved or sent), and when the PostHog
+/// sink runs, the actor has a user and the request did not opt out, queues it (after the
+/// org's `$groupidentify` when due). Never fails and never blocks.
 pub(crate) fn record(state: &AppState, event: &Event, actor: &Actor) {
-    state.analytics.counters.increment(event.name());
+    if state.analytics.counting.load(Ordering::Relaxed) {
+        state.analytics.counters.increment(event.name());
+    }
     let Some(sink) = state.analytics.sink.as_ref() else {
         return;
     };
@@ -186,15 +190,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn counting_off_leaves_the_counters_at_zero() {
+        // `TestApp` counts by default; a real debug build does not, so the hook turns it off.
+        // The PostHog sink does not depend on counting: the event still reaches it.
+        let app = TestApp::new().await;
+        app.state.analytics.set_counting(false);
+        assert!(!app.state.analytics.ui_events_wanted());
+        record(&app.state, &Event::DatasetCreated, &no_actor());
+        assert_eq!(app.state.analytics.counters.get("dataset.created"), 0);
+
+        let receiver = Receiver::start(200).await;
+        let with_sink = posthog_app(&receiver).await;
+        with_sink.state.analytics.set_counting(false);
+        assert!(with_sink.state.analytics.posthog_enabled());
+        let actor = Actor {
+            user_id: Some(Uuid::now_v7()),
+            ..no_actor()
+        };
+        record(&with_sink.state, &Event::DatasetCreated, &actor);
+        assert_eq!(with_sink.state.analytics.counters.get("dataset.created"), 0);
+        assert_eq!(receiver.wait_for(1, Duration::from_secs(2)).await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn ui_events_follow_either_sink() {
         let app = TestApp::new().await;
+        app.state.analytics.set_counting(false);
         assert!(!app.state.analytics.ui_events_wanted());
         app.state.analytics.set_counting(true);
         assert!(app.state.analytics.ui_events_wanted());
 
         let receiver = Receiver::start(200).await;
-        // Counting is off in a test build; the PostHog sink alone makes the flag true.
+        // With counting off, the PostHog sink alone makes the flag true.
         let with_sink = posthog_app(&receiver).await;
+        with_sink.state.analytics.set_counting(false);
         assert!(with_sink.state.analytics.ui_events_wanted());
     }
 

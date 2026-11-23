@@ -203,18 +203,22 @@ pub(crate) fn build(
     let ring = LogRing::new();
     let ring_filter = log_filter(&config.log.level).map_err(ObservabilityError::LogLevel)?;
     // Events only: the ring formats events, and a span it enabled would cost a registry slot
-    // and a fields extension per request with nothing recorded (M2's notes for M3).
+    // and a fields extension per request with nothing recorded (M2's notes for M3). The
+    // TRACE hint keeps `log.level`'s, as for stdout above.
     let ring_targets =
-        filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target()));
+        filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target()))
+            .with_max_level_hint(LevelFilter::TRACE);
     layers.push(ring.layer(FilterExt::<Registry>::and(ring_filter, ring_targets)));
     let logs = match config.self_monitoring.logs_endpoint() {
         Some(endpoint) => {
             let pipeline = LogPipeline::new(&config.self_monitoring, endpoint, runtime.clone())?;
             // The log bridge ignores spans; without `is_event` here, `self_monitoring.level =
-            // "info"` would enable every `info` span even with traces off.
+            // "info"` would enable every `info` span even with traces off. TRACE for the same
+            // reason as the ring: the export level's own hint decides.
             let targets = filter_fn(|metadata| {
                 metadata.is_event() && export_target_allowed(metadata.target(), *metadata.level())
-            });
+            })
+            .with_max_level_hint(LevelFilter::TRACE);
             let export: BoxedLayer = pipeline
                 .bridge()
                 .with_filter(FilterExt::<Registry>::and(export_level_filter, targets))
@@ -305,14 +309,20 @@ fn span_target_allowed(target: &str, level: Level) -> bool {
 /// `parent:`), and the exception mappings, which would copy error text into span attributes
 /// and statuses. No propagator exists, so no incoming `traceparent` is read (D-TL-7).
 fn span_layer(tracer: SdkTracer, events: EnvFilter) -> BoxedLayer {
+    // INFO is the most verbose level a span can pass (`span_target_allowed`); the events
+    // filter can pass any level, so TRACE, which leaves the export filter's hint in charge.
+    // `Or`'s hint needs both sides': without one on each `filter_fn`, the layer would count
+    // as TRACE.
     let spans = filter_fn(|metadata| {
         metadata.is_span() && span_target_allowed(metadata.target(), *metadata.level())
-    });
+    })
+    .with_max_level_hint(LevelFilter::INFO);
     let events = FilterExt::<Registry>::and(
         events,
         filter_fn(|metadata| {
             metadata.is_event() && export_target_allowed(metadata.target(), *metadata.level())
-        }),
+        })
+        .with_max_level_hint(LevelFilter::TRACE),
     );
     OpenTelemetryLayer::<Registry, SdkTracer>::new(tracer)
         .with_location(false)
@@ -907,7 +917,8 @@ mod tests {
         let ring = LogRing::new();
         let layer = ring.layer(FilterExt::<Registry>::and(
             log_filter("info").unwrap(),
-            filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target())),
+            filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target()))
+                .with_max_level_hint(LevelFilter::TRACE),
         ));
         let dispatch = Dispatch::new(tracing_subscriber::registry().with(layer));
         let guard = tracing::dispatcher::set_default(&dispatch);

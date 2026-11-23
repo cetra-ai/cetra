@@ -243,13 +243,27 @@ fn join(path: &str, key: &str) -> String {
     }
 }
 
-/// A shown leaf: strings scrubbed and capped.
+/// A shown leaf: strings scrubbed and capped. A string that parses as a URL loses its query
+/// string and fragment after the scrubber: a token can sit in either (`?token=…`, `#…`).
 fn show(value: &Value) -> Value {
     match value {
-        Value::String(text) => Value::String(cap(scrub_text(text))),
+        Value::String(text) => {
+            Value::String(cap(drop_query_and_fragment(&scrub_text(text)).to_owned()))
+        }
         Value::Array(items) => Value::Array(items.iter().map(show).collect()),
         other => other.clone(),
     }
+}
+
+/// `text` without its query string and fragment when it parses as a URL, else `text` as is.
+/// Runs after [`scrub_text`](super::scrub::scrub_text), so a `?` or `#` inside user info has
+/// already been redacted; whatever is left is a real delimiter, and the text is otherwise
+/// kept byte for byte (no re-serialization).
+fn drop_query_and_fragment(text: &str) -> &str {
+    if url::Url::parse(text).is_err() {
+        return text;
+    }
+    text.find(['?', '#']).map_or(text, |at| &text[..at])
 }
 
 fn cap(text: String) -> String {
@@ -539,6 +553,72 @@ mod tests {
     }
 
     #[test]
+    fn url_shown_values_lose_their_query_and_fragment() {
+        // A token can sit after `?` or `#` in any shown URL; the scrubber alone leaves it.
+        let out = redact(&tree_with(&[
+            (
+                "orgs.create_url",
+                Value::String("https://billing.example/new?token=PLANTED".to_owned()),
+            ),
+            (
+                "public_url",
+                Value::String("https://app.example/#PLANTED".to_owned()),
+            ),
+            (
+                "entitlements.upgrade_url",
+                Value::String("https://shop.example/up?team=1#PLANTED".to_owned()),
+            ),
+            (
+                "storage.s3.endpoint",
+                Value::String("https://minio.example:9000?accessKey=PLANTED#frag".to_owned()),
+            ),
+            (
+                "auth.oidc[].issuer",
+                Value::String("https://id.example.com/realms/x?hint=PLANTED".to_owned()),
+            ),
+            // Not a URL: a `?` in plain text is kept.
+            ("init.org", Value::String("What? yes".to_owned())),
+        ]));
+        let text = out.to_string();
+        assert!(
+            !text.contains("PLANTED"),
+            "a query or fragment leaked: {text}"
+        );
+        assert_eq!(
+            read(&out, "orgs.create_url"),
+            &json!("https://billing.example/new")
+        );
+        assert_eq!(read(&out, "public_url"), &json!("https://app.example/"));
+        assert_eq!(
+            read(&out, "entitlements.upgrade_url"),
+            &json!("https://shop.example/up")
+        );
+        assert_eq!(
+            read(&out, "storage.s3.endpoint"),
+            &json!("https://minio.example:9000")
+        );
+        assert_eq!(
+            read(&out, "auth.oidc[].issuer"),
+            &json!("https://id.example.com/realms/x")
+        );
+        assert_eq!(read(&out, "init.org"), &json!("What? yes"));
+    }
+
+    #[test]
+    fn a_delimiter_inside_user_info_still_scrubs_whole() {
+        // The query and fragment are dropped after the scrubber, so a `#` inside user info
+        // does not cut the password short of its `@`.
+        let out = redact(&tree_with(&[(
+            "storage.s3.endpoint",
+            Value::String("https://u:p#PLANTED@minio.example?x=1".to_owned()),
+        )]));
+        assert_eq!(
+            read(&out, "storage.s3.endpoint"),
+            &json!("https://<redacted>@minio.example")
+        );
+    }
+
+    #[test]
     fn numbers_and_booleans_convert() {
         assert_eq!(
             figment_to_json(&FigmentValue::Num(Tag::Default, Num::U8(3))),
@@ -603,8 +683,7 @@ mod tests {
             ("smtp_url = \"PLANTED://x\"\n", &[]),
         ];
         for (toml, env) in cases {
-            let error = load_from(Some(toml), env)
-                .expect_err("the configuration is rejected");
+            let error = load_from(Some(toml), env).expect_err("the configuration is rejected");
             let text = serde_json::to_string(&error_view(&error)).expect("the view serializes");
             assert!(!text.contains("PLANTED"), "{text}");
         }
@@ -635,8 +714,8 @@ mod tests {
 
     #[test]
     fn a_toml_syntax_error_is_toml_syntax() {
-        let error = source_tree(Some("encryption_key = \"PLANTED"), &[])
-            .expect_err("the TOML is rejected");
+        let error =
+            source_tree(Some("encryption_key = \"PLANTED"), &[]).expect_err("the TOML is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::TomlSyntax);
         assert_eq!(view.key, None);
@@ -649,8 +728,8 @@ mod tests {
 
     #[test]
     fn an_unknown_key_is_unknown_field() {
-        let error = load_from(Some("zz_probe = 1\n"), &[])
-            .expect_err("the configuration is rejected");
+        let error =
+            load_from(Some("zz_probe = 1\n"), &[]).expect_err("the configuration is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::UnknownField);
         assert!(view.key.is_some_and(|key| key.contains("zz_probe")));

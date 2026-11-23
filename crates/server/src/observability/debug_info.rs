@@ -157,13 +157,12 @@ pub struct TelemetryState {
     pub instance_id: Option<Uuid>,
     /// `telemetry.endpoint`.
     pub endpoint: String,
-    /// `heartbeat::collect` serialized, shown even when the heartbeat is off; the nil UUID
-    /// stands for an id not created yet. `None` when it could not be built (see `errors`).
+    /// `heartbeat::collect` with the current feature counts applied, serialized; shown even
+    /// when the heartbeat is off; the nil UUID stands for an id not created yet. `None` when
+    /// it could not be built (see `errors`).
     pub heartbeat_preview: Option<serde_json::Value>,
-    /// The switchboard's crash-report decision when M5's `Decision.crash_reports` exists;
-    /// `None` before M5 (and in answers of a server without it).
-    #[serde(default)]
-    pub crash_reports: Option<SwitchView>,
+    /// The switchboard's crash-report decision.
+    pub crash_reports: SwitchView,
 }
 
 /// A part of `debug_info` that could not be read.
@@ -363,7 +362,11 @@ pub(crate) async fn collect(state: &AppState, ring: Option<&LogRing>) -> DebugIn
     )
     .await;
     let heartbeat_preview = match preview {
-        Ok(heartbeat) => serde_json::to_value(&heartbeat).ok(),
+        // The preview is the heartbeat the server would send now, so it carries the current
+        // feature counts (`Sender::tick` applies the same snapshot).
+        Ok(heartbeat) => {
+            serde_json::to_value(heartbeat.with_usage(&state.analytics.counters.snapshot())).ok()
+        }
         Err(_) => {
             errors.push(section_error("telemetry.heartbeat_preview", "query_failed"));
             None
@@ -374,7 +377,7 @@ pub(crate) async fn collect(state: &AppState, ring: Option<&LogRing>) -> DebugIn
         instance_id,
         endpoint: state.config.telemetry.endpoint.clone(),
         heartbeat_preview,
-        crash_reports: Some(SwitchView::of(decision.crash_reports)),
+        crash_reports: SwitchView::of(decision.crash_reports),
     };
 
     DebugInfo {
@@ -467,7 +470,10 @@ pub(crate) fn sample() -> DebugInfo {
             instance_id: None,
             endpoint: "http://127.0.0.1:9".to_owned(),
             heartbeat_preview: None,
-            crash_reports: None,
+            crash_reports: SwitchView {
+                on: false,
+                reason: Some("config".to_owned()),
+            },
         },
         errors: Vec::new(),
     }
@@ -476,6 +482,9 @@ pub(crate) fn sample() -> DebugInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analytics::actor::{Actor, Via};
+    use crate::analytics::catalog::Event;
+    use crate::analytics::record;
     use crate::config::parse_otlp_endpoint;
     use crate::meta::instance_settings::{TELEMETRY_INSTANCE_ID, get_setting};
     use crate::test_support::TestApp;
@@ -549,6 +558,34 @@ mod tests {
         assert_eq!(info.telemetry.instance_id, Some(id));
         let preview = info.telemetry.heartbeat_preview.expect("a preview");
         assert_eq!(preview["instance_id"], id.to_string());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_preview_carries_the_current_feature_counts() {
+        // The preview must match what the server would send now: the same usage snapshot
+        // `Sender::tick` applies (`TestApp` counts by default).
+        let app = TestApp::new().await;
+        for _ in 0..3 {
+            record(
+                &app.state,
+                &Event::DatasetCreated,
+                &Actor::user(Uuid::now_v7(), Via::Session),
+            );
+        }
+        let info = collect(&app.state, None).await;
+        let preview = info.telemetry.heartbeat_preview.expect("a preview");
+        assert_eq!(preview["usage"]["dataset.created"], "1-9");
+
+        // Counting off (a real debug build): a further event changes nothing.
+        app.state.analytics.set_counting(false);
+        record(
+            &app.state,
+            &Event::DatasetCreated,
+            &Actor::user(Uuid::now_v7(), Via::Session),
+        );
+        let info = collect(&app.state, None).await;
+        let preview = info.telemetry.heartbeat_preview.expect("a preview");
+        assert_eq!(preview["usage"]["dataset.created"], "1-9");
     }
 
     #[tokio::test(flavor = "current_thread")]

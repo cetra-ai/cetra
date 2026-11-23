@@ -35,9 +35,12 @@ fn is_domain_byte(byte: u8) -> bool {
 }
 
 /// `scheme://user:password@host` becomes `scheme://<redacted>@host`: everything between
-/// `://` and the last `@` before the next `/`, quote, backslash, whitespace or the end. `?`
-/// and `#` do not end the scan, so a password containing them is covered; the cost is
-/// over-redacting `https://h?x=a@b`, which is harmless.
+/// `://` and the last `@` before the next `/`, quote, backslash, whitespace or list or map
+/// delimiter (`,`, `;`, `<`, `>`, `)`, `]`), so unquoted `key=value,key=value` text such as
+/// `url=https://relay.example,user=bob@corp.example` does not swallow across the comma (the
+/// email keeps its own form for `scrub_emails`). `?` and `#` do not end the scan, so a
+/// password containing them is covered; the cost is over-redacting `https://h?x=a@b`, which
+/// is harmless.
 fn scrub_userinfo(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -48,7 +51,10 @@ fn scrub_userinfo(text: &str) -> String {
         let mut end = start;
         let mut at = None;
         while end < bytes.len()
-            && !matches!(bytes[end], b'/' | b'"' | b'\'' | b'\\')
+            && !matches!(
+                bytes[end],
+                b'/' | b'"' | b'\'' | b'\\' | b',' | b';' | b'<' | b'>' | b')' | b']'
+            )
             && !bytes[end].is_ascii_whitespace()
         {
             if bytes[end] == b'@' {
@@ -61,7 +67,10 @@ fn scrub_userinfo(text: &str) -> String {
             out.push_str(REDACTED);
             copied = at;
         }
-        search = end;
+        // Resume right after this `://`, not where its scan stopped: a `://` that abuts the
+        // previous URL (`://u:p@://k@h`) would otherwise be skipped on one pass and examined
+        // on the next, and scrubbing must be idempotent.
+        search = start;
     }
     out.push_str(&text[copied..]);
     out
@@ -179,7 +188,7 @@ mod tests {
     ];
 
     /// URL inputs, with what they must scrub to.
-    const URLS: [(&str, &str); 6] = [
+    const URLS: [(&str, &str); 13] = [
         ("https://u:p@h.example/x", "https://<redacted>@h.example/x"),
         (
             "smtp://user:pa%40ss@mail.example:587",
@@ -189,6 +198,37 @@ mod tests {
         ("https://h.example/a@b", "https://h.example/a@b"),
         ("https://u:pa#ss@h.example", "https://<redacted>@h.example"),
         ("https://u:pa?ss@h.example", "https://<redacted>@h.example"),
+        // No path: the scan runs to the end of the text.
+        (
+            "https://u:p@relay.example",
+            "https://<redacted>@relay.example",
+        ),
+        // The userinfo scan stops at list delimiters, so an email in the next field is
+        // scrubbed whole (no domain left behind) and the host before it is kept.
+        (
+            "url=https://relay.example,user=bob@corp.example",
+            "url=https://relay.example,user=<redacted>",
+        ),
+        (
+            "https://u:p@relay.example,x@y.example",
+            "https://<redacted>@relay.example,<redacted>",
+        ),
+        (
+            "https://u:p@relay.example;user=bob@corp.example",
+            "https://<redacted>@relay.example;user=<redacted>",
+        ),
+        (
+            "(https://relay.example) bob@corp.example",
+            "(https://relay.example) <redacted>",
+        ),
+        (
+            "see <https://u:p@relay.example>",
+            "see <https://<redacted>@relay.example>",
+        ),
+        (
+            "[https://relay.example] a@b.example",
+            "[https://relay.example] <redacted>",
+        ),
     ];
 
     #[test]
@@ -243,7 +283,22 @@ mod tests {
 
     #[test]
     fn scrub_is_total_and_idempotent_on_a_small_alphabet() {
-        let pieces = ["a", "@", ".", "-", "é", "sk-cetra-", "://", ":", "/", "\""];
+        let pieces = [
+            "a",
+            "@",
+            ".",
+            "-",
+            "é",
+            "sk-cetra-",
+            "://",
+            ":",
+            "/",
+            "\"",
+            ",",
+            ";",
+            "<",
+            ">",
+        ];
         for len in 1..=5u32 {
             let total = pieces.len().pow(len);
             for n in 0..total {

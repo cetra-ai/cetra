@@ -156,7 +156,7 @@ It never contains emails, email domains, names of organizations, projects or any
 
 ## The instance id
 
-The instance id is a random UUID that cetra creates in `meta.db` the first time it sends a heartbeat or a crash report. Nothing about your machine goes into it. A backup and its restore keep it, since they are the same instance; a copy of the data directory made by hand shares it with the original. The startup line shows it. To have us delete the heartbeats and crash reports of an instance, write to `hello@cetra.sh` with its id.
+The instance id is a random UUID that cetra creates in `meta.db` when the heartbeat or the crash-report task starts, before the first send. Nothing about your machine goes into it. A backup and its restore keep it, since they are the same instance; a copy of the data directory made by hand shares it with the original. The startup line shows it. To have us delete the heartbeats and crash reports of an instance, write to `hello@cetra.sh` with its id.
 
 ## Crash reports
 
@@ -215,7 +215,7 @@ A report never contains the panic or error message, field values, error texts, t
 
 ## Feature usage
 
-cetra counts how often each product event happens, whoever does it: the web UI, the CLI, an SDK, an agent over MCP, or the API. The heartbeat's `usage` field sends each count since the last heartbeat as a bucket: `0`, `1-9`, `10-99`, `100-999` or `1000+`. It never says who did what, in which organization or project, in what order, or when. cetra keeps the counts in `meta.db` while the heartbeat is on, saved once an hour, and clears what the relay accepted. When the heartbeat is off, nothing is saved or sent.
+cetra counts how often each product event happens, whoever does it: the web UI, the CLI, an SDK, an agent over MCP, or the API. The heartbeat's `usage` field sends each count since the last heartbeat as a bucket: `0`, `1-9`, `10-99`, `100-999` or `1000+`. It never says who did what, in which organization or project, in what order, or when. cetra keeps the counts in `meta.db` while the heartbeat is on, saved once an hour, and clears what the relay accepted. When the heartbeat is off, nothing is counted, saved or sent.
 
 While the heartbeat is on, the web UI reports its own events (marked "UI" below) to your server, through `POST /api/v1/analytics/events` on its own origin, only so that they are counted: your server keeps no per-user record of them and sends nothing about them except the buckets. The UI loads no analytics script and sets no cookie. When the heartbeat is off and [product analytics](#product-analytics) are not set up, the UI reports nothing.
 

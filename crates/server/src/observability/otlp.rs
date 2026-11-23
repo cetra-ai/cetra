@@ -269,17 +269,21 @@ fn post(
 pub(crate) struct OtlpLogExporter {
     client: reqwest::Client,
     url: String,
+    /// The endpoint's host, the only part of it the Debug impl prints: some vendors put a
+    /// token in the path.
+    host: String,
     headers: HeaderMap,
     resource: ResourceAttributesWithSchema,
     runtime: Handle,
     failures: Arc<FailureLog>,
 }
 
+/// Prints the host only, like `OtlpEndpoint`'s Debug: the URL's path can hold a token.
 impl fmt::Debug for OtlpLogExporter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let header_names: Vec<&str> = self.headers.keys().map(HeaderName::as_str).collect();
         f.debug_struct("OtlpLogExporter")
-            .field("url", &self.url)
+            .field("host", &self.host)
             .field("header_names", &header_names)
             .finish_non_exhaustive()
     }
@@ -346,6 +350,7 @@ impl LogPipeline {
         let exporter = OtlpLogExporter {
             client,
             url: endpoint.logs_url(),
+            host: endpoint.host().to_owned(),
             headers,
             resource: (&resource).into(),
             runtime,
@@ -396,17 +401,21 @@ impl fmt::Debug for LogPipeline {
 pub(crate) struct OtlpSpanExporter {
     client: reqwest::Client,
     url: String,
+    /// The endpoint's host, the only part of it the Debug impl prints: some vendors put a
+    /// token in the path.
+    host: String,
     headers: HeaderMap,
     resource: ResourceAttributesWithSchema,
     runtime: Handle,
     failures: Arc<FailureLog>,
 }
 
+/// Prints the host only, like `OtlpEndpoint`'s Debug: the URL's path can hold a token.
 impl fmt::Debug for OtlpSpanExporter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let header_names: Vec<&str> = self.headers.keys().map(HeaderName::as_str).collect();
         f.debug_struct("OtlpSpanExporter")
-            .field("url", &self.url)
+            .field("host", &self.host)
             .field("header_names", &header_names)
             .finish_non_exhaustive()
     }
@@ -472,6 +481,7 @@ impl SpanPipeline {
         let exporter = OtlpSpanExporter {
             client,
             url: endpoint.traces_url(),
+            host: endpoint.host().to_owned(),
             headers,
             resource: (&resource).into(),
             runtime,
@@ -771,9 +781,11 @@ mod tests {
 
     /// The exporter as `LogPipeline::new` builds it, pointed at `receiver_base`.
     fn exporter_for(receiver_base: &str) -> OtlpLogExporter {
+        let endpoint = parse_otlp_endpoint(receiver_base).unwrap();
         OtlpLogExporter {
             client: http_client().unwrap(),
-            url: parse_otlp_endpoint(receiver_base).unwrap().logs_url(),
+            url: endpoint.logs_url(),
+            host: endpoint.host().to_owned(),
             headers: request_headers(None).unwrap(),
             resource: (&resource(vec![])).into(),
             runtime: Handle::current(),
@@ -783,9 +795,11 @@ mod tests {
 
     /// The span exporter as `SpanPipeline::new` builds it, pointed at `receiver_base`.
     fn span_exporter_for(receiver_base: &str) -> OtlpSpanExporter {
+        let endpoint = parse_otlp_endpoint(receiver_base).unwrap();
         OtlpSpanExporter {
             client: http_client().unwrap(),
-            url: parse_otlp_endpoint(receiver_base).unwrap().traces_url(),
+            url: endpoint.traces_url(),
+            host: endpoint.host().to_owned(),
             headers: request_headers(None).unwrap(),
             resource: (&resource(vec![])).into(),
             runtime: Handle::current(),
@@ -1078,6 +1092,35 @@ mod tests {
         assert!(!shown.contains("t0k3n"));
     }
 
+    #[tokio::test]
+    async fn log_debug_shows_the_host_and_never_the_path() {
+        // Some vendors put a token in the path (M1): the exporter's and the pipeline's Debug
+        // print the host only.
+        let exporter = exporter_for("https://o1.ingest.example/api/123/secret-token");
+        let shown = format!("{exporter:?}");
+        assert!(shown.contains("o1.ingest.example"), "{shown}");
+        assert!(!shown.contains("secret-token"), "{shown}");
+        assert!(!shown.contains("/api/123"), "{shown}");
+
+        let config = SelfMonitoringConfig {
+            otlp_endpoint: Some(
+                parse_otlp_endpoint("https://o1.ingest.example/api/123/secret-token").unwrap(),
+            ),
+            ..SelfMonitoringConfig::default()
+        };
+        let pipeline =
+            LogPipeline::new(&config, config.logs_endpoint().unwrap(), Handle::current()).unwrap();
+        let shown = format!("{pipeline:?}");
+        assert!(shown.contains("o1.ingest.example"), "{shown}");
+        assert!(!shown.contains("secret-token"), "{shown}");
+        // Shut down on a blocking thread: the batch processor's drop would otherwise block a
+        // runtime worker the test needs.
+        tokio::task::spawn_blocking(move || pipeline.shutdown(Duration::from_secs(2)))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
     #[test]
     fn the_operator_resource_extends_and_overrides() {
         let extended = resource(vec![
@@ -1277,6 +1320,39 @@ mod tests {
         assert!(shown.contains("127.0.0.1"), "{shown}");
         assert!(!shown.contains("/otlp"), "{shown}");
         assert!(!shown.contains("t0k3n"), "{shown}");
+        // Shut down on a blocking thread: the batch processor's drop would otherwise block a
+        // runtime worker the test needs.
+        tokio::task::spawn_blocking(move || pipeline.shutdown(Duration::from_secs(2)))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn span_debug_shows_the_host_and_never_the_path() {
+        // Some vendors put a token in the path (M1): the exporter's and the pipeline's Debug
+        // print the host only.
+        let exporter = span_exporter_for("https://o1.ingest.example/api/123/secret-token");
+        let shown = format!("{exporter:?}");
+        assert!(shown.contains("o1.ingest.example"), "{shown}");
+        assert!(!shown.contains("secret-token"), "{shown}");
+        assert!(!shown.contains("/api/123"), "{shown}");
+
+        let config = SelfMonitoringConfig {
+            otlp_endpoint: Some(
+                parse_otlp_endpoint("https://o1.ingest.example/api/123/secret-token").unwrap(),
+            ),
+            ..SelfMonitoringConfig::default()
+        };
+        let pipeline = SpanPipeline::new(
+            &config,
+            config.traces_endpoint().unwrap(),
+            Handle::current(),
+        )
+        .unwrap();
+        let shown = format!("{pipeline:?}");
+        assert!(shown.contains("o1.ingest.example"), "{shown}");
+        assert!(!shown.contains("secret-token"), "{shown}");
         // Shut down on a blocking thread: the batch processor's drop would otherwise block a
         // runtime worker the test needs.
         tokio::task::spawn_blocking(move || pipeline.shutdown(Duration::from_secs(2)))

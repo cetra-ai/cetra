@@ -172,7 +172,8 @@ async fn table_flags(meta: &MetaDb) -> Result<TableFlags, MetaError> {
     })
 }
 
-/// The heartbeat as it would be sent now. Reads `meta.db` only; M3's debug bundle reuses it.
+/// The heartbeat as it would be sent now, without feature counts: `Sender::tick` and the
+/// debug bundle's preview apply those with [`Heartbeat::with_usage`]. Reads `meta.db` only.
 ///
 /// # Errors
 ///
@@ -292,7 +293,12 @@ fn wait_before_send(last_sent_ns: Option<i64>, now_ns: i64) -> Option<Duration> 
     let now = i128::from(now_ns);
     let period = i128::from(u64::try_from(PERIOD.as_nanos()).unwrap_or(u64::MAX));
     if last > now {
-        // The clock went back: wait a whole period rather than send twice in a day.
+        // A last-send time more than a period in the future is a wrong clock that has since
+        // been corrected, not a send to wait for: treat it as never sent. A small step back
+        // waits a whole period rather than send twice in a day.
+        if last - now > period {
+            return None;
+        }
         return Some(PERIOD);
     }
     let elapsed = now - last;
@@ -1209,9 +1215,20 @@ mod tests {
         );
         assert_eq!(wait_before_send(Some(now - 24 * HOUR_NS), now), None);
         assert_eq!(wait_before_send(Some(now - 25 * HOUR_NS), now), None);
+        // A small step back waits a period; a last-send time further in the future than that
+        // (a wrong clock since corrected) counts as never sent.
         assert_eq!(wait_before_send(Some(now + HOUR_NS), now), Some(PERIOD));
+        assert_eq!(
+            wait_before_send(Some(now + 24 * HOUR_NS), now),
+            Some(PERIOD)
+        );
+        assert_eq!(wait_before_send(Some(now + 25 * HOUR_NS), now), None);
+        assert_eq!(
+            wait_before_send(Some(now + 100 * 365 * 24 * HOUR_NS), now),
+            None
+        );
         assert_eq!(wait_before_send(Some(i64::MIN), i64::MAX), None);
-        assert_eq!(wait_before_send(Some(i64::MAX), i64::MIN), Some(PERIOD));
+        assert_eq!(wait_before_send(Some(i64::MAX), i64::MIN), None);
     }
 
     #[test]
@@ -1331,6 +1348,32 @@ mod tests {
             Duration::from_secs(23 * 3600)
         );
         assert!(receiver.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_sends_when_the_stored_time_is_far_in_the_future() {
+        // A heartbeat accepted under a clock two days ahead, then the clock corrected: the
+        // stored time is more than a period in the future and counts as never sent.
+        let app = TestApp::new().await;
+        let receiver = Receiver::start(204, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        let future = (app.state.clock.now_ns() + 48 * HOUR_NS).to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(
+                    async move { put_setting(conn, TELEMETRY_LAST_HEARTBEAT_AT, &future).await },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(sender.tick(&app.state).await, PERIOD);
+        assert_eq!(receiver.requests().len(), 1);
+        let now = app.state.clock.now_ns();
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_LAST_HEARTBEAT_AT)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(now.to_string()));
     }
 
     #[tokio::test]

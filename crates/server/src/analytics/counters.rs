@@ -1,4 +1,4 @@
-//! Feature counters (design § 6): every catalog event, from any source, adds one to its name's counter. The heartbeat sends them as buckets in `usage` and subtracts what was accepted. While the heartbeat runs they are saved hourly to `instance_settings`; otherwise they stay in memory and nothing reads them. No users, orgs, sequences or timings. This module reads nothing of the licence code (D172).
+//! Feature counters (design § 6): every catalog event, from any source, adds one to its name's counter while the heartbeat runs (when it is off, `analytics::record` does not count at all). The heartbeat sends them as buckets in `usage` and subtracts what was accepted. While the heartbeat runs they are saved hourly to `instance_settings`. No users, orgs, sequences or timings. This module reads nothing of the licence code (D172).
 
 use std::collections::BTreeMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
