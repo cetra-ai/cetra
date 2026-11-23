@@ -5,7 +5,7 @@ description: "Trace Google Gen AI calls with cetra: Gemini generateContent, stre
 
 import Backing from "../../../../components/Backing.astro";
 
-cetra traces calls to Gemini through the Google Gen AI SDK, including streamed answers, images in the input and reasoning tokens.
+cetra traces calls to Gemini through the Google Gen AI SDK, including streamed answers, images in the input and reasoning tokens. For Vertex AI, see [Vertex AI](/docs/integrations/vertex-ai/).
 
 <Backing fixtures={["openinference/google-genai-multimodal", "openinference/google-genai-stream", "genai/google-genai-multimodal", "genai/google-genai-stream", "openllmetry/google-genai-multimodal"]} tests={["sdks/python/tests/test_instrument.py::test_other_registry_entries_import[google-genai]"]} />
 

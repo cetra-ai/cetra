@@ -1,0 +1,68 @@
+---
+title: Ollama
+description: "Trace models served by Ollama with cetra from Python, with the OpenInference Ollama instrumentation."
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+import Backing from "../../../../components/Backing.astro";
+
+Trace models served by Ollama with cetra from Python, with the OpenInference Ollama instrumentation.
+
+<Backing fixtures={["openinference/ollama-chat"]} />
+
+## Install
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+```bash
+pip install "cetra-sdk[ollama]" ollama
+```
+
+  </TabItem>
+</Tabs>
+
+## Set up
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+
+{/* untested: calls a local Ollama server with the model llama3.1 */}
+```python
+import ollama
+
+import cetra
+
+cetra.init(instrument=["ollama"])
+
+response = ollama.chat(
+    model="llama3.1",
+    messages=[{"role": "user", "content": "What is the capital of France?"}],
+)
+print(response.message.content)
+
+cetra.flush()
+```
+
+  </TabItem>
+</Tabs>
+
+## What you get
+
+- Each chat call is an `llm` span with the provider `ollama`.
+- Input and output token counts come from the response.
+- Cost comes from the built-in prices.
+
+## Limits
+
+- Only non-streaming chat is captured.
+- Through the OpenAI client on `localhost`, the provider stays `openai`: cetra cannot tell a local server from another.
+- Common Ollama models are in the built-in prices at 0; add a custom model price for others.
+- The fixtures were captured with ollama 0.6.3 and openinference-instrumentation-ollama 0.1.20.
+- If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
+
+## Next
+
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
+- [Cost and tokens](/docs/tracing/cost-and-tokens/): how cost is computed from the token counts.
+- [Custom model prices](/docs/tracing/cost-and-tokens/#custom-model-prices): price a model the built-in prices do not cover.
