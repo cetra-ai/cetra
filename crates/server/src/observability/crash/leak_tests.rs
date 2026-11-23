@@ -120,6 +120,7 @@ fn crash_child_process() {
     );
     // `unwrap` puts the error's Debug, planted values included, in the panic message.
     let failed: Result<(), String> = Err(format!("{PLANTED_KEY} {PLANTED_EMAIL} {PLANTED_PROMPT}"));
+    #[allow(clippy::unnecessary_literal_unwrap)] // the panic message is the point of the test
     failed.unwrap();
 }
 

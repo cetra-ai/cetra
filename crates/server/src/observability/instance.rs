@@ -45,10 +45,12 @@ pub(crate) async fn instance_id(meta: &MetaDb) -> Result<Uuid, MetaError> {
 pub(crate) async fn existing_instance_id(meta: &MetaDb) -> Result<Option<Uuid>, MetaError> {
     match get_setting(meta.reader(), TELEMETRY_INSTANCE_ID).await? {
         None => Ok(None),
-        Some(value) => Uuid::parse_str(&value).map(Some).map_err(|_| MetaError::Corrupt {
-            table: "instance_settings",
-            column: "value",
-        }),
+        Some(value) => Uuid::parse_str(&value)
+            .map(Some)
+            .map_err(|_| MetaError::Corrupt {
+                table: "instance_settings",
+                column: "value",
+            }),
     }
 }
 

@@ -266,7 +266,14 @@ mod tests {
         assert_eq!(batch[1]["properties"]["$geoip_disable"], true);
 
         let text = serde_json::to_string(&bodies).expect("bodies serialize");
-        for forbidden in ["ada@", "example.com", "Acme", "acme", "Support", "support-bot"] {
+        for forbidden in [
+            "ada@",
+            "example.com",
+            "Acme",
+            "acme",
+            "Support",
+            "support-bot",
+        ] {
             assert!(!text.contains(forbidden), "the body carries {forbidden}");
         }
     }

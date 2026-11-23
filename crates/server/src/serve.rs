@@ -286,6 +286,12 @@ pub async fn run(
 /// socket fails. Storage is shut down before a later step's error is returned,
 /// so `LOCK` is not held after `Err`.
 pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Running, ServeError> {
+    // Boxed: the startup future is larger than clippy's `large_futures` bound, and boxing it
+    // here spares every caller.
+    Box::pin(bind_inner(config, ui)).await
+}
+
+async fn bind_inner(config: ServerConfig, ui: Option<axum::Router>) -> Result<Running, ServeError> {
     crate::observability::facts::mark_process_start();
     let data_dir = config.data_dir.clone();
     let http_addr = config.http_addr;

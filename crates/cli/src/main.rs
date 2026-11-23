@@ -1441,9 +1441,16 @@ mod tests {
 
     #[test]
     fn debug_bundle_parses_its_flags() {
-        match Cli::try_parse_from(["cetra", "debug-bundle", "--config", "c.toml", "--output", "-"])
-            .unwrap()
-            .command
+        match Cli::try_parse_from([
+            "cetra",
+            "debug-bundle",
+            "--config",
+            "c.toml",
+            "--output",
+            "-",
+        ])
+        .unwrap()
+        .command
         {
             Command::DebugBundle {
                 config: Some(config),

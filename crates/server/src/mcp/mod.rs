@@ -1700,7 +1700,12 @@ mod tests {
             Some("/mcp".to_owned())
         );
         assert_eq!(query.parent_span_id, request.span_id);
-        assert!(captured.spans().iter().all(|span| !span.name.starts_with("rmcp")));
+        assert!(
+            captured
+                .spans()
+                .iter()
+                .all(|span| !span.name.starts_with("rmcp"))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

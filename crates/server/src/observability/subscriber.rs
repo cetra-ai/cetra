@@ -89,6 +89,7 @@ impl Observability {
     }
 
     /// The ring buffer this subscriber writes.
+    #[cfg(test)]
     pub(crate) fn log_ring(&self) -> &LogRing {
         &self.ring
     }
@@ -227,7 +228,7 @@ pub(crate) fn build(
         Some(endpoint) => {
             let events = export_filter(&config.self_monitoring.level)
                 .map_err(ObservabilityError::ExportLevel)?;
-            let pipeline = SpanPipeline::new(&config.self_monitoring, endpoint, runtime.clone())?;
+            let pipeline = SpanPipeline::new(&config.self_monitoring, endpoint, runtime)?;
             layers.push(span_layer(pipeline.tracer(), events));
             Some(pipeline)
         }

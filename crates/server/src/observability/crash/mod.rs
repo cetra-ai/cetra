@@ -302,10 +302,18 @@ mod tests {
         let held = ReportGuard::enter();
         assert!(held.is_some());
         reporter.report_event(&site);
-        assert!(Spool::new(dir.path().join("spool")).list().unwrap().is_empty());
+        assert!(
+            Spool::new(dir.path().join("spool"))
+                .list()
+                .unwrap()
+                .is_empty()
+        );
         drop(held);
         reporter.report_event(&site);
-        assert_eq!(Spool::new(dir.path().join("spool")).list().unwrap().len(), 1);
+        assert_eq!(
+            Spool::new(dir.path().join("spool")).list().unwrap().len(),
+            1
+        );
     }
 
     #[test]
@@ -338,7 +346,14 @@ mod tests {
         };
         let (handle, logs) = capture_logs(start(&app.state, decision)).await;
         assert!(handle.is_none());
-        assert!(!app.state.config.data_dir.join("telemetry").join("spool").exists());
+        assert!(
+            !app.state
+                .config
+                .data_dir
+                .join("telemetry")
+                .join("spool")
+                .exists()
+        );
         assert!(logs.contains("telemetry: crash reports are off"), "{logs}");
         assert!(logs.contains("DO_NOT_TRACK"), "{logs}");
         let stored = get_setting(app.state.meta.reader(), TELEMETRY_INSTANCE_ID)
@@ -395,7 +410,7 @@ mod tests {
         let bodies = receiver.bodies();
         assert_eq!(bodies.len(), 1);
         let report: CrashReport = serde_json::from_slice(&bodies[0]).unwrap();
-        let id = crate::observability::instance::existing_instance_id(&app.state.meta)
+        let id = instance::existing_instance_id(&app.state.meta)
             .await
             .unwrap();
         assert!(id.is_some());

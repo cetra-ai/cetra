@@ -604,20 +604,17 @@ mod tests {
         ];
         for (toml, env) in cases {
             let error = load_from(Some(toml), env)
-                .err()
-                .expect("the configuration is rejected");
+                .expect_err("the configuration is rejected");
             let text = serde_json::to_string(&error_view(&error)).expect("the view serializes");
             assert!(!text.contains("PLANTED"), "{text}");
         }
 
         let error = load_from(Some("http_addr = \"PLANTED-nope\"\n"), &[])
-            .err()
-            .expect("the configuration is rejected");
+            .expect_err("the configuration is rejected");
         assert_eq!(error_view(&error).key.as_deref(), Some("http_addr"));
 
         let error = load_from(Some("[storage.wal]\nsync = \"PLANTED\"\n"), &[])
-            .err()
-            .expect("the configuration is rejected");
+            .expect_err("the configuration is rejected");
         let view = error_view(&error);
         assert_eq!(view.key.as_deref(), Some("storage.wal.sync"));
         assert!(matches!(
@@ -626,8 +623,7 @@ mod tests {
         ));
 
         let error = load_from(Some("smtp_url = \"PLANTED://x\"\n"), &[])
-            .err()
-            .expect("the configuration is rejected");
+            .expect_err("the configuration is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::Invalid);
         assert_eq!(view.key.as_deref(), Some("smtp_url"));
@@ -640,8 +636,7 @@ mod tests {
     #[test]
     fn a_toml_syntax_error_is_toml_syntax() {
         let error = source_tree(Some("encryption_key = \"PLANTED"), &[])
-            .err()
-            .expect("the TOML is rejected");
+            .expect_err("the TOML is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::TomlSyntax);
         assert_eq!(view.key, None);
@@ -655,8 +650,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_unknown_field() {
         let error = load_from(Some("zz_probe = 1\n"), &[])
-            .err()
-            .expect("the configuration is rejected");
+            .expect_err("the configuration is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::UnknownField);
         assert!(view.key.is_some_and(|key| key.contains("zz_probe")));
@@ -665,8 +659,7 @@ mod tests {
     #[test]
     fn a_bad_cetra_telemetry_is_a_provider_error() {
         let error = load_from(None, &[("CETRA_TELEMETRY", "PLANTED")])
-            .err()
-            .expect("the configuration is rejected");
+            .expect_err("the configuration is rejected");
         let view = error_view(&error);
         assert_eq!(view.kind, ConfigErrorKind::Provider);
         assert_eq!(view.key.as_deref(), Some("CETRA_TELEMETRY"));

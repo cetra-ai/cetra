@@ -319,7 +319,9 @@ async fn deliver_one(state: &AppState, due: &DueDelivery, now: i64) -> Option<Ou
         due.channel_kind.as_str(),
         due.attempts.saturating_add(1),
     );
-    let outcome = deliver_one_once(state, due, now).instrument(span.clone()).await;
+    let outcome = deliver_one_once(state, due, now)
+        .instrument(span.clone())
+        .await;
     let label = match outcome {
         Some(Outcome::Sent) => "sent",
         Some(Outcome::Retried) => "retry",

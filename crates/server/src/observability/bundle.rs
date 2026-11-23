@@ -78,6 +78,8 @@ pub(crate) struct ConfigView {
 /// The server section of the bundle.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
+// Built once per bundle, so the size of `NotRunning` costs nothing.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum ServerSection {
     /// A server answered `debug_info`.
     Running {
@@ -268,7 +270,7 @@ fn config_section(
         }
     };
     let data_dir = match loaded {
-        Some(config) => config.data_dir.clone(),
+        Some(config) => config.data_dir,
         None => tree
             .as_ref()
             .and_then(|t| t.get("data_dir"))

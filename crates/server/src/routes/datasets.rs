@@ -24,7 +24,7 @@ use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::{Event, ItemSource};
 use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{

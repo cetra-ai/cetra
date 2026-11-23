@@ -288,11 +288,11 @@ impl SinkWorker {
         }
         let result = post(&self.client, &self.url, self.key.expose(), batch).await;
         batch.clear();
-        if let Err(error) = result {
-            if last_failure_log.is_none_or(|at| at.elapsed() >= FAILURE_LOG_INTERVAL) {
-                *last_failure_log = Some(Instant::now());
-                tracing::debug!(error = %error, "analytics: batch not sent");
-            }
+        if let Err(error) = result
+            && last_failure_log.is_none_or(|at| at.elapsed() >= FAILURE_LOG_INTERVAL)
+        {
+            *last_failure_log = Some(Instant::now());
+            tracing::debug!(error = %error, "analytics: batch not sent");
         }
     }
 }
