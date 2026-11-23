@@ -134,6 +134,7 @@ export default defineConfig({
                   items: [
                     { label: "FAQ", link: "/docs/help/faq/" },
                     { label: "Troubleshooting", link: "/docs/help/troubleshooting/" },
+                    { label: "Reporting a bug", link: "/docs/help/reporting-a-bug/" },
                     { label: "Changelog", link: "/docs/help/changelog/" },
                     { label: "Support and security", link: "/docs/help/support/" },
                   ],

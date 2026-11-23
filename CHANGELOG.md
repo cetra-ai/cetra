@@ -28,6 +28,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   message, a value or an exact time. Reports are spooled in `<data_dir>/telemetry/spool/`, sent
   every minute and turned off by `CETRA_TELEMETRY=off`, `DO_NOT_TRACK` or restore mode. The
   heartbeat gains `features.crash_reports_on`.
+- `cetra debug-bundle` writes one JSON file for a bug report: build and host facts, the configuration with secret values redacted, and the running server's state and last log lines (or, when it is stopped, the data directory's file sizes and format versions). It contacts no network. The admin socket answers a new `debug_info` command for it. See https://cetra.sh/docs/help/reporting-a-bug/.
 
 ### Changed
 

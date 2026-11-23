@@ -45,6 +45,8 @@ Turning the heartbeat off changes nothing else, and licences never turn it on or
 
 At every start, cetra logs two lines, at `info` with the target `cetra_server::observability::notice`: one says whether the heartbeat is on, the other whether crash reports are on. They show even when `log.level` is `warn`. When the heartbeat is on, its line gives the instance id and a link to this page. When something is off, the line's `reason` field says why: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, `restore_mode`, `ci`, `debug_build` or `config`. Crash reports are never off for `ci` or `debug_build`.
 
+`cetra debug-bundle` shows the instance id too, with the heartbeat the server would send now ([Reporting a bug](/docs/help/reporting-a-bug/)).
+
 ## When it is sent
 
 The first heartbeat goes 10 to 20 minutes after the server starts, then one every 24 hours. cetra records in `meta.db` when the last heartbeat was accepted, so restarts send at most one a day.
