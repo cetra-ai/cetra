@@ -11,6 +11,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry};
 
 use crate::config::{LogFormat, ServerConfig};
+use crate::observability::switchboard::NOTICE_DIRECTIVE;
 
 use super::ObservabilityError;
 use super::otlp::{EXPORT_FAILURE_TARGET, LogPipeline};
@@ -148,10 +149,12 @@ fn capped_filter(level: &str) -> Result<EnvFilter, ParseError> {
     Ok(EnvFilter::try_new(level)?.add_directive(rmcp))
 }
 
-/// The stdout layer's filter: `log.level`, capped. Directives that only stdout must carry
-/// (M4's start-up notice) are added here, never in [`export_filter`].
+/// The stdout layer's filter: [`capped_filter`] plus the telemetry notice directive, which
+/// lets the start-up notice through at `info` whatever `log.level` says. The export filter
+/// never gets it, so the notice is not exported over OTLP (D-TL-11, design § Startup notice).
 pub(crate) fn log_filter(level: &str) -> Result<EnvFilter, ParseError> {
-    capped_filter(level)
+    let notice = NOTICE_DIRECTIVE.parse()?;
+    Ok(capped_filter(level)?.add_directive(notice))
 }
 
 /// The export layer's filter: `self_monitoring.level`, capped, and nothing else.
@@ -184,6 +187,7 @@ mod tests {
     use super::*;
     use crate::config::load_from;
     use crate::observability::otlp::receiver::Receiver;
+    use crate::observability::switchboard::NOTICE_TARGET;
     use crate::test_support;
 
     /// `io::Write` over a shared buffer, used as the stdout writer of a test subscriber.
@@ -293,6 +297,72 @@ mod tests {
         assert!(!logs.contains("dropped-canary"), "{logs}");
         assert!(logs.contains("kept-canary"), "{logs}");
         assert!(logs.contains("cetra::serve"), "{logs}");
+    }
+
+    #[test]
+    fn the_stdout_filter_has_the_notice_directive() {
+        for level in ["info", "warn", "error"] {
+            let filter = log_filter(level).unwrap().to_string();
+            assert!(
+                filter.contains("cetra_server::observability::notice=info"),
+                "{level}: {filter}"
+            );
+            assert!(filter.contains("rmcp=warn"), "{level}: {filter}");
+        }
+    }
+
+    #[test]
+    fn the_export_filter_has_no_notice_directive() {
+        for level in ["warn", "info"] {
+            let filter = export_filter(level).unwrap().to_string();
+            assert!(
+                !filter.contains("cetra_server::observability::notice"),
+                "{level}: {filter}"
+            );
+        }
+    }
+
+    /// At `log.level = "warn"` the stdout subscriber writes the notice canary and drops an
+    /// ordinary `info` event; the export is off (no endpoint), so only stdout is checked.
+    #[tokio::test]
+    async fn the_notice_shows_on_stdout_at_warn() {
+        let config = load_from(Some("[log]\nlevel = \"warn\"\n"), &[]).unwrap();
+        let stdout = Buffer::default();
+        let (subscriber, _observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&stdout),
+            Handle::current(),
+        )
+        .unwrap();
+
+        test_support::ensure_global_subscriber();
+        let guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+        tracing::info!(target: NOTICE_TARGET, "notice-canary");
+        tracing::info!(target: "cetra_server::serve", "dropped-canary");
+        drop(guard);
+
+        let logs = stdout.text();
+        assert!(logs.contains("notice-canary"), "{logs}");
+        assert!(!logs.contains("dropped-canary"), "{logs}");
+    }
+
+    /// The notice directive is added last, so it replaces an `off` written for its own target
+    /// in `log.level`: the notice still shows.
+    #[test]
+    fn the_notice_directive_wins_over_the_level() {
+        let buffer = Buffer::default();
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(stdout_writer(&buffer))
+            .with_ansi(false)
+            .with_target(true)
+            .with_filter(log_filter("warn,cetra_server::observability::notice=off").unwrap());
+        let dispatch = Dispatch::new(tracing_subscriber::registry().with(layer));
+        let guard = tracing::dispatcher::set_default(&dispatch);
+        tracing::info!(target: NOTICE_TARGET, "notice-canary");
+        drop(guard);
+        let logs = buffer.text();
+        assert!(logs.contains("notice-canary"), "{logs}");
     }
 
     #[test]
