@@ -1037,6 +1037,26 @@ Decisions of track EA (`docs/plans/ea-enterprise-admin/README.md`), numbered `D-
 | D-EA-19 | Lapses never widen access | **Lapses never widen access (user, D-P-8).** Recording continues; reads, exports and the stream stop; SCIM accepts removals and lowering changes, and refuses creates, reactivations and raises. Features `audit_log` and `scim` (`ee`; Enterprise, licence). Rejected: SCIM fully off when lapsed: IdP deprovisions would not reach cetra. |
 | D-EA-20 | `seq` is the cursor | **`seq` is the cursor.** `audit_events.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`, commit order under `meta.db`'s single writer) orders paging, exports and the stream. The UUIDv7 `id` is the public id. Rejected: UUIDv7 as cursor: not ordered within a millisecond and exposed to clock steps, so a stream could skip records. `at` as cursor: same problem. |
 
+## Track TL — Telemetry and error reporting
+
+Decisions of track TL (`docs/plans/tl-telemetry/README.md`), numbered `D-TL-<n>`. "(user)" marks the user's choices of 2026-11-23.
+
+| # | Topic | Decision |
+|---|---|---|
+| D-TL-1 | Config tables | **`[self_monitoring]` (export to the operator's OTLP endpoint) and `[telemetry]` (what goes to us).** Amends D-W-18, spec 12's "no telemetry key" and D38/D-N-33's deferral of OTel self-traces. Rejected: the standard `OTEL_EXPORTER_OTLP_*` variables, since a host that sets them for its own apps would turn on export by accident. |
+| D-TL-2 | Export mechanism | **The OpenTelemetry Rust SDK 0.33.1 (`opentelemetry_sdk`, `opentelemetry-appender-tracing`, `tracing-opentelemetry` 0.34.0) with cetra's own two OTLP/HTTP exporters** built on `opentelemetry-proto`'s `transform`, `prost`, `flate2` and the workspace's `reqwest` 0.12; no `OTEL_*` variable changes the export. No vendor SDK. Rejected: `opentelemetry-otlp` (merges the host's `OTEL_EXPORTER_OTLP_HEADERS` into ours and brings `reqwest` 0.13); gRPC (Sentry accepts HTTP only); a fully custom pipeline. |
+| D-TL-3 | Export privacy | **The OTLP export carries what stdout carries, with the same caps (`rmcp=warn`); exported logs default to `warn`, traces to 10 %.** The operator owns the destination. Rejected: a second allow-list for the same lines. |
+| D-TL-4 | Server spans | **Span names and attribute keys are constants; values are ids, counts, enums and durations, never names, URLs, SQL, emails or payload.** Rejected: `#[instrument]`, which records every argument by default. |
+| D-TL-5 | Crash report content | **Code-defined facts only (user):** build, deployment kind, uptime bucket, location (path cut to the workspace or crate), callsite target and module, field names, function names of the backtrace (release archives keep symbols, not lines), counts per hour. The panic message, every field value and exact timestamps are dropped. Rejected: scrubbed messages (a scrubber misses data); location only (too little). Covers panics and ERROR events, one report per location per hour, 20 per hour in all (user). |
+| D-TL-6 | Debug bundle | **`cetra debug-bundle` writes one local JSON file: build, host, the config with values shown only for allow-listed keys, and the running server's logs and stats over `admin.sock`.** It never contacts the network; an invalid config still gives a bundle, with the failing key and error kind. Rejected: a deny-list of secret keys (misses future ones); a tarball; opening the storage engine next to a running server. |
+| D-TL-7 | Trace context | **Incoming `traceparent` is ignored.** Every server trace starts at the server. |
+| D-TL-8 | Heartbeat | **Daily, on by default (user):** random instance id, build, deployment kind, storage kind, bucketed counts and feature booleans; no emails, domains, names, hosts, IPs, exact counts or licence data. Rejected: exact counts and email domains (competitors); opt-in. |
+| D-TL-9 | Instance id | **A random UUIDv4 in `instance_settings['telemetry.instance_id']`.** Rejected: UUIDv7 (reveals the install time); a file outside `meta.db` (backups would lose it). |
+| D-TL-10 | Receiver | **Heartbeats and crash reports go to `telemetry.cetra.sh`, a relay track Q runs (user).** Rejected: the control plane (couples telemetry to billing and login); a Sentry DSN in the binary. |
+| D-TL-11 | Switchboard | **`CETRA_TELEMETRY=off`, then `DO_NOT_TRACK`, then restore mode turn off everything sent to us; CI and debug builds turn off the heartbeat; then the config. Any error means off.** Licences never change it (D172 stays true). |
+| D-TL-12 | Crash spool | **Crash reports are written to `<data_dir>/telemetry/spool/` before sending**, so a panic that ends the process is still reported. |
+| D-TL-13 | Our error destination | **Our cloud's logs, errors and traces and the forwarded crash reports go to Sentry, EU region; heartbeats stay in the relay's own storage, with no product-analytics SaaS such as PostHog (user).** The binary only knows an OTLP endpoint and the relay's hostname, so this is configuration. |
+
 ## Open
 
 - `.cursor/` is untracked while D58 says `.cursor/rules` is kept (and the plans tell agents to read it): commit `.cursor/rules`, or drop that mention from D58?
