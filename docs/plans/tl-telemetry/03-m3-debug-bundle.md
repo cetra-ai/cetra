@@ -109,7 +109,7 @@
 | Design § Details settled while planning, bullet "Debug bundle (M3)" | `config` shows the keys the user set (file and environment) plus the names of the `CETRA_*` variables, without serde defaults; domains, the OIDC issuer and client id, and the `init` org and project names are shown; `config_error` carries the key path, the kind and its static reason, never figment or serde text; catalog file counts come from a read-only query of `catalog.db`; `--output -` writes to stdout; the golden server scenario records one `debug_info` exchange; host facts use `sysinfo` |
 
 Plan-level details (within those decisions):
-- **Ring buffer.** It uses the stdout filter (`log_filter(&config.log.level)`, so the `rmcp` cap and M4's notice directive apply), minus the OTLP export's dropped library targets (M1's `EXPORT_DROPPED_TARGETS`, through `export_target_allowed`) and `sqlx`, but keeping the export's failure lines, and always formats JSON, even when stdout is pretty. It has no span fields. Bounds: 2000 lines, 2 MiB of line bytes, 16 KiB per line (a longer line is cut and ends with `…<truncated>`).
+- **Ring buffer.** It uses the stdout filter (`log_filter(&config.log.level)`, so the `rmcp` cap and M4's notice directive apply), minus the OTLP export's dropped library targets (M1's `EXPORT_DROPPED_TARGETS`, through `export_target_allowed`) and `sqlx`, but keeping the export's failure lines, and passes events only (`metadata.is_event()`), so it never enables a span, and always formats JSON, even when stdout is pretty. It has no span fields. Bounds: 2000 lines, 2 MiB of line bytes, 16 KiB per line (a longer line is cut and ends with `…<truncated>`).
 - **Where the ring is reached.** `subscriber::init` installs it in a process-wide `OnceLock` (`ring::install`). The socket handler reads it with `ring::installed()`. Servers built by tests have no ring, and their `debug_info.logs` is `null`.
 - **Response cap.** 4 MiB per response line (`MAX_RESPONSE`). The server drops the oldest log lines until the line fits and sets `logs.trimmed`. A client refuses a longer line.
 - **Bundle cap.** 8 MiB (`MAX_BUNDLE_BYTES`), pretty-printed JSON, measured on the scrubbed document. The oldest log lines go first; if the bundle is still too large without them, `BundleError::TooLarge`. Each shown config string is cut at 4096 bytes.
@@ -913,7 +913,7 @@ In `ring.rs`:
 
 ### TL3.2 — The ring layer in the subscriber
 
-**Goal.** `subscriber::build` pushes the ring layer, with the stdout filter minus the libraries' targets, onto M1's layer list, and `init` installs the ring for the admin socket.
+**Goal.** `subscriber::build` pushes the ring layer, with the stdout filter minus the libraries' targets and passing events only, onto M1's layer list, and `init` installs the ring for the admin socket.
 
 **Edit:**
 - `crates/server/src/observability/subscriber.rs` (shared with M2)
@@ -947,7 +947,10 @@ In `ring.rs`:
    // the stdout format (track TL M3).
    let ring = LogRing::new();
    let ring_filter = log_filter(&config.log.level).map_err(ObservabilityError::LogLevel)?;
-   let ring_targets = filter_fn(|metadata| ring_target_allowed(metadata.target()));
+   // Events only: the ring formats events, and a span it enabled would cost a registry slot
+   // and a fields extension per request with nothing recorded (M2's notes for M3).
+   let ring_targets =
+       filter_fn(|metadata| metadata.is_event() && ring_target_allowed(metadata.target()));
    layers.push(ring.layer(FilterExt::<Registry>::and(ring_filter, ring_targets)));
    ```
    (`filter_fn`, `FilterExt` and `Registry` are already imported in `subscriber.rs` for the export layer.)
@@ -981,6 +984,7 @@ In `ring.rs`:
      - has none containing `ring-debug` or `rmcp-info`;
      - every line parses as JSON with the keys `timestamp`, `level`, `fields` and `target`.
 - `the_ring_is_json_when_stdout_is_pretty`: the same build with `LogFormat::Pretty`; `info!("pretty-canary")` → the ring's line parses as JSON.
+- `the_ring_enables_no_span`: a subscriber made of the ring layer alone, with the filter of step 3 (`tracing_subscriber::registry().with(ring.layer(FilterExt::<Registry>::and(log_filter("info").unwrap(), filter_fn(|m| m.is_event() && ring_target_allowed(m.target())))))`). Under `tracing::dispatcher::set_default` of it, `tracing::info_span!("ring-span").is_disabled()` is `true`; `info!("ring-event")` emitted inside `let _entered = tracing::info_span!("ring-span").entered();` still adds one ring line, with no `span` key. (The whole `build` subscriber is not checked here: before M2 the stdout layer still enables spans.)
 - `ring_target_allowed_drops_library_lines`, a table: false for `hyper_util::client`, `h2::codec`, `reqwest::connect`, `rustls::conn`, `opentelemetry_sdk`, `sqlx::query`; true for `cetra_self_monitoring`, `cetra_server::serve`, `cetra_storage::wal`, `rmcp::service`.
 - `the_ring_drops_library_lines_at_debug`: `log.level = "debug"`; `debug!(target: "hyper_util::client", "hyper-canary")`, `debug!(target: "sqlx::query", "sqlx-canary")`, `debug!("cetra-canary")` → the ring has `cetra-canary` only; the stdout buffer has all three.
 - `the_notice_reaches_the_ring_at_warn`: `log.level = "warn"`; `info!(target: crate::observability::switchboard::NOTICE_TARGET, "notice-canary")` → in the ring (M4's directive in `log_filter`).
