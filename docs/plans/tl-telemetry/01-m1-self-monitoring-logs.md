@@ -111,7 +111,7 @@ Nothing goes to us. Spans are M2's work.
 
 Plan-level choices (implementation detail the design leaves to the plan):
 - **Stdout JSON span fields.** M1 keeps the formatter defaults: cetra has no spans yet, and a test proves the output is byte-identical. M2 turns `with_current_span` and `with_span_list` off.
-- **Where `self_monitoring.level` is checked.** It is checked when the subscriber is built (TL1.5), as `log.level` is today, not by the config loader. A bad value is still a start-up error.
+- **Where `self_monitoring.level` is checked.** It is checked when the subscriber is built (TL1.5), as `log.level` is today, not by the config loader. It is checked even when nothing is exported, so a bad value is always a start-up error.
 - **Export failures** use the target `cetra_self_monitoring` (a constant), which the export filter drops.
 - **Batch settings.**
   - Queue 2048 records, delay 1 s, batch 512, set through `BatchConfigBuilder`'s three setters. A value set there replaces the `OTEL_BLRP_*` one.
@@ -223,7 +223,7 @@ The coordinator schedules the phases across M1 and M4. Each phase touches these 
 | TL1.4 | `crates/server/src/observability/otlp.rs` (new), `crates/server/src/observability/mod.rs` |
 | TL1.5 | `crates/server/src/observability/subscriber.rs` (new), `crates/server/src/observability/mod.rs` |
 | TL1.6 | `crates/cli/src/main.rs`, `crates/cli/Cargo.toml`, `Cargo.lock` |
-| TL1.7 | `website/src/content/docs/docs/self-hosting/monitoring.md`, `CHANGELOG.md`, `docs/spec/12-operations.md` |
+| TL1.7 | `website/src/content/docs/docs/self-hosting/monitoring.md`, `website/src/content/docs/docs/self-hosting/backup.md`, `website/src/content/docs/docs/self-hosting/configuration.md`, `CHANGELOG.md`, `docs/spec/12-operations.md` |
 
 Never two agents on the same file at once: `git commit -- <file>` commits the whole working-tree file, another agent's half-done edit included.
 
@@ -233,7 +233,7 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
 - Edit only the files of the phase's **Edit** list. Report any change needed elsewhere.
 - **Do not run** `cargo build`, `cargo test`, `cargo clippy`, `cargo check`, or any `just` recipe: the machine is loaded, and the coordinator runs the checks once at the end of the milestone. These commands are fine:
   - read-only commands: `cargo info`, `grep`, reading sources under `~/.cargo/registry/src`;
-  - `rustfmt --edition 2024 <your .rs files>`, which formats without building. Run it on the Rust files you changed before committing;
+  - `rustfmt --edition 2024 <file>`, which formats without building. Run it only on leaf files you created or changed: `config.rs` and `ingest/fixtures_tests.rs` (TL1.2), `panic.rs`, `otlp.rs`, `subscriber.rs`. **Never** run it on a file that declares out-of-line modules: `lib.rs`, `observability/mod.rs`, `test_support/mod.rs`, `crates/cli/src/main.rs`. rustfmt recurses into the modules those files declare, which includes other agents' files. The coordinator's `just fmt` covers them;
   - where a phase says so, `cargo metadata --format-version 1 --offline > /dev/null`, which only rewrites `Cargo.lock` and compiles nothing.
 - Write the tests the phase lists, even though you do not run them. Make them compile by reading the APIs: never guess a signature. Look it up in the registry sources named in **Read first**.
 - **Done when** for every phase means: the listed files are changed as specified, nothing else changed (`git status`), and the commit exists with the given subject.
@@ -1009,19 +1009,47 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
    }
    ```
    1. Write a manual `impl fmt::Debug for OtlpLogExporter`. It prints `url` and `header_names` (the `headers.keys()` names only, collected to a `Vec<&str>`), with `finish_non_exhaustive()`. It never prints a header value.
-   2. Write `impl LogExporter for OtlpLogExporter`. `export` is a plain `fn … -> impl Future<Output = OTelSdkResult> + Send`, not an `async fn`, so the `LogBatch` borrow ends before the returned future. Its steps, in order:
-      1. `let records = batch.iter().count();`
-      2. `let request = ExportLogsServiceRequest { resource_logs: group_logs_by_resource_and_scope(&batch, &self.resource) };`
-      3. `let prepared = gzip(&request.encode_to_vec());`
-      4. On `Ok(body)`:
-         - Build the request synchronously: `let builder = self.client.post(&self.url).headers(self.headers.clone()).body(body);`
-         - Spawn on the runtime: `self.runtime.spawn(async move { builder.send().await.map(|response| response.status()) })`.
-         - **`send()` must be called inside the spawned block**, because reqwest creates its timeout timer when `send` is called, and that needs the runtime's context. This thread has none.
-         - Keep the `JoinHandle`. The response body is never read.
-      5. Clone `self.failures` (an `Arc`), then return `async move { … }`:
-         - map the gzip error to `Failure::new("encode", None)`, or await the handle and pass it to `outcome`;
-         - on `Ok(())`, return `Ok(())`;
-         - on `Err(failure)`, if `failures.should_log(Instant::now())`, emit `tracing::warn!(target: EXPORT_FAILURE_TARGET, reason = failure.reason, status = failure.status, records, "self-monitoring log export failed");`, then return `Err(OTelSdkError::InternalFailure(failure.reason.to_owned()))`.
+   2. Write `impl LogExporter for OtlpLogExporter`. `export` is a plain `fn`, not an `async fn`, so the `LogBatch` borrow ends before the returned future. The comments are part of the code. Write `export` exactly as:
+      ```rust
+      fn export(&self, batch: LogBatch<'_>) -> impl Future<Output = OTelSdkResult> + Send {
+          let records = batch.iter().count();
+          let request = ExportLogsServiceRequest {
+              resource_logs: group_logs_by_resource_and_scope(&batch, &self.resource),
+          };
+          // `send()` runs inside the spawned task: reqwest creates its timeout timer there, which
+          // needs the runtime's context, and this (the SDK's batch) thread has none.
+          let sent = gzip(&request.encode_to_vec()).map(|body| {
+              let builder = self
+                  .client
+                  .post(&self.url)
+                  .headers(self.headers.clone())
+                  .body(body);
+              self.runtime
+                  .spawn(async move { builder.send().await.map(|response| response.status()) })
+          });
+          let failures = Arc::clone(&self.failures);
+          async move {
+              let result = match sent {
+                  Ok(handle) => outcome(handle.await),
+                  Err(_) => Err(Failure::new("encode", None)),
+              };
+              let Err(failure) = result else {
+                  return Ok(());
+              };
+              if failures.should_log(Instant::now()) {
+                  tracing::warn!(
+                      target: EXPORT_FAILURE_TARGET,
+                      reason = failure.reason,
+                      status = failure.status,
+                      records,
+                      "self-monitoring log export failed"
+                  );
+              }
+              Err(OTelSdkError::InternalFailure(failure.reason.to_owned()))
+          }
+      }
+      ```
+      The response body is never read. `Future` is in the 2024 prelude: no import is needed.
    3. `fn set_resource(&mut self, resource: &Resource) { self.resource = resource.into(); }`
       - The processor forwards the provider's resource on its control channel. The same value is also given at construction (step 9), because a batch could be exported before that message is read.
    4. Leave `shutdown_with_timeout` and `event_enabled` at their defaults.
@@ -1101,7 +1129,8 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
     It is served with `axum::serve(listener, router)` in a spawned task.
 11. Add these test helpers in `mod tests`. They are for the direct `export` tests:
     - `fn exporter_for(receiver_base: &str) -> OtlpLogExporter`. It builds the exporter as `LogPipeline::new` does (`http_client()`, `request_headers(None)`, `resource(vec![])`, `Handle::current()`), with `url` = `parse_otlp_endpoint(receiver_base).unwrap().logs_url()`.
-    - `fn test_record(body: &'static str) -> SdkLogRecord`. It creates a provider with `SdkLoggerProvider::builder().with_resource(Resource::builder_empty().build()).build()`, then `provider.logger("test").create_log_record()` (traits `opentelemetry::logs::{Logger, LoggerProvider, LogRecord}`), `record.set_body(body.into())` and **`record.set_observed_timestamp(std::time::SystemTime::now())`**. The transform unwraps `observed_timestamp`, which only `SdkLogger::emit` fills, so a record built by hand without it makes `export` panic.
+    - The test module imports the trait as `use opentelemetry::logs::{Logger as _, LoggerProvider as _, LogRecord as _};`, because the proto type `opentelemetry_proto::tonic::logs::v1::LogRecord` is also used there by name.
+    - `fn test_record(body: &'static str) -> SdkLogRecord`. It creates a provider with `SdkLoggerProvider::builder().with_resource(Resource::builder_empty().build()).build()`, then `provider.logger("test").create_log_record()` (the traits imported `as _` above), `record.set_body(body.into())` and **`record.set_observed_timestamp(std::time::SystemTime::now())`**. The transform unwraps `observed_timestamp`, which only `SdkLogger::emit` fills, so a record built by hand without it makes `export` panic.
 
 **Tests** (in `otlp.rs` `mod tests`; async tests that block use `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`):
 - `records_arrive_with_fields_severity_resource_and_headers`:
@@ -1313,7 +1342,7 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
       }
       ```
       (`Level::DEBUG > Level::WARN` in `tracing`: more verbose is greater.)
-   3. `build`, verbatim. The export filter is parsed before the pipeline is built, so a bad level starts no batch thread. Later milestones push their layer onto `layers` before the `Ok`.
+   3. `build`, verbatim. `self_monitoring.level` is parsed first, whatever the endpoint and `logs` say. A bad value is then always a start-up error, like a bad `otlp_headers`, and it never starts a batch thread. Later milestones push their layer onto `layers` before the `Ok`.
       ```rust
       pub(crate) fn build(
           config: &ServerConfig,
@@ -1336,18 +1365,18 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
                   .with_filter(stdout_filter)
                   .boxed(),
           };
+          let export_level_filter = export_filter(&config.self_monitoring.level)
+              .map_err(ObservabilityError::ExportLevel)?;
           let mut layers: Vec<BoxedLayer> = vec![stdout];
           let logs = match config.self_monitoring.logs_endpoint() {
               Some(endpoint) => {
-                  let filter = export_filter(&config.self_monitoring.level)
-                      .map_err(ObservabilityError::ExportLevel)?;
                   let pipeline = LogPipeline::new(&config.self_monitoring, endpoint, runtime)?;
                   let targets = filter_fn(|metadata| {
                       export_target_allowed(metadata.target(), *metadata.level())
                   });
                   let export: BoxedLayer = pipeline
                       .bridge()
-                      .with_filter(FilterExt::<Registry>::and(filter, targets))
+                      .with_filter(FilterExt::<Registry>::and(export_level_filter, targets))
                       .boxed();
                   layers.push(export);
                   Some(pipeline)
@@ -1387,7 +1416,7 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
 - `stdout_pretty_matches_the_former_builder`: the same with `.pretty()`. Compare the outputs with the timestamp, the first whitespace-separated token of the first line, removed.
 - `no_endpoint_means_no_export_layer`: `build` with `load_from(None, &[])` and `Handle::current()` gives `exporting_logs() == false`, and the subscriber has one layer (`subscriber` is `Layered`; checking `exporting_logs` is enough).
 - `logs_false_means_no_export_layer`: an endpoint set with `logs = false` gives `exporting_logs() == false`.
-- `an_invalid_export_level_is_an_error`: `self_monitoring.level = "cetra_server=nonsense"` with an endpoint set fails with `ObservabilityError::ExportLevel(_)`, whose `Display` starts with `self_monitoring.level: `.
+- `an_invalid_export_level_is_an_error`: `self_monitoring.level = "cetra_server=nonsense"` fails with `ObservabilityError::ExportLevel(_)`, whose `Display` starts with `self_monitoring.level: `. Check three configs: an endpoint set, no endpoint, and an endpoint with `logs = false`.
 - `an_invalid_log_level_is_an_error`: `log.level = "cetra_server=nonsense"` gives `ObservabilityError::LogLevel(_)`.
 - `the_export_layer_applies_its_own_filter` (multi-thread):
   1. Start a `Receiver` (200, no delay) and build with `log.level = "info"`, `self_monitoring.level = "warn"`, the endpoint `receiver.base`, and a buffer writer.
@@ -1488,6 +1517,8 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
 
 **Edit:**
 - `website/src/content/docs/docs/self-hosting/monitoring.md`
+- `website/src/content/docs/docs/self-hosting/backup.md` (§ Restore mode only)
+- `website/src/content/docs/docs/self-hosting/configuration.md` (the `restore_mode` row only)
 - `CHANGELOG.md`
 - `docs/spec/12-operations.md`
 
@@ -1546,7 +1577,7 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
    CETRA_SELF_MONITORING__OTLP_HEADERS="x-sentry-auth=sentry sentry_key=<public key>"
    ```
 
-   The records arrive as Sentry logs.
+   The records should arrive as Sentry logs (check in your project).
 
    ### Grafana Cloud
 
@@ -1587,9 +1618,15 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
    self-monitoring is operator configuration and skips the private-network egress guard.
    ````
    Every `CETRA_SELF_MONITORING__*` name used is a documented key, as `check-env-vars.mjs` requires. No banned term is used (`check-terms.mjs`). `toml`, `bash` and `yaml` fences need no sample marker.
-2. `CHANGELOG.md` § `[Unreleased]` § `### Added`, appended as the last item:
+2. Restore mode keeps the export to the operator's own endpoint (design § The switchboard, rule 3). Say so where restore mode is described:
+   1. `backup.md` § Restore mode:
+      - Replace `starts a server that makes no outbound call.` with `starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)).`
+      - Append this bullet as the last item of the list under `With restore mode on, the server:`: `- keeps exporting its own logs to \`self_monitoring.otlp_endpoint\`, when it is set: that endpoint is yours.` Keep it last; M4 may add its own bullet after it.
+   2. `configuration.md`, the `restore_mode` row: replace `no outbound calls, for restore drills` with `no outbound calls except the self-monitoring export, for restore drills`, and keep the link.
+   3. `docs/spec/12-operations.md`, the configuration table's `restore_mode` row (line ~18): append ` The self-monitoring export to the operator's own endpoint stays on (D-TL-1).` at the end of the third cell, before its closing `|`. M4's TL4.10 appends its own clause to the same row: append, never rewrite.
+3. `CHANGELOG.md` § `[Unreleased]` § `### Added`, appended as the last item:
    `- \`cetra serve\` can export its own logs to an OTLP/HTTP endpoint you choose, such as Sentry, Grafana Cloud or an OpenTelemetry Collector: set \`self_monitoring.otlp_endpoint\` and usually \`self_monitoring.otlp_headers\`. Off by default; warnings and errors are exported unless \`self_monitoring.level\` says otherwise. A panic is also logged as an ERROR event with its code location.`
-3. `docs/spec/12-operations.md`:
+4. `docs/spec/12-operations.md` (in addition to step 2.3):
    1. In the configuration table, after the `log.format` / `log.level` row, add the row `` | `self_monitoring.otlp_endpoint` / `self_monitoring.otlp_headers` | | unset (off) / unset. Base `http(s)` URL without user info, query or fragment, `/v1/logs` appended; headers `name=value,…` (secret, percent-decoded, ≤ 32 and 8192 bytes) (D-TL-1) | `` and the row `` | `self_monitoring.logs` / `self_monitoring.level` / `self_monitoring.resource` | | `true` / `"warn"` / `""` (`key=value,…` resource attributes) | ``. Match the table's column count by reading its header.
    2. Replace the sentence `cetra has no \`tls.*\` keys and no telemetry key: the loader refuses them as unknown keys.` with exactly `cetra has no \`tls.*\` keys: the loader refuses them as unknown keys. Its own logs are exported with \`[self_monitoring]\` (§ Self-monitoring, D-TL-1).` This makes no claim about `telemetry.*`, which M4 adds.
    3. § Process lifecycle, the Shutdown bullet: after `close SQLite.` add `Then the self-monitoring export is flushed (≤ 2 s, on a blocking thread), also when start-up fails after the config loaded (track TL M1).` After `the pending-map, … SQLite close are short meta writes outside that bound` add `, and so is the self-monitoring flush`.
@@ -1610,7 +1647,7 @@ Never two agents on the same file at once: `git commit -- <file>` commits the wh
 - the link and anchor `#export-logs-over-otlp` and `#self_monitoring`.
 The implementer checks by reading that the anchor in `configuration-reference.md` (`#export-logs-over-otlp`) matches the heading, and that `#self_monitoring` is the slug of the heading `` ## `[self_monitoring]` `` (Starlight drops the backticks and brackets). If unsure about the slug, link to `/docs/self-hosting/configuration-reference/` without an anchor and report it.
 
-**Done when.** The three files are changed as above and committed.
+**Done when.** The five files are changed as above and committed.
 
 **Commit:** `Document the self-monitoring log export`
 
@@ -1619,7 +1656,7 @@ The implementer checks by reading that the anchor in `configuration-reference.md
 ## Milestone check (coordinator)
 
 After TL1.7 is merged with whatever M4 phases ran:
-1. `just fmt`. The plan's verbatim code is written to be rustfmt-clean, and the phases run `rustfmt` on their files, but this catches the rest.
+1. `just fmt`. The plan's verbatim code is written to be rustfmt-clean, and the phases run `rustfmt` on their leaf files, but this covers `lib.rs`, the `mod.rs` files, `main.rs` and the rest.
 2. `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just check`. Run it with no `HTTP(S)_PROXY`, or with `NO_PROXY` covering 127.0.0.1: the CLI test's export client honours proxies.
 3. `just deny` (the licences and single versions of the opentelemetry family)
 4. By hand:
