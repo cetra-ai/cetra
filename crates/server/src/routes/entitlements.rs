@@ -799,7 +799,7 @@ mod tests {
         assert_eq!(action, "org.entitlements_updated");
         assert_eq!(row_org.as_deref(), Some(org.to_string().as_str()));
         assert_eq!(actor_kind, "control_plane");
-        let details: serde_json::Value = serde_json::from_str(details).unwrap();
+        let details: Value = serde_json::from_str(details).unwrap();
         assert!(details["token_id"].is_string(), "{details}");
         assert!(!details.to_string().contains("cetra1."));
     }

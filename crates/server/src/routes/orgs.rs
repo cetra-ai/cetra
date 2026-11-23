@@ -10,9 +10,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
+use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::audit::catalog::OrgAction;
 use crate::audit::{self, Event, TargetKind};
-use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::auth::principal::{self, Principal};
 use crate::demo::{is_demo_org, orgs_for};
 use crate::http::AppState;
@@ -355,12 +355,13 @@ mod tests {
 
     /// `(target_id, details)` of every audit row with `action`, oldest first.
     async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
-        let rows: Vec<(Option<String>, String)> =
-            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
-                .bind(action)
-                .fetch_all(app.state.meta.reader())
-                .await
-                .unwrap();
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         rows.into_iter()
             .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
             .collect()

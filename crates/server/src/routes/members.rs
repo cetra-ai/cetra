@@ -11,11 +11,11 @@ use uuid::Uuid;
 
 use crate::api::account::OrgRole;
 use crate::api::common::{Page, PageParams, ProblemCode};
-use crate::audit::catalog::MemberAction;
-use crate::audit::{self, Event, TargetKind};
 use crate::api::members::{
     MemberUser, OrgMember, ProjectMember, ProjectRoleOverride, UpdateOrgMemberRequest,
 };
+use crate::audit::catalog::MemberAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectOverride, ProjectPerm, Role};
 use crate::entitlements::{over_limit, plan_limit};
@@ -430,13 +430,14 @@ mod tests {
     }
 
     /// `(target_id, details)` of every audit row with `action`, oldest first.
-    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
-        let rows: Vec<(Option<String>, String)> =
-            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
-                .bind(action)
-                .fetch_all(app.state.meta.reader())
-                .await
-                .unwrap();
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, Value)> {
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         rows.into_iter()
             .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
             .collect()

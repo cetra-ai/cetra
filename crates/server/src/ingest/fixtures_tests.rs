@@ -462,7 +462,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         ingest: IngestConfig::default(),
         media: MediaConfig::default(),
         eval: EvalConfig::default(),
-audit: crate::config::AuditConfig::default(),
+        audit: crate::config::AuditConfig::default(),
         issues: crate::config::IssuesConfig::default(),
         security: SecurityConfig::default(),
         entitlements: EntitlementsConfig::default(),

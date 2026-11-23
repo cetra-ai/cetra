@@ -9,12 +9,12 @@ use axum::routing::{get, post};
 use uuid::Uuid;
 
 use crate::api::common::ProblemCode;
-use crate::audit::catalog::AuthAction;
-use crate::audit::{self, Event};
 use crate::api::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
     DevicePurpose, DeviceRequest, DeviceTokenRequest, InternalDeviceCode,
 };
+use crate::audit::catalog::AuthAction;
+use crate::audit::{self, Event};
 use crate::auth::device::{
     DeviceError, Grant, GrantProject, POLL_INTERVAL_S, Pending, Poll, Purpose,
 };
@@ -377,13 +377,7 @@ async fn deny(
         .device
         .deny(&user_code, now)
         .map_err(|_| ApiError::NotFound)?;
-    audit::record_alone(
-        &state.meta,
-        &ctx,
-        Event::new(AuthAction::DeviceDenied),
-        now,
-    )
-    .await?;
+    audit::record_alone(&state.meta, &ctx, Event::new(AuthAction::DeviceDenied), now).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -858,14 +852,20 @@ mod tests {
         )
         .await;
         assert_eq!(approved.status, 204);
-        let rows: Vec<(String, Option<String>, Option<String>, String, Option<String>)> =
-            sqlx::query_as(
-                "SELECT actor_kind, org_id, project_id, details, via FROM audit_events \
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, org_id, project_id, details, via FROM audit_events \
                  WHERE action = 'auth.device_approved'",
-            )
-            .fetch_all(app.state.meta.reader())
-            .await
-            .unwrap();
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
         let (actor_kind, org_id, project_id, details, via) = &rows[0];
         assert_eq!(actor_kind, "user");
@@ -875,7 +875,7 @@ mod tests {
             project_id.as_deref(),
             Some(seeded.project.id.to_string().as_str())
         );
-        let details: serde_json::Value = serde_json::from_str(details).unwrap();
+        let details: Value = serde_json::from_str(details).unwrap();
         assert_eq!(details["purpose"], "init");
         assert!(details["token_id"].is_string(), "{details}");
         assert!(details["key_id"].is_string(), "{details}");

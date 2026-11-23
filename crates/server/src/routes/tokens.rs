@@ -834,14 +834,21 @@ mod tests {
             .await;
         assert_eq!(revoked.status, 204);
 
-        let rows: Vec<(String, String, Option<String>, Option<String>, String, String)> =
-            sqlx::query_as(
-                "SELECT action, actor_kind, via, credential_id, target_id, details \
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT action, actor_kind, via, credential_id, target_id, details \
                  FROM audit_events WHERE target_kind = 'pat' ORDER BY seq",
-            )
-            .fetch_all(app.state.meta.reader())
-            .await
-            .unwrap();
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 2);
         let user = account.user_id.to_string();
         let (created_row, revoked_row) = (&rows[0], &rows[1]);
@@ -858,12 +865,11 @@ mod tests {
         assert_eq!(revoked_row.3.as_deref(), Some(id.as_str()));
         assert_eq!(revoked_row.4, id);
         assert_eq!(revoked_row.5, "{}");
-        let actor: Option<String> = sqlx::query_scalar(
-            "SELECT actor_id FROM audit_events WHERE action = 'pat.revoked'",
-        )
-        .fetch_one(app.state.meta.reader())
-        .await
-        .unwrap();
+        let actor: Option<String> =
+            sqlx::query_scalar("SELECT actor_id FROM audit_events WHERE action = 'pat.revoked'")
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
         assert_eq!(actor.as_deref(), Some(user.as_str()));
     }
 }

@@ -11,9 +11,8 @@ use sqlx::Row;
 use uuid::Uuid;
 
 use super::catalog::{
-    ApiKeyAction, AuthAction, DeletionAction, InstanceAction, InviteAction, JoinVia,
-    LoginMethod, MemberAction, OrgAction, PatAction, ProjectAction, SignupMethod, SsoAction,
-    UserAction,
+    ApiKeyAction, AuthAction, DeletionAction, InstanceAction, InviteAction, JoinVia, LoginMethod,
+    MemberAction, OrgAction, PatAction, ProjectAction, SignupMethod, SsoAction, UserAction,
 };
 use super::{
     Action, Actor, Ctx, Event, LOGIN_FAILED_WINDOW_NS, TargetKind, Via, record, record_alone,
@@ -241,7 +240,10 @@ async fn record_writes_one_row_with_every_column() {
     let id: String = row.get("id");
     assert_eq!(Uuid::parse_str(&id).expect("uuid").get_version_num(), 7);
     assert_eq!(row.get::<i64, _>("at"), 42);
-    assert_eq!(row.get::<Option<String>, _>("org_id"), Some(org.to_string()));
+    assert_eq!(
+        row.get::<Option<String>, _>("org_id"),
+        Some(org.to_string())
+    );
     assert_eq!(
         row.get::<Option<String>, _>("project_id"),
         Some(project.to_string())
@@ -249,13 +251,19 @@ async fn record_writes_one_row_with_every_column() {
     assert_eq!(row.get::<String, _>("action"), "member.role_changed");
     assert_eq!(row.get::<String, _>("outcome"), "success");
     assert_eq!(row.get::<String, _>("actor_kind"), "user");
-    assert_eq!(row.get::<Option<String>, _>("actor_id"), Some(user.to_string()));
+    assert_eq!(
+        row.get::<Option<String>, _>("actor_id"),
+        Some(user.to_string())
+    );
     assert_eq!(row.get::<Option<String>, _>("via"), Some("pat".to_owned()));
     assert_eq!(
         row.get::<Option<String>, _>("credential_id"),
         Some(pat.to_string())
     );
-    assert_eq!(row.get::<Option<String>, _>("target_kind"), Some("user".to_owned()));
+    assert_eq!(
+        row.get::<Option<String>, _>("target_kind"),
+        Some("user".to_owned())
+    );
     assert_eq!(
         row.get::<Option<String>, _>("target_id"),
         Some(target.to_string())
@@ -266,7 +274,10 @@ async fn record_writes_one_row_with_every_column() {
         details,
         serde_json::json!({"old_role": "viewer", "new_role": "admin"})
     );
-    assert_eq!(row.get::<Option<String>, _>("ip"), Some("203.0.113.7".to_owned()));
+    assert_eq!(
+        row.get::<Option<String>, _>("ip"),
+        Some("203.0.113.7".to_owned())
+    );
     assert_eq!(
         row.get::<Option<String>, _>("user_agent"),
         Some("agent/1".to_owned())
@@ -338,7 +349,10 @@ fn every_action_name_is_group_dot_snake() {
             !rest.contains('.')
                 && !prefix.is_empty()
                 && !rest.is_empty()
-                && prefix.chars().chain(rest.chars()).all(|c| c.is_ascii_lowercase() || c == '_'),
+                && prefix
+                    .chars()
+                    .chain(rest.chars())
+                    .all(|c| c.is_ascii_lowercase() || c == '_'),
             "{name} is not group.snake_name"
         );
         assert_eq!(prefix, group(&action), "{name} is in the wrong group");
@@ -438,10 +452,9 @@ async fn ctx_reads_the_principal_ip_and_user_agent() {
         session_hash: "hash".to_owned(),
         sso_org: None,
     });
-    parts.extensions.insert(ConnectInfo(SocketAddr::from((
-        [10, 0, 0, 1],
-        4_000,
-    ))));
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([10, 0, 0, 1], 4_000))));
     let ctx = Ctx::from_request_parts(&mut parts, state)
         .await
         .expect("infallible");

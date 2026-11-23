@@ -10,8 +10,6 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use super::store::{DomainRow, ProviderRow, ProviderWrite};
-use crate::audit::catalog::SsoAction;
-use crate::audit::{self, Event, TargetKind};
 use super::{dns, instance_claims, normalize_domain, store};
 use crate::api::common::FieldError;
 use crate::api::common::ProblemCode;
@@ -20,6 +18,8 @@ use crate::api::org_sso::{
     AddOrgSsoDomain, DomainStatus, JitRole, OrgSso as OrgSsoView, OrgSsoDomain, OrgSsoProvider,
     PatchOrgSso, PutOrgSsoProvider,
 };
+use crate::audit::catalog::SsoAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
 use crate::config::{Secret, issuer_problem};
@@ -401,18 +401,18 @@ async fn patch_org_sso(
                 })
                 .org(org);
                 audit::record(conn, &ctx, event, now).await?;
-                Ok(Patch::Done(users, hashes))
+                Ok(Patch::Done(hashes))
             })
         })
         .await?;
-    let (users, hashes) = match outcome {
+    let hashes = match outcome {
         Patch::Missing => return Err(ApiError::NotFound),
         Patch::Changed => {
             return Err(ApiError::Conflict {
                 detail: "The identity provider changed meanwhile; reload and try again.",
             });
         }
-        Patch::Done(users, hashes) => (users, hashes),
+        Patch::Done(hashes) => hashes,
     };
     for hash in &hashes {
         state.pat_cache.evict(hash);
@@ -498,9 +498,7 @@ async fn post_org_sso_domain(
         Add::Listed => Err(ApiError::Conflict {
             detail: "This domain is already listed.",
         }),
-        Add::Added => {
-            Ok((StatusCode::CREATED, error::Json(view(&state, org).await?)))
-        }
+        Add::Added => Ok((StatusCode::CREATED, error::Json(view(&state, org).await?))),
     }
 }
 
@@ -558,7 +556,6 @@ async fn post_org_sso_domain_verify(
                         store::mark_checked(conn, id, now).await?;
                         record_verified(conn, &ctx, org, id, None, now).await?;
                         Ok(Check::Verified {
-                            taken_from: None,
                             revoked: Vec::new(),
                         })
                     }
@@ -573,20 +570,14 @@ async fn post_org_sso_domain_verify(
                             store::mark_verified(conn, id, now).await?;
                             let revoked = revoke_if_enforced(conn, org, &domain, now).await?;
                             record_verified(conn, &ctx, org, id, Some(holder.org_id), now).await?;
-                            Ok(Check::Verified {
-                                taken_from: Some(holder.org_id),
-                                revoked,
-                            })
+                            Ok(Check::Verified { revoked })
                         }
                     }
                     None => match store::mark_verified(conn, id, now).await {
                         Ok(()) => {
                             let revoked = revoke_if_enforced(conn, org, &domain, now).await?;
                             record_verified(conn, &ctx, org, id, None, now).await?;
-                            Ok(Check::Verified {
-                                taken_from: None,
-                                revoked,
-                            })
+                            Ok(Check::Verified { revoked })
                         }
                         Err(MetaError::Conflict(_)) => {
                             store::mark_checked(conn, id, now).await?;
@@ -605,10 +596,7 @@ async fn post_org_sso_domain_verify(
         Check::Elsewhere => Err(ApiError::Conflict {
             detail: "This domain is verified by another organization.",
         }),
-        Check::Verified {
-            taken_from,
-            revoked,
-        } => {
+        Check::Verified { revoked } => {
             for hash in &revoked {
                 state.pat_cache.evict(hash);
             }
@@ -706,9 +694,8 @@ enum Check {
     Missing,
     /// Another org holds the domain and its record is still in the answer.
     Elsewhere,
-    /// The domain is this org's now. `taken_from` is the org it moved from.
+    /// The domain is this org's now; the audit record names the org it moved from.
     Verified {
-        taken_from: Option<OrgId>,
         /// The personal access token hashes the enforcement revoked (D-P-58).
         revoked: Vec<String>,
     },
@@ -728,8 +715,8 @@ enum Patch {
     Missing,
     /// The provider changed between the read and the write.
     Changed,
-    /// The flags are set; the revoked users and token hashes.
-    Done(u64, Vec<String>),
+    /// The flags are set; the revoked token hashes.
+    Done(Vec<String>),
 }
 
 /// What the delete found and did.

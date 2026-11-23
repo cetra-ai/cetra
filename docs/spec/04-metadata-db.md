@@ -1078,7 +1078,7 @@ CREATE INDEX audit_events_at ON audit_events (at);
 | `project_id` | The project, for a project-scoped action. |
 | `action` | A dotted, append-only name from the catalog, e.g. `member.role_changed`. |
 | `outcome` | `success`, or `failure` for the actions the catalog marks as recording failures. |
-| `actor_kind`, `actor_id` | `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system` or `anonymous`, with the id of the user, key or control-plane token; null when there is none. |
+| `actor_kind`, `actor_id` | `user`, `api_key`, `control_plane`, `cli`, `system` or `anonymous`, with the id of the user, key or control-plane token; null when there is none. |
 | `via`, `credential_id` | For a user: `session`, `pat` or `device`; `credential_id` is the PAT id. Never a token value. |
 | `target_kind`, `target_id` | The resource the action acted on, by kind and id. |
 | `details` | JSON with the fields the action's catalog entry allows: names of changed fields, roles, scopes, flags, limits. Never secrets, emails, names, payloads or URLs. |

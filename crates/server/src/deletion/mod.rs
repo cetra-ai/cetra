@@ -1526,7 +1526,7 @@ mod tests {
         let (org, other) = (seeded.org_id, OrgId::from_uuid(Uuid::now_v7()));
         let now = app.state.clock.now_ns();
         for record_org in [org, other] {
-            crate::audit::record_alone(
+            audit::record_alone(
                 &app.state.meta,
                 &Ctx::system(),
                 Event::new(ProjectAction::Created)
@@ -1537,7 +1537,7 @@ mod tests {
             .await
             .unwrap();
         }
-        crate::audit::record_alone(
+        audit::record_alone(
             &app.state.meta,
             &Ctx::system(),
             Event::new(InstanceAction::InitApplied),

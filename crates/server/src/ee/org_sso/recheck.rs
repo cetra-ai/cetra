@@ -113,7 +113,15 @@ mod tests {
         let run = recheck_once(&app.state, later).await.unwrap();
         assert_eq!(run.lapsed, 1);
 
-        let rows: Vec<(String, Option<String>, String, Option<String>, String, String)> = sqlx::query_as(
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+            String,
+        )> = sqlx::query_as(
             "SELECT action, org_id, actor_kind, actor_id, target_kind, target_id \
              FROM audit_events WHERE action = 'sso.domain_lapsed'",
         )

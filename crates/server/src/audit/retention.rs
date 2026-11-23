@@ -14,11 +14,7 @@ const DAY_NS: i64 = 86_400 * 1_000_000_000;
 /// # Errors
 ///
 /// The [`MetaError`] of the first batch that fails; the batches before it stay deleted.
-pub(crate) async fn purge(
-    meta: &MetaDb,
-    retention_days: u32,
-    now: i64,
-) -> Result<u64, MetaError> {
+pub(crate) async fn purge(meta: &MetaDb, retention_days: u32, now: i64) -> Result<u64, MetaError> {
     if retention_days == 0 {
         return Ok(0);
     }

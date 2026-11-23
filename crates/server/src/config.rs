@@ -507,7 +507,9 @@ pub struct AuditConfig {
 
 impl Default for AuditConfig {
     fn default() -> Self {
-        Self { retention_days: 365 }
+        Self {
+            retention_days: 365,
+        }
     }
 }
 

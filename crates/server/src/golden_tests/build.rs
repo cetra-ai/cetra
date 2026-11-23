@@ -917,6 +917,23 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     .bind(now)
     .execute(&mut *conn)
     .await?;
+    // One audit record, through `audit::record` (track EA).
+    crate::audit::record(
+        conn,
+        &crate::audit::Ctx::for_session_user(
+            owner.id,
+            Some(std::net::IpAddr::from([127, 0, 0, 1])),
+            Some("golden"),
+        ),
+        crate::audit::Event::new(crate::audit::catalog::MemberAction::RoleChanged {
+            old_role: "viewer",
+            new_role: "member",
+        })
+        .org(org.id)
+        .target(crate::audit::TargetKind::User, owner.id),
+        now,
+    )
+    .await?;
 
     // Queue rows in states the startup tasks leave alone: finished eval jobs, a failed backfill,
     // rule spend, a pending trace seen just now.

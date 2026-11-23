@@ -85,7 +85,9 @@ impl Actor {
     /// The `via` column: `session` or `pat` for a user; `None` otherwise.
     pub(crate) fn via(&self) -> Option<&'static str> {
         match self {
-            Self::User { via: Via::Session, .. } => Some("session"),
+            Self::User {
+                via: Via::Session, ..
+            } => Some("session"),
             Self::User { via: Via::Pat, .. } => Some("pat"),
             _ => None,
         }
@@ -301,6 +303,8 @@ impl Event {
         self
     }
 
+    // Call sites pass owned ids (`Uuid`, `OrgId`, …); taking them by value reads best there.
+    #[allow(clippy::needless_pass_by_value)]
     pub(crate) fn target(mut self, kind: TargetKind, id: impl ToString) -> Self {
         self.target = Some((kind, id.to_string()));
         self

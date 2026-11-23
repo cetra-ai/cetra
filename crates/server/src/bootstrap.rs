@@ -100,10 +100,6 @@ pub(crate) struct Provisioned {
     pub(crate) org: OrgRow,
     /// The project.
     pub(crate) project: ProjectRow,
-    /// The secret key, when one was requested.
-    pub(crate) key: Option<ApiKeyRow>,
-    /// The read-only key of `init.read_key`, when one was given (D-N-38).
-    pub(crate) read_key: Option<ApiKeyRow>,
 }
 
 /// Values for [`provision`]. The password is already a PHC string.
@@ -291,21 +287,13 @@ async fn insert_first(
     add_org_member(conn, org.id, user.id, OrgRole::Owner, now).await?;
     let project =
         insert_project_with_derived_slug(conn, org.id, &input.project_name, None, now).await?;
-    let key = match &input.key {
-        None => None,
-        Some(key) => Some(insert_key(conn, project.id, user.id, key, &FULL_SCOPES, now).await?),
-    };
-    let read_key = match &input.read_key {
-        None => None,
-        Some(key) => Some(insert_key(conn, project.id, user.id, key, &READ_SCOPES, now).await?),
-    };
-    Ok(Provisioned {
-        user,
-        org,
-        project,
-        key,
-        read_key,
-    })
+    if let Some(key) = &input.key {
+        insert_key(conn, project.id, user.id, key, &FULL_SCOPES, now).await?;
+    }
+    if let Some(key) = &input.read_key {
+        insert_key(conn, project.id, user.id, key, &READ_SCOPES, now).await?;
+    }
+    Ok(Provisioned { user, org, project })
 }
 
 async fn insert_key(

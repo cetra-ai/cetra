@@ -56,10 +56,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 /// another subject is another control-plane account (D-S-9). The email is validated only
 /// when it is used, as `memberships/lookup` does. The control plane never manages an
 /// instance admin, so one is refused.
-async fn managed_user(
-    state: &AppState,
-    body: &InternalUserRef,
-) -> Result<Option<Uuid>, ApiError> {
+async fn managed_user(state: &AppState, body: &InternalUserRef) -> Result<Option<Uuid>, ApiError> {
     let reader = state.meta.reader();
     let provider = &state.config.entitlements.control_plane_provider;
     let found = match identity_user(reader, provider, &body.subject).await? {
@@ -629,7 +626,7 @@ mod tests {
         let app = TestApp::new().await;
         let user = linked_user(&app, "ip@example.com", "sub-ip", false).await;
         let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
-        crate::auth::session::start_session(
+        start_session(
             &app.state,
             user.id,
             Some("Agent/1.0"),

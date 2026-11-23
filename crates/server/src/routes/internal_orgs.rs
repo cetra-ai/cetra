@@ -641,7 +641,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|id| Uuid::parse_str(id).is_ok())
         );
-        assert!(logs.contains("deletion requested"));
+        assert!(logs.contains("deletion.requested"));
         assert!(logs.contains("control_plane"));
         assert!(!logs.contains("doomed@example.com"));
         let deletion_id = deletion["id"].clone();

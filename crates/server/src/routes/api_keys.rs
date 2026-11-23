@@ -8,9 +8,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams};
+use crate::api::keys::{ApiKey, ApiKeyKind, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey};
 use crate::audit::catalog::ApiKeyAction;
 use crate::audit::{self, Event, TargetKind};
-use crate::api::keys::{ApiKey, ApiKeyKind, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{KeyScope, KeyScopes, ProjectPerm};
 use crate::auth::secret::{self, KeyKind};
@@ -840,6 +840,7 @@ mod tests {
             .await;
         assert_eq!(again.status, 404);
 
+        #[allow(clippy::type_complexity)]
         let rows: Vec<(String, Option<String>, Option<String>, String, String)> = sqlx::query_as(
             "SELECT action, org_id, project_id, target_id, details FROM audit_events \
              WHERE target_kind = 'api_key' ORDER BY seq",

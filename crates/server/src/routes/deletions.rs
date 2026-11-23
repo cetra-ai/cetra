@@ -14,12 +14,12 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
-use crate::audit::catalog::DeletionAction;
-use crate::audit::{self, Ctx, Event, TargetKind};
 use crate::api::deletions::{
     CreateDeletion, Deletion, DeletionActor, DeletionActorKind, DeletionFailure, DeletionFilter,
     DeletionKind, DeletionPreview, DeletionPreviewRequest, DeletionStatus, DropParams,
 };
+use crate::audit::catalog::DeletionAction;
+use crate::audit::{self, Ctx, Event, TargetKind};
 use crate::auth::OrgRole;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm};
@@ -249,9 +249,9 @@ async fn drop_org(
         &ctx,
     )
     .await?
-            .ok_or(MetaError::Conflict(
-                "the organization is already being deleted",
-            ))?;
+    .ok_or(MetaError::Conflict(
+        "the organization is already being deleted",
+    ))?;
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 

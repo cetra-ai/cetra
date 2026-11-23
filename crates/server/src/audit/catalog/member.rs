@@ -13,10 +13,7 @@ pub(crate) enum JoinVia {
 pub(crate) enum MemberAction {
     #[serde(rename = "member.added")]
     #[serde(rename_all = "snake_case")]
-    Added {
-        role: &'static str,
-        via: JoinVia,
-    },
+    Added { role: &'static str, via: JoinVia },
     #[serde(rename = "member.role_changed")]
     #[serde(rename_all = "snake_case")]
     RoleChanged {

@@ -1,0 +1,1294 @@
+---
+source: crates/server/src/meta/mod.rs
+assertion_line: 718
+expression: text
+---
+table agent_contexts
+CREATE TABLE agent_contexts (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  agent TEXT NOT NULL,          -- claude-code | codex | gemini-cli | copilot
+  session_id TEXT NOT NULL,
+  repository TEXT,              -- canonical form (D-CA-4)
+  branch TEXT,
+  user_id TEXT,                 -- the hook's `user`, lowercased
+  updated_at INTEGER NOT NULL,  -- ns since the Unix epoch, time of the last write
+  PRIMARY KEY (project_id, agent, session_id)
+)
+
+index agent_contexts_updated
+CREATE INDEX agent_contexts_updated ON agent_contexts(project_id, updated_at)
+
+index agent_contexts_user
+CREATE INDEX agent_contexts_user ON agent_contexts(project_id, user_id) WHERE user_id IS NOT NULL
+
+table alert_events
+CREATE TABLE alert_events (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  value REAL,
+  count INTEGER,
+  threshold REAL NOT NULL,
+  window_from INTEGER NOT NULL,
+  window_to INTEGER NOT NULL,
+  details TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+)
+
+index alert_events_created
+CREATE INDEX alert_events_created ON alert_events(created_at)
+
+index alert_events_rule
+CREATE INDEX alert_events_rule ON alert_events(rule_id, created_at)
+
+table alert_rule_channels
+CREATE TABLE alert_rule_channels (
+  rule_id TEXT NOT NULL REFERENCES alert_rules(id) ON DELETE CASCADE,
+  channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+  PRIMARY KEY (rule_id, channel_id)
+)
+
+index alert_rule_channels_channel
+CREATE INDEX alert_rule_channels_channel ON alert_rule_channels(channel_id)
+
+table alert_rules
+CREATE TABLE alert_rules (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  metric TEXT NOT NULL,
+  config TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  cooldown_s INTEGER NOT NULL DEFAULT 3600,
+  notify_while_firing INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'ok',
+  clear_streak INTEGER NOT NULL DEFAULT 0,
+  last_value REAL,
+  last_count INTEGER,
+  last_evaluated_at INTEGER,
+  last_fired_at INTEGER,
+  last_notified_at INTEGER,
+  last_error TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index alert_rules_due
+CREATE INDEX alert_rules_due ON alert_rules(enabled, last_evaluated_at)
+
+index alert_rules_name
+CREATE UNIQUE INDEX alert_rules_name ON alert_rules(project_id, name)
+
+table annotation_queue_definitions
+CREATE TABLE annotation_queue_definitions (
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  definition_id TEXT NOT NULL REFERENCES score_definitions(id) ON DELETE CASCADE,
+  position INTEGER NOT NULL,
+  PRIMARY KEY (queue_id, definition_id)
+)
+
+table annotation_queue_items
+CREATE TABLE annotation_queue_items (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  queue_id TEXT NOT NULL REFERENCES annotation_queues(id) ON DELETE CASCADE,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id TEXT,                      -- lowercase hex; trace and span items
+  span_id TEXT,                       -- lowercase hex; span items
+  session_id TEXT,                    -- session items
+  target_time INTEGER NOT NULL,       -- ns: trace start, or the session's earliest visible trace start
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'completed', 'skipped')),
+  skip_reason TEXT,
+  leased_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  lease_expires_at INTEGER,
+  done_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  done_at INTEGER,
+  added_by_kind TEXT NOT NULL CHECK (added_by_kind IN ('user', 'pat', 'key')),
+  added_by_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index annotation_queue_items_claim
+CREATE INDEX annotation_queue_items_claim ON annotation_queue_items(queue_id, status, id)
+
+index annotation_queue_items_session
+CREATE INDEX annotation_queue_items_session ON annotation_queue_items(project_id, session_id) WHERE session_id IS NOT NULL
+
+index annotation_queue_items_target
+CREATE UNIQUE INDEX annotation_queue_items_target ON annotation_queue_items(
+  queue_id, coalesce(trace_id, ''), coalesce(span_id, ''), coalesce(session_id, '')
+)
+
+index annotation_queue_items_time
+CREATE INDEX annotation_queue_items_time ON annotation_queue_items(project_id, target_time)
+
+index annotation_queue_items_trace
+CREATE INDEX annotation_queue_items_trace ON annotation_queue_items(project_id, trace_id) WHERE trace_id IS NOT NULL
+
+table annotation_queues
+CREATE TABLE annotation_queues (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  instructions TEXT,                  -- Markdown
+  target TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (project_id, name)
+)
+
+table api_keys
+CREATE TABLE api_keys (
+    id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    name TEXT,
+    prefix TEXT NOT NULL,
+    key_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+)
+
+index api_keys_project
+CREATE INDEX api_keys_project ON api_keys(project_id)
+
+table assistant_conversations
+CREATE TABLE assistant_conversations (
+  id TEXT PRIMARY KEY,                 -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  title TEXT NOT NULL DEFAULT '',      -- '' until the first user message (M3) or a rename
+  message_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  last_active_at INTEGER NOT NULL
+)
+
+index assistant_conversations_idle
+CREATE INDEX assistant_conversations_idle ON assistant_conversations(last_active_at)
+
+index assistant_conversations_owner
+CREATE INDEX assistant_conversations_owner ON assistant_conversations(project_id, user_id, last_active_at)
+
+table assistant_messages
+CREATE TABLE assistant_messages (
+  conversation_id TEXT NOT NULL REFERENCES assistant_conversations(id) ON DELETE CASCADE,
+  seq INTEGER NOT NULL,                -- 1, 2, … within the conversation
+  role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool')),
+  parts TEXT NOT NULL,                 -- JSON array of message parts (spec 04 § Assistant)
+  context TEXT,                        -- JSON page context of a user message (D-AS-14)
+  status TEXT NOT NULL DEFAULT 'complete' CHECK (status IN ('complete', 'cancelled', 'failed')),
+  feedback TEXT CHECK (feedback IN ('up', 'down')),
+  turn_trace_id TEXT,                  -- 32 lowercase hex characters
+  stub_after INTEGER,                  -- tool messages: when their results become stubs; NULL once stubbed
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (conversation_id, seq)
+)
+
+index assistant_messages_stub
+CREATE INDEX assistant_messages_stub ON assistant_messages(stub_after) WHERE stub_after IS NOT NULL
+
+table audit_events
+CREATE TABLE audit_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    at INTEGER NOT NULL,
+    org_id TEXT,
+    project_id TEXT,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_id TEXT,
+    via TEXT,
+    credential_id TEXT,
+    target_kind TEXT,
+    target_id TEXT,
+    details TEXT NOT NULL DEFAULT '{}',
+    ip TEXT,
+    user_agent TEXT
+)
+
+index audit_events_actor
+CREATE INDEX audit_events_actor ON audit_events (actor_id)
+
+index audit_events_at
+CREATE INDEX audit_events_at ON audit_events (at)
+
+index audit_events_org
+CREATE INDEX audit_events_org ON audit_events (org_id, seq)
+
+index audit_events_org_action
+CREATE INDEX audit_events_org_action ON audit_events (org_id, action, seq)
+
+index audit_events_org_actor
+CREATE INDEX audit_events_org_actor ON audit_events (org_id, actor_id, seq)
+
+index audit_events_org_target
+CREATE INDEX audit_events_org_target ON audit_events (org_id, target_id, seq)
+
+table backfills
+CREATE TABLE backfills (
+  id TEXT PRIMARY KEY,
+  rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
+  from_ns INTEGER NOT NULL,
+  to_ns INTEGER NOT NULL,
+  max_targets INTEGER NOT NULL,
+  sample_rate REAL NOT NULL,
+  status TEXT NOT NULL,
+  matched INTEGER NOT NULL DEFAULT 0,
+  enqueued INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+)
+
+index backfills_rule
+CREATE INDEX backfills_rule ON backfills(rule_id, created_at)
+
+index backfills_running
+CREATE UNIQUE INDEX backfills_running ON backfills(rule_id) WHERE status = 'running'
+
+table dashboards
+CREATE TABLE dashboards (
+  id TEXT PRIMARY KEY,                -- UUIDv7
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  definition TEXT NOT NULL,           -- JSON: {widgets: [Widget]}, validated by the server
+  version INTEGER NOT NULL DEFAULT 1, -- +1 on every update; a PATCH names the version it read
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+, kind TEXT NOT NULL DEFAULT 'custom' CHECK (kind IN ('custom', 'overview')))
+
+index dashboards_overview
+CREATE UNIQUE INDEX dashboards_overview ON dashboards(project_id) WHERE kind = 'overview'
+
+index dashboards_project
+CREATE INDEX dashboards_project ON dashboards(project_id, name)
+
+table dataset_items
+CREATE TABLE dataset_items (
+  revision_id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,              -- stable across revisions
+  dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+  input TEXT NOT NULL,                -- JSON
+  expected_output TEXT,               -- JSON, NULL when absent
+  metadata TEXT NOT NULL DEFAULT '{}',
+  source_trace_id BLOB,               -- 16 bytes
+  source_span_id BLOB,                -- 8 bytes
+  valid_from_version INTEGER NOT NULL,
+  valid_to_version INTEGER,
+  created_at INTEGER NOT NULL
+)
+
+index dataset_items_item
+CREATE INDEX dataset_items_item ON dataset_items(dataset_id, item_id, valid_from_version)
+
+index dataset_items_live
+CREATE INDEX dataset_items_live ON dataset_items(dataset_id, valid_to_version, item_id)
+
+index dataset_items_one_live
+CREATE UNIQUE INDEX dataset_items_one_live ON dataset_items(dataset_id, item_id) WHERE valid_to_version IS NULL
+
+index dataset_items_source
+CREATE INDEX dataset_items_source ON dataset_items(source_trace_id) WHERE source_trace_id IS NOT NULL
+
+table dataset_versions
+CREATE TABLE dataset_versions (
+  dataset_id TEXT NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  description TEXT NOT NULL,
+  created_by TEXT,                    -- user id, or 'key:<key id>'
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (dataset_id, version)
+)
+
+table datasets
+CREATE TABLE datasets (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  description TEXT,
+  input_schema TEXT,                  -- JSON Schema text, or NULL
+  expected_schema TEXT,
+  current_version INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+table deletion_projects
+CREATE TABLE deletion_projects (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    project_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, project_id)
+)
+
+table deletion_sessions
+CREATE TABLE deletion_sessions (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    PRIMARY KEY (deletion_id, session_id)
+)
+
+table deletion_traces
+CREATE TABLE deletion_traces (
+    deletion_id TEXT NOT NULL REFERENCES deletions(id) ON DELETE CASCADE,
+    trace_id BLOB NOT NULL,
+    PRIMARY KEY (deletion_id, trace_id)
+)
+
+table deletions
+CREATE TABLE deletions (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL,
+    project_id TEXT,
+    kind TEXT NOT NULL,
+    user_id TEXT,
+    request TEXT NOT NULL,
+    requested_by_kind TEXT NOT NULL,
+    requested_by TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trace_count INTEGER,
+    session_count INTEGER,
+    created_at INTEGER NOT NULL,
+    handed_over_at INTEGER,
+    applied_at INTEGER,
+    error TEXT
+)
+
+index deletions_applied_drops
+CREATE INDEX deletions_applied_drops ON deletions(applied_at, id)
+  WHERE kind IN ('project', 'org') AND status = 'applied'
+
+index deletions_open
+CREATE INDEX deletions_open ON deletions(created_at, id) WHERE status IN ('resolving', 'pending')
+
+index deletions_org
+CREATE INDEX deletions_org ON deletions(org_id, created_at, id)
+
+index deletions_project
+CREATE INDEX deletions_project ON deletions(project_id, created_at, id)
+
+table email_verifications
+CREATE TABLE email_verifications (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+)
+
+index email_verifications_user
+CREATE INDEX email_verifications_user ON email_verifications(user_id)
+
+table eval_jobs
+CREATE TABLE eval_jobs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  rule_id TEXT REFERENCES online_rules(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  variable_mapping TEXT,
+  trace_id BLOB NOT NULL,
+  span_id BLOB,
+  trace_start_ns INTEGER NOT NULL,
+  dedup_key TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  claims INTEGER NOT NULL DEFAULT 0,
+  load_retries INTEGER NOT NULL DEFAULT 0,
+  interruptions INTEGER NOT NULL DEFAULT 0,
+  not_before INTEGER NOT NULL,
+  error_class TEXT,
+  error TEXT,
+  judge_trace_id BLOB,
+  score_id TEXT,
+  evaluator_version INTEGER,
+  input_tokens INTEGER,
+  output_tokens INTEGER,
+  cost_usd REAL,
+  latency_ms INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  finished_at INTEGER
+)
+
+index eval_jobs_finished
+CREATE INDEX eval_jobs_finished ON eval_jobs(finished_at) WHERE finished_at IS NOT NULL
+
+index eval_jobs_project
+CREATE INDEX eval_jobs_project ON eval_jobs(project_id, created_at)
+
+index eval_jobs_ready
+CREATE INDEX eval_jobs_ready ON eval_jobs(status, priority, not_before)
+
+index eval_jobs_rule
+CREATE INDEX eval_jobs_rule ON eval_jobs(rule_id, created_at)
+
+table evaluator_versions
+CREATE TABLE evaluator_versions (
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,               -- as evaluators.config: no sealed value
+  output_score TEXT NOT NULL,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (evaluator_id, version)
+)
+
+table evaluators
+CREATE TABLE evaluators (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  config TEXT NOT NULL,
+  output_score TEXT NOT NULL,
+  connection_id TEXT REFERENCES llm_connections(id),
+  secret_enc BLOB,
+  version INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+index evaluators_connection
+CREATE INDEX evaluators_connection ON evaluators(connection_id) WHERE connection_id IS NOT NULL
+
+table experiment_items
+CREATE TABLE experiment_items (
+  experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
+  dataset_item_id TEXT NOT NULL,      -- item_id (stable)
+  repetition INTEGER NOT NULL,
+  revision_id TEXT NOT NULL,          -- the pinned revision; no FK (D-J-9 deletes by it)
+  input TEXT NOT NULL,                -- snapshot of the revision
+  expected_output TEXT,
+  trace_id BLOB,
+  output TEXT,                        -- JSON
+  error TEXT,
+  latency_ns INTEGER,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (experiment_id, dataset_item_id, repetition)
+)
+
+index experiment_items_revision
+CREATE INDEX experiment_items_revision ON experiment_items(revision_id)
+
+index experiment_items_trace
+CREATE INDEX experiment_items_trace ON experiment_items(trace_id) WHERE trace_id IS NOT NULL
+
+table experiments
+CREATE TABLE experiments (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  dataset_id TEXT REFERENCES datasets(id) ON DELETE SET NULL,
+  dataset_name TEXT NOT NULL,         -- copied at create, shown after the dataset is deleted
+  dataset_version INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  repetitions INTEGER NOT NULL DEFAULT 1,
+  item_count INTEGER NOT NULL,        -- live items of the pinned version
+  status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+  error TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  finished_at INTEGER
+)
+
+index experiments_dataset
+CREATE INDEX experiments_dataset ON experiments(dataset_id, created_at)
+
+index experiments_project
+CREATE INDEX experiments_project ON experiments(project_id, created_at)
+
+table identities
+CREATE TABLE identities (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    email TEXT,
+    created_at INTEGER NOT NULL,
+    UNIQUE(provider, subject)
+)
+
+index identities_user
+CREATE INDEX identities_user ON identities(user_id)
+
+table instance_settings
+CREATE TABLE instance_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+
+table invites
+CREATE TABLE invites (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    email TEXT NOT NULL,
+    role TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    invited_by TEXT REFERENCES users(id),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    accepted_at INTEGER
+)
+
+index invites_pending
+CREATE UNIQUE INDEX invites_pending ON invites(org_id, email) WHERE accepted_at IS NULL
+
+table issue_candidates
+CREATE TABLE issue_candidates (
+    id                     TEXT PRIMARY KEY,
+    project_id             TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id              TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    target                 TEXT NOT NULL CHECK (target IN ('trace', 'span', 'session')),
+    trace_id               BLOB,
+    span_id                BLOB,
+    session_id             TEXT,
+    user_id                TEXT,
+    trace_start            INTEGER,
+    score_id               TEXT,
+    dedup_key              TEXT NOT NULL UNIQUE,
+    status                 TEXT NOT NULL CHECK (status IN ('queued', 'running', 'pending', 'assigned', 'outlier', 'dropped', 'failed', 'skipped')),
+    attempts               INTEGER NOT NULL DEFAULT 0,
+    claims                 INTEGER NOT NULL DEFAULT 0,
+    interruptions          INTEGER NOT NULL DEFAULT 0,
+    load_retries           INTEGER NOT NULL DEFAULT 0,
+    not_before             INTEGER NOT NULL,
+    error_class            TEXT,
+    issue_id               TEXT REFERENCES issues(id) ON DELETE SET NULL,
+    summary                TEXT,
+    summary_prompt_version INTEGER,
+    vector                 BLOB,
+    embed_model            TEXT,
+    dimension              INTEGER,
+    call_trace_id          BLOB,
+    cost_usd               REAL NOT NULL DEFAULT 0,
+    created_at             INTEGER NOT NULL,
+    updated_at             INTEGER NOT NULL
+)
+
+index issue_candidates_ready
+CREATE INDEX issue_candidates_ready ON issue_candidates (not_before) WHERE status = 'queued'
+
+index issue_candidates_source
+CREATE INDEX issue_candidates_source ON issue_candidates (source_id, status, created_at)
+
+index issue_candidates_trace
+CREATE INDEX issue_candidates_trace ON issue_candidates (project_id, trace_id)
+
+table issue_events
+CREATE TABLE issue_events (
+    id            TEXT PRIMARY KEY,
+    issue_id      TEXT NOT NULL REFERENCES issues(id) ON DELETE CASCADE,
+    kind          TEXT NOT NULL CHECK (kind IN ('created', 'state_changed', 'renamed', 'merged', 'regressed')),
+    actor_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+    from_value    TEXT,
+    to_value      TEXT,
+    at            INTEGER NOT NULL
+)
+
+index issue_events_issue
+CREATE INDEX issue_events_issue ON issue_events (issue_id, at, id)
+
+table issue_notifications
+CREATE TABLE issue_notifications (
+    id         TEXT PRIMARY KEY,
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    digest     TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+)
+
+index issue_notifications_created
+CREATE INDEX issue_notifications_created ON issue_notifications (created_at)
+
+table issue_refits
+CREATE TABLE issue_refits (
+    id          TEXT PRIMARY KEY,
+    source_id   TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    trigger     TEXT NOT NULL CHECK (trigger IN ('schedule', 'manual')),
+    started_at  INTEGER NOT NULL,
+    finished_at INTEGER,
+    pending     INTEGER NOT NULL DEFAULT 0,
+    clusters    INTEGER NOT NULL DEFAULT 0,
+    created     INTEGER NOT NULL DEFAULT 0,
+    joined      INTEGER NOT NULL DEFAULT 0,
+    outliers    INTEGER NOT NULL DEFAULT 0,
+    cost_usd    REAL NOT NULL DEFAULT 0,
+    error_class TEXT
+)
+
+index issue_refits_source
+CREATE INDEX issue_refits_source ON issue_refits (source_id, started_at DESC)
+
+table issue_source_channels
+CREATE TABLE issue_source_channels (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    channel_id TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, channel_id)
+)
+
+index issue_source_channels_channel
+CREATE INDEX issue_source_channels_channel ON issue_source_channels (channel_id)
+
+table issue_source_days
+CREATE TABLE issue_source_days (
+    source_id  TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    day        INTEGER NOT NULL,
+    candidates INTEGER NOT NULL DEFAULT 0,
+    spent_usd  REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (source_id, day)
+)
+
+table issue_sources
+CREATE TABLE issue_sources (
+    id            TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name          TEXT NOT NULL,
+    kind          TEXT NOT NULL,
+    filter        TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 1,
+    paused_reason TEXT,
+    paused_at     INTEGER,
+    created_by    TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL, sample_rate REAL, daily_cap INTEGER, score_names TEXT, feedback_sources TEXT, chat_connection_id TEXT REFERENCES llm_connections(id), chat_model TEXT, embed_connection_id TEXT REFERENCES llm_connections(id), embed_model TEXT, embed_dimension INTEGER, floor REAL, min_issue_size INTEGER, budget_usd REAL, budget_period TEXT, paused_detail TEXT, next_refit_at INTEGER, refit_trigger TEXT NOT NULL DEFAULT 'schedule' CHECK (refit_trigger IN ('schedule', 'manual')), last_notified_at INTEGER,
+    UNIQUE (project_id, name)
+)
+
+table issues
+CREATE TABLE issues (
+    id          TEXT PRIMARY KEY,
+    project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    source_id   TEXT NOT NULL REFERENCES issue_sources(id) ON DELETE CASCADE,
+    fingerprint TEXT,
+    title       TEXT NOT NULL,
+    description TEXT,
+    state       TEXT NOT NULL CHECK (state IN ('open', 'resolved', 'ignored', 'merged')),
+    regressed   INTEGER NOT NULL DEFAULT 0,
+    merged_into TEXT REFERENCES issues(id) ON DELETE SET NULL,
+    first_seen  INTEGER NOT NULL,
+    last_seen   INTEGER NOT NULL,
+    resolved_at INTEGER,
+    resolved_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL
+, centroid BLOB, member_count INTEGER NOT NULL DEFAULT 0)
+
+index issues_merged_into
+CREATE INDEX issues_merged_into ON issues (merged_into) WHERE merged_into IS NOT NULL
+
+index issues_project_last_seen
+CREATE INDEX issues_project_last_seen ON issues (project_id, last_seen DESC, id)
+
+index issues_source
+CREATE INDEX issues_source ON issues (source_id)
+
+index issues_source_fingerprint
+CREATE UNIQUE INDEX issues_source_fingerprint ON issues (source_id, fingerprint)
+    WHERE fingerprint IS NOT NULL
+
+table llm_connections
+CREATE TABLE llm_connections (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  adapter TEXT NOT NULL,
+  base_url TEXT,
+  secret_enc BLOB NOT NULL,
+  api_key_hint TEXT NOT NULL,
+  extra_headers_enc BLOB,
+  extra_header_names TEXT NOT NULL DEFAULT '[]',
+  default_model TEXT,
+  structured_output TEXT NOT NULL DEFAULT 'native',
+  max_concurrency INTEGER NOT NULL DEFAULT 4,
+  requests_per_minute INTEGER NOT NULL DEFAULT 300,
+  status TEXT NOT NULL DEFAULT 'ok',
+  last_error TEXT,
+  last_error_at INTEGER,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(org_id, name)
+)
+
+table model_prices
+CREATE TABLE model_prices (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+  project_id TEXT REFERENCES projects(id) ON DELETE CASCADE,
+  model_name TEXT NOT NULL,
+  match_pattern TEXT NOT NULL,
+  provider TEXT,
+  valid_from INTEGER NOT NULL DEFAULT 0,
+  price_input REAL,
+  price_output REAL,
+  price_cache_read REAL,
+  price_cache_write REAL,
+  price_reasoning REAL,
+  tiers TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index model_prices_key
+CREATE UNIQUE INDEX model_prices_key ON model_prices(
+  org_id, coalesce(project_id, ''), match_pattern, coalesce(provider, ''), valid_from
+)
+
+index model_prices_project
+CREATE INDEX model_prices_project ON model_prices(project_id) WHERE project_id IS NOT NULL
+
+table notification_channels
+CREATE TABLE notification_channels (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  config_enc BLOB NOT NULL,
+  target_hint TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index notification_channels_name
+CREATE UNIQUE INDEX notification_channels_name ON notification_channels(project_id, name)
+
+table notification_deliveries
+CREATE TABLE "notification_deliveries" (
+    id                    TEXT PRIMARY KEY,
+    event_id              TEXT REFERENCES alert_events(id) ON DELETE CASCADE,
+    issue_notification_id TEXT REFERENCES issue_notifications(id) ON DELETE CASCADE,
+    channel_id            TEXT NOT NULL REFERENCES notification_channels(id) ON DELETE CASCADE,
+    status                TEXT NOT NULL,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       INTEGER,
+    last_error            TEXT,
+    created_at            INTEGER NOT NULL,
+    updated_at            INTEGER NOT NULL,
+    CHECK ((event_id IS NULL) <> (issue_notification_id IS NULL))
+)
+
+index notification_deliveries_channel
+CREATE INDEX notification_deliveries_channel ON notification_deliveries(channel_id, updated_at)
+
+index notification_deliveries_due
+CREATE INDEX notification_deliveries_due ON notification_deliveries(status, next_attempt_at)
+
+index notification_deliveries_event
+CREATE INDEX notification_deliveries_event ON notification_deliveries(event_id)
+
+index notification_deliveries_issue
+CREATE INDEX notification_deliveries_issue ON notification_deliveries(issue_notification_id)
+
+table online_rules
+CREATE TABLE online_rules (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  evaluator_id TEXT NOT NULL REFERENCES evaluators(id),
+  name TEXT NOT NULL,
+  target TEXT NOT NULL,
+  filter TEXT,
+  variable_mapping TEXT NOT NULL,
+  sample_rate REAL NOT NULL DEFAULT 1.0,
+  budget_usd REAL,
+  budget_period TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  paused_reason TEXT,
+  paused_at INTEGER,
+  paused_detail TEXT,
+  created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+index online_rules_evaluator
+CREATE INDEX online_rules_evaluator ON online_rules(evaluator_id)
+
+table org_assistant_settings
+CREATE TABLE org_assistant_settings (
+  org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  connection_id TEXT REFERENCES llm_connections(id) ON DELETE SET NULL,
+  model TEXT,
+  updated_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  updated_at INTEGER NOT NULL
+)
+
+table org_entitlements
+CREATE TABLE org_entitlements (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    token TEXT NOT NULL,
+    token_id TEXT NOT NULL,
+    issued_at INTEGER NOT NULL,
+    received_at INTEGER NOT NULL
+)
+
+table org_members
+CREATE TABLE org_members (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (org_id, user_id)
+)
+
+index org_members_user
+CREATE INDEX org_members_user ON org_members(user_id)
+
+table org_sso_domains
+CREATE TABLE org_sso_domains (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    domain TEXT NOT NULL,               -- lowercase, no trailing dot
+    token TEXT NOT NULL,                -- 32 lowercase hex; the TXT value's random part (public)
+    verified_at INTEGER,
+    last_checked_at INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (org_id, domain)
+)
+
+index org_sso_domains_verified
+CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE verified_at IS NOT NULL
+
+table org_sso_providers
+CREATE TABLE org_sso_providers (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the row id in client_secret_enc's associated data
+    org_id TEXT NOT NULL UNIQUE REFERENCES orgs(id) ON DELETE CASCADE,
+    display_name TEXT NOT NULL,
+    issuer TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    client_secret_enc BLOB NOT NULL,    -- sealed (D-I-2)
+    enabled INTEGER NOT NULL DEFAULT 0,
+    enforced INTEGER NOT NULL DEFAULT 0,
+    jit_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member'
+    last_login_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+
+table org_window_ends
+CREATE TABLE org_window_ends (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    ended_at INTEGER NOT NULL,
+    data_access_days INTEGER,
+    PRIMARY KEY (org_id, ended_at)
+)
+
+table orgs
+CREATE TABLE orgs (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+
+table password_resets
+CREATE TABLE password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+)
+
+index password_resets_user
+CREATE INDEX password_resets_user ON password_resets(user_id)
+
+table pending_traces
+CREATE TABLE pending_traces (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  trace_id BLOB NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  min_start INTEGER NOT NULL,
+  root_ended INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (project_id, trace_id)
+)
+
+table personal_tokens
+CREATE TABLE personal_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT,
+    prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    scopes TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+)
+
+index personal_tokens_user
+CREATE INDEX personal_tokens_user ON personal_tokens(user_id)
+
+table project_members
+CREATE TABLE project_members (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    PRIMARY KEY (project_id, user_id)
+)
+
+index project_members_user
+CREATE INDEX project_members_user ON project_members(user_id)
+
+table projects
+CREATE TABLE projects (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    retention_days INTEGER,
+    settings TEXT NOT NULL DEFAULT '{}',
+    state TEXT NOT NULL DEFAULT 'active',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(org_id, slug)
+)
+
+index projects_org
+CREATE INDEX projects_org ON projects(org_id)
+
+table prompt_label_events
+CREATE TABLE prompt_label_events (
+  id INTEGER PRIMARY KEY,               -- rowid: the history's order
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  from_version INTEGER,                 -- NULL: the label was new
+  to_version INTEGER,                   -- NULL: the label was removed
+  actor TEXT,
+  at INTEGER NOT NULL
+)
+
+index prompt_label_events_prompt
+CREATE INDEX prompt_label_events_prompt ON prompt_label_events(prompt_id, id)
+
+table prompt_labels
+CREATE TABLE prompt_labels (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, label),
+  FOREIGN KEY (prompt_id, version) REFERENCES prompt_versions(prompt_id, version)
+)
+
+table prompt_settings
+CREATE TABLE prompt_settings (
+  project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  protected_labels TEXT NOT NULL,       -- JSON array; no row means ["production"] (D-V-10)
+  updated_by TEXT,
+  updated_at INTEGER NOT NULL
+)
+
+table prompt_versions
+CREATE TABLE prompt_versions (
+  prompt_id TEXT NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL,
+  template TEXT NOT NULL,               -- JSON: a string (text) or an array (chat)
+  config TEXT NOT NULL DEFAULT '{}',    -- JSON object (D-V-6)
+  commit_message TEXT,
+  created_by TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (prompt_id, version)
+)
+
+table prompts
+CREATE TABLE prompts (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,                   -- immutable (D-V-2)
+  type TEXT NOT NULL CHECK (type IN ('text', 'chat')),
+  description TEXT,
+  tags TEXT NOT NULL DEFAULT '[]',      -- JSON array of strings
+  latest_version INTEGER NOT NULL,
+  created_by TEXT,                      -- a user id or key:<key id>
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(project_id, name)
+)
+
+table rule_spend
+CREATE TABLE rule_spend (
+  rule_id TEXT NOT NULL REFERENCES online_rules(id) ON DELETE CASCADE,
+  day INTEGER NOT NULL,
+  spent_usd REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (rule_id, day)
+)
+
+table saved_views
+CREATE TABLE saved_views (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL,
+  state TEXT NOT NULL,
+  owner_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  shared INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+)
+
+index saved_views_lookup
+CREATE INDEX saved_views_lookup ON saved_views(project_id, kind)
+
+index saved_views_owner
+CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id)
+
+table score_definitions
+CREATE TABLE score_definitions (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  data_type TEXT NOT NULL,
+  categories TEXT,
+  min_value REAL,
+  max_value REAL,
+  description TEXT,
+  archived_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+, direction TEXT NOT NULL DEFAULT 'none')
+
+index score_definitions_live
+CREATE UNIQUE INDEX score_definitions_live ON score_definitions(project_id, name) WHERE archived_at IS NULL
+
+index sqlite_autoindex__sqlx_migrations_1
+
+index sqlite_autoindex_agent_contexts_1
+
+index sqlite_autoindex_alert_events_1
+
+index sqlite_autoindex_alert_rule_channels_1
+
+index sqlite_autoindex_alert_rules_1
+
+index sqlite_autoindex_annotation_queue_definitions_1
+
+index sqlite_autoindex_annotation_queue_items_1
+
+index sqlite_autoindex_annotation_queues_1
+
+index sqlite_autoindex_annotation_queues_2
+
+index sqlite_autoindex_api_keys_1
+
+index sqlite_autoindex_api_keys_2
+
+index sqlite_autoindex_assistant_conversations_1
+
+index sqlite_autoindex_assistant_messages_1
+
+index sqlite_autoindex_audit_events_1
+
+index sqlite_autoindex_backfills_1
+
+index sqlite_autoindex_dashboards_1
+
+index sqlite_autoindex_dataset_items_1
+
+index sqlite_autoindex_dataset_versions_1
+
+index sqlite_autoindex_datasets_1
+
+index sqlite_autoindex_datasets_2
+
+index sqlite_autoindex_deletion_projects_1
+
+index sqlite_autoindex_deletion_sessions_1
+
+index sqlite_autoindex_deletion_traces_1
+
+index sqlite_autoindex_deletions_1
+
+index sqlite_autoindex_email_verifications_1
+
+index sqlite_autoindex_eval_jobs_1
+
+index sqlite_autoindex_eval_jobs_2
+
+index sqlite_autoindex_evaluator_versions_1
+
+index sqlite_autoindex_evaluators_1
+
+index sqlite_autoindex_evaluators_2
+
+index sqlite_autoindex_experiment_items_1
+
+index sqlite_autoindex_experiments_1
+
+index sqlite_autoindex_identities_1
+
+index sqlite_autoindex_identities_2
+
+index sqlite_autoindex_instance_settings_1
+
+index sqlite_autoindex_invites_1
+
+index sqlite_autoindex_invites_2
+
+index sqlite_autoindex_issue_candidates_1
+
+index sqlite_autoindex_issue_candidates_2
+
+index sqlite_autoindex_issue_events_1
+
+index sqlite_autoindex_issue_notifications_1
+
+index sqlite_autoindex_issue_refits_1
+
+index sqlite_autoindex_issue_source_channels_1
+
+index sqlite_autoindex_issue_source_days_1
+
+index sqlite_autoindex_issue_sources_1
+
+index sqlite_autoindex_issue_sources_2
+
+index sqlite_autoindex_issues_1
+
+index sqlite_autoindex_llm_connections_1
+
+index sqlite_autoindex_llm_connections_2
+
+index sqlite_autoindex_model_prices_1
+
+index sqlite_autoindex_notification_channels_1
+
+index sqlite_autoindex_notification_deliveries_1
+
+index sqlite_autoindex_online_rules_1
+
+index sqlite_autoindex_online_rules_2
+
+index sqlite_autoindex_org_assistant_settings_1
+
+index sqlite_autoindex_org_entitlements_1
+
+index sqlite_autoindex_org_members_1
+
+index sqlite_autoindex_org_sso_domains_1
+
+index sqlite_autoindex_org_sso_domains_2
+
+index sqlite_autoindex_org_sso_providers_1
+
+index sqlite_autoindex_org_sso_providers_2
+
+index sqlite_autoindex_org_window_ends_1
+
+index sqlite_autoindex_orgs_1
+
+index sqlite_autoindex_orgs_2
+
+index sqlite_autoindex_password_resets_1
+
+index sqlite_autoindex_pending_traces_1
+
+index sqlite_autoindex_personal_tokens_1
+
+index sqlite_autoindex_personal_tokens_2
+
+index sqlite_autoindex_project_members_1
+
+index sqlite_autoindex_projects_1
+
+index sqlite_autoindex_projects_2
+
+index sqlite_autoindex_prompt_labels_1
+
+index sqlite_autoindex_prompt_settings_1
+
+index sqlite_autoindex_prompt_versions_1
+
+index sqlite_autoindex_prompts_1
+
+index sqlite_autoindex_prompts_2
+
+index sqlite_autoindex_rule_spend_1
+
+index sqlite_autoindex_saved_views_1
+
+index sqlite_autoindex_score_definitions_1
+
+index sqlite_autoindex_usage_daily_1
+
+index sqlite_autoindex_usage_notices_1
+
+index sqlite_autoindex_users_1
+
+index sqlite_autoindex_users_2
+
+index sqlite_autoindex_web_sessions_1
+
+table sqlite_sequence
+CREATE TABLE sqlite_sequence(name,seq)
+
+table usage_daily
+CREATE TABLE usage_daily (
+  org_id TEXT NOT NULL, project_id TEXT NOT NULL, day TEXT NOT NULL,
+  spans INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+  scores INTEGER NOT NULL DEFAULT 0,
+  judge_input_tokens INTEGER NOT NULL DEFAULT 0, judge_output_tokens INTEGER NOT NULL DEFAULT 0,
+  judge_cost_usd REAL NOT NULL DEFAULT 0, genai_log_events INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (org_id, project_id, day)
+)
+
+table usage_notices
+CREATE TABLE usage_notices (
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    month TEXT NOT NULL,
+    threshold INTEGER NOT NULL,
+    sent_at INTEGER NOT NULL,
+    PRIMARY KEY (org_id, month, threshold)
+)
+
+table users
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    name TEXT,
+    password_hash TEXT,
+    email_verified_at INTEGER,
+    is_instance_admin INTEGER NOT NULL DEFAULT 0,
+    disabled_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+, email_verified_via TEXT
+    CHECK (email_verified_via IS NULL
+        OR email_verified_via IN ('mail_token', 'idp', 'invite', 'control_plane', 'operator')))
+
+table web_sessions
+CREATE TABLE web_sessions (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    user_agent TEXT,
+    ip TEXT
+, sso_org_id TEXT REFERENCES orgs(id) ON DELETE SET NULL, via_provider INTEGER NOT NULL DEFAULT 0
+    CHECK (via_provider IN (0, 1)))
+
+index web_sessions_user
+CREATE INDEX web_sessions_user ON web_sessions(user_id)

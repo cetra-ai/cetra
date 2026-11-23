@@ -1794,11 +1794,12 @@ mod tests {
             "{unknown_logs}"
         );
         assert!(!unknown_logs.contains(PASSWORD), "{unknown_logs}");
-        let failures: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action = 'auth.login_failed'")
-                .fetch_one(app.state.meta.reader())
-                .await
-                .unwrap();
+        let failures: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.login_failed'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
         assert_eq!(failures, 1, "an unknown account writes no row");
         let (logged_in, logs) = capture_logs(async {
             app.request(Method::POST, "/api/auth/login")

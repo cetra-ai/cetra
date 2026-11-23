@@ -209,9 +209,7 @@ async fn update_project(
         None => None,
         Some(name) => Some(trimmed_name(&name)?),
     };
-    let name_changed = name
-        .as_ref()
-        .is_some_and(|new| *new != access.project.name);
+    let name_changed = name.as_ref().is_some_and(|new| *new != access.project.name);
     let retention_days = match body.retention_days {
         None => None,
         Some(None) => Some(None),
@@ -409,12 +407,13 @@ mod tests {
 
     /// `(target_id, details)` of every audit row with `action`, oldest first.
     async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
-        let rows: Vec<(Option<String>, String)> =
-            sqlx::query_as("SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq")
-                .bind(action)
-                .fetch_all(app.state.meta.reader())
-                .await
-                .unwrap();
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         rows.into_iter()
             .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
             .collect()
@@ -969,7 +968,10 @@ mod tests {
             .json();
 
         let rows = audit_rows(&app, "project.created").await;
-        assert_eq!(rows, vec![(Some(created.id.to_string()), serde_json::json!({}))]);
+        assert_eq!(
+            rows,
+            vec![(Some(created.id.to_string()), serde_json::json!({}))]
+        );
     }
 
     #[tokio::test]
@@ -1034,10 +1036,16 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(audit_rows(&app, "project.renamed").await.len(), 1);
         assert_eq!(
-            audit_rows(&app, "project.completion_timeout_changed").await.len(),
+            audit_rows(&app, "project.completion_timeout_changed")
+                .await
+                .len(),
             1
         );
-        assert!(audit_rows(&app, "project.retention_changed").await.is_empty());
+        assert!(
+            audit_rows(&app, "project.retention_changed")
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1195,10 +1203,7 @@ mod tests {
             .status;
         assert_eq!(status, 200);
         assert_eq!(audit_rows(&app, "project.renamed").await.len(), 1);
-        assert_eq!(
-            audit_rows(&app, "project.retention_changed").await.len(),
-            1
-        );
+        assert_eq!(audit_rows(&app, "project.retention_changed").await.len(), 1);
     }
 
     /// Sends `PATCH retention_days: 30` to a project of org `acme`, after the org holds a

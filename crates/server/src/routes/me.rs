@@ -433,14 +433,20 @@ mod tests {
             .send()
             .await;
         assert_eq!(changed.status, 204);
-        let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> =
-            sqlx::query_as(
-                "SELECT actor_kind, outcome, via, target_kind, target_id \
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, outcome, via, target_kind, target_id \
                  FROM audit_events WHERE action = 'auth.password_changed'",
-            )
-            .fetch_all(app.state.meta.reader())
-            .await
-            .unwrap();
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
         let (actor_kind, outcome, via, target_kind, target_id) = &rows[0];
         assert_eq!(actor_kind, "user");

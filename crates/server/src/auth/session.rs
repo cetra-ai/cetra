@@ -88,13 +88,7 @@ pub(crate) async fn start_session(
                     expires_at,
                 )
                 .await?;
-                audit::record(
-                    conn,
-                    &ctx,
-                    Event::new(AuthAction::Login { method }),
-                    now,
-                )
-                .await?;
+                audit::record(conn, &ctx, Event::new(AuthAction::Login { method }), now).await?;
                 if let Some(org) = sso_org {
                     audit::record(
                         conn,

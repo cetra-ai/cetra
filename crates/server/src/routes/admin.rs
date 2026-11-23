@@ -278,8 +278,7 @@ async fn reset_link(
         .write(move |conn| {
             Box::pin(async move {
                 reset::reset_link_tx(conn, &minted, id, now).await?;
-                let event = Event::new(UserAction::ResetLinkIssued)
-                    .target(TargetKind::User, id);
+                let event = Event::new(UserAction::ResetLinkIssued).target(TargetKind::User, id);
                 audit::record(conn, &ctx, event, now).await
             })
         })
