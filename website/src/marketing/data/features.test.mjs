@@ -188,7 +188,7 @@ test("the limit rows match the plans", () => {
   assert.equal(PLANS[2].rules, "Unlimited rules");
 });
 
-test("Teams add-on rows match the licence", () => {
+test("licence rows match the licence features", () => {
   const teamsRows = allRows.filter(
     ({ row }) =>
       row.cloud !== undefined &&
@@ -199,10 +199,17 @@ test("Teams add-on rows match the licence", () => {
       row.cloud[3] === true &&
       row.selfHosted !== undefined,
   );
-  assert.equal(teamsRows.length, SELF_HOSTED.licence.features.length);
   for (const { row } of teamsRows) {
     assert.deepEqual(row.selfHosted, [false, true], `"${row.label}" licence cells`);
   }
+  const licenceRows = allRows.filter(
+    ({ row }) =>
+      row.selfHosted !== undefined &&
+      row.selfHosted.length === 2 &&
+      row.selfHosted[0] === false &&
+      row.selfHosted[1] === true,
+  );
+  assert.equal(licenceRows.length, SELF_HOSTED.licence.features.length);
 });
 
 test("retention controls are Pro and up", () => {
@@ -212,10 +219,10 @@ test("retention controls are Pro and up", () => {
   assert.deepEqual(row.selfHosted, [true, true]);
 });
 
-test("each table has about 55 to 60 rows", () => {
+test("each table has about 55 to 65 rows", () => {
   const count = (table) => groupsFor(table).reduce((sum, group) => sum + group.rows.length, 0);
-  assert.equal(count("cloud"), 61);
-  assert.equal(count("selfHosted"), 57);
+  assert.equal(count("cloud"), 62);
+  assert.equal(count("selfHosted"), 59);
 });
 
 test("groupsFor drops rows and empty groups", () => {

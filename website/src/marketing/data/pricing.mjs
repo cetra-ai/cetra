@@ -111,6 +111,8 @@ export const SELF_HOSTED = {
       "Single sign-on per org, with verified domains",
       "Enforce single sign-on for your domains",
       "Project-level roles",
+      "Audit logs, with export and a SIEM stream",
+      "SCIM provisioning from your identity provider",
     ],
   },
 };
