@@ -157,6 +157,8 @@ mod tests {
             status: "ok".to_owned(),
             last_error: None,
             last_error_at: None,
+            last_tested_at: None,
+            last_test_ok: None,
             created_by: None,
             created_at: 1_000,
             updated_at,

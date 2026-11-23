@@ -487,6 +487,8 @@ async fn connections_section(world: &World<'_>) -> Value {
                 "requests_per_minute": row.requests_per_minute,
                 "status": row.status,
                 "last_error": row.last_error,
+                "last_tested_at": row.last_tested_at,
+                "last_test_ok": row.last_test_ok,
             }),
         );
     }

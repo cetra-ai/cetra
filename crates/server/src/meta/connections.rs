@@ -48,6 +48,10 @@ pub(crate) struct ConnectionRow {
     pub(crate) last_error: Option<String>,
     /// When `last_error` was recorded.
     pub(crate) last_error_at: Option<i64>,
+    /// When the saved values were last tested (D-I-54).
+    pub(crate) last_tested_at: Option<i64>,
+    /// Whether that test succeeded; `None` with `last_tested_at`.
+    pub(crate) last_test_ok: Option<bool>,
     /// User who created the connection.
     pub(crate) created_by: Option<Uuid>,
     /// Creation time, nanoseconds.
@@ -79,6 +83,8 @@ impl fmt::Debug for ConnectionRow {
             .field("status", &self.status)
             .field("last_error", &self.last_error)
             .field("last_error_at", &self.last_error_at)
+            .field("last_tested_at", &self.last_tested_at)
+            .field("last_test_ok", &self.last_test_ok)
             .field("created_by", &self.created_by)
             .field("created_at", &self.created_at)
             .field("updated_at", &self.updated_at)
@@ -126,8 +132,8 @@ pub(crate) async fn list_connections(
     let records: Vec<ConnectionRecord> = sqlx::query_as(
         "SELECT id, org_id, name, adapter, base_url, secret_enc, api_key_hint, extra_headers_enc, \
          extra_header_names, default_model, structured_output, max_concurrency, \
-         requests_per_minute, status, last_error, last_error_at, created_by, created_at, \
-         updated_at \
+         requests_per_minute, status, last_error, last_error_at, last_tested_at, last_test_ok, \
+         created_by, created_at, updated_at \
          FROM llm_connections WHERE org_id = ? ORDER BY name, id",
     )
     .bind(org.to_string())
@@ -149,8 +155,8 @@ pub(crate) async fn get_connection(
     let record: Option<ConnectionRecord> = sqlx::query_as(
         "SELECT id, org_id, name, adapter, base_url, secret_enc, api_key_hint, extra_headers_enc, \
          extra_header_names, default_model, structured_output, max_concurrency, \
-         requests_per_minute, status, last_error, last_error_at, created_by, created_at, \
-         updated_at \
+         requests_per_minute, status, last_error, last_error_at, last_tested_at, last_test_ok, \
+         created_by, created_at, updated_at \
          FROM llm_connections WHERE org_id = ? AND id = ?",
     )
     .bind(org.to_string())
@@ -173,8 +179,8 @@ pub(crate) async fn get_connection_tx(
     let record: Option<ConnectionRecord> = sqlx::query_as(
         "SELECT id, org_id, name, adapter, base_url, secret_enc, api_key_hint, extra_headers_enc, \
          extra_header_names, default_model, structured_output, max_concurrency, \
-         requests_per_minute, status, last_error, last_error_at, created_by, created_at, \
-         updated_at \
+         requests_per_minute, status, last_error, last_error_at, last_tested_at, last_test_ok, \
+         created_by, created_at, updated_at \
          FROM llm_connections WHERE org_id = ? AND id = ?",
     )
     .bind(org.to_string())
@@ -339,6 +345,51 @@ pub(crate) async fn set_connection_status(
     Ok(())
 }
 
+/// Stores the outcome of a test of the saved values (D-I-54), without touching `updated_at`,
+/// only while the row's `updated_at` is still `tested_updated_at`: a change saved during the
+/// test call makes the outcome stale, and it is dropped. Returns whether the row was updated.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+pub(crate) async fn record_connection_test(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+    tested_updated_at: i64,
+    ok: bool,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let result = sqlx::query(
+        "UPDATE llm_connections SET last_tested_at = ?, last_test_ok = ? \
+         WHERE id = ? AND updated_at = ?",
+    )
+    .bind(now)
+    .bind(ok)
+    .bind(id.to_string())
+    .bind(tested_updated_at)
+    .execute(&mut *conn)
+    .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+/// Forgets the stored test (D-I-54), without touching `updated_at`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the update fails.
+pub(crate) async fn clear_connection_test(
+    conn: &mut SqliteConnection,
+    id: Uuid,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE llm_connections SET last_tested_at = NULL, last_test_ok = NULL WHERE id = ?",
+    )
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 #[derive(sqlx::FromRow)]
 struct ConnectionRecord {
     id: String,
@@ -357,6 +408,8 @@ struct ConnectionRecord {
     status: String,
     last_error: Option<String>,
     last_error_at: Option<i64>,
+    last_tested_at: Option<i64>,
+    last_test_ok: Option<bool>,
     created_by: Option<String>,
     created_at: i64,
     updated_at: i64,
@@ -393,6 +446,8 @@ fn row_from(record: ConnectionRecord) -> Result<ConnectionRow, MetaError> {
         status: record.status,
         last_error: record.last_error,
         last_error_at: record.last_error_at,
+        last_tested_at: record.last_tested_at,
+        last_test_ok: record.last_test_ok,
         created_by: match record.created_by {
             Some(value) => Some(parse_uuid(&value, "created_by")?),
             None => None,
@@ -425,8 +480,8 @@ mod tests {
     use crate::meta::MetaDb;
     use crate::meta::MetaError;
     use crate::meta::connections::{
-        delete_connection, get_connection, insert_connection, list_connections,
-        set_connection_status, update_connection,
+        clear_connection_test, delete_connection, get_connection, insert_connection,
+        list_connections, record_connection_test, set_connection_status, update_connection,
     };
     use crate::meta::orgs::insert_org;
     use crate::meta::users::{NewUser, insert_user};
@@ -534,6 +589,8 @@ mod tests {
                 status: "ok".to_owned(),
                 last_error: None,
                 last_error_at: None,
+                last_tested_at: None,
+                last_test_ok: None,
                 created_by: row.created_by,
                 created_at: NOW,
                 updated_at: NOW,
@@ -749,6 +806,83 @@ mod tests {
         assert_eq!(ok.last_error, None);
         assert_eq!(ok.last_error_at, None);
         assert_eq!(ok.updated_at, NOW);
+    }
+
+    #[tokio::test]
+    async fn record_connection_test_needs_the_tested_updated_at() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db, "acme").await;
+        let row = insert(&db, acme, "tested", None).await;
+
+        let stale = db
+            .write({
+                let id = row.id;
+                move |conn| {
+                    Box::pin(async move {
+                        record_connection_test(conn, id, NOW + 1, true, NOW + 5).await
+                    })
+                }
+            })
+            .await
+            .unwrap();
+        assert!(!stale);
+        let unchanged = get_connection(db.reader(), acme, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.last_tested_at, None);
+        assert_eq!(unchanged.last_test_ok, None);
+
+        let recorded = db
+            .write({
+                let id = row.id;
+                move |conn| {
+                    Box::pin(
+                        async move { record_connection_test(conn, id, NOW, false, NOW + 5).await },
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert!(recorded);
+        let failed = get_connection(db.reader(), acme, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.last_tested_at, Some(NOW + 5));
+        assert_eq!(failed.last_test_ok, Some(false));
+        assert_eq!(failed.updated_at, NOW);
+    }
+
+    #[tokio::test]
+    async fn clear_connection_test_clears_both() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let acme = org(&db, "acme").await;
+        let row = insert(&db, acme, "cleared", None).await;
+        db.write({
+            let id = row.id;
+            move |conn| {
+                Box::pin(async move {
+                    record_connection_test(conn, id, NOW, true, NOW + 5).await?;
+                    Ok(())
+                })
+            }
+        })
+        .await
+        .unwrap();
+        db.write({
+            let id = row.id;
+            move |conn| Box::pin(async move { clear_connection_test(conn, id).await })
+        })
+        .await
+        .unwrap();
+        let cleared = get_connection(db.reader(), acme, row.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.last_tested_at, None);
+        assert_eq!(cleared.last_test_ok, None);
+        assert_eq!(cleared.updated_at, NOW);
     }
 
     #[tokio::test]

@@ -277,6 +277,10 @@ pub struct AssistantStatus {
     /// The connection's adapter, when `usable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<String>,
+    /// The connection's base URL, when `usable` and set: it tells OpenAI from an
+    /// OpenAI-compatible server (D-I-51).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
     /// The model, when `usable`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
