@@ -27863,6 +27863,10 @@
             "type": "string",
             "description": "The connection's adapter, when `usable`."
           },
+          "base_url": {
+            "type": "string",
+            "description": "The connection's base URL, when `usable` and set: it tells OpenAI from an\nOpenAI-compatible server (D-I-51)."
+          },
           "connection_name": {
             "type": "string",
             "description": "The connection's name, when `usable`, for the panel's notice (D-AS-18)."

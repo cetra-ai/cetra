@@ -4589,6 +4589,11 @@ export interface components {
         AssistantStatus: {
             /** @description The connection's adapter, when `usable`. */
             adapter?: string;
+            /**
+             * @description The connection's base URL, when `usable` and set: it tells OpenAI from an
+             *     OpenAI-compatible server (D-I-51).
+             */
+            base_url?: string;
             /** @description The connection's name, when `usable`, for the panel's notice (D-AS-18). */
             connection_name?: string;
             /** @description The model, when `usable`. */
