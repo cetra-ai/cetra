@@ -20,6 +20,8 @@ use crate::auth::OrgRole;
 use crate::auth::oidc::ExchangeError;
 use crate::auth::oidc::flow::{self, LoggedIn, LoginError, display_name};
 use crate::auth::oidc::state_cookie::{self, OAuthState};
+use crate::audit::catalog::{AuthAction, JoinVia, MemberAction, SignupMethod};
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::roles::org_role_str;
 use crate::auth::secret::new_opaque_token;
 use crate::auth::session::resolve_cookie_header;
@@ -198,6 +200,7 @@ pub(crate) async fn finish(
     query_state: Option<&str>,
     code: Option<&str>,
     provider_error: bool,
+    ctx: &audit::Ctx,
 ) -> Result<LoggedIn, LoginError> {
     let now = state.clock.now_ns();
     let saved = state_cookie::open(
@@ -264,23 +267,22 @@ pub(crate) async fn finish(
         test_owner: saved.test_owner,
         now,
     };
+    let ctx = ctx.clone();
     let admitted = state
         .meta
-        .write(move |conn| Box::pin(async move { admit(conn, &input).await }))
+        .write(move |conn| Box::pin(async move { admit(conn, &input, &ctx).await }))
         .await;
     let admitted = match admitted {
         Ok(admitted) => admitted,
         Err(MetaError::Conflict(_)) => Admitted::LinkRefused,
         Err(error) => return Err(flow::internal(error)),
     };
-    let (user_id, revoked, linked, joined, no_seat) = match admitted {
+    let (user_id, revoked, no_seat) = match admitted {
         Admitted::User {
             user_id,
             revoked,
-            linked,
-            joined,
             no_seat,
-        } => (user_id, revoked, linked, joined, no_seat),
+        } => (user_id, revoked, no_seat),
         Admitted::AccountDisabled => return Err(LoginError::AccountDisabled),
         Admitted::LinkRefused => return Err(LoginError::LinkRefused),
         Admitted::SignupClosed => return Err(LoginError::SignupClosed),
@@ -291,14 +293,8 @@ pub(crate) async fn finish(
     for hash in &revoked {
         state.pat_cache.evict(hash);
     }
-    if linked {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, "identity linked");
-    }
-    if let Some(role) = joined {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, role = org_role_str(role), "org sso joined");
-    }
     let redirect = if no_seat {
-        tracing::info!(target: "audit", user_id = %user_id, org_id = %org, "org sso join skipped: seat limit");
+        tracing::info!(user_id = %user_id, org_id = %org, "org sso join skipped: seat limit");
         let slug = orgs::org_by_id(state.meta.reader(), org)
             .await
             .map_err(flow::internal)?
@@ -341,9 +337,6 @@ enum Admitted {
         user_id: Uuid,
         /// Personal access token hashes the link revoked.
         revoked: Vec<String>,
-        linked: bool,
-        /// The role of a new membership.
-        joined: Option<OrgRole>,
         /// JIT was refused for lack of a seat, and the person keeps their other orgs (D-P-56).
         no_seat: bool,
     },
@@ -367,7 +360,11 @@ enum Target {
 }
 
 /// Decides the login. All reads come first; a refusal writes nothing (D-P-55, D-P-56).
-async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, MetaError> {
+async fn admit(
+    conn: &mut SqliteConnection,
+    input: &Admit,
+    ctx: &audit::Ctx,
+) -> Result<Admitted, MetaError> {
     let org = input.org;
     let now = input.now;
     let known = identities::identity_user_tx(conn, &input.identity, &input.subject).await?;
@@ -415,8 +412,6 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
                         return Ok(Admitted::User {
                             user_id: user.id,
                             revoked: Vec::new(),
-                            linked: false,
-                            joined: None,
                             no_seat: false,
                         });
                     }
@@ -488,6 +483,7 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
     }
 
     // Writes. A conflict (a concurrent first login) rolls the whole write back.
+    let created = matches!(target, Target::New);
     let mut revoked = Vec::new();
     let mut linked = false;
     let user_id = match target {
@@ -551,11 +547,38 @@ async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, M
         joined = Some(role);
     }
     store::set_last_login(conn, org, now).await?;
+    // The records name the signed-in user as the actor, in the same transaction (D-EA-2).
+    let actor = ctx.with_actor(audit::Actor::User {
+        id: user_id,
+        via: audit::Via::Session,
+        credential_id: None,
+    });
+    if linked {
+        let event = Event::new(AuthAction::IdentityLinked {
+            provider: input.identity.clone(),
+        })
+        .org(org);
+        audit::record(conn, &actor, event, now).await?;
+    }
+    if created {
+        let event = Event::new(AuthAction::Signup {
+            method: SignupMethod::OrgProvider,
+        })
+        .org(org);
+        audit::record(conn, &actor, event, now).await?;
+    }
+    if let Some(role) = joined {
+        let event = Event::new(MemberAction::Added {
+            role: org_role_str(role),
+            via: JoinVia::SsoJit,
+        })
+        .org(org)
+        .target(TargetKind::User, user_id);
+        audit::record(conn, &actor, event, now).await?;
+    }
     Ok(Admitted::User {
         user_id,
         revoked,
-        linked,
-        joined,
         no_seat,
     })
 }

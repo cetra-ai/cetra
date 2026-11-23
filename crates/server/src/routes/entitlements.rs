@@ -8,6 +8,8 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::api::entitlements::{OrgEntitlements, OrgMonthUsage, PutOrgTokenRequest};
+use crate::audit::catalog::OrgAction;
+use crate::audit::{self, Event};
 use crate::auth::roles::OrgPerm;
 use crate::entitlements::tokens::{OrgGrant, OrgTokenError, grant_from_token};
 use crate::entitlements::{self, Limits, units};
@@ -91,6 +93,7 @@ enum PutOutcome {
 async fn put_org_token(
     State(state): State<AppState>,
     ClientIp(ip): ClientIp,
+    ctx: audit::Ctx,
     error::Path(OrgIdPath { org_id }): error::Path<OrgIdPath>,
     error::Json(body): error::Json<PutOrgTokenRequest>,
 ) -> Result<StatusCode, ApiError> {
@@ -128,7 +131,7 @@ async fn put_org_token(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store_token(
+                let outcome = store_token(
                     conn,
                     org,
                     body.token,
@@ -137,14 +140,24 @@ async fn put_org_token(
                     &defaults_limits,
                     now,
                 )
-                .await
+                .await?;
+                if matches!(outcome, PutOutcome::Stored) {
+                    let actor = ctx.with_actor(audit::Actor::ControlPlane {
+                        token_id: token_id.to_string(),
+                    });
+                    let event = Event::new(OrgAction::EntitlementsUpdated {
+                        token_id: token_id.to_string(),
+                    })
+                    .org(org);
+                    audit::record(conn, &actor, event, now).await?;
+                }
+                Ok(outcome)
             })
         })
         .await?;
     match outcome {
         PutOutcome::Stored => {
             state.entitlements.put_grant(org, grant);
-            tracing::info!(target: "audit", org_id = %org, token_id = %token_id, "org entitlements updated");
             Ok(StatusCode::NO_CONTENT)
         }
         // A retry after a cancelled request: the token is stored but memory may not hold it.
@@ -773,9 +786,22 @@ mod tests {
 
         let (response, logs) = capture_logs(put(&app, org, &token)).await;
         assert_eq!(response.status, StatusCode::NO_CONTENT);
-        assert!(logs.contains("org entitlements updated"), "{logs}");
-        assert!(logs.contains(&org.to_string()), "{logs}");
         assert!(!logs.contains("cetra1."), "{logs}");
+        let rows: Vec<(String, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT action, org_id, actor_kind, details FROM audit_events \
+             WHERE action = 'org.entitlements_updated'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (action, row_org, actor_kind, details) = &rows[0];
+        assert_eq!(action, "org.entitlements_updated");
+        assert_eq!(row_org.as_deref(), Some(org.to_string().as_str()));
+        assert_eq!(actor_kind, "control_plane");
+        let details: serde_json::Value = serde_json::from_str(details).unwrap();
+        assert!(details["token_id"].is_string(), "{details}");
+        assert!(!details.to_string().contains("cetra1."));
     }
 
     #[tokio::test]

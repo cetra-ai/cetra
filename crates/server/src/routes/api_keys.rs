@@ -8,6 +8,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::api::common::{FieldError, Page, PageParams};
+use crate::audit::catalog::ApiKeyAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::api::keys::{ApiKey, ApiKeyKind, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{KeyScope, KeyScopes, ProjectPerm};
@@ -79,6 +81,7 @@ async fn create_api_key(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, error::Json<CreatedApiKey>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -88,14 +91,19 @@ async fn create_api_key(
     let expires_at = checked_expiry(body.expires_at.map(|time| time.ns()), now)?;
     let minted = secret::new_key(kind).map_err(|error| ApiError::Internal(Box::new(error)))?;
     let project_id = access.project.id;
+    let org_id = access.project.org_id;
     let user_id = user.id;
     let prefix = minted.prefix.clone();
     let hash = minted.hash.clone();
+    let action = ApiKeyAction::Created {
+        kind: kind_name(kind),
+        scopes: scope_names(&scopes),
+    };
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                api_keys::insert_api_key(
+                let row = api_keys::insert_api_key(
                     conn,
                     NewApiKey {
                         project_id,
@@ -109,17 +117,16 @@ async fn create_api_key(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let event = Event::new(action)
+                    .org(org_id)
+                    .project(project_id)
+                    .target(TargetKind::ApiKey, row.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        key_id = %row.id,
-        project_id = %project_id,
-        user_id = %user_id,
-        "api key created"
-    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedApiKey {
@@ -133,29 +140,33 @@ async fn revoke_api_key(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(ApiKeyPath { id }): error::Path<ApiKeyPath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project_id = access.project.id;
-    let user_id = user.id;
+    let org_id = access.project.org_id;
     let now = state.clock.now_ns();
     let hash = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { api_keys::revoke_api_key(conn, project_id, id, now).await })
+            Box::pin(async move {
+                let hash = api_keys::revoke_api_key(conn, project_id, id, now).await?;
+                if hash.is_some() {
+                    let event = Event::new(ApiKeyAction::Revoked)
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::ApiKey, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(hash)
+            })
         })
         .await?;
     let Some(hash) = hash else {
         return Err(ApiError::NotFound);
     };
     state.key_cache.evict(&hash);
-    tracing::info!(
-        target: "audit",
-        key_id = %id,
-        project_id = %project_id,
-        user_id = %user_id,
-        "api key revoked"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -234,6 +245,19 @@ fn checked_expiry(expires_at: Option<i64>, now: i64) -> Result<Option<i64>, ApiE
         ));
     }
     Ok(Some(expires_at))
+}
+
+/// The scope names the audit record carries (as `meta::api_keys` stores them).
+fn scope_names(scopes: &[KeyScope]) -> Vec<&'static str> {
+    scopes
+        .iter()
+        .map(|scope| match scope {
+            KeyScope::Ingest => "ingest",
+            KeyScope::Read => "read",
+            KeyScope::Write => "write",
+            KeyScope::Feedback => "feedback",
+        })
+        .collect()
 }
 
 fn kind_name(kind: KeyKind) -> &'static str {
@@ -789,5 +813,51 @@ mod tests {
         assert_eq!(past.status, 400);
         let text = String::from_utf8_lossy(&past.body);
         assert!(!text.contains("\"1\""));
+    }
+
+    #[tokio::test]
+    async fn api_key_create_and_revoke_are_recorded() {
+        let app = TestApp::new().await;
+        let owner = owner(&app).await;
+        let created = create(&app, &owner, json!({"kind": "secret", "scopes": ["read"]})).await;
+        let id = created["key"]["id"].as_str().unwrap().to_owned();
+        let revoked = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/projects/{}/api-keys/{id}", owner.project_id),
+            )
+            .header(header::COOKIE.as_str(), &owner.cookie)
+            .send()
+            .await;
+        assert_eq!(revoked.status, 204);
+        let again = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/projects/{}/api-keys/{id}", owner.project_id),
+            )
+            .header(header::COOKIE.as_str(), &owner.cookie)
+            .send()
+            .await;
+        assert_eq!(again.status, 404);
+
+        let rows: Vec<(String, Option<String>, Option<String>, String, String)> = sqlx::query_as(
+            "SELECT action, org_id, project_id, target_id, details FROM audit_events \
+             WHERE target_kind = 'api_key' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 2, "a second revoke records nothing");
+        let (created_row, revoked_row) = (&rows[0], &rows[1]);
+        assert_eq!(created_row.0, "api_key.created");
+        assert_eq!(created_row.3, id);
+        assert_eq!(created_row.4, r#"{"kind":"secret","scopes":["read"]}"#);
+        assert_eq!(revoked_row.0, "api_key.revoked");
+        assert_eq!(revoked_row.3, id);
+        assert_eq!(revoked_row.4, "{}");
+        for row in &rows {
+            assert!(row.1.is_some(), "the org is the project's org");
+            assert_eq!(row.2.as_deref(), Some(owner.project_id.as_str()));
+        }
     }
 }
