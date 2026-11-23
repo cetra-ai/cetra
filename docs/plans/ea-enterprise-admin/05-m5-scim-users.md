@@ -650,7 +650,9 @@ C3 + C4 + C5 ────────── C7 (docs)
 
 **Edit:**
 - `crates/server/src/ee/scim/settings.rs` (new, with `pub(crate) fn routes()`);
-- `crates/server/src/api_examples.rs` (examples for the four Provisioning operations, following `get_org_sso`'s entries, ~807);
+- `crates/server/src/api_examples.rs` (examples for the GET Provisioning operation, following `get_org_sso`'s entry, ~807, with `fixtures/api/static/org-scim.json`, new);
+- `crates/server/tests/api_examples.rs` (a round-trip arm for the new example; write operations are not in the manifest) and `crates/server/tests/openapi.rs` (the four operation ids in `OPERATIONS`, a `"provisioning"` tag in `TAGS` if a new tag is used, else the `org-sso` tag; the session-security list, as for the org SSO routes; and their `expected_errors` branches, copied from the matching org SSO operations);
+- `web/src/mocks/writes.ts` (the three write operations under `/api/v1/orgs` in `WRITE_OPERATIONS`, with handlers returning static JSON, as `writes.test.ts` requires) and `fixtures/api/static/` JSON for those responses;
 - `crates/server/src/auth/roles.rs` (`OrgPerm::ManageProvisioning`);
 - `crates/server/src/api/scim.rs` (new DTOs) and `crates/server/src/api/mod.rs`;
 - `crates/server/src/api/openapi.rs`;
@@ -685,7 +687,7 @@ C3 + C4 + C5 ────────── C7 (docs)
      - record `TokenCreated`.
    - **`DELETE /api/v1/orgs/{org}/scim/tokens/{id}`** (204): always allowed. `store::revoke_token`, record `TokenRevoked`, then `state.scim_cache.evict(&hash)`.
 
-   Add the four paths and the DTOs to `api/openapi.rs` the way the org SSO paths are added (security `session`).
+   Add the four paths and the DTOs to `api/openapi.rs` the way the org SSO paths are added (security `session`). Operation ids: `get_org_scim`, `update_org_scim`, `create_org_scim_token`, `revoke_org_scim_token`.
 4. **Locks:** `ee::scim::locks` (C1a's `mod.rs`).
 
 5. **Guards**, each computing `let locks = ee::scim::locks(&state, org).await?;` before the write and, inside the closure, when `locks && store::is_managed_tx(conn, org, target).await?`, returning a new outcome variant mapped to `ApiError::ScimManaged`:

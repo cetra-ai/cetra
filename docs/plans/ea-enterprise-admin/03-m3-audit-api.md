@@ -59,7 +59,9 @@
   - `former_member`: in an org log, the user exists but is not a member;
   - `deleted`: no `users` row;
   - `unresolved`: a kind that is not resolved.
-- **P-4. Retention default.** `Defaults::from_config` also reads `[audit] retention_days`: `0` gives `None` (keep), otherwise `Some(days)`. So a missing token claim means the instance default, and a JSON `null` means keep. The purge applies `max(days, 30)`, so a token value below 30 counts as 30.
+- **P-4. Retention limit.** `Limits.audit_retention_days` has no instance default (the defaults stay `None`), so existing limits, responses and fixtures do not change.
+  - The purge reads it per org: `None` (no claim, or `null`) → the instance's `audit.retention_days`; `Some(0)` → keep forever; `Some(d)` → `max(d, 30)` days.
+  - A lapsed org's grant falls back to the defaults, so it gets the instance value again. The docs say so.
 - **P-5. Instance gate.** The instance routes need `state.entitlements.license().state.active_features(now)` to contain `Feature::AuditLog`, or `config.entitlements.control_plane` to be true (a cloud cell, D-EA-19).
 - **P-6. CSV safety.** A CSV cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return is prefixed with `'`. User agents and names are attacker-chosen.
 - **P-7. Export cap.** 1,000,000 rows, streamed in pages of 1,000 (reader pool), names resolved per page. The stream stops after the cap; the docs say so.
@@ -72,42 +74,17 @@ No new dependency. `csv` 1.4 is already a dependency of `cetra-server`.
 ## Phase graph
 
 ```
-D1 (perm, catalog) ──┐
-D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) ── D5 (web) ── D6 (docs)
+D2 (feature, limit, purge) ──┐
+D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (docs)
 ```
 
-- D1 and D2 run in parallel; their files are disjoint.
-- D3 creates `ee/audit/mod.rs` in its final form, including the export routes whose handlers D4 writes. D4 starts after D3, because both depend on the read query.
-- D5 needs `just openapi` (coordinator) after D4.
+- D2 and D3 run in parallel; their files are disjoint.
+- D3 holds the read routes and the exports together (no phase leaves a route without its handler).
+- D5 needs `just openapi` and `just api-examples` (coordinator) after D3.
 - D6 runs alongside D5.
+- There is no D1 or D4: their content is in D3.
 
 **Shared rules:** M1's shared rules, plus P-8 of M5 (clone state into closures). `ee/` files start with `// SPDX-License-Identifier: Elastic-2.0`.
-
----
-
-### D1 — `ViewAudit` and the `audit.export_started` action
-
-**Goal:** the permission and the audit action of exports.
-
-**Edit:** `crates/server/src/auth/roles.rs`, `crates/server/src/audit/catalog/audit.rs` (new), `crates/server/src/audit/catalog/mod.rs`, `crates/server/src/audit/tests.rs`.
-
-**Steps:**
-1. `OrgPerm::ViewAudit` with minimum role `Admin` (in the `Admin` group of `min_role`), and one assert in `permissions_follow_the_spec_table`.
-2. `audit/catalog/audit.rs` `AuditAction` (group `audit`), one variant:
-
-   ```rust
-   #[serde(rename = "audit.export_started")]
-   ExportStarted { format: &'static str, filters: Vec<&'static str> },
-   ```
-
-   - `format` is `csv` or `ndjson`.
-   - `filters` holds the names of the query filters that were set (`from`, `to`, `action`, `actor_id`, `target_id`, `project_id`, `outcome`), never their values.
-
-   Wire it in `catalog/mod.rs` (`mod`, `pub(crate) use`, `Action::Audit`, `From`) and add a sample and the `audit` prefix to `audit/tests.rs`.
-
-**Done when:** committed.
-
-**Commit:** `Add ViewAudit and the audit.export_started action`
 
 ---
 
@@ -115,7 +92,7 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
 **Goal:** the feature exists, orgs carry `audit_retention_days`, and the purge applies it.
 
-**Edit:** `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs`, `crates/server/src/entitlements/tokens.rs`, `crates/token/src/lib.rs`, `crates/server/src/serve.rs`, `crates/server/src/test_support/mod.rs` (the `Defaults::from_config` call only), `crates/server/src/audit/retention.rs`, `crates/cli/src/main.rs`.
+**Edit:** `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs`, `crates/server/src/entitlements/tokens.rs`, `crates/token/src/lib.rs`, `crates/server/src/serve.rs`, `crates/server/src/audit/retention.rs`, `crates/cli/src/main.rs`.
 
 **Steps:**
 1. **`Feature::AuditLog`**, appended after `Scim`:
@@ -133,10 +110,9 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
    Add it to the `org_claims_round_trip` literal and a single-key round-trip sub-test like `max_annotation_queues`'s.
 3. **`Limits.audit_retention_days: Option<u64>`** (`entitlements/mod.rs`):
-   - `Defaults::from_config(config: &EntitlementDefaults, audit: &crate::config::AuditConfig)` sets it to `(audit.retention_days != 0).then_some(u64::from(audit.retention_days))` (P-4);
-   - update both call sites (`serve.rs:~431`, `test_support/mod.rs:~361`) to pass `&config.audit`;
+   - `Defaults::from_config` sets it to `None`: there is no `[entitlements.defaults]` key (P-4);
    - `merge_limits` (`entitlements/tokens.rs`) merges it like the others, with tests for value, `null` and missing;
-   - every `Limits { … }` literal in the crate gets the field: search `Limits {` and `OrgGrant {`.
+   - every `Limits { … }` literal in the crate gets the field: search `Limits {` in `crates/server/src` and fix each in this phase's files. A literal in another file uses `..Default::default()` if it already does; otherwise report it.
 4. **`OrgLimits.audit_retention_days`** (`api/entitlements.rs`), `#[serde(default, skip_serializing_if = "Option::is_none")]`, and the `From<Limits>` mapping.
 5. **`crates/cli/src/main.rs` `limit_rows`:** add `("audit_retention_days", limits.audit_retention_days)`, bump the array length, and update its test.
 6. **`audit/retention.rs`:**
@@ -151,8 +127,13 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
    - `purge` steps:
      1. `purge_scope(None, config.audit.retention_days)` when non-zero.
-     2. `SELECT DISTINCT org_id FROM audit_events WHERE org_id IS NOT NULL` on the reader.
-     3. For each org, `state.entitlements.resolve(org, now).limits.audit_retention_days`. `Some(d)` → `purge_scope(Some(org), max(d, 30) as u32 (saturating), now)`.
+     2. `SELECT id FROM orgs` on the reader (every org, active or not; dropped orgs' records are already gone).
+     3. For each org, `state.entitlements.resolve(org, now).limits.audit_retention_days`:
+        - `None` → the instance's `audit.retention_days` (skip when 0);
+        - `Some(0)` → skip;
+        - `Some(d)` → `max(d, 30)`, saturating into `u32`.
+
+        Call `purge_scope(Some(org), days, now)`.
    - `purge_scope` batches like today, adding `AND org_id IS ?` (bind NULL for the instance).
    - `serve.rs` `spawn_audit_purge` calls `purge(&state, now)`.
    - Tests:
@@ -160,7 +141,8 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
      - `a_limit_below_30_counts_as_30`;
      - `a_null_limit_keeps_everything`;
      - `the_instance_log_uses_the_config`.
-     - The existing tests adapt to the new signature.
+     - The existing tests adapt to the new signature. They build their app with `TestApp::with_config(|c| c.audit.retention_days = 30)` (or `0` for keep-all), since `purge` now takes the instance days from the config.
+     - `test_support::set_limits` ignores a grant that is not newer than the current one, so successive calls in one test use strictly increasing `issued_at`.
 
 **Done when:** committed.
 
@@ -168,15 +150,29 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
 ---
 
-### D3 — Read routes
+### D3 — Read routes and exports
 
-**Goal:** `GET` the org and instance logs with filters, paging and resolved names.
+**Goal:** the permission, the export action, the org and instance logs with filters, paging and resolved names, and their CSV and NDJSON exports.
 
-**Edit:** `crates/server/src/ee/mod.rs` (`pub(crate) mod audit;`), `crates/server/src/ee/audit/mod.rs` (new), `crates/server/src/ee/audit/read.rs` (new), `crates/server/src/api/audit.rs` (new), `crates/server/src/api/mod.rs`, `crates/server/src/api/openapi.rs`, `crates/server/src/http/access.rs` (one `routes.extend(crate::ee::audit::routes());` line), `crates/server/src/api_examples.rs`, `fixtures/api/static/org-audit-events.json` (new), `fixtures/api/static/admin-audit-events.json` (new).
+**Edit:**
+- `crates/server/src/auth/roles.rs`, `crates/server/src/audit/catalog/audit.rs` (new), `crates/server/src/audit/catalog/mod.rs`, `crates/server/src/audit/tests.rs`;
+- `crates/server/src/ee/mod.rs` (`pub(crate) mod audit;`), `crates/server/src/ee/audit/mod.rs`, `read.rs` and `export.rs` (new);
+- `crates/server/src/api/audit.rs` (new), `crates/server/src/api/mod.rs`, `crates/server/src/api/openapi.rs`;
+- `crates/server/src/http/access.rs` (one `routes.extend(crate::ee::audit::routes());` line);
+- `crates/server/src/api_examples.rs`, `crates/server/tests/api_examples.rs`, `crates/server/tests/openapi.rs`;
+- `fixtures/api/static/org-audit-events.json` and `fixtures/api/static/admin-audit-events.json` (new), `fixtures/api/README.md`.
+
+**Steps 0 (permission and action):**
+- `OrgPerm::ViewAudit`, with minimum role `Admin` (in the `Admin` group of `min_role`), and one assert in `permissions_follow_the_spec_table`.
+- `audit/catalog/audit.rs` `AuditAction` (group `audit`), with one variant `#[serde(rename = "audit.export_started")] ExportStarted { format: &'static str, filters: Vec<&'static str> }`:
+  - `format` is `csv` or `ndjson`;
+  - `filters` holds the names of the filters that were set (`from`, `to`, `action`, `actor_id`, `target_id`, `project_id`, `outcome`), never their values.
+
+  Wire it in `catalog/mod.rs` (`mod`, `pub(crate) use`, `Action::Audit`, `From`), and add a sample and the `audit` prefix to `audit/tests.rs`.
 
 **Steps:**
 
-1. **DTOs** (`api/audit.rs`). All derive `Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema`, with serde `snake_case`:
+1. **DTOs** (`api/audit.rs`). `AuditEvent`, `AuditActor` and `AuditRef` derive `Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema`. The enums (`AuditOutcome`, `AuditRefStatus`, `AuditExportFormat`) derive `Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema` with serde `snake_case`. `AuditLimit` copies `api/common.rs` `Limit`'s derives and impls (`Debug, Clone, Copy, PartialEq, Eq, Serialize` transparent, `ToSchema` with `value_type = u32`, a hand `Deserialize` with bounds 1–500, `Default` = 100, and `get()`).
 
    ```rust
    pub struct AuditEvent {
@@ -238,8 +234,16 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    pub(crate) enum Scope { Org(OrgId), Instance }
    pub(crate) struct Filters { pub(crate) from: Option<i64>, pub(crate) to: Option<i64>, pub(crate) actions: Vec<ActionMatch>, pub(crate) actor_id: Option<String>, pub(crate) target_id: Option<String>, pub(crate) project_id: Option<ProjectId>, pub(crate) outcome: Option<&'static str> }
    pub(crate) enum ActionMatch { Exact(String), Prefix(String) }
-   pub(crate) struct Row { /* every audit_events column, typed */ }
-   pub(crate) fn filters(params: &AuditListParams-like fields) -> Result<Filters, ApiError>; // P-2 validation
+   pub(crate) struct Row {
+       pub(crate) seq: i64, pub(crate) id: String, pub(crate) at: i64,
+       pub(crate) org_id: Option<String>, pub(crate) project_id: Option<String>,
+       pub(crate) action: String, pub(crate) outcome: String,
+       pub(crate) actor_kind: String, pub(crate) actor_id: Option<String>, pub(crate) via: Option<String>, pub(crate) credential_id: Option<String>,
+       pub(crate) target_kind: Option<String>, pub(crate) target_id: Option<String>,
+       pub(crate) details: String, pub(crate) ip: Option<String>, pub(crate) user_agent: Option<String>,
+   }
+   /// P-2 validation; errors are `field_error(<name>, …)`. Seven parameters (clippy's limit).
+   pub(crate) fn filters(from: Option<&TimeParam>, to: Option<&TimeParam>, action: Option<&str>, actor_id: Option<&str>, target_id: Option<&str>, project_id: Option<Uuid>, outcome: Option<AuditOutcome>) -> Result<Filters, ApiError>;
    pub(crate) async fn page(pool: &SqlitePool, scope: &Scope, filters: &Filters, before_seq: Option<i64>, limit: u32) -> Result<Vec<Row>, MetaError>;
    pub(crate) async fn resolve(pool: &SqlitePool, scope: &Scope, rows: &[Row]) -> Result<Vec<AuditEvent>, MetaError>;
    pub(crate) fn encode_cursor(seq: i64) -> String;
@@ -249,18 +253,20 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    - **`page`** builds `SELECT … FROM audit_events WHERE <scope> AND …` with `sqlx::QueryBuilder`:
      - scope `org_id = ?` or `org_id IS NULL`;
      - `at >= ?`, `at < ?`;
-     - `(action = ? OR action LIKE ? ESCAPE '\' …)`, where a prefix's `_` is escaped as in `meta/datasets.rs:~271`;
+     - `(action = ? OR action LIKE ? ESCAPE '\' …)`. A prefix's `_` and `%` are escaped with `\`: copy `meta/datasets.rs`'s private `escape_like` (~280) into `read.rs`. In the Rust string literal the clause is `"ESCAPE '\\'"`;
      - `actor_id = ?`, `target_id = ?`, `project_id = ?`, `outcome = ?`;
      - `seq < ?`;
      - `ORDER BY seq DESC LIMIT ?`.
    - **`resolve`** (P-3):
      - collect user ids from user actors and `user` targets, and fetch `id, name, email` from `users WHERE id IN (…)`;
      - for an org scope, also fetch `user_id FROM org_members WHERE org_id = ? AND user_id IN (…)`;
-     - fetch `api_keys.name` for `api_key` actors and targets, `projects.name` for project refs (the row's `project_id` and `project` targets), and `org_sso_providers.display_name` for `sso_provider` targets.
+     - **org scope only**: fetch `api_keys.name` for `api_key` actors and targets through the org's projects (`SELECT k.id, k.name FROM api_keys k JOIN projects p ON p.id = k.project_id WHERE p.org_id = ? AND k.id IN (…)`), `projects.name WHERE org_id = ? AND id IN (…)` for project refs (the row's `project_id` and `project` targets), and `org_sso_providers.display_name WHERE org_id = ?` for `sso_provider` targets;
+     - **instance scope**: resolve users only. Every other kind is `unresolved` (D-EA-8: an instance admin learns nothing about an org's objects).
      - Status rules:
        - **User:** no `users` row → `deleted`, no name or email. Org scope and not a member → `former_member`, no name or email. Otherwise `present` with name and email.
        - **Key, project, provider:** a row → `present` with its name (no email); none → `deleted`.
        - **Every other kind:** `unresolved`, id only.
+     - Use the base64url cursor model of `routes/admin.rs:~486-505` (`encode_cursor`, `cursor_error`) with a struct `{ seq: i64 }`.
      - `details` is parsed from the stored JSON. A parse failure gives `{}` and logs `tracing::warn!(id = %id, "audit details do not decode")`.
      - Ids are bound as text. Use `QueryBuilder` with `separated(", ")`, as `meta/users.rs:~503` `providers_by_user` does.
 3. **Routes** (`ee/audit/mod.rs`, SPDX header, final form, with the export handlers that D4 writes in `export.rs`):
@@ -272,20 +278,26 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    ```
 
    - `GET /api/v1/orgs/{org}/audit-events`: `Access::Org { perm: OrgPerm::ViewAudit, session_only: false }`, documented. Handler `list_org`: `require(&state, org, Feature::AuditLog)?`, then `filters`, `decode_cursor`, `page(limit + 1)`, `resolve`, and `Page { data, next_cursor }` (the next cursor is the last kept row's seq when more rows exist).
-   - `GET /api/v1/orgs/{org}/audit-events/export`: same access; handler `export::export_org` (D4).
+   - `GET /api/v1/orgs/{org}/audit-events/export`: same access, documented; operation id `get_org_audit_export`; handler `export::export_org` (step 6).
    - `GET /api/v1/admin/audit-events`: `Access::InstanceAdmin`, documented. Handler `list_instance`: the P-5 gate (else `ApiError::PlanRequired { detail: Feature::AuditLog.locked_detail() }`), then the same steps with `Scope::Instance`.
-   - `GET /api/v1/admin/audit-events/export`: `Access::InstanceAdmin`; handler `export::export_instance` (D4).
+   - `GET /api/v1/admin/audit-events/export`: `Access::InstanceAdmin`, documented; operation id `get_admin_audit_export`; handler `export::export_instance` (step 6).
 
-   Until D4 lands, `export.rs` does not exist. D3 and D4 are sequential, and checks run at the end.
+   The list operation ids are `list_org_audit_events` and `list_admin_audit_events`.
 4. **OpenAPI** (`api/openapi.rs`):
    - add `tag("audit", "Audit records of an organization and of the instance.")`;
    - `audit_paths` for the four routes, modelled on `list_org_deletions` and `list_admin_users`. The exports use a `ResponseBuilder` with `text/csv` and `application/x-ndjson` string content, as `export_result()` does. The 403 text mentions `plan_required`.
    - Schemas: `AuditEvent`, `AuditActor`, `AuditRef`, `AuditOutcome`, `AuditRefStatus`, `AuditExportFormat`, plus `insert_page::<AuditEvent>("AuditEventPage")`.
 5. **Examples:**
    - `api_examples.rs`: `example("list_org_audit_events", params(&[("org","acme")]), BTreeMap::new(), "static/org-audit-events.json", "application/json")` and `example("list_admin_audit_events", …, "static/admin-audit-events.json", …)`.
-   - The two static files are canonical pretty JSON pages of 3 records each (one `member.role_changed` with a present actor, one `auth.login` from an anonymous actor with an IP, one with a `former_member` target), using the ids of `fixtures/api/README.md`'s fixed-identifier table. Extend the table with three audit event ids.
+   - The two static files are canonical pretty JSON pages of 3 records each (one `member.role_changed` with a present actor, one `auth.login` from an anonymous actor with an IP, one with a `former_member` target), using the ids of `fixtures/api/README.md`'s fixed-identifier table. Extend the table with three audit event ids ending `…0d00`, `…0d01`, `…0d02` (check that they are unused).
+     - The files must round-trip through the DTOs: `details` keys in `serde_json`'s map order, `at` written with nine fractional digits (`…T12:00:00.000000000Z`).
+   - **`crates/server/tests/api_examples.rs`:**
+     - `generated_files_roundtrip` gets `"list_org_audit_events" | "list_admin_audit_events" => roundtrip::<Page<AuditEvent>>(…)` arms, as the deletions page has, with imports;
+     - `manifest_covers_the_read_operations` exempts `get_org_audit_export` and `get_admin_audit_export`, as it exempts `get_dataset_export`.
+   - **`crates/server/tests/openapi.rs`:** add the four operation ids to `OPERATIONS`, `"audit"` to `TAGS`, the routes with query parameters to `QUERY_OR_BODY`, the two admin ids to the session-security list (the `list_admin_users` group), and their expected errors to the per-id `expected_errors` branches (lists: `[400, 401, 403, 404, 429]`; admin: `[400, 401, 403, 429]`; exports the same as their lists).
+6. **Exports** (`ee/audit/export.rs`): D3's former D4 steps below, all in this phase.
 
-**Tests** (`ee/audit/mod.rs` tests, with `TestApp::with_license(&["audit_log"])` or the existing licence helper):
+**Tests** (`ee/audit/mod.rs` tests, with `TestApp::with_license(&["audit_log"])` (`test_support:~266`); members via `test_support::member_in_org`, PATs and keys through the existing helpers of `routes/tokens.rs` and `routes/api_keys.rs` tests, an erased user by `DELETE FROM users` on the writer):
 - `admins_read_the_org_log_newest_first`;
 - `members_and_api_keys_cannot_read` (403 member, 404 key);
 - `without_the_feature_it_is_plan_required`;
@@ -297,18 +309,9 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 - `instance_admins_cannot_read_an_org_log_without_membership`;
 - `instance_log_needs_the_licence_or_a_cloud_cell`;
 - `details_never_carry_an_email` (over the example records).
+- `instance_scope_resolves_no_org_object_names`.
 
-**Done when:** committed.
-
-**Commit:** `Serve the audit log to admins and instance admins`
-
----
-
-### D4 — Exports
-
-**Goal:** CSV and NDJSON exports of the filtered records, recorded before they stream.
-
-**Edit:** `crates/server/src/ee/audit/export.rs` (new).
+#### D3 step 6 in detail — exports
 
 **Steps:**
 1. Two handlers, with `export_org` mirroring D3's gate and `export_instance` the instance gate:
@@ -317,7 +320,7 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    pub(crate) async fn export_org(State(state): State<AppState>, Extension(access): Extension<OrgAccess>, ctx: audit::Ctx, error::Query(params): error::Query<AuditExportParams>) -> Result<Response, ApiError>;
    pub(crate) async fn export_instance(State(state): State<AppState>, ctx: audit::Ctx, error::Query(params): error::Query<AuditExportParams>) -> Result<Response, ApiError>;
    ```
-2. Before streaming, `audit::record_alone(&state.meta, &ctx, Event::new(AuditAction::ExportStarted { format, filters }), now)`, with `.org(org)` for the org export (no org for the instance). A failed record refuses the export.
+2. Order: the gate (`require(…, Feature::AuditLog)` or the P-5 instance gate), then `read::filters` (400 on bad input), then `audit::record_alone(&state.meta, &ctx, Event::new(AuditAction::ExportStarted { format, filters }), now)` (with `.org(org)` for the org export, none for the instance), then the stream. A failed record refuses the export, and a refused or invalid request writes nothing. The export's first page may include its own `audit.export_started` record: intended.
 3. **The stream:**
    - `futures::stream::try_unfold` over a cursor struct `{ before_seq: Option<i64>, written: u64, header_due: bool, done: bool }`;
    - each step reads `read::page(pool, scope, filters, before_seq, 1000)` on `state.meta.reader().clone()` and `read::resolve`, then encodes;
@@ -325,7 +328,7 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    - errors log `tracing::error!(error = %error, "audit export failed")` and end the body with `io::Error::other("audit export failed")`, as the dataset export does.
 4. **CSV:**
    - `csv::WriterBuilder::new().terminator(csv::Terminator::CRLF)`;
-   - header once: `at,action,outcome,actor_kind,actor_id,actor_name,actor_email,actor_status,via,credential_id,target_kind,target_id,target_name,target_status,project_id,project_name,ip,user_agent,details`;
+   - header once: `at,action,outcome,actor_kind,actor_id,actor_name,actor_email,actor_status,via,credential_id,target_kind,target_id,target_name,target_email,target_status,project_id,project_name,ip,user_agent,details`;
    - `at` is RFC 3339 with milliseconds, UTC (chrono, as `backup.rs:~549`); `details` is the compact JSON;
    - every cell passes through `fn safe_cell(value: &str) -> Cow<str>` (P-6).
 5. **NDJSON:** one `AuditEvent` per line (`serde_json::to_writer` + `\n`).
@@ -340,11 +343,11 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 - `export_is_recorded_before_streaming` (`audit.export_started` with `filters` names only);
 - `export_respects_filters`;
 - `export_without_the_feature_is_plan_required`;
-- `export_stops_at_the_cap` (lower the cap through a `#[cfg(test)]` constant, e.g. 2,500 rows written and a cap of 2,000 → 2,000 rows).
+- `export_stops_at_the_cap` (the cap is `#[cfg(not(test))] 1_000_000` / `#[cfg(test)] 1_500`; 2,500 rows written → exactly 1,500 exported, which truncates mid-page).
 
-**Done when:** committed.
+**Done when:** committed (with step 6).
 
-**Commit:** `Export the audit log as CSV and NDJSON`
+**Commit:** `Serve and export the audit log`
 
 ---
 
@@ -352,10 +355,10 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
 **Goal:** the org and admin pages.
 
-**Prerequisite:** the coordinator has run `just openapi` and `just api-examples` after D4.
+**Prerequisite:** the coordinator has run `just openapi` and `just api-examples` after D3.
 
 **Edit:**
-- `web/src/components/settings/settings-nav.ts`, its test, `settings-home.tsx` and the other nav consumers that filter `ownerOnly` (search `ownerOnly` in `web/src`);
+- `web/src/components/settings/settings-nav.ts`, its test, and `settings-home.tsx` (`visibleOrgNav`, ~30, the only consumer that filters `ownerOnly`);
 - `web/src/routes/$org/settings/audit-log.tsx` (new) and `audit-log.test.tsx` (new);
 - `web/src/routes/admin/audit-log.tsx` (new) and test (new), and `web/src/routes/admin/route.tsx`;
 - `web/src/ee/audit/audit-log-view.tsx` (new, SPDX Elastic-2.0), `web/src/ee/audit/audit-export-menu.tsx` (new), `web/src/ee/audit/audit-record-sheet.tsx` (new);
@@ -364,11 +367,11 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 
 **Steps:**
 1. **Nav:**
-   - an optional `adminOnly: true` on org nav items; every consumer that filters `ownerOnly` also hides `adminOnly` items unless the role is `admin` or `owner` (`atLeast(role, "admin")` from `@/lib/roles`);
+   - an `adminOnly` flag on org nav items. The array is `as const`, so give **every** org item `adminOnly: false` except the new one, which has `true`. `visibleOrgNav` also hides `adminOnly` items unless `atLeast(role, "admin")` (`@/lib/roles`);
    - the new item `{ to: "/$org/settings/audit-log", label: "Audit log", icon: ScrollText, description: "Who did what, and when", keywords: ["audit", "log", "security", "compliance"], adminOnly: true }` goes after "Provisioning".
 2. **`lib/search/audit.ts`:**
    - `parseAuditSearch(search)` returns `{ range: "24h" | "7d" | "30d" | "90d" | "all", action?: string, actor?: string, target?: string, outcome?: "success" | "failure", open?: string }`, using `lib/search/common.ts` helpers (`parseEnum`, `parseString(value, 200)`); the default range is `7d`;
-   - `auditQuery(search, now)` maps it to the API's query (`from` = now − range, as RFC 3339; no `from` for `all`).
+   - `auditQuery(search, now)` maps it to the API's query (`from` = now − range, as RFC 3339; no `from` for `all`). The view computes `now` once per search change (`useMemo` keyed on the search, rounded down to the minute), so the query key is stable between renders.
 3. **`AuditLogView`** (`{ scope: { org: string } | "instance" }`):
    - `$api.useInfiniteQuery` on the list route with `pageParamName: "cursor"`;
    - filters above the table: a range select, an action text input (debounced 300 ms, a comma list, with placeholder `member., auth.login`), actor id, target id, and an outcome select;
@@ -376,14 +379,14 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
    - "Load more" when there is a next page;
    - a row click sets `open` (the record's id) and shows `AuditRecordSheet`: every field, details as `<pre>` JSON, ids with `CopyButton`;
    - empty state "No records match these filters.";
-   - status labels: `former_member` → "Former member", `deleted` → "Deleted user", `unresolved` → the kind.
-4. **`AuditExportMenu`:** a dropdown with "Export CSV" and "Export NDJSON", using `api.GET(exportPath, { params, parseAs: "blob" })`, `saveBlob` and `exportName`, as `components/datasets/export-menu.tsx` does.
+   - status labels: `former_member` → "Former member"; `deleted` → "Deleted user" for a user, "Deleted key", "Deleted project" or "Deleted provider" by kind; `unresolved` → the kind.
+4. **`AuditExportMenu`:** a dropdown with "Export CSV" and "Export NDJSON", using `api.GET(path, { params, parseAs: "blob" })`, `saveBlob` and `exportName`, as `components/datasets/export-menu.tsx` does. Write one `api.GET` call per literal path (org or admin) in an `if`, so that openapi-fetch types each.
 5. **Pages:**
    - `$org/settings/audit-log.tsx`: `SettingsPage` titled "Audit log", description "Records of sign-ins, membership, keys, settings and data exports in this organization.". Admins and owners see `<LockedFeature feature="audit_log" …/>` when `useOrgEntitlements(org).locked("audit_log")`, else the view. Others see "Only admins and owners can read the audit log.".
    - `admin/audit-log.tsx`: the `AdminTab` union gains `/admin/audit-log`, with the tab "Audit log". The page shows the view with `scope="instance"`, and on a `plan_required` problem, "The instance audit log needs an enterprise licence that lists audit_log." with a link to the Settings tab.
 6. **Feature labels:**
    - `featureOffer` gets `case "audit_log": return "Available with Enterprise or an enterprise licence";`;
-   - `FEATURE_NAMES` in `license-card.tsx` and `plan.tsx` get "Audit log";
+   - `FEATURE_NAMES` in `license-card.tsx` and `plan.tsx` get "Audit log", and `plan.tsx`'s `FEATURES` list gets `audit_log`;
    - `plan.tsx`'s limits table gets "Audit retention" (`unlimited` or `${n} days`).
 
 **Tests** (vitest, MSW `server.use`):
@@ -402,7 +405,7 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 ### D6 — Docs
 
 **Edit:**
-- `website/src/content/docs/docs/platform/audit-log.mdx` (new), registered like `sso.mdx`;
+- `website/src/content/docs/docs/platform/audit-log.mdx` (new), and its sidebar entry in `website/astro.config.mjs` (next to `sso`, ~124);
 - `website/src/content/docs/docs/platform/plans-and-licence.mdx`;
 - `website/src/content/docs/docs/self-hosting/configuration-reference.md` (the `audit.retention_days` description now mentions the org limit);
 - `docs/spec/04-metadata-db.md`, `docs/spec/08-auth.md`, `docs/spec/09-api.md`, `docs/spec/11-ui.md`, `docs/spec/12-operations.md`;
@@ -413,7 +416,7 @@ D2 (feature, limit, purge) ──┼── D3 (read routes) ── D4 (export) �
 1. **`audit-log.mdx`:**
    - what is recorded (the catalog groups) and what is not (data work);
    - privacy (ids stored, names resolved on read, former members);
-   - retention (365 days, `audit.retention_days`, the org limit on the cloud);
+   - retention (365 days, `audit.retention_days`, the org limit on the cloud; a lapsed org returns to the instance value);
    - reading, filtering, exporting (the cap) and the instance log;
    - plans: Enterprise and the licence.
 
