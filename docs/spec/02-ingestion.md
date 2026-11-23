@@ -177,7 +177,7 @@ When the provider is still empty after the sources above, or is `openai`, and th
 | `api.tokenfactory.nebius.com` | `nebius` |
 | `api.mistral.ai` | `mistral_ai` |
 | `*.openai.azure.com` | `azure.ai.openai` |
-| `*.services.ai.azure.com` | `azure.ai.openai` |
+| `*.services.ai.azure.com` | `azure.ai.inference` |
 | `*.cognitiveservices.azure.com` | `azure.ai.openai` |
 | `api.deepinfra.com` | `deepinfra` |
 | `inference.baseten.co` | `baseten` |

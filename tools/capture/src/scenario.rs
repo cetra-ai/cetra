@@ -1044,6 +1044,18 @@ mod tests {
             "turns[0].usage.cache_read is not reported by cohere.chat",
         );
 
+        for api in ["cohere.chat", "ollama.chat"] {
+            for field in ["cache_read", "cache_write", "reasoning"] {
+                let mut value = chat();
+                value["turns"][0]["api"] = json!(api);
+                value["turns"][0]["usage"][field] = json!(1);
+                assert_reason(
+                    value,
+                    &format!("turns[0].usage.{field} is not reported by {api}"),
+                );
+            }
+        }
+
         let mut value = chat();
         value["turns"][0]["api"] = json!("ollama.chat");
         value["turns"][0]["message"]["tool_calls"] =

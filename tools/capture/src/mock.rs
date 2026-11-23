@@ -202,8 +202,8 @@ impl Mock {
         if turn.api != route.api() {
             let message = format!(
                 "turn {index}: expected {}, got {}",
-                api_name(turn.api),
-                api_name(route.api())
+                turn.api.name(),
+                route.api().name()
             );
             state.errors.push(message.clone());
             return Take::Reject {
@@ -392,19 +392,6 @@ fn render(turn: &Turn, index: usize, facts: &Facts) -> Rendered {
         }
         Api::CohereChat => crate::wire::cohere::chat(turn, &ids),
         Api::OllamaChat => crate::wire::ollama::chat(turn, &ids),
-    }
-}
-
-fn api_name(api: Api) -> &'static str {
-    match api {
-        Api::OpenaiChat => "openai.chat",
-        Api::OpenaiResponses => "openai.responses",
-        Api::OpenaiEmbeddings => "openai.embeddings",
-        Api::AnthropicMessages => "anthropic.messages",
-        Api::GeminiGenerateContent => "gemini.generate_content",
-        Api::GeminiEmbedContent => "gemini.embed_content",
-        Api::CohereChat => "cohere.chat",
-        Api::OllamaChat => "ollama.chat",
     }
 }
 

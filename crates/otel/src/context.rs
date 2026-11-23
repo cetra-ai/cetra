@@ -79,7 +79,8 @@ const ENDPOINT_PROVIDERS: &[(&str, &str)] = &[
     ("api.tokenfactory.nebius.com", "nebius"),
     ("api.mistral.ai", "mistral_ai"),
     ("*.openai.azure.com", "azure.ai.openai"),
-    ("*.services.ai.azure.com", "azure.ai.openai"),
+    // Azure AI Foundry serves several publishers' models; their prices are azure.ai.inference rows.
+    ("*.services.ai.azure.com", "azure.ai.inference"),
     ("*.cognitiveservices.azure.com", "azure.ai.openai"),
     ("api.deepinfra.com", "deepinfra"),
     ("inference.baseten.co", "baseten"),
@@ -1021,7 +1022,7 @@ mod tests {
         assert_eq!(match_endpoint("model-abc.api.baseten.co"), Some("baseten"));
         assert_eq!(
             match_endpoint("res.services.ai.azure.com"),
-            Some("azure.ai.openai")
+            Some("azure.ai.inference")
         );
     }
 
