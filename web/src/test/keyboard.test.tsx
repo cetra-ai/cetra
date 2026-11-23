@@ -7,7 +7,7 @@ const PAGES: { url: string; name: string; ready: () => Promise<HTMLElement> }[] 
   {
     url: "/acme",
     name: "projects",
-    ready: () => screen.findByRole("table", { name: "Projects" }),
+    ready: () => screen.findByRole("list", { name: "Projects" }),
   },
   {
     url: "/acme/support-bot/traces",

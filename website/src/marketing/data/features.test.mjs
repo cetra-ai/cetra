@@ -215,7 +215,7 @@ test("retention controls are Pro and up", () => {
 test("each table has about 55 to 60 rows", () => {
   const count = (table) => groupsFor(table).reduce((sum, group) => sum + group.rows.length, 0);
   assert.equal(count("cloud"), 61);
-  assert.equal(count("selfHosted"), 57);
+  assert.equal(count("selfHosted"), 58);
 });
 
 test("groupsFor drops rows and empty groups", () => {
@@ -232,7 +232,7 @@ test("groupsFor drops rows and empty groups", () => {
     "self-hosted table has Dedicated cell",
   );
   const support = selfHosted.find((group) => group.id === "support");
-  assert.equal(support?.rows.length, 1);
+  assert.equal(support?.rows.length, 2);
 
   for (const table of ["cloud", "selfHosted"]) {
     const expected = FEATURE_GROUPS.flatMap((group) =>

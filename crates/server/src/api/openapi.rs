@@ -140,6 +140,9 @@ use super::playground::{
     PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
     PlaygroundTool,
 };
+use super::project_activity::{
+    ActivityBucket, ProjectActivity, ProjectActivityParams, ProjectsActivity,
+};
 use super::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
     PromptListParams, PromptMetrics, PromptMetricsParams, PromptScoreMean, PromptSettings,
@@ -250,6 +253,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<ProjectsActivity>();
+    set.insert::<ProjectActivity>();
+    set.insert::<ActivityBucket>();
     set.insert::<JitRole>();
     set.insert::<OrgSsoProvider>();
     set.insert::<DomainStatus>();
@@ -1832,6 +1838,24 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let activity = operation(
+        "get_projects_activity",
+        "projects",
+        "Read the projects' last 24 hours",
+    )
+    .description(Some(
+        "The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.",
+    ))
+    .parameters(Some(with_query::<ProjectActivityParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<ProjectsActivity>("The activity of the requested projects."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let post_project = operation("post_project", "projects", "Create a project")
         .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
         .request_body(Some(json_body("CreateProjectRequest")))
@@ -2192,6 +2216,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, post_internal_device_code),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
+        .path(
+            "/api/v1/orgs/{org}/projects/activity",
+            PathItem::new(HttpMethod::Get, activity),
+        )
         .path("/api/v1/projects/{project}", project)
 }
 

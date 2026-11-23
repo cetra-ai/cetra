@@ -1147,6 +1147,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/projects/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the projects' last 24 hours
+         * @description The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.
+         */
+        get: operations["get_projects_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/sso": {
         parameters: {
             query?: never;
@@ -3811,6 +3831,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description One hour of a project's traces. */
+        ActivityBucket: {
+            /**
+             * Format: int64
+             * @description Of those, the traces whose status is `error`.
+             */
+            errors: number;
+            /**
+             * Format: int64
+             * @description Traces that started in the hour.
+             */
+            traces: number;
+        };
         /** @description `POST …/datasets/{dataset}/items` body: 1 to 1 000 items, one new version. */
         AddItemsRequest: {
             /** @description The items, 1 to 1 000 of them. Their ids come back in the same order. */
@@ -8773,8 +8806,9 @@ export interface components {
             /**
              * Format: date-time
              * @description When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
-             *     memory: absent until the first batch after the server starts. Present only when one
-             *     project is read.
+             *     memory: absent until the first batch after the server starts. Present when one project
+             *     is read; lists omit it. `GET /orgs/{org}/projects/activity` also returns it per project
+             *     (D-C-27).
              */
             last_ingest_at?: string;
             /** @description Display name. */
@@ -8796,6 +8830,34 @@ export interface components {
              *     10 to 3600; 60 unless set.
              */
             trace_completion_timeout_s: number;
+        };
+        /** @description One project's traces over the activity window. */
+        ProjectActivity: {
+            /** @description 24 hourly buckets, oldest first. Bucket `i` starts `i` hours after `from`. */
+            buckets: components["schemas"]["ActivityBucket"][];
+            /**
+             * Format: double
+             * @description Sum of the traces' `cost_total`, USD.
+             */
+            cost_usd: number;
+            /**
+             * Format: int64
+             * @description Of those, the traces whose status is `error`.
+             */
+            errors: number;
+            /**
+             * Format: date-time
+             * @description When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
+             *     memory: absent until the first batch after the server starts.
+             */
+            last_ingest_at?: string;
+            /** @description The project. */
+            project_id: components["schemas"]["ProjectId"];
+            /**
+             * Format: int64
+             * @description Traces that started in the window, with the default exclusions (spec 05).
+             */
+            traces: number;
         };
         /**
          * Format: uuid
@@ -8840,6 +8902,23 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `GET /api/v1/orgs/{org}/projects/activity`: the requested projects' last 24 hours (D-C-27). */
+        ProjectsActivity: {
+            /** @description One entry per requested project the caller can see, in request order. */
+            data: components["schemas"]["ProjectActivity"][];
+            /**
+             * Format: date-time
+             * @description Window start: the start of the hour 23 hours before the current one. JSON is RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description Window end, exclusive: one nanosecond after the request time. JSON is RFC 3339.
+             */
+            to: string;
+            /** @description Requested projects whose query failed or ran out of time, in request order. */
+            unavailable: components["schemas"]["ProjectId"][];
+        };
         /** @description A prompt (D-V-2). */
         Prompt: {
             /**
@@ -16017,6 +16096,77 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_projects_activity: {
+        parameters: {
+            query: {
+                /** @description One to 50 distinct project ids, comma-separated, in the order of the answer. */
+                ids: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The activity of the requested projects. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectsActivity"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
