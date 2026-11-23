@@ -106,15 +106,33 @@ jobs:
       - run: just check-ee check-golden deny-policy
       - run: just assert-clean
 
+  # `just check-web` in parallel jobs (.github/CI.md § Web tests): the checks and the build here,
+  # the tests in the web-test shards.
   web:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
-      - run: just check-web
+      - run: just check-web-static
+      - run: just assert-clean
+
+  web-test:
+    name: web-test (${{ matrix.shard }}/4)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/js # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the $/ form
+      - run: just test-web-shard ${{ matrix.shard }} 4
       - run: just assert-clean
 
   docs:
@@ -307,6 +325,7 @@ jobs:
         rust-test,
         rust-policy,
         web,
+        web-test,
         docs,
         ts-sdk,
         ts-sdk-min-node,

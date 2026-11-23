@@ -162,6 +162,7 @@ Run everything through `just`:
 | `just check` | Rust, web, Python SDK, TypeScript SDK, cetra-cli and the docs site (D79); **must pass before every commit** |
 | `just check-rust` | format check, clippy (`-D warnings`), tests, `ee` licence headers, golden directories, cargo-deny's bans, licences and sources (D196) |
 | `just check-web` | web lint, types, tests, production build |
+| `just check-web-static` · `just test-web-shard <k> <n>` | `check-web` without the tests (CI's `web` job) · shard `k` of `n` of the web tests (CI's `web-test` matrix) |
 | `just check-docs` | docs site: lint, script tests, types, content checks, build with link validation |
 | `just check-release` | build-release, then check the UI is embedded |
 | `just check-py` | Python SDK format, lint, types, tests |
