@@ -85,6 +85,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 - **Do not compile, test, lint or format.** No `cargo`, `just` or `pnpm`. The coordinating session runs the checks once, when every phase is committed. Write the tests anyway.
 - Commit only your own files: `git add <files> && git commit -m "<subject>" -- <files>`. If `index.lock` exists, wait 5 seconds and retry. Never `git add -A`.
 - No `unwrap()` or `expect()` outside tests unless a comment states the invariant. No payload, email, name or secret in a record, a log or an error.
+- When a deleted tracing line was the only use of a binding, parameter or import (for example `actor_id`, `caller`, `token_id`, `provider`), remove it too, so clippy's unused warnings do not fail. Never add `Extension(principal)` only to get the actor: `audit::Ctx` already reads the principal.
 
 ---
 
@@ -100,6 +101,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 - `crates/server/src/audit/tests.rs` (new)
 - `crates/server/src/lib.rs` (add `pub(crate) mod audit;`, keeping the module list's order)
 - `crates/server/src/http/client_ip.rs` (make `client_ip` `pub(crate)`)
+- `crates/server/src/auth/reset.rs` (add `reset_link_tx`, step 7)
 
 **Steps:**
 
@@ -241,8 +243,8 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    /// One record before it is written.
    #[derive(Debug, Clone, PartialEq)]
    pub(crate) struct Event {
-       pub(crate) org_id: Option<uuid::Uuid>,
-       pub(crate) project_id: Option<uuid::Uuid>,
+       pub(crate) org_id: Option<cetra_core::ids::OrgId>,
+       pub(crate) project_id: Option<cetra_core::ids::ProjectId>,
        pub(crate) target: Option<(TargetKind, String)>,
        pub(crate) action: Action,
        pub(crate) outcome: Outcome,
@@ -251,14 +253,14 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    impl Event {
        /// An instance record (no org), success, no target.
        pub(crate) fn new(action: impl Into<Action>) -> Self { /* … */ }
-       pub(crate) fn org(mut self, org: impl Into<uuid::Uuid>) -> Self { /* sets org_id */ }
-       pub(crate) fn project(mut self, project: impl Into<uuid::Uuid>) -> Self { /* sets project_id */ }
+       pub(crate) fn org(mut self, org: cetra_core::ids::OrgId) -> Self { /* sets org_id */ }
+       pub(crate) fn project(mut self, project: cetra_core::ids::ProjectId) -> Self { /* sets project_id */ }
        pub(crate) fn target(mut self, kind: TargetKind, id: impl ToString) -> Self { /* … */ }
        pub(crate) fn failed(mut self) -> Self { /* outcome = Failure */ }
    }
    ```
 
-   `OrgId` and `ProjectId` (`cetra_core::ids`) convert with `.as_uuid()`. Add `impl From<OrgId> for uuid::Uuid`-style conversions only if they already exist. Otherwise call sites pass `org.as_uuid()`, and `org()`/`project()` take `uuid::Uuid`. Pick the second when unsure, and write the signatures as `fn org(self, org: uuid::Uuid)`.
+   `org()` and `project()` take the typed ids. A call site holding a raw `uuid::Uuid` for an org or project wraps it with `OrgId::from_uuid(..)` / `ProjectId::from_uuid(..)`. The row stores `org.to_string()` (hyphenated lowercase).
 
 5. Write `record` and `record_alone`:
 
@@ -296,7 +298,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    ```
 
    `record`:
-   1. Serialize `event.action` with `serde_json::to_value`. The result is `{"action": "<name>", "details": {…}}`, or `{"action": "<name>"}` for a unit variant (`catalog` uses adjacent tagging). Take `name` from `action` and `details` from `details`, defaulting to `{}`. A serialization error maps to `MetaError::Corrupt` with a fixed message, never the value. Check `meta/mod.rs` for the `Corrupt` variant's exact shape and reuse it.
+   1. Serialize `event.action` with `serde_json::to_value`. The result is `{"action": "<name>", "details": {…}}`, or `{"action": "<name>"}` for a unit variant (`catalog` uses adjacent tagging). Take `name` from `action` and `details` from `details`, defaulting to `{}`. A serialization error maps to `MetaError::Corrupt { table: "audit_events", column: "details" }` (the variant at `meta/mod.rs:307`), never the value.
    2. `INSERT INTO audit_events (id, at, org_id, project_id, action, outcome, actor_kind, actor_id, via, credential_id, target_kind, target_id, details, ip, user_agent) VALUES (?, …)` with:
       - `uuid::Uuid::now_v7()` hyphenated;
       - `now`;
@@ -445,11 +447,27 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    **`deletion.rs` — `DeletionAction`** (target `deletion`, org records):
    | Variant | Name | Fields |
    |---|---|---|
-   | `Requested { kind: crate::api::deletions::DeletionKind, follow_up_of: Option<uuid::Uuid> }` | `deletion.requested` | |
-   | `Applied { kind: DeletionKind }` | `deletion.applied` | |
-   | `Failed { kind: DeletionKind }` | `deletion.failed` | never the reason text |
+   | `Requested { kind: &'static str, follow_up_of: Option<uuid::Uuid> }` | `deletion.requested` | `kind` from `crate::meta::deletions::DeletionKind::as_str()` |
+   | `Applied { kind: &'static str }` | `deletion.applied` | trace, filter and user deletions; drops record `project.dropped` / `org.dropped` instead |
+   | `Failed { kind: &'static str }` | `deletion.failed` | never the reason text |
 
-7. `audit/tests.rs` (`#[tokio::test]` with `crate::meta::test_db()`, or `TestApp` where a request is needed):
+7. `auth/reset.rs`: split `reset_link` so A2 and A4 can record in the same transaction:
+
+   ```rust
+   /// Stores `minted`'s reset token for `user_id` in the caller's transaction.
+   pub(crate) async fn reset_link_tx(
+       conn: &mut sqlx::SqliteConnection,
+       minted: &MintedReset,
+       user_id: Uuid,
+       now: i64,
+   ) -> Result<(), MetaError> {
+       insert_reset(conn, &minted.hash, user_id, now, minted.expires_at).await
+   }
+   ```
+
+   `reset_link` keeps its signature and calls `reset_link_tx` inside its `meta.write`. It needs a clone of `minted` (or of its hash and expiry) to move into the closure, and still returns `minted.url`. Check that `MintedReset`'s fields are `hash`, `expires_at` and `url`, and adjust the body to the real names.
+
+8. `audit/tests.rs` (`#[tokio::test]` with `crate::meta::test_db()`, or `TestApp` where a request is needed):
    - `record_writes_one_row_with_every_column`: a user actor with a PAT, org, project, target, details. The row has the expected columns, `details` parses to the variant's fields, `seq` is 1 and `id` parses as a UUIDv7.
    - `a_unit_variant_stores_empty_details`: `AuthAction::Logout` → `details = '{}'`.
    - `record_in_a_rolled_back_transaction_leaves_no_row`: `record` then `Err(MetaError::Conflict("x"))` from the closure → zero rows.
@@ -478,7 +496,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 
 **Goal:** record every sign-in, sign-up, password and device action of the auth area.
 
-**Edit:** `crates/server/src/auth/session.rs`, `crates/server/src/routes/auth.rs`, `crates/server/src/routes/me.rs`, `crates/server/src/routes/oauth.rs`, `crates/server/src/auth/oidc/flow.rs`, `crates/server/src/routes/device.rs`, `crates/server/src/bootstrap.rs`, `crates/server/src/auth/reset.rs`.
+**Edit:** `crates/server/src/auth/session.rs`, `crates/server/src/routes/auth.rs`, `crates/server/src/routes/me.rs`, `crates/server/src/routes/oauth.rs`, `crates/server/src/auth/oidc/flow.rs`, `crates/server/src/routes/device.rs`, `crates/server/src/bootstrap.rs`.
 
 **Rules for every site:**
 - Add a `ctx: audit::Ctx` extractor argument to each handler that records. It never fails. Put it before any body extractor.
@@ -499,7 +517,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 3. **`routes/auth.rs` `audit_login_failed`:**
    - Change it to `async fn audit_login_failed(state: &AppState, ctx: &audit::Ctx, user: Option<Uuid>)`.
    - `None` keeps today's `tracing::info!(target: "audit", account = "unknown", "login failed")` exactly, so no row is written for an unknown email.
-   - `Some(id)` calls `audit::record_login_failed(&state.meta, &ctx.with_actor(audit::Actor::Anonymous), id, now)`. On `Err`, log `tracing::error!(error = %error, "audit write failed")` and keep answering the login's 401: a failed login must not turn into a 500. This is the one place where the audit error is logged instead of failing the request, because the request already fails.
+   - `Some(id)` calls `audit::record_login_failed(&state.meta, ctx, id, now)` (`ctx` is anonymous: the login is not authenticated). On `Err`, log `tracing::error!(error = %error, "audit write failed")` and keep answering the login's 401: a failed login must not turn into a 500. This is the one place where the audit error is logged instead of failing the request, because the request already fails.
    - Thread `ctx` from `login`'s new `ctx` argument.
 4. **`routes/auth.rs` `reset_password`:**
    - Inside closure 384-395, before `Ok(Some((id, hashes)))`, record `AuthAction::PasswordReset` with target `(User, id)`.
@@ -515,26 +533,25 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    - plain branch (closure 701-717): bind `insert_user`'s row, record `AuthAction::Signup { method: Password }`, target `(User, user.id)`, actor the new user;
    - invited branch (closure 635-678): before `Ok(InvitedSignup::User(user))`, record `Signup { method: Invitation }` and `InviteAction::Accepted { role }` (`.org(pending.org_id)`, target `(Invite, pending.id)`), actor the new user.
 8. **`routes/auth.rs` `verify_email`:** before `Ok(Some(()))` (501), record `AuthAction::EmailVerified`, target `(User, id)`, actor the user.
-9. **`routes/auth.rs` `forgot_password` and `resend_verification`, and `auth/reset.rs`:**
-   - Split `reset_link` into `reset_link_tx(conn: &mut SqliteConnection, …)` holding the closure body, plus `reset_link(meta, …)`, which keeps its signature and calls it inside `meta.write`.
-   - `forgot_password` calls `state.meta.write` itself with `reset_link_tx`, then records `AuthAction::PasswordResetRequested`, target `(User, user.id)`, actor `Anonymous` (the requester is not authenticated).
+9. **`routes/auth.rs` `forgot_password`:**
+   - Replace its `reset_link(&state.meta, …)` call: `let minted = auth::reset::mint_reset(&public_url, now)?;` (mapping errors as `reset_link`'s errors are mapped today), then one `state.meta.write` that calls `reset_link_tx(conn, &minted, user.id, now)` (A1) and records `AuthAction::PasswordResetRequested`, target `(User, user.id)`, with `ctx` as is (the requester is anonymous). The mail uses `minted.url`.
    - Only the branch that runs today records. An unknown email still does nothing, and the response stays identical.
    - `resend_verification` is unchanged (not in the catalog).
-   - `routes/admin.rs`'s `reset_link` caller is A4's; keep `reset_link`'s signature so it still compiles.
 10. **`routes/me.rs` `change_password`:** in closure 138-144, bind the `revoke_user_tokens` result, record `AuthAction::PasswordChanged` (target `(User, user_id)`), return it.
 11. **`routes/oauth.rs` `callback`:** delete both `login` tracing lines; `start_session` records. Keep `provider` unused only if the compiler allows; otherwise drop the binding.
 12. **`auth/oidc/flow.rs`:**
-    - Thread an `audit::Ctx` into `admit` from `finish`: add a `ctx: &audit::Ctx` parameter to `finish`, and pass it from `routes/oauth.rs` `callback` (add the `ctx` extractor there). `callback` also calls `crate::ee::org_sso::login::finish` (line 96): pass `&ctx` as its new last argument too. A4 adds that parameter.
-    - In `decide`'s branches, record inside the closure before returning:
+    - Add a `ctx: &audit::Ctx` parameter to `finish`, `resolve`, `admit`, `decide` and `provision_org`, and thread it down: `finish` → `resolve` (both `provision_org` calls at ~264 and ~293) and `finish` → `admit` → `decide` (clone into `admit`'s closure). Pass it from `routes/oauth.rs` `callback` (add the `ctx` extractor there). `callback` also calls `crate::ee::org_sso::login::finish` (line 96): pass `&ctx` as its new last argument too. A4 adds that parameter. Update any test in these two files that calls a changed function.
+    - In `decide`, which runs on the closure's `conn`, record before returning each outcome:
       - `Outcome::Setup(id)`: `SetupCompleted`, actor the new user;
       - `Outcome::Linked{user_id, ..}`: `IdentityLinked{provider}`, actor the user;
       - `Outcome::User(id)` (new user): `Signup{method: Provider}`, actor the new user.
-    - In `provision_org`'s closure, after `add_org_member`, record `MemberAction::Added { role, via: AutoProvision }`, `.org(org)`, target `(User, user)`, actor `Ctx::system()` with the request IP.
+    - In `provision_org`'s closure, record `MemberAction::Added { role, via: AutoProvision }`, `.org(org)`, target `(User, user)`, with `ctx.with_actor(Actor::System)`, only on the arm where `add_org_member` returned `Ok(())`, never on `Err(Conflict)`.
     - Delete the two tracing lines at 431 and 438.
 13. **`routes/device.rs`:**
     - `approve`: pass `ctx` into `mint`. In each closure, before its success value, record `AuthAction::DeviceApproved { purpose: "login" | "init", token_id, key_id }`. The init branch adds `.org(org).project(project)`.
+    - The approval record commits with the minted token, before `state.device.complete`. A stale code then leaves a `device_approved` row for a token that was minted but never handed out. That matches the token row, and is intended.
     - `deny`: `audit::record_alone(&state.meta, &ctx, Event::new(AuthAction::DeviceDenied), now)`.
-    - `register_code`: add `Extension(principal)` and `ctx`; record `DeviceRegistered { purpose }` with `record_alone`.
+    - `register_code`: add `ctx`; record `DeviceRegistered { purpose }` with `record_alone`.
     - Delete the four tracing lines.
 14. **Tests**, updated or added in the same files (every new test reads `audit_events` with `sqlx::query_as` on `app.state.meta.reader()`):
     - `routes/auth.rs`:
@@ -575,7 +592,12 @@ The same rules as A2 apply to every site.
    - `update_org`: add `ctx`. Turn the one-liner closure into a block: rename, then record `OrgAction::Renamed`, `.org(id)`, target `(Org, id)`, then return the rename's value.
 2. `routes/projects.rs`:
    - `create_project` (add `ctx`): before `Ok(ProjectCreate::Created(project))`, record `ProjectAction::Created`, `.org(org).project(project.id)`, target `(Project, project.id)`.
-   - `update_project`: inside the closure, after `projects::update_project(…)`, record, each with `.org(…).project(…)` and target `(Project, id)`:
+   - `update_project`: before the closure, compute from `access.project` and the request:
+     - `name_changed = body.name.is_some_and(|n| n != access.project.name)` (adapt to the body's field type);
+     - the retention change. The request's retention is `Option<Option<u32>>`: outer `None` = unchanged, `Some(None)` = clear, `Some(Some(d))` = set. A change exists when the outer value is `Some(new)` and `new != access.project.retention_days`. Then `old_days = access.project.retention_days`, `new_days = new`.
+     - the timeout change, the same way against the current timeout.
+
+     Inside the closure, after `projects::update_project(…)`, record, each with `.org(…).project(…)` and target `(Project, id)`:
      - `ProjectAction::Renamed` when the name changed (compare with `access.project.name`);
      - `RetentionChanged{old_days, new_days}` when retention changed;
      - `CompletionTimeoutChanged{…}` when the timeout changed.
@@ -636,7 +658,7 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
    - `revoke_api_key`: record `Revoked` only when the helper returned `Some`.
 2. `routes/tokens.rs`:
    - `create_token`: record `PatAction::Created { scopes, expires_at }`, target `(Pat, row.id)`.
-   - `revoke_owned`: add a `ctx: &audit::Ctx` parameter (its callers have `ctx` extractors) and record `PatAction::Revoked` when `Some`.
+   - `revoke_owned`: add a `ctx: &audit::Ctx` parameter and record `PatAction::Revoked` when `Some`. Add a `ctx: audit::Ctx` extractor to its two callers, `revoke_token` (~130) and `revoke_current` (~140), and pass `&ctx`.
 3. `ee/org_sso/settings.rs`, on the success branch of each closure:
    - `put_org_sso_provider`: `ProviderSaved { issuer_changed: renames_issuer }`, target `(SsoProvider, id)`, on `Ok(Save::Saved)` only.
    - `delete_org_sso_provider`: `ProviderRemoved`.
@@ -647,21 +669,21 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
    - Delete the seven tracing lines.
 4. `ee/org_sso/login.rs` `finish`:
    - Add a parameter `ctx: &audit::Ctx` to `finish` and pass it into `admit`'s closure (clone). Its only caller, `routes/oauth.rs:96` `callback`, is A2's file: A2 passes `&ctx` there. The two phases agree on this signature, and the code compiles once both are committed.
-   - Inside `admit`'s closure, before `Ok(Admitted::User{…})`, record with `.org(org)` and the signed-in user as actor:
+   - `admit` (`login.rs:~370`) is a free function called as `admit(conn, &input)` inside `finish`'s write closure. Add a `ctx: &audit::Ctx` parameter (clone `ctx` into the closure). Record only before its final `Ok(Admitted::User{…})`, never on the early return for the instance-admin test sign-in. Update the test calls of `finish` in this file (`~604`, `~1015`, `~1190`) with a ctx (`audit::Ctx::system()`). Record with `.org(org)` and the signed-in user as actor (`ctx.with_actor(Actor::User{id: user_id, via: Session, credential_id: None})`):
      - `AuthAction::IdentityLinked { provider }` when `linked` (the org's identity provider string);
      - `MemberAction::Added { role, via: SsoJit }` when `joined`;
-     - `AuthAction::Signup { method: OrgProvider }` for a new user.
+     - `AuthAction::Signup { method: OrgProvider }` when the user was created here (the `Target::New` branch).
    - Make the `org sso join skipped: seat limit` line a plain `tracing::info!` without the audit target (plan P-5).
 5. `ee/org_sso/recheck.rs`: inside the closure, after `mark_unverified`, record `SsoAction::DomainLapsed`, `.org(row.org_id)`, target `(SsoDomain, id)`, `Ctx::system()`. Delete the `warn!` audit line. Keep a plain `tracing::warn!` with org and domain ids.
 6. `admin.rs` `org_sso_disable_in`: in the closure, when `set_flags` returned true, record `SsoAction::Disabled`, `.org(id)`, `Ctx::cli()`. Delete the tracing line.
 7. `routes/admin.rs`:
    - `create_user`: record `UserAction::Created { instance_admin }`, target `(User, user.id)`.
    - `update_user`: record `UserAction::Updated { disabled, instance_admin }` (the request's options) before returning the row, only when the user exists.
-   - `reset_link`: call `state.meta.write` with A2's `auth::reset::reset_link_tx`, then record `UserAction::ResetLinkIssued`.
-
-     A2 creates `reset_link_tx`, so A4 must not run this step before A2 is committed. If A2 is not in `git log`, do every other step, leave this one, and report it.
-   - `put_license`: add `Extension(principal)` and `ctx`. In the closure, record `InstanceAction::LicenseInstalled { license_id, kid }`, target `(License, license_id)`. Delete the plain info line.
-8. `routes/internal_orgs.rs` `create_org`: before `Ok(Outcome::Created(…))`, record `OrgAction::Created`, `.org(id)`, target `(Org, id)`. The ctx is the extractor's: the control-plane principal gives `Actor::ControlPlane`.
+   - `reset_link`: replace the `reset::reset_link(&state.meta, …)` call with `let minted = reset::mint_reset(&public_url, now)?;` (same error mapping as today), then one `state.meta.write` that calls `reset::reset_link_tx(conn, &minted, id, now)` (A1) and records `UserAction::ResetLinkIssued`, target `(User, id)`. The response uses `minted.url`.
+   - `put_license`: add `ctx`. In the closure, record `InstanceAction::LicenseInstalled { license_id, kid }`, target `(License, license_id)`. Delete the plain info line.
+8. `routes/internal_orgs.rs`:
+   - `create_org`: before `Ok(Outcome::Created(…))`, record `OrgAction::Created`, `.org(id)`, target `(Org, id)`. The ctx is the extractor's: the control-plane principal gives `Actor::ControlPlane`.
+   - `drop_org`: add a `ctx: audit::Ctx` extractor and pass `&ctx` as the new last argument of `crate::deletion::request_org_drop` (A5 adds that parameter). Keep the `(ActorKind, Uuid)` tuple argument as it is.
 9. `routes/internal_users.rs`:
    - `revoke_access`: add `ctx: &audit::Ctx`. Before `Ok(hashes)`, record `UserAction::Disabled` when `disable`, else `SessionsRevoked`, target `(User, user)`.
    - `delete`: before `DELETE FROM users`, run `UPDATE audit_events SET ip = NULL, user_agent = NULL WHERE actor_kind = 'user' AND actor_id = ?`. After it, record `UserAction::Deleted { sole_owner_orgs }`, target `(User, user)`.
@@ -683,7 +705,7 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
 
 **Goal:** record deletion requests and outcomes, purge old records hourly, and delete an org's records when its drop is applied.
 
-**Edit:** `crates/server/src/deletion/mod.rs`, `crates/server/src/deletion/resolve.rs`, `crates/server/src/routes/deletions.rs`, `crates/server/src/serve.rs`, `crates/server/src/config.rs`, `website/src/content/docs/docs/self-hosting/configuration-reference.md`, `crates/server/src/audit/retention.rs` (new), and one line in `crates/server/src/audit/mod.rs` (`pub(crate) mod retention;`).
+**Edit:** `crates/server/src/deletion/mod.rs`, `crates/server/src/deletion/resolve.rs`, `crates/server/src/routes/deletions.rs`, `crates/server/src/serve.rs`, `crates/server/src/config.rs`, `crates/server/src/test_support/mod.rs` (the two `ServerConfig` literals only), `crates/server/src/ingest/fixtures_tests.rs` (its `ServerConfig` literal only), `website/src/content/docs/docs/self-hosting/configuration-reference.md`, `crates/server/src/audit/retention.rs` (new), and one line in `crates/server/src/audit/mod.rs` (`pub(crate) mod retention;`).
 
 **Steps:**
 
@@ -701,6 +723,7 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
    ```
 
    - Add the field `#[serde(default)] pub audit: AuditConfig,` on `ServerConfig`, next to `eval`.
+   - Add `audit: AuditConfig::default(),` after `eval: …,` in the three `ServerConfig` struct literals without `..`: `test_support/mod.rs:1286` (`default_config`), `test_support/mod.rs:1841` (`with_init`) and `ingest/fixtures_tests.rs:464`. Also search `crates/server/src` for any other `ServerConfig {` literal and fix it the same way.
    - In `validate`: `if config.audit.retention_days != 0 && config.audit.retention_days < 30 { return Err(ConfigError::Invalid { key: "audit.retention_days", reason: "must be 0 or at least 30" }) }`.
    - Tests:
      - `audit_retention_defaults_to_365`;
@@ -742,22 +765,17 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
    - Add `/// How often old audit records are deleted (D-EA-7).` `const AUDIT_PURGE_EVERY: Duration = Duration::from_secs(60 * 60);`.
    - Add `fn spawn_audit_purge(state: AppState) -> JoinHandle<()>`, shaped exactly like `spawn_purge`, calling `crate::audit::retention::purge(&state.meta, state.config.audit.retention_days, now)`. It logs `tracing::info!(removed, "purged old audit records")` when `removed > 0`, and `tracing::error!(error = %error, "audit purge failed")` on error.
    - Spawn it inside the existing `if !state.config.restore_mode { … }` block: restore mode keeps a restored copy unchanged.
-   - Extend `restore_mode_skips_the_sending_and_dns_loops`, or add a test beside it, to assert that the purge does not run in restore mode, if that test can observe tasks. If it cannot, note it in the report.
+   - In `restore_mode_skips_the_sending_and_dns_loops` (`serve.rs:~1205`), the assertion `normal_tasks - restore_tasks == 4` becomes `== 5`, with its comment naming the audit purge.
 5. `deletion/mod.rs`. Each record uses `Ctx::system()` unless an actor is given:
-   - `request_org_drop`: replace `actor: (ActorKind, Uuid)` handling. In the closure, before `Ok(Some(row))`, record `DeletionAction::Requested { kind: Org, follow_up_of: None }`, `.org(org)`, target `(Deletion, row.id)`, with a ctx built from the actor:
-     - `ActorKind::User` → `Actor::User { via: Session }`;
-     - `ActorKind::ApiKey` → `ApiKey`;
-     - the control-plane kind → `ControlPlane { token_id: id.to_string() }`.
-
-     Callers pass the `audit::Ctx` they have as a new `ctx: &audit::Ctx` parameter. That is `routes/deletions.rs` `drop_org` (this phase) and `routes/internal_orgs.rs` `drop_org` (A4's file). Add the parameter to `request_org_drop`, and in `routes/internal_orgs.rs` change only the one call. A5 is allowed this single-line edit in `routes/internal_orgs.rs`: commit it with A5 and say so in the report.
-   - `follow_up`: record `Requested { kind: row.kind, follow_up_of: Some(parent) }`, `Ctx::system()`.
+   - `request_org_drop`: keep the `actor: (ActorKind, Uuid)` parameter (it still fills the deletion row) and add `ctx: &audit::Ctx` as the last parameter. In the closure, before `Ok(Some(row))`, record `DeletionAction::Requested { kind: "org", follow_up_of: None }`, `.org(org)`, target `(Deletion, row.id)`, using `ctx` as is: its actor comes from the request's principal, so there is no mapping from `ActorKind`.
+     - Callers: `routes/deletions.rs` `drop_org` (this phase) passes `&ctx`. `routes/internal_orgs.rs` `drop_org` is A4's file: A4 adds its `ctx` extractor and passes `&ctx`. The two phases agree on this signature.
+   - `follow_up`: copy `row.kind.as_str()`, the org and the project into locals before the closure (it moves `row`), then record `Requested { kind, follow_up_of: Some(parent) }`, `Ctx::system()`.
    - `applied_now`: record `Applied { kind }` when `mark_applied` returned true.
-   - `drop_project_step`: when `dropped`, record `Applied { kind: Project }` and `ProjectAction::Dropped`, `.org(row.org_id).project(project)`.
-   - `drop_org_step`: in the closure, after `delete_org` and `mark_dropped`, when dropped:
-     1. `delete_org_records(conn, org)`;
-     2. then record `OrgAction::Dropped`, target `(Org, org)`, with **no** `.org(…)`: it is an instance record (D-EA-7).
+   - `drop_project_step`: in the closure, write `let dropped = mark_dropped(conn, id, now).await?; if dropped { audit::record(conn, &Ctx::system(), Event::new(ProjectAction::Dropped).org(..).project(..).target(TargetKind::Project, project), now).await?; } Ok(dropped)`. No `deletion.applied` for a drop.
+   - `drop_org_step`: in the closure, after `delete_org`, write `let dropped = mark_dropped(..).await?; if dropped { delete_org_records(conn, org).await?; audit::record(conn, &Ctx::system(), Event::new(OrgAction::Dropped).target(TargetKind::Org, org), now).await?; } Ok(dropped)`. There is **no** `.org(…)`: it is an instance record (D-EA-7). No `deletion.applied` either: the org's records are gone.
+   - Delete `on_dropped` and the `Dropped` struct (`deletion/mod.rs:~196`), and their two calls (in `drop_project_step` and `drop_org_step`). If a test uses `Dropped`, rewrite it to assert the rows.
    - `fail`: record `Failed { kind }` when `mark_failed` returned true.
-   - Delete `on_dropped`'s and these sites' tracing lines.
+   - Delete these sites' tracing lines.
    - `deletion registered` (540) and `deletion/resolve.rs:161` drop `target: "audit"` (plan P-5).
 6. `routes/deletions.rs`:
    - `drop_project` and `create_deletion`: add `ctx`. Before the success value, record `DeletionAction::Requested { kind, follow_up_of: None }`, `.org(org).project(project)`, target `(Deletion, row.id)`.
@@ -809,7 +827,8 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
 2. Run once: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH; just check-rust`, then `just check-docs`. Expected rework:
    - compile errors from parallel phases;
    - the `config::tests::the_configuration_reference_matches_the_loader` row;
-   - golden server dumps (`golden_tests`), which now contain `audit_events` rows: make them deterministic, or exclude the table, and say which in the commit.
+   - `crates/server/tests/snapshots/meta_schema.snap` (`schema_matches_the_snapshot`, `meta/mod.rs:~694`): regenerate with `cargo insta accept`, or by the test's documented bless path, and review that only `audit_events` and its 6 indexes were added;
+   - golden server dumps (`golden_tests/dump.rs:92`, `golden_tests/mod.rs:191`), which dump every table and now contain `audit_events` rows with UUIDv7 ids and times: make them deterministic, or exclude the table from the dump, and say which in the commit.
 3. A Haiku fix phase for what fails, with an exact brief.
 4. A Sonnet code review of M1. Its findings are fixed the same way.
 5. Update the roadmap row: "M1 implemented".
