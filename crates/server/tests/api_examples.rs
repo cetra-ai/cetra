@@ -25,7 +25,7 @@ use cetra_server::api::assistant::{
     AssistantSettings, AssistantStatus, AssistantTurnRequest, PutAssistantSettings,
     UpdateAssistantConversationRequest,
 };
-use cetra_server::api::audit::AuditEvent;
+use cetra_server::api::audit::{AuditEvent, AuditStream};
 use cetra_server::api::backfills::{Backfill, BackfillEstimate, CreateBackfillRequest};
 use cetra_server::api::common::{Page, Problem};
 use cetra_server::api::connections::{
@@ -453,6 +453,8 @@ fn static_files_match_their_types() {
     roundtrip::<Page<Deletion>>("static/org-deletions.json");
     roundtrip::<Page<AuditEvent>>("static/org-audit-events.json");
     roundtrip::<Page<AuditEvent>>("static/admin-audit-events.json");
+    roundtrip::<AuditStream>("static/org-audit-stream.json");
+    roundtrip::<AuditStream>("static/admin-audit-stream.json");
     roundtrip::<Deletion>("static/deletion-project.json");
     roundtrip::<Deletion>("static/deletion-org.json");
     roundtrip::<Page<Evaluator>>("static/evaluators.json");

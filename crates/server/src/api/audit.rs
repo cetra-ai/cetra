@@ -6,6 +6,7 @@ use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
 use super::common::TimeParam;
+use super::keys::optional_time;
 
 /// Whether the action succeeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -200,4 +201,78 @@ pub struct AuditExportParams {
     pub outcome: Option<AuditOutcome>,
     /// `csv` or `ndjson`.
     pub format: AuditExportFormat,
+}
+
+/// The SIEM stream destination of an org or of the instance (track EA M4, D-EA-11). The URL,
+/// the signing secret and the header value are never returned.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditStream {
+    /// The endpoint's host.
+    pub url_host: String,
+    /// The optional header's name. Its value is never returned.
+    pub header_name: Option<String>,
+    /// Whether records are sent.
+    pub enabled: bool,
+    pub status: AuditStreamStatus,
+}
+
+/// How the stream is doing. Records are sent oldest first, at least once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditStreamStatus {
+    /// The last delivery the endpoint accepted. Null until the first one.
+    #[serde(default, with = "optional_time")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub last_success_at: Option<i64>,
+    /// The class of the last failure, when the last attempt failed. Never a URL or a value.
+    pub last_error: Option<String>,
+    /// When the current run of failures began. Null when the last attempt worked.
+    #[serde(default, with = "optional_time")]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub failing_since: Option<i64>,
+    /// Records not yet accepted by the endpoint.
+    pub lag: u64,
+    /// Whether retention deleted records before they were sent.
+    pub lost_records: bool,
+}
+
+/// `PUT` body of the stream. The URL must be https and carry no user information; the optional
+/// header is one name and one value, sealed and never returned. Without `header_value`, a
+/// stored header keeps its value when the name is unchanged.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutAuditStream {
+    /// The endpoint, an https URL of at most 2,048 bytes. Never returned.
+    pub url: String,
+    /// The optional header's name, for example `Authorization`.
+    #[serde(default)]
+    pub header_name: Option<String>,
+    /// The header's value, at most 1,024 bytes. Never returned.
+    #[serde(default)]
+    pub header_value: Option<String>,
+    /// Whether records are sent.
+    pub enabled: bool,
+}
+
+/// `201` of the create: the destination, and its signing secret, which is shown only here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CreatedAuditStream {
+    pub stream: AuditStream,
+    /// The signing secret: verify `X-Cetra-Signature` with it. Shown once.
+    pub secret: String,
+}
+
+/// `POST …/secret`: the new signing secret, shown once.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RotatedAuditStreamSecret {
+    pub secret: String,
+}
+
+/// The answer to a test send. Only reachability: connection errors and timeouts both read as
+/// not reached (plan P-7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AuditStreamTest {
+    /// Whether the endpoint answered.
+    pub reached: bool,
+    /// The HTTP status it answered with, when it answered.
+    pub status: Option<u16>,
 }

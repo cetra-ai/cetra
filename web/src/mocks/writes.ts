@@ -7,6 +7,7 @@ import promptSettingsDocument from "../../../fixtures/api/responses/prompt-setti
 import promptVersion1Document from "../../../fixtures/api/responses/prompts/support-reply/versions/1.json";
 import promptVersion2Document from "../../../fixtures/api/responses/prompts/support-reply/versions/2.json";
 import promptDocument from "../../../fixtures/api/responses/prompts/support-reply.json";
+import adminAuditStreamDocument from "../../../fixtures/api/static/admin-audit-stream.json";
 import adminLicenseDocument from "../../../fixtures/api/static/admin-license.json";
 import adminUserCreatedDocument from "../../../fixtures/api/static/admin-user-created.json";
 import adminUsersDocument from "../../../fixtures/api/static/admin-users.json";
@@ -43,6 +44,7 @@ import modelPriceDocument from "../../../fixtures/api/static/model-price.json";
 import onlineRuleDocument from "../../../fixtures/api/static/online-rule.json";
 import onlineRulePreviewDocument from "../../../fixtures/api/static/online-rule-preview.json";
 import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-resumed.json";
+import orgAuditStreamDocument from "../../../fixtures/api/static/org-audit-stream.json";
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
@@ -142,6 +144,22 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "delete_org_scim_group_mapping",
     method: "delete",
     path: "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+  },
+  { operationId: "put_org_audit_stream", method: "put", path: "/api/v1/orgs/{org}/audit-stream" },
+  {
+    operationId: "delete_org_audit_stream",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/audit-stream",
+  },
+  {
+    operationId: "rotate_org_audit_stream_secret",
+    method: "post",
+    path: "/api/v1/orgs/{org}/audit-stream/secret",
+  },
+  {
+    operationId: "test_org_audit_stream",
+    method: "post",
+    path: "/api/v1/orgs/{org}/audit-stream/test",
   },
   {
     operationId: "post_llm_connection",
@@ -269,6 +287,22 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/admin/settings/test-email",
   },
   { operationId: "put_admin_license", method: "put", path: "/api/v1/admin/license" },
+  { operationId: "put_admin_audit_stream", method: "put", path: "/api/v1/admin/audit-stream" },
+  {
+    operationId: "delete_admin_audit_stream",
+    method: "delete",
+    path: "/api/v1/admin/audit-stream",
+  },
+  {
+    operationId: "rotate_admin_audit_stream_secret",
+    method: "post",
+    path: "/api/v1/admin/audit-stream/secret",
+  },
+  {
+    operationId: "test_admin_audit_stream",
+    method: "post",
+    path: "/api/v1/admin/audit-stream/test",
+  },
   { operationId: "create_channel", method: "post", path: "/api/v1/projects/{project}/channels" },
   {
     operationId: "update_channel",
@@ -659,6 +693,15 @@ const RESPONSES: Record<string, Respond> = {
   revoke_org_scim_token: () => noContent(),
   put_org_scim_group_mapping: () => HttpResponse.json(scimGroupDocument),
   delete_org_scim_group_mapping: () => noContent(),
+  put_org_audit_stream: ({ body }) =>
+    HttpResponse.json({
+      ...orgAuditStreamDocument,
+      enabled: typeof body.enabled === "boolean" ? body.enabled : orgAuditStreamDocument.enabled,
+    }),
+  delete_org_audit_stream: () => noContent(),
+  rotate_org_audit_stream_secret: () =>
+    HttpResponse.json({ secret: "mock-signing-secret-not-for-use" }),
+  test_org_audit_stream: () => HttpResponse.json({ reached: true, status: 200 }),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {
@@ -858,6 +901,16 @@ const RESPONSES: Record<string, Respond> = {
   },
   post_admin_settings_test_email: () => problem(400, "bad_request", "email is not configured"),
   put_admin_license: () => HttpResponse.json(adminLicenseDocument),
+  put_admin_audit_stream: ({ body }) =>
+    HttpResponse.json({
+      ...adminAuditStreamDocument,
+      enabled:
+        typeof body.enabled === "boolean" ? body.enabled : adminAuditStreamDocument.enabled,
+    }),
+  delete_admin_audit_stream: () => noContent(),
+  rotate_admin_audit_stream_secret: () =>
+    HttpResponse.json({ secret: "mock-signing-secret-not-for-use" }),
+  test_admin_audit_stream: () => HttpResponse.json({ reached: true, status: 200 }),
 
   create_channel: ({ body }) => {
     const sample =

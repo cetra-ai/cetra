@@ -55,7 +55,8 @@ use super::assistant::{
 };
 use super::audit::{
     AuditActor, AuditEvent, AuditExportFormat, AuditExportParams, AuditLimit, AuditListParams,
-    AuditOutcome, AuditRef, AuditRefStatus,
+    AuditOutcome, AuditRef, AuditRefStatus, AuditStream, AuditStreamStatus, AuditStreamTest,
+    CreatedAuditStream, PutAuditStream, RotatedAuditStreamSecret,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
@@ -218,6 +219,12 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AuditEvent>();
     set.insert::<AuditLimit>();
     set.insert_page::<AuditEvent>("AuditEventPage");
+    set.insert::<AuditStreamStatus>();
+    set.insert::<AuditStream>();
+    set.insert::<PutAuditStream>();
+    set.insert::<CreatedAuditStream>();
+    set.insert::<RotatedAuditStreamSecret>();
+    set.insert::<AuditStreamTest>();
     set.insert::<SortOrder>();
     set.insert::<TraceSort>();
     set.insert::<SpanSort>();
@@ -1075,6 +1082,7 @@ fn paths() -> Paths {
     let paths = sql_paths(paths);
     let paths = deletion_paths(paths);
     let paths = audit_paths(paths);
+    let paths = audit_stream_paths(paths);
     let paths = channel_paths(paths);
     let paths = alert_rule_paths(paths);
     let paths = assistant_paths(paths);
@@ -1164,6 +1172,206 @@ fn audit_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/admin/audit-events/export",
             PathItem::new(HttpMethod::Get, export_admin),
+        )
+}
+
+/// One operation of the audit stream, session only. `org_scoped` adds the path's `org`.
+fn stream_operation(
+    id: &str,
+    summary: &str,
+    description: &str,
+    org_scoped: bool,
+) -> OperationBuilder {
+    operation(id, "audit", summary)
+        .description(Some(description))
+        .securities(Some(vec![SecurityRequirement::new(
+            "session",
+            [] as [&str; 0],
+        )]))
+        .parameters(if org_scoped {
+            Some(vec![path_string("org", "Org UUID or slug.")])
+        } else {
+            None
+        })
+}
+
+fn audit_stream_paths(paths: PathsBuilder) -> PathsBuilder {
+    let get_org = stream_operation(
+        "get_org_audit_stream",
+        "Get the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature (403 `plan_required` otherwise). 404 when no destination is set. 409 when the stored settings cannot be read.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStream>("The destination and its status."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_org = stream_operation(
+        "put_org_audit_stream",
+        "Create or update the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature. Creating returns 201 with the signing secret, shown once; updating returns 200 and keeps the secret. The URL must be https and carry no user information; the header is one name and value (400 `field_error`). Records are sent from the destination's creation on: history is not replayed.",
+        true,
+    )
+    .request_body(Some(json_body("PutAuditStream")))
+    .responses(responses_with(
+        [
+            ("200", json_of::<AuditStream>("The updated destination.")),
+            (
+                "201",
+                json_of::<CreatedAuditStream>("The created destination and its signing secret."),
+            ),
+        ],
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let delete_org = stream_operation(
+        "delete_org_audit_stream",
+        "Remove the organization's audit stream",
+        "Owners only, with a session. Works without the feature, so a lapsed org can still remove it. Records already sent are not affected.",
+        true,
+    )
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("Removed. The stream stops.")
+            .build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let rotate_org = stream_operation(
+        "rotate_org_audit_stream_secret",
+        "Rotate the organization's signing secret",
+        "Owners only, with a session, and the `audit_log` feature. The new secret is shown once. 409 when the stored settings cannot be read.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<RotatedAuditStreamSecret>("The new signing secret."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let test_org = stream_operation(
+        "test_org_audit_stream",
+        "Send a test line to the organization's audit stream",
+        "Owners only, with a session, and the `audit_log` feature. Sends one signed test line now and does not move the cursor. Reports only whether the endpoint answered, and with which status: a connection error reads as not reached.",
+        true,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStreamTest>("Whether the endpoint answered, and its status."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let get_admin = stream_operation(
+        "get_admin_audit_stream",
+        "Get the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. 404 when no destination is set. 409 when the stored settings cannot be read.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStream>("The destination and its status."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_admin = stream_operation(
+        "put_admin_audit_stream",
+        "Create or update the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Same rules as the organization's stream. The stream carries the instance log only.",
+        false,
+    )
+    .request_body(Some(json_body("PutAuditStream")))
+    .responses(responses_with(
+        [
+            ("200", json_of::<AuditStream>("The updated destination.")),
+            (
+                "201",
+                json_of::<CreatedAuditStream>("The created destination and its signing secret."),
+            ),
+        ],
+        &[400, 401, 403, 409, 429],
+    ))
+    .build();
+    let delete_admin = stream_operation(
+        "delete_admin_audit_stream",
+        "Remove the instance's audit stream",
+        "Instance admins only, with a session. Works without the licence.",
+        false,
+    )
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("Removed. The stream stops.")
+            .build(),
+        &[401, 403, 404, 429],
+    ))
+    .build();
+    let rotate_admin = stream_operation(
+        "rotate_admin_audit_stream_secret",
+        "Rotate the instance's signing secret",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. The new secret is shown once. 409 when the stored settings cannot be read.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<RotatedAuditStreamSecret>("The new signing secret."),
+        &[401, 403, 404, 409, 429],
+    ))
+    .build();
+    let test_admin = stream_operation(
+        "test_admin_audit_stream",
+        "Send a test line to the instance's audit stream",
+        "Instance admins only, with a session, and a licence that lists `audit_log`, or a cloud cell. Reports only reachability, as the organization's test does.",
+        false,
+    )
+    .responses(responses(
+        "200",
+        json_of::<AuditStreamTest>("Whether the endpoint answered, and its status."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    paths
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Get, get_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Put, put_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream",
+            PathItem::new(HttpMethod::Delete, delete_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream/secret",
+            PathItem::new(HttpMethod::Post, rotate_org),
+        )
+        .path(
+            "/api/v1/orgs/{org}/audit-stream/test",
+            PathItem::new(HttpMethod::Post, test_org),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Get, get_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Put, put_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream",
+            PathItem::new(HttpMethod::Delete, delete_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream/secret",
+            PathItem::new(HttpMethod::Post, rotate_admin),
+        )
+        .path(
+            "/api/v1/admin/audit-stream/test",
+            PathItem::new(HttpMethod::Post, test_admin),
         )
 }
 
