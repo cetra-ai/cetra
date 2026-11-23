@@ -34,8 +34,8 @@ impl IdpCertificate {
             return Err(MetadataError::Certificate);
         }
         let cert = x509_cert::Certificate::from_der(der).map_err(|_| MetadataError::Certificate)?;
-        let not_before_ns = unix_nanos(cert.tbs_certificate.validity.not_before)?;
-        let not_after_ns = unix_nanos(cert.tbs_certificate.validity.not_after)?;
+        let not_before_ns = unix_nanos(cert.tbs_certificate.validity.not_before);
+        let not_after_ns = unix_nanos(cert.tbs_certificate.validity.not_after);
 
         let key = load_x509_cert_der(der).map_err(|_| MetadataError::Certificate)?;
         match key.data.algorithm_name() {
@@ -98,6 +98,7 @@ impl IdpCertificate {
     }
 
     /// `notAfter`, nanoseconds since the epoch. Shown and warned about, never enforced (D-SA-11).
+    /// `i64::MAX` when the certificate expires after April 2262.
     pub fn not_after_ns(&self) -> i64 {
         self.not_after_ns
     }
@@ -116,9 +117,10 @@ impl std::fmt::Debug for IdpCertificate {
     }
 }
 
-/// A certificate time as nanoseconds since the epoch.
-fn unix_nanos(time: Time) -> Result<i64, MetadataError> {
-    i64::try_from(time.to_unix_duration().as_nanos()).map_err(|_| MetadataError::Certificate)
+/// A certificate time as nanoseconds since the epoch, saturated at `i64::MAX` (April 2262): the
+/// dates are shown, never enforced, and some IdPs issue certificates valid for centuries.
+fn unix_nanos(time: Time) -> i64 {
+    i64::try_from(time.to_unix_duration().as_nanos()).unwrap_or(i64::MAX)
 }
 
 #[cfg(test)]
@@ -129,6 +131,7 @@ mod tests {
     const IDP_EC: &str = include_str!("../../../fixtures/saml/idp-ec.cert.pem");
     const IDP_EC384: &str = include_str!("../../../fixtures/saml/idp-ec384.cert.pem");
     const WEAK_RSA: &str = include_str!("../../../fixtures/saml/weak-rsa-1024.cert.pem");
+    const FAR_FUTURE: &str = include_str!("../../../fixtures/saml/idp-far-future.cert.pem");
 
     /// The base64 body of a PEM block, without its markers and line breaks.
     fn pem_body(pem: &str) -> String {
@@ -143,6 +146,14 @@ mod tests {
         assert!(cert.not_after_ns() > 4_102_444_800_000_000_000); // after 2100-01-01
         assert!(cert.not_after_ns() > cert.not_before_ns());
         assert_eq!(cert.sha256_hex().len(), 64);
+    }
+
+    #[test]
+    fn a_certificate_expiring_after_2262_is_read() {
+        let cert = IdpCertificate::from_pem(FAR_FUTURE)
+            .expect("a far-future X.509 v1 certificate is accepted");
+        assert_eq!(cert.not_after_ns(), i64::MAX);
+        assert!(cert.not_before_ns() < cert.not_after_ns());
     }
 
     #[test]
