@@ -3,4 +3,5 @@
 //! per-event feature counters for the heartbeat's `usage` buckets, and per-user events to the
 //! operator's PostHog when `[analytics]` is set.
 
+pub(crate) mod actor;
 pub(crate) mod catalog;
