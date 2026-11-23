@@ -223,6 +223,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/projects", "list_projects"),
     ("post", "/api/v1/orgs/{org}/projects", "post_project"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/projects/activity",
+        "get_projects_activity",
+    ),
     ("get", "/api/v1/projects/{project}", "get_project"),
     ("patch", "/api/v1/projects/{project}", "patch_project"),
     (
@@ -1058,6 +1063,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_llm_connections",
     "list_project_members",
     "list_projects",
+    "get_projects_activity",
     "list_api_keys",
     "list_personal_tokens",
     "list_traces",
