@@ -172,7 +172,7 @@ bergshamra is young too: first released 2026-02-22, one main author. The mitigat
 - pass `cargo deny` (licence BSD-2-Clause, already allowed in `deny.toml`; bans; sources);
 - run M4's internal review.
 
-M1 measures the dependency footprint with default features off and records the exact versions.
+**Measured in M1 (2026-11-23):** `bergshamra` 0.12.0, `uppsala` 0.12.1 and `x509-cert` 0.2.5, with bergshamra's default features off and `rustcrypto` on. `cetra-saml`'s normal dependency tree has 298 entries. No C code and no OpenSSL. It brings the pre-release crates `ed448-goldilocks` 0.14.0-pre.15, `x448` 0.14.0-pre.12 and `slh-dsa` 0.2.0-rc.5 through kryptering, and second versions of `der`, `sha2`, `base64`, `rand` and `getrandom`. `cargo deny`'s bans, licences and sources pass (`multiple-versions` only warns). A Sonnet security review of the crate found no critical or high issue; its medium and low findings are fixed by SA1.9.
 
 ### Cloud
 
