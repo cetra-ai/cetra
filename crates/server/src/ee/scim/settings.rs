@@ -106,10 +106,10 @@ async fn update_scim(
     error::Json(body): error::Json<UpdateScimSettings>,
 ) -> Result<error::Json<ScimSettings>, ApiError> {
     let org = access.org.id;
-    if let Some(role) = body.default_role {
-        if !matches!(role, OrgRole::Viewer | OrgRole::Member) {
-            return Err(field_error("default_role", "must be viewer or member"));
-        }
+    if let Some(role) = body.default_role
+        && !matches!(role, OrgRole::Viewer | OrgRole::Member)
+    {
+        return Err(field_error("default_role", "must be viewer or member"));
     }
     // The feature is checked against the settings as they were read; the write below
     // re-reads them, so a racing write changes what is recorded, not what is allowed.
@@ -120,6 +120,11 @@ async fn update_scim(
         .is_some_and(|role| role != snapshot.default_role);
     if enabling || role_changes {
         require(&state, org, Feature::Scim)?;
+    }
+    // D-EA-13: on a self-hosted instance, SCIM also needs org SSO. The cloud's control plane
+    // grants SCIM alone.
+    if enabling && !state.config.entitlements.control_plane {
+        require(&state, org, Feature::OrgSso)?;
     }
     let now = state.clock.now_ns();
     let domains_state = state.clone();
@@ -256,8 +261,13 @@ async fn view(state: &AppState, org: OrgId) -> Result<ScimSettings, ApiError> {
     let row = store::org_scim(state.meta.reader(), org).await?;
     let tokens = store::list_tokens(state.meta.reader(), org).await?;
     let now = state.clock.now_ns();
-    let mut conn = state.meta.reader().acquire().await.map_err(MetaError::from)?;
-    let listed = domains::scim_domains_tx(state, &mut *conn, org, now).await?;
+    let mut conn = state
+        .meta
+        .reader()
+        .acquire()
+        .await
+        .map_err(MetaError::from)?;
+    let listed = domains::scim_domains_tx(state, &mut conn, org, now).await?;
     Ok(ScimSettings {
         enabled: row.enabled,
         default_role: row.default_role,
@@ -405,7 +415,11 @@ mod tests {
         response.json()
     }
 
-    async fn send_patch(app: &TestApp, cookie: &str, body: &Value) -> crate::test_support::TestResponse {
+    async fn send_patch(
+        app: &TestApp,
+        cookie: &str,
+        body: &Value,
+    ) -> crate::test_support::TestResponse {
         app.request(Method::PATCH, PATH)
             .header("cookie", cookie)
             .json(body)
@@ -413,7 +427,11 @@ mod tests {
             .await
     }
 
-    async fn create_token(app: &TestApp, cookie: &str, name: &str) -> crate::test_support::TestResponse {
+    async fn create_token(
+        app: &TestApp,
+        cookie: &str,
+        name: &str,
+    ) -> crate::test_support::TestResponse {
         app.request(Method::POST, TOKENS)
             .header("cookie", cookie)
             .json(&json!({ "name": name }))
@@ -451,7 +469,7 @@ mod tests {
         assert_eq!(locked.status, StatusCode::FORBIDDEN);
         assert_eq!(locked.problem().code, ProblemCode::PlanRequired);
 
-        let (app, seeded, owner) = app_with(&["scim"]).await;
+        let (app, seeded, owner) = app_with(&["scim", "org_sso"]).await;
         let no_domain = send_patch(&app, &owner.cookie, &json!({ "enabled": true })).await;
         assert_eq!(no_domain.status, StatusCode::CONFLICT);
         assert_eq!(
@@ -463,6 +481,26 @@ mod tests {
         assert_eq!(on.status, StatusCode::OK);
         assert!(on.json::<ScimSettings>().enabled);
         assert_eq!(get_settings(&app, &owner.cookie).await.verified_domains, 1);
+    }
+
+    #[tokio::test]
+    async fn self_hosted_enabling_also_needs_org_sso() {
+        // Off the cloud (D-EA-13): the licence must list org SSO as well as SCIM.
+        let key = crate::test_support::license_key(&["scim"]);
+        let app = TestApp::with_config(move |config| {
+            config.entitlements.control_plane = false;
+            config.license_key = Some(crate::config::Secret::new(key));
+        })
+        .await;
+        let seeded = app.seed().await;
+        let owner = app
+            .add_member(&seeded, "owner@acme.test", OrgRole::Owner)
+            .await;
+        verify_domain(&app, seeded.org_id, "acme.com").await;
+        let refused = send_patch(&app, &owner.cookie, &json!({ "enabled": true })).await;
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert_eq!(refused.problem().code, ProblemCode::PlanRequired);
+        assert!(!get_settings(&app, &owner.cookie).await.enabled);
     }
 
     #[tokio::test]
@@ -499,9 +537,11 @@ mod tests {
         );
         let listed = get_settings(&app, &owner.cookie).await;
         assert_eq!(listed.tokens.len(), 2);
-        assert!(!serde_json::to_string(&listed)
-            .unwrap()
-            .contains(&created.secret));
+        assert!(
+            !serde_json::to_string(&listed)
+                .unwrap()
+                .contains(&created.secret)
+        );
         let blank = create_token(&app, &owner.cookie, "   ").await;
         assert_eq!(blank.status, StatusCode::BAD_REQUEST);
     }
@@ -557,7 +597,10 @@ mod tests {
     async fn managed_member_role_change_is_409_scim_managed() {
         let (app, _, owner, ada) = managed_app(&["scim"]).await;
         let changed = app
-            .request(Method::PATCH, &format!("/api/v1/orgs/acme/members/{}", ada.id))
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{}", ada.id),
+            )
             .header("cookie", &owner.cookie)
             .json(&json!({ "role": "viewer" }))
             .send()
@@ -570,14 +613,20 @@ mod tests {
     async fn managed_member_removal_and_self_leave_are_409() {
         let (app, _, owner, ada) = managed_app(&["scim"]).await;
         let removed = app
-            .request(Method::DELETE, &format!("/api/v1/orgs/acme/members/{}", ada.id))
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{}", ada.id),
+            )
             .header("cookie", &owner.cookie)
             .send()
             .await;
         assert_eq!(removed.status, StatusCode::CONFLICT);
         assert_eq!(removed.problem().code, ProblemCode::ScimManaged);
         let left = app
-            .request(Method::DELETE, &format!("/api/v1/orgs/acme/members/{}", ada.id))
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{}", ada.id),
+            )
             .header("cookie", &ada.cookie)
             .send()
             .await;
@@ -628,7 +677,10 @@ mod tests {
         let off = send_patch(&app, &owner.cookie, &json!({ "enabled": false })).await;
         assert_eq!(off.status, StatusCode::OK);
         let changed = app
-            .request(Method::PATCH, &format!("/api/v1/orgs/acme/members/{}", ada.id))
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{}", ada.id),
+            )
             .header("cookie", &owner.cookie)
             .json(&json!({ "role": "viewer" }))
             .send()

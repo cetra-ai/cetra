@@ -919,23 +919,9 @@ mod tests {
                     let org =
                         crate::meta::orgs::insert_org(conn, OrgId::new_v7(), "Acme", "acme", 1)
                             .await?;
-                    crate::meta::members::add_org_member(
-                        conn,
-                        org.id,
-                        owner_id,
-                        crate::auth::OrgRole::Owner,
-                        1,
-                    )
-                    .await?;
+                    members::add_org_member(conn, org.id, owner_id, OrgRole::Owner, 1).await?;
                     assert!(is_last_active_owner(conn, owner_id).await?);
-                    crate::meta::members::add_org_member(
-                        conn,
-                        org.id,
-                        other_id,
-                        crate::auth::OrgRole::Owner,
-                        1,
-                    )
-                    .await?;
+                    members::add_org_member(conn, org.id, other_id, OrgRole::Owner, 1).await?;
                     assert!(!is_last_active_owner(conn, owner_id).await?);
                     set_disabled(conn, other_id, Some(2), 2).await?;
                     assert!(is_last_active_owner(conn, owner_id).await?);
@@ -990,11 +976,12 @@ mod tests {
 
     /// The user's web sessions, and their PATs that are not revoked.
     async fn live_sessions_and_tokens(db: &crate::meta::MetaDb, user: Uuid) -> (i64, i64) {
-        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM web_sessions WHERE user_id = ?")
-            .bind(user.to_string())
-            .fetch_one(db.reader())
-            .await
-            .unwrap();
+        let sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM web_sessions WHERE user_id = ?")
+                .bind(user.to_string())
+                .fetch_one(db.reader())
+                .await
+                .unwrap();
         let tokens: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM personal_tokens WHERE user_id = ? AND revoked_at IS NULL",
         )
@@ -1012,9 +999,7 @@ mod tests {
         let bob = insert(&db, "bob@example.com", false).await;
         let ada_id = ada.id;
         db.write(move |conn| {
-            Box::pin(async move {
-                set_email_tx(conn, ada_id, "ada.lovelace@example.com", 2).await
-            })
+            Box::pin(async move { set_email_tx(conn, ada_id, "ada.lovelace@example.com", 2).await })
         })
         .await
         .unwrap();
@@ -1031,9 +1016,9 @@ mod tests {
         let bob_id = bob.id;
         let error = db
             .write(move |conn| {
-                Box::pin(async move {
-                    set_email_tx(conn, bob_id, "ada.lovelace@example.com", 3).await
-                })
+                Box::pin(
+                    async move { set_email_tx(conn, bob_id, "ada.lovelace@example.com", 3).await },
+                )
             })
             .await
             .unwrap_err();
@@ -1088,9 +1073,7 @@ mod tests {
         let id = ada.id;
 
         let revoked = db
-            .write(move |conn| {
-                Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await })
-            })
+            .write(move |conn| Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await }))
             .await
             .unwrap();
         assert_eq!(revoked, vec!["token-hash-1".to_owned()]);
@@ -1128,9 +1111,7 @@ mod tests {
         let id = ada.id;
 
         let revoked = db
-            .write(move |conn| {
-                Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await })
-            })
+            .write(move |conn| Box::pin(async move { reset_unproven_tx(conn, &ada, 2).await }))
             .await
             .unwrap();
         assert!(revoked.is_empty());

@@ -15,7 +15,6 @@ use crate::meta::MetaError;
 
 pub(crate) const ERROR_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:Error";
 pub(crate) const CONTENT_TYPE: &str = "application/scim+json";
-const PROBLEM_JSON: &str = "application/problem+json";
 
 /// One SCIM error answer. `detail` is static text, never a request value.
 #[derive(Debug)]
@@ -109,16 +108,12 @@ impl ScimError {
 impl IntoResponse for ScimError {
     fn into_response(self) -> Response {
         let bytes = serde_json::to_vec(&self.body()).unwrap_or_default();
-        let mut response = (
-            self.status,
-            [(header::CONTENT_TYPE, CONTENT_TYPE)],
-            bytes,
-        )
-            .into_response();
-        if let Some(seconds) = self.retry_after_s {
-            if let Ok(value) = HeaderValue::from_str(&seconds.to_string()) {
-                response.headers_mut().insert(header::RETRY_AFTER, value);
-            }
+        let mut response =
+            (self.status, [(header::CONTENT_TYPE, CONTENT_TYPE)], bytes).into_response();
+        if let Some(seconds) = self.retry_after_s
+            && let Ok(value) = HeaderValue::from_str(&seconds.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
         }
         response
     }
@@ -175,26 +170,29 @@ impl<T: Serialize> IntoResponse for ScimJson<T> {
     }
 }
 
-/// The error layer for `/scim/v2`. A problem answer on that path becomes a SCIM error with the
-/// same status, a fixed detail for the status class and the same `Retry-After`. Other paths and
-/// other answers pass through.
+/// The error layer for `/scim/v2`. Every non-2xx answer on that path that is not already
+/// `application/scim+json` (a problem, a plain-text 413, a bare 405) becomes a SCIM error with
+/// the same status and a fixed detail for the status class. Its other headers (such as
+/// `Retry-After` or `x-test-access`) are copied across, except the content type and length.
+/// Other paths and other answers pass through.
 pub(crate) async fn scim_errors(request: Request, next: Next) -> Response {
     let scim = is_scim_path(request.uri().path());
     let response = next.run(request).await;
-    if !scim || !is_problem(&response) {
+    if !scim || response.status().is_success() || is_scim_json(&response) {
         return response;
     }
-    let status = response.status();
-    let retry_after = response.headers().get(header::RETRY_AFTER).cloned();
+    let (parts, _body) = response.into_parts();
     let mut rewritten = ScimError {
-        status,
+        status: parts.status,
         scim_type: None,
-        detail: layer_detail(status),
+        detail: layer_detail(parts.status),
         retry_after_s: None,
     }
     .into_response();
-    if let Some(value) = retry_after {
-        rewritten.headers_mut().insert(header::RETRY_AFTER, value);
+    for (name, value) in &parts.headers {
+        if *name != header::CONTENT_TYPE && *name != header::CONTENT_LENGTH {
+            rewritten.headers_mut().append(name.clone(), value.clone());
+        }
     }
     rewritten
 }
@@ -203,11 +201,11 @@ fn is_scim_path(path: &str) -> bool {
     path == "/scim/v2" || path.starts_with("/scim/v2/")
 }
 
-fn is_problem(response: &Response) -> bool {
+fn is_scim_json(response: &Response) -> bool {
     response
         .headers()
         .get(header::CONTENT_TYPE)
-        .is_some_and(|value| value.as_bytes() == PROBLEM_JSON.as_bytes())
+        .is_some_and(|value| value.as_bytes() == CONTENT_TYPE.as_bytes())
 }
 
 /// The fixed detail for a rewritten problem. The problem's own detail can name internals, so
@@ -227,6 +225,8 @@ fn layer_detail(status: StatusCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::Method;
+
     use super::*;
 
     #[test]
@@ -283,6 +283,79 @@ mod tests {
         ))));
         assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(error.detail, "Internal error.");
+    }
+
+    /// A router with one route on `/scim/v2/item` (GET only), behind the layer.
+    fn layered(handler: axum::routing::MethodRouter) -> axum::Router {
+        axum::Router::new()
+            .route("/scim/v2/item", handler)
+            .route("/other", axum::routing::get(|| async { "plain" }))
+            .layer(axum::middleware::from_fn(scim_errors))
+    }
+
+    async fn send(app: axum::Router, request: axum::http::Request<axum::body::Body>) -> Response {
+        use tower::ServiceExt;
+        app.oneshot(request).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_plain_text_413_becomes_a_scim_error_and_keeps_its_headers() {
+        let handler = axum::routing::post(|| async {
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                [("x-test-access", "denied-401")],
+                "body too large",
+            )
+        });
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/scim/v2/item")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = send(layered(handler), request).await;
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], CONTENT_TYPE);
+        assert_eq!(response.headers()["x-test-access"], "denied-401");
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "413");
+        assert_eq!(body["detail"], "Request body too large.");
+        assert_eq!(body["schemas"][0], ERROR_SCHEMA);
+    }
+
+    #[tokio::test]
+    async fn a_bare_405_becomes_a_scim_error() {
+        let request = axum::http::Request::builder()
+            .method(Method::POST)
+            .uri("/scim/v2/item")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = send(layered(axum::routing::get(|| async { "ok" })), request).await;
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], CONTENT_TYPE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["status"], "405");
+        assert_eq!(body["detail"], "Method not allowed.");
+    }
+
+    #[tokio::test]
+    async fn other_paths_and_successes_pass_through() {
+        let request = axum::http::Request::builder()
+            .uri("/other")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let response = send(layered(axum::routing::get(|| async { "ok" })), request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_ne!(
+            response.headers()[header::CONTENT_TYPE],
+            CONTENT_TYPE,
+            "a path off /scim/v2 keeps its own answer"
+        );
     }
 
     #[test]

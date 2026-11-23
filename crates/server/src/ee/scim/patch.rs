@@ -46,7 +46,10 @@ pub(crate) fn user_changes(body: &Value) -> Result<Vec<UserChange>, ScimError> {
         .get("schemas")
         .and_then(Value::as_array)
         .ok_or_else(ScimError::invalid_syntax)?;
-    if !schemas.iter().any(|schema| schema.as_str() == Some(PATCH_SCHEMA)) {
+    if !schemas
+        .iter()
+        .any(|schema| schema.as_str() == Some(PATCH_SCHEMA))
+    {
         return Err(ScimError::invalid_syntax());
     }
     let operations = body
@@ -70,7 +73,9 @@ pub(crate) fn user_changes(body: &Value) -> Result<Vec<UserChange>, ScimError> {
 }
 
 fn operation_changes(operation: &Value) -> Result<Vec<UserChange>, ScimError> {
-    let fields = operation.as_object().ok_or_else(ScimError::invalid_syntax)?;
+    let fields = operation
+        .as_object()
+        .ok_or_else(ScimError::invalid_syntax)?;
     let op = fields
         .get("op")
         .and_then(Value::as_str)
@@ -142,9 +147,9 @@ pub(crate) fn map_changes(value: &Value) -> Result<Vec<UserChange>, ScimError> {
     let mut changes = Vec::new();
     for (key, item) in fields {
         if key.eq_ignore_ascii_case(ENTERPRISE_USER) {
-            let extension = item
-                .as_object()
-                .ok_or_else(|| ScimError::invalid_value("The enterprise extension must be an object."))?;
+            let extension = item.as_object().ok_or_else(|| {
+                ScimError::invalid_value("The enterprise extension must be an object.")
+            })?;
             for (field, field_value) in extension {
                 changes.extend(path_change(field, field_value)?);
             }
@@ -227,6 +232,7 @@ mod tests {
     use super::*;
 
     /// A PATCH body with the given operations.
+    #[allow(clippy::needless_pass_by_value)] // callers build the value inline
     fn body(operations: Value) -> Value {
         json!({"schemas": [PATCH_SCHEMA], "Operations": operations})
     }
@@ -375,25 +381,29 @@ mod tests {
             "schemas": [PATCH_SCHEMA],
             "operations": [{"op": "REPLACE", "path": "active", "value": true}]
         });
-        assert_eq!(
-            user_changes(&body).unwrap(),
-            vec![UserChange::Active(true)]
-        );
+        assert_eq!(user_changes(&body).unwrap(), vec![UserChange::Active(true)]);
     }
 
     #[test]
     fn active_accepts_the_four_string_forms() {
-        for (text, expected) in [("true", true), ("True", true), ("false", false), ("False", false)] {
+        for (text, expected) in [
+            ("true", true),
+            ("True", true),
+            ("false", false),
+            ("False", false),
+        ] {
             let changes = user_changes(&body(json!([
                 {"op": "replace", "path": "active", "value": text}
             ])))
             .unwrap();
             assert_eq!(changes, vec![UserChange::Active(expected)]);
         }
-        assert!(user_changes(&body(json!([
-            {"op": "replace", "path": "active", "value": "yes"}
-        ])))
-        .is_err());
+        assert!(
+            user_changes(&body(json!([
+                {"op": "replace", "path": "active", "value": "yes"}
+            ])))
+            .is_err()
+        );
     }
 
     #[test]

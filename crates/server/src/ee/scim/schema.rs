@@ -65,11 +65,7 @@ pub(crate) fn user_resource(row: &ScimUserRow, base_url: &str) -> Value {
 }
 
 /// A ListResponse. `itemsPerPage` is the number of resources in this page.
-pub(crate) fn list_response(
-    total: u64,
-    start_index: u32,
-    resources: Vec<Value>,
-) -> Value {
+pub(crate) fn list_response(total: u64, start_index: u32, resources: &[Value]) -> Value {
     let items = resources.len();
     json!({
         "schemas": [LIST_SCHEMA],
@@ -114,7 +110,7 @@ pub(crate) fn resource_types(base_url: &str) -> Value {
             "location": format!("{base_url}/ResourceTypes/User"),
         },
     });
-    list_response(1, 1, vec![user])
+    list_response(1, 1, &[user])
 }
 
 /// The Schemas ListResponse: the core User and the enterprise User, with the attributes cetra
@@ -169,7 +165,7 @@ pub(crate) fn schemas() -> Value {
             attribute("employeeNumber", "string", false),
         ],
     });
-    list_response(2, 1, vec![core, enterprise])
+    list_response(2, 1, &[core, enterprise])
 }
 
 /// One simple attribute of a schema.
@@ -205,7 +201,6 @@ fn rfc3339(ns: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use cetra_core::ids::OrgId;
     use uuid::Uuid;
 
     use super::*;
@@ -215,7 +210,6 @@ mod tests {
     fn row(department: Option<&str>) -> ScimUserRow {
         ScimUserRow {
             id: Uuid::from_u128(1),
-            org_id: OrgId::from_uuid(Uuid::from_u128(2)),
             user_id: Uuid::from_u128(3),
             user_name: "ada@example.com".to_owned(),
             external_id: None,
@@ -225,7 +219,6 @@ mod tests {
             department: department.map(str::to_owned),
             employee_number: None,
             active: true,
-            disabled_account: false,
             // 2023-11-14T22:13:20Z and 500 ms later.
             created_at: 1_700_000_000_000_000_000,
             updated_at: 1_700_000_001_500_000_000,
@@ -262,17 +255,14 @@ mod tests {
         assert!(plain.get(ENTERPRISE_USER).is_none());
 
         let managed = user_resource(&row(Some("Engineering")), BASE);
-        assert_eq!(
-            managed["schemas"],
-            json!([USER_SCHEMA, ENTERPRISE_USER])
-        );
+        assert_eq!(managed["schemas"], json!([USER_SCHEMA, ENTERPRISE_USER]));
         assert_eq!(managed[ENTERPRISE_USER]["department"], "Engineering");
         assert!(managed[ENTERPRISE_USER].get("employeeNumber").is_none());
     }
 
     #[test]
     fn list_response_shape() {
-        let list = list_response(5, 2, vec![json!({"id": "a"})]);
+        let list = list_response(5, 2, &[json!({"id": "a"})]);
         assert_eq!(list["schemas"], json!([LIST_SCHEMA]));
         assert_eq!(list["totalResults"], 5);
         assert_eq!(list["startIndex"], 2);
@@ -290,7 +280,10 @@ mod tests {
         assert_eq!(config["changePassword"]["supported"], false);
         assert_eq!(config["sort"]["supported"], false);
         assert_eq!(config["etag"]["supported"], false);
-        assert_eq!(config["authenticationSchemes"][0]["type"], "oauthbearertoken");
+        assert_eq!(
+            config["authenticationSchemes"][0]["type"],
+            "oauthbearertoken"
+        );
     }
 
     #[test]

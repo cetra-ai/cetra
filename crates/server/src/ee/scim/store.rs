@@ -2,7 +2,6 @@
 //! Storage of SCIM provisioning: the per-org settings, the bearer tokens and the provisioned
 //! users (track EA M5, D-EA-12 to D-EA-19). The `scim_users` row is per org; the `users` row
 //! is instance-wide. Names and emails are never logged or recorded from here.
-#![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::HashSet;
 use std::str::FromStr;
@@ -17,13 +16,12 @@ use crate::meta::{MetaError, unique_or};
 /// Max live tokens per org (D-EA-15).
 pub(crate) const MAX_LIVE_TOKENS: u64 = 2;
 
-/// One `org_scim` row. A missing row is disabled, `viewer`, `updated_at` 0.
+/// One `org_scim` row. A missing row is disabled and `viewer`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OrgScim {
     pub(crate) enabled: bool,
     /// `viewer` or `member` (D-EA-14, P-4).
     pub(crate) default_role: OrgRole,
-    pub(crate) updated_at: i64,
 }
 
 /// One `scim_tokens` row. The plaintext and the hash are not here.
@@ -43,7 +41,6 @@ pub(crate) struct ScimTokenRow {
 #[derive(Clone)]
 pub(crate) struct ScimUserRow {
     pub(crate) id: Uuid,
-    pub(crate) org_id: OrgId,
     pub(crate) user_id: Uuid,
     /// The normalized email.
     pub(crate) user_name: String,
@@ -54,7 +51,6 @@ pub(crate) struct ScimUserRow {
     pub(crate) department: Option<String>,
     pub(crate) employee_number: Option<String>,
     pub(crate) active: bool,
-    pub(crate) disabled_account: bool,
     pub(crate) created_at: i64,
     pub(crate) updated_at: i64,
 }
@@ -89,12 +85,11 @@ pub(crate) enum UserFilter {
 ///
 /// Returns [`MetaError::Corrupt`] when `default_role` is not `viewer` or `member`.
 pub(crate) async fn org_scim(pool: &SqlitePool, org: OrgId) -> Result<OrgScim, MetaError> {
-    let record: Option<OrgScimRecord> = sqlx::query_as(
-        "SELECT enabled, default_role, updated_at FROM org_scim WHERE org_id = ?",
-    )
-    .bind(org.to_string())
-    .fetch_optional(pool)
-    .await?;
+    let record: Option<OrgScimRecord> =
+        sqlx::query_as("SELECT enabled, default_role FROM org_scim WHERE org_id = ?")
+            .bind(org.to_string())
+            .fetch_optional(pool)
+            .await?;
     org_scim_from(record)
 }
 
@@ -107,12 +102,11 @@ pub(crate) async fn org_scim_tx(
     conn: &mut SqliteConnection,
     org: OrgId,
 ) -> Result<OrgScim, MetaError> {
-    let record: Option<OrgScimRecord> = sqlx::query_as(
-        "SELECT enabled, default_role, updated_at FROM org_scim WHERE org_id = ?",
-    )
-    .bind(org.to_string())
-    .fetch_optional(&mut *conn)
-    .await?;
+    let record: Option<OrgScimRecord> =
+        sqlx::query_as("SELECT enabled, default_role FROM org_scim WHERE org_id = ?")
+            .bind(org.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
     org_scim_from(record)
 }
 
@@ -313,9 +307,8 @@ pub(crate) async fn insert_user(
     let id = Uuid::now_v7();
     sqlx::query(
         "INSERT INTO scim_users (id, org_id, user_id, user_name, external_id, given_name, \
-         family_name, display_name, department, employee_number, active, disabled_account, \
-         created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)",
+         family_name, display_name, department, employee_number, active, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
     )
     .bind(id.to_string())
     .bind(org.to_string())
@@ -334,7 +327,6 @@ pub(crate) async fn insert_user(
     .map_err(|error| unique_or(error, "uniqueness"))?;
     Ok(ScimUserRow {
         id,
-        org_id: org,
         user_id,
         user_name: fields.user_name.clone(),
         external_id: fields.external_id.clone(),
@@ -344,7 +336,6 @@ pub(crate) async fn insert_user(
         department: fields.department.clone(),
         employee_number: fields.employee_number.clone(),
         active: true,
-        disabled_account: false,
         created_at: now,
         updated_at: now,
     })
@@ -361,7 +352,7 @@ pub(crate) async fn user_tx(
     id: Uuid,
 ) -> Result<Option<ScimUserRow>, MetaError> {
     let sql = format!("SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ? AND id = ?");
-    let record: Option<UserRecord> = sqlx::query_as(&sql)
+    let record: Option<UserRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(org.to_string())
         .bind(id.to_string())
         .fetch_optional(&mut *conn)
@@ -380,7 +371,7 @@ pub(crate) async fn user(
     id: Uuid,
 ) -> Result<Option<ScimUserRow>, MetaError> {
     let sql = format!("SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ? AND id = ?");
-    let record: Option<UserRecord> = sqlx::query_as(&sql)
+    let record: Option<UserRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(org.to_string())
         .bind(id.to_string())
         .fetch_optional(pool)
@@ -399,7 +390,7 @@ pub(crate) async fn user_by_user_name_tx(
     user_name: &str,
 ) -> Result<Option<ScimUserRow>, MetaError> {
     let sql = format!("SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ? AND user_name = ?");
-    let record: Option<UserRecord> = sqlx::query_as(&sql)
+    let record: Option<UserRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(org.to_string())
         .bind(user_name)
         .fetch_optional(&mut *conn)
@@ -418,28 +409,9 @@ pub(crate) async fn user_by_external_id_tx(
     external_id: &str,
 ) -> Result<Option<ScimUserRow>, MetaError> {
     let sql = format!("SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ? AND external_id = ?");
-    let record: Option<UserRecord> = sqlx::query_as(&sql)
+    let record: Option<UserRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
         .bind(org.to_string())
         .bind(external_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    record.map(user_row).transpose()
-}
-
-/// The SCIM row of `org` that links `user_id`, active or not, in the caller's transaction.
-///
-/// # Errors
-///
-/// Returns [`MetaError`] when the query fails or a stored value does not decode.
-pub(crate) async fn user_of_member_tx(
-    conn: &mut SqliteConnection,
-    org: OrgId,
-    user_id: Uuid,
-) -> Result<Option<ScimUserRow>, MetaError> {
-    let sql = format!("SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ? AND user_id = ?");
-    let record: Option<UserRecord> = sqlx::query_as(&sql)
-        .bind(org.to_string())
-        .bind(user_id.to_string())
         .fetch_optional(&mut *conn)
         .await?;
     record.map(user_row).transpose()
@@ -463,7 +435,8 @@ pub(crate) async fn list_users(
     let (clause, value) = filter_clause(filter);
 
     let count_sql = format!("SELECT COUNT(*) FROM scim_users WHERE org_id = ?{clause}");
-    let mut total = sqlx::query_scalar::<_, i64>(&count_sql).bind(org.to_string());
+    let mut total =
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql)).bind(org.to_string());
     if let Some(value) = value {
         total = total.bind(value);
     }
@@ -473,7 +446,8 @@ pub(crate) async fn list_users(
         "SELECT {USER_COLUMNS} FROM scim_users WHERE org_id = ?{clause} \
          ORDER BY created_at, id LIMIT ? OFFSET ?"
     );
-    let mut page = sqlx::query_as::<_, UserRecord>(&page_sql).bind(org.to_string());
+    let mut page =
+        sqlx::query_as::<_, UserRecord>(sqlx::AssertSqlSafe(page_sql)).bind(org.to_string());
     if let Some(value) = value {
         page = page.bind(value);
     }
@@ -523,7 +497,7 @@ pub(crate) async fn update_user(
     Ok(())
 }
 
-/// Sets the SCIM row's `active` and `disabled_account` flags.
+/// Sets the SCIM row's `active` flag.
 ///
 /// # Errors
 ///
@@ -533,15 +507,13 @@ pub(crate) async fn set_user_active(
     org: OrgId,
     id: Uuid,
     active: bool,
-    disabled_account: bool,
     now: i64,
 ) -> Result<(), MetaError> {
     sqlx::query(
-        "UPDATE scim_users SET active = ?, disabled_account = ?, updated_at = ? \
+        "UPDATE scim_users SET active = ?, updated_at = ? \
          WHERE org_id = ? AND id = ?",
     )
     .bind(i64::from(active))
-    .bind(i64::from(disabled_account))
     .bind(now)
     .bind(org.to_string())
     .bind(id.to_string())
@@ -567,6 +539,64 @@ pub(crate) async fn delete_user(
         .await?
         .rows_affected();
     Ok(changed == 1)
+}
+
+/// Records that SCIM disabled the account `user` (D-EA-16), for `org`. A later create or
+/// reactivation re-enables it. Replaces an earlier row.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the upsert fails.
+pub(crate) async fn mark_scim_disabled(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    user: Uuid,
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "INSERT INTO scim_disabled_accounts (user_id, org_id, disabled_at) VALUES (?, ?, ?) \
+         ON CONFLICT (user_id) DO UPDATE SET org_id = excluded.org_id, \
+         disabled_at = excluded.disabled_at",
+    )
+    .bind(user.to_string())
+    .bind(org.to_string())
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Whether SCIM disabled the account `user`. An account disabled any other way has no row.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the query fails.
+pub(crate) async fn is_scim_disabled_tx(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+) -> Result<bool, MetaError> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM scim_disabled_accounts WHERE user_id = ?")
+            .bind(user.to_string())
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(count > 0)
+}
+
+/// Forgets that SCIM disabled the account `user`, once it is enabled again.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the delete fails.
+pub(crate) async fn clear_scim_disabled(
+    conn: &mut SqliteConnection,
+    user: Uuid,
+) -> Result<(), MetaError> {
+    sqlx::query("DELETE FROM scim_disabled_accounts WHERE user_id = ?")
+        .bind(user.to_string())
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
 }
 
 /// Whether an active SCIM row of `org` links `user_id` (D-EA-18).
@@ -613,7 +643,6 @@ pub(crate) async fn managed_user_ids(
 struct OrgScimRecord {
     enabled: i64,
     default_role: String,
-    updated_at: i64,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -635,13 +664,11 @@ struct HashRecord {
 
 /// Every column of a SCIM user, in the order [`UserRecord`] reads them.
 const USER_COLUMNS: &str = "id, org_id, user_id, user_name, external_id, given_name, \
-     family_name, display_name, department, employee_number, active, disabled_account, \
-     created_at, updated_at";
+     family_name, display_name, department, employee_number, active, created_at, updated_at";
 
 #[derive(sqlx::FromRow)]
 struct UserRecord {
     id: String,
-    org_id: String,
     user_id: String,
     user_name: String,
     external_id: Option<String>,
@@ -651,7 +678,6 @@ struct UserRecord {
     department: Option<String>,
     employee_number: Option<String>,
     active: i64,
-    disabled_account: i64,
     created_at: i64,
     updated_at: i64,
 }
@@ -661,7 +687,6 @@ fn org_scim_from(record: Option<OrgScimRecord>) -> Result<OrgScim, MetaError> {
         return Ok(OrgScim {
             enabled: false,
             default_role: OrgRole::Viewer,
-            updated_at: 0,
         });
     };
     let default_role = match parse_org_role(&record.default_role) {
@@ -676,7 +701,6 @@ fn org_scim_from(record: Option<OrgScimRecord>) -> Result<OrgScim, MetaError> {
     Ok(OrgScim {
         enabled: record.enabled != 0,
         default_role,
-        updated_at: record.updated_at,
     })
 }
 
@@ -701,7 +725,6 @@ fn token_row(record: TokenRecord) -> Result<ScimTokenRow, MetaError> {
 fn user_row(record: UserRecord) -> Result<ScimUserRow, MetaError> {
     Ok(ScimUserRow {
         id: parse_id(&record.id, "scim_users", "id")?,
-        org_id: parse_id(&record.org_id, "scim_users", "org_id")?,
         user_id: parse_id(&record.user_id, "scim_users", "user_id")?,
         user_name: record.user_name,
         external_id: record.external_id,
@@ -711,7 +734,6 @@ fn user_row(record: UserRecord) -> Result<ScimUserRow, MetaError> {
         department: record.department,
         employee_number: record.employee_number,
         active: record.active != 0,
-        disabled_account: record.disabled_account != 0,
         created_at: record.created_at,
         updated_at: record.updated_at,
     })
@@ -734,7 +756,9 @@ fn parse_id<T: FromStr>(
     table: &'static str,
     column: &'static str,
 ) -> Result<T, MetaError> {
-    value.parse().map_err(|_| MetaError::Corrupt { table, column })
+    value
+        .parse()
+        .map_err(|_| MetaError::Corrupt { table, column })
 }
 
 #[cfg(test)]
@@ -802,7 +826,6 @@ mod tests {
         let scim = org_scim(db.reader(), org).await.unwrap();
         assert!(!scim.enabled);
         assert_eq!(scim.default_role, OrgRole::Viewer);
-        assert_eq!(scim.updated_at, 0);
 
         db.write(move |conn| {
             Box::pin(async move { put_org_scim(conn, org, true, OrgRole::Member, 5).await })
@@ -812,7 +835,6 @@ mod tests {
         let scim = org_scim(db.reader(), org).await.unwrap();
         assert!(scim.enabled);
         assert_eq!(scim.default_role, OrgRole::Member);
-        assert_eq!(scim.updated_at, 5);
     }
 
     #[tokio::test]
@@ -914,7 +936,12 @@ mod tests {
         let (row, active) = token_by_hash(db.reader(), "hash-1").await.unwrap().unwrap();
         assert_eq!(row.org_id, org);
         assert!(active);
-        assert!(token_by_hash(db.reader(), "unknown").await.unwrap().is_none());
+        assert!(
+            token_by_hash(db.reader(), "unknown")
+                .await
+                .unwrap()
+                .is_none()
+        );
 
         let marked = db
             .write(move |conn| Box::pin(async move { mark_org_deleting(conn, org, 9).await }))
@@ -935,7 +962,14 @@ mod tests {
 
         db.write(move |conn| {
             Box::pin(async move {
-                insert_user(conn, acme, ada, &fields("ada@example.com", Some("ext-1")), 1).await?;
+                insert_user(
+                    conn,
+                    acme,
+                    ada,
+                    &fields("ada@example.com", Some("ext-1")),
+                    1,
+                )
+                .await?;
                 Ok(())
             })
         })
@@ -956,19 +990,34 @@ mod tests {
         let same_external = db
             .write(move |conn| {
                 Box::pin(async move {
-                    insert_user(conn, acme, bob, &fields("bob@example.com", Some("ext-1")), 3)
-                        .await
-                        .map(|_| ())
+                    insert_user(
+                        conn,
+                        acme,
+                        bob,
+                        &fields("bob@example.com", Some("ext-1")),
+                        3,
+                    )
+                    .await
+                    .map(|_| ())
                 })
             })
             .await;
-        assert!(matches!(same_external, Err(MetaError::Conflict("uniqueness"))));
+        assert!(matches!(
+            same_external,
+            Err(MetaError::Conflict("uniqueness"))
+        ));
 
         // Another org may use the same names.
         db.write(move |conn| {
             Box::pin(async move {
-                insert_user(conn, globex, bob, &fields("ada@example.com", Some("ext-1")), 4)
-                    .await?;
+                insert_user(
+                    conn,
+                    globex,
+                    bob,
+                    &fields("ada@example.com", Some("ext-1")),
+                    4,
+                )
+                .await?;
                 Ok(())
             })
         })
@@ -1067,9 +1116,7 @@ mod tests {
         assert!(ids.contains(&ada));
 
         let id = row.id;
-        db.write(move |conn| {
-            Box::pin(async move { set_user_active(conn, org, id, false, false, 2).await })
-        })
+        db.write(move |conn| Box::pin(async move { set_user_active(conn, org, id, false, 2).await }))
         .await
         .unwrap();
         let managed = db
@@ -1081,7 +1128,7 @@ mod tests {
 
         let linked = db
             .write(move |conn| {
-                Box::pin(async move { user_of_member_tx(conn, org, ada).await })
+                Box::pin(async move { user_by_user_name_tx(conn, org, "ada@example.com").await })
             })
             .await
             .unwrap();
@@ -1110,10 +1157,11 @@ mod tests {
             .unwrap();
 
         for table in ["org_scim", "scim_tokens", "scim_users"] {
-            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
-                .fetch_one(db.reader())
-                .await
-                .unwrap();
+            let count: i64 =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                    .fetch_one(db.reader())
+                    .await
+                    .unwrap();
             assert_eq!(count, 0, "{table} kept rows of a deleted org");
         }
     }

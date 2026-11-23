@@ -62,9 +62,9 @@ fn parse_attribute(input: &str) -> Result<(Attribute, &str), ScimError> {
         let rest = strip_prefix_ci(rest, ".value").ok_or_else(ScimError::invalid_filter)?;
         return Ok((Attribute::Email, rest));
     }
-    let (name, rest) = input
-        .split_once(' ')
-        .ok_or_else(ScimError::invalid_filter)?;
+    // The rest keeps its leading space: `parse_user_filter` requires one before the operator.
+    let end = input.find(' ').ok_or_else(ScimError::invalid_filter)?;
+    let (name, rest) = input.split_at(end);
     let attribute = if name.eq_ignore_ascii_case("userName") {
         Attribute::UserName
     } else if name.eq_ignore_ascii_case("externalId") {

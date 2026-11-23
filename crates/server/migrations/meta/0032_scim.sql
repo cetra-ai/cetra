@@ -29,10 +29,16 @@ CREATE TABLE scim_users (
     department TEXT,
     employee_number TEXT,
     active INTEGER NOT NULL DEFAULT 1,
-    disabled_account INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX scim_users_org_user_name ON scim_users (org_id, user_name);
 CREATE UNIQUE INDEX scim_users_org_external_id ON scim_users (org_id, external_id) WHERE external_id IS NOT NULL;
 CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id);
+-- The accounts SCIM disabled (D-EA-16). A row is the only record of a SCIM disable, so an
+-- account disabled by an instance admin or the control plane has none (and stays disabled).
+CREATE TABLE scim_disabled_accounts (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    org_id TEXT NOT NULL,
+    disabled_at INTEGER NOT NULL
+);
