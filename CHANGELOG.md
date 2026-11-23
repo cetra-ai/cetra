@@ -7,6 +7,10 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Added
+
+- Calls through the OpenAI client to OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and other providers show that provider, read from the endpoint's host; the Python SDK records the OpenAI client's host for this.
+
 ### Changed
 
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
@@ -17,6 +21,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 ### Fixed
 
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
+- OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic and Together models that were missing.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

@@ -412,7 +412,7 @@ After each append, `commit` records the trace in the online-rule trigger's in-me
 The fixture format is defined in `fixtures/otlp/README.md` (D66). Each case is a directory `fixtures/otlp/<group>/<case>/` with `case.json` (metadata, settings), `input.json` (OTLP/JSON `ExportTraceServiceRequest`) and `expected.json` (normalized spans in `cetra_core::Span` JSON, extracted media, rejected count). Fixtures use the fixed test price table `fixtures/otlp/prices.json`, not the embedded LiteLLM snapshot (D67).
 
 - Hand-written cases pin this spec's rules (Phase 0 step 3).
-- Captured cases are recorded by `tools/capture` against a local mock of the provider HTTP APIs (D114, D115). The `cetra` group is not captured: the SDK conformance cases `cetra/sdk-*` are the SDKs' expected output (spec 10 § Testing, D-F-9).
+- Captured cases are recorded by `tools/capture` against a local mock of the provider HTTP APIs (D114, D115). A turn may name a real host, such as `openrouter.ai`; the harness routes the request to the mock under that host, and the client keeps its real base URL (D-IN-3). The mock matches routes by path suffix (D-IN-4). The `cetra` group is not captured: the SDK conformance cases `cetra/sdk-*` are the SDKs' expected output (spec 10 § Testing, D-F-9).
 
 | Convention or library | OpenAI | Anthropic | Gemini | Frameworks and own spans |
 |---|---|---|---|---|
@@ -424,6 +424,8 @@ The fixture format is defined in `fixtures/otlp/README.md` (D66). Each case is a
 | Laminar (Python) | client | — | — | the SDK's own spans |
 | Google ADK | — | — | native model calls | native agent spans |
 | Coding agents (§ Coding agents) | Codex CLI (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
+
+OpenAI client to OpenRouter and Novita: OpenInference through cetra's SDK, and OpenLLMetry (D-IN-19).
 
 A captured case may be committed before its `expected.json`. The golden test skips it until bless mode writes that file, which is then reviewed ([`fixtures/otlp/README.md` § Workflows](../../fixtures/otlp/README.md#workflows), D118).
 

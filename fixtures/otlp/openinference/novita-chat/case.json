@@ -1,0 +1,21 @@
+{
+  "description": "OpenAI client call through Novita, one chat turn, traced by OpenInference through cetra's SDK.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "openinference-instrumentation-openai",
+    "instrumentation_version": "0.1.69",
+    "language": "python",
+    "libraries": {
+      "openai": "3.45.0",
+      "openinference-instrumentation-openai": "0.1.69",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T13:48:58Z"
+  },
+  "spec_refs": [
+    "02 § Model, provider, usage",
+    "02 § Provider from the endpoint",
+    "02 § Cost computation"
+  ],
+  "notes": "The client keeps the real base URL https://api.novita.ai/openai, and the harness routes the request to the capture mock under that host (D-IN-3). cetra's SDK stamps the OpenAI client's host on the span as server.address api.novita.ai (D-IN-18), so the provider is novita from the endpoint rule (D-IN-2). The model deepseek/deepseek-v3.2 is priced by the snapshot's Novita row, a vendor/model row kept by the converter (D-IN-14). Cost is computed, not reported. Token counts are input 14 and output 8."
+}
