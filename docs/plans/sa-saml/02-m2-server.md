@@ -44,9 +44,12 @@ When M2 is done:
 - the security review and interop (M4);
 - the cloud (track Q).
 
-The only web edits here are the ones the regenerated API types force so that `just check` stays green:
-- `feature-label.ts` and `plan.tsx` list the new feature;
-- `provider-section.tsx` handles the now-optional `issuer` and `client_id`.
+The only web edits here are the ones the regenerated API types and the mock contract test force so that `just check` stays green:
+- `feature-label.ts`, `plan.tsx` and `license-card.tsx` list the new feature;
+- `org-sso-settings.tsx` handles the now-optional `issuer`;
+- `mocks/writes.ts` registers the two new write operations.
+
+The CHANGELOG line is M3's.
 
 ## Decisions this plan relies on
 
@@ -74,17 +77,25 @@ No new external dependency. `crates/server/Cargo.toml` gains the workspace crate
 
 | Phase | Edits | Depends on | Parallel with |
 |---|---|---|---|
-| SA2.1 Storage | `crates/server/migrations/meta/0031_org_sso_saml.sql`, `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs` (only `SsoProtocol`), `crates/server/Cargo.toml` | M1 | SA2.2 |
-| SA2.2 Feature `saml` | `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs` (tests only), `crates/server/src/config.rs` (test only), `web/src/components/plan/feature-label.ts`, `web/src/routes/$org/settings/plan.tsx` | M1 | SA2.1 |
+| SA2.1 Storage | `crates/server/migrations/meta/0031_org_sso_saml.sql`, `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs` (only `SsoProtocol`), `crates/server/Cargo.toml`, and the mechanical `ProviderRow` adaptations in `crates/server/src/ee/org_sso/{settings,mod}.rs` and `crates/server/src/golden_tests/dump.rs` | M1 | SA2.2 |
+| SA2.2 Feature `saml` | `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs` (tests only), `crates/server/src/config.rs` (test only), `web/src/components/plan/feature-label.ts`, `web/src/routes/$org/settings/plan.tsx`, `web/src/ee/license-card.tsx` | M1 | SA2.1 |
 | SA2.3 Index, pending table, sign-in core | `crates/server/src/ee/org_sso/{mod.rs,login.rs,saml_pending.rs}`, `crates/server/src/test_support/mod.rs`, `crates/server/src/serve.rs` (`OrgSso::new` call only, if its signature changes) | SA2.1, SA2.2 | — |
-| SA2.4 Settings API | `crates/server/src/api/org_sso.rs`, `crates/server/src/ee/org_sso/settings.rs`, `fixtures/api/static/org-sso.json`, `web/src/ee/org-sso/provider-section.tsx` | SA2.3 | SA2.5 |
+| SA2.4 Settings API | `crates/server/src/api/org_sso.rs`, `crates/server/src/ee/org_sso/settings.rs`, `fixtures/api/static/org-sso.json`, `web/src/ee/org-sso/org-sso-settings.tsx`, `web/src/mocks/writes.ts` | SA2.3 | SA2.5 |
 | SA2.5 SAML login routes | `crates/server/src/ee/org_sso/{saml.rs,mod.rs,login.rs}`, `crates/server/src/auth/oidc/flow.rs`, `crates/server/src/http/csrf.rs`, `crates/server/src/http/access.rs`, `crates/server/src/auth/limits.rs` | SA2.3 | SA2.4 |
 | SA2.6 Daily metadata refresh | `crates/server/src/ee/org_sso/{saml_refresh.rs,mod.rs}`, `crates/server/src/serve.rs` | SA2.4, SA2.5 | SA2.7, SA2.8 |
-| SA2.7 OpenAPI, examples, golden, break-glass test | `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/src/golden_tests/{build.rs,dump.rs}`, `crates/server/src/admin.rs` (test only), `crates/server/src/http/access_suite.rs` (only if a SAML route needs an entry) | SA2.4, SA2.5 | SA2.6, SA2.8 |
+| SA2.7 OpenAPI, examples, golden, break-glass test | `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/golden_tests/{build.rs,dump.rs}`, `crates/server/src/admin.rs` (test only) | SA2.4, SA2.5 | SA2.6, SA2.8 |
 | SA2.8 Specs | `docs/spec/04-metadata-db.md`, `08-auth.md`, `09-api.md`, `11-ui.md`, `12-operations.md`, `docs/spec/README.md` | SA2.4, SA2.5 | SA2.6, SA2.7 |
 | SA2.9 Checks and review (coordinating session) | generated files, snapshot, fixes | all | — |
 
 Phases marked parallel run at the same time in the same worktree. Their Edit lists do not overlap. Each one stages only its own files by path.
+
+## Notes the reviewers raised (accepted)
+
+- D-SA-2 says the display name and JIT role are kept on a switch. The PUT bodies carry both, so a switch saves what the form shows.
+- `reload` reads `active_providers` and `active_saml` separately. A switch committed between the two reads skips that org once (as unreadable) until the next reload, at most 60 s later.
+- The SSO URL egress check rejects only what `allows_url` can see without fetching (literal private addresses, restore mode), because the server never fetches the SSO URL.
+- The certificate expiry warning of D-SA-11 is UI (M3); M2 exposes `not_after`.
+- The login code list lives in five places: spec 08, the OpenAPI callback text, `LoginError::code` (M2), and spec 11 and the web `OAUTH_ERROR_CODES` (M3).
 
 ## Conventions for every phase
 
@@ -106,7 +117,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** the provider row gains a protocol, and the SAML configuration has its tables and store functions (D-SA-17).
 
-**Edit:** `crates/server/migrations/meta/0031_org_sso_saml.sql` (new), `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs`, `crates/server/Cargo.toml`.
+**Edit:** `crates/server/migrations/meta/0031_org_sso_saml.sql` (new), `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs`, `crates/server/Cargo.toml`, `crates/server/src/ee/org_sso/settings.rs`, `crates/server/src/ee/org_sso/mod.rs`, `crates/server/src/golden_tests/dump.rs`.
 
 **Steps:**
 
@@ -167,7 +178,9 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 3. `migration_tests.rs`:
    - Append `31, // 0031 rebuilds org_sso_providers for SAML (D-SA-17)` to `PRE_RELEASE_NON_ADDITIVE`.
    - Append an `AlteringCase` with `version: 31`:
-     - `seed`: one `orgs` row (`'018f6b4e-7c1a-7c1a-8c1a-0000000000a7'`, `'Acme'`, `'acme'`, `'active'`, 1, 2), then one `org_sso_providers` row in the 0013 shape: `(id, org_id, display_name, issuer, client_id, client_secret_enc, enabled, enforced, jit_role, last_login_at, created_at, updated_at)` = `('018f6b4e-7c1a-7c1a-8c1a-0000000000a8', '018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Okta', 'https://idp.test', 'client', X'00', 1, 0, 'member', 5, 3, 4)`.
+     - `seed`, two statements:
+       - `"INSERT INTO orgs (id, name, slug, state, created_at, updated_at) VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Acme', 'acme', 'active', 1, 2)"`;
+       - `"INSERT INTO org_sso_providers (id, org_id, display_name, issuer, client_id, client_secret_enc, enabled, enforced, jit_role, last_login_at, created_at, updated_at) VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a8', '018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Okta', 'https://idp.test', 'client', X'00', 1, 0, 'member', 5, 3, 4)"`.
      - `read`: `"SELECT id || '|' || org_id || '|' || protocol || '|' || display_name || '|' || issuer || '|' || client_id || '|' || hex(client_secret_enc) || '|' || enabled || '|' || enforced || '|' || jit_role || '|' || last_login_at || '|' || created_at || '|' || updated_at FROM org_sso_providers"`.
      - `expected`: `"018f6b4e-7c1a-7c1a-8c1a-0000000000a8|018f6b4e-7c1a-7c1a-8c1a-0000000000a7|oidc|Okta|https://idp.test|client|00|1|0|member|5|3|4"`.
 4. `api/org_sso.rs`: add, next to `JitRole` and in its style (derives `Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema`, `#[serde(rename_all = "snake_case")]`):
@@ -185,7 +198,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
      /// The OIDC columns of a provider row; `None` for a SAML row.
      pub(crate) struct OidcColumns { pub(crate) issuer: String, pub(crate) client_id: String, pub(crate) client_secret_enc: Vec<u8> }
      ```
-     `ProviderRow`'s `Debug` prints `protocol`, and for OIDC `issuer` and `client_id` (as today); `OidcColumns` gets a manual `Debug` without the secret.
+     `ProviderRow`'s `Debug` prints `protocol`, and for OIDC `issuer` and `client_id` (as today). `OidcColumns` derives `Clone, PartialEq, Eq` and gets a manual `Debug` without the secret.
    - Every `SELECT` of provider columns (the `PROVIDER_BY_ORG` constant, `active_providers`) adds `p.protocol` (or `protocol`). `ProviderRecord` gets `protocol: String` and `Option<…>` for the three OIDC columns.
    - `provider_row` maps `protocol` with `SsoProtocol::from_str_opt`; unknown → `corrupt("org_sso_providers", "protocol")`. For `Oidc` all three columns must be present (else `corrupt(.., "issuer")`) → `Some(OidcColumns)`. For `Saml` → `None`.
 6. `store.rs`, `put_provider` (the OIDC save) keeps its signature. Its body becomes:
@@ -290,7 +303,25 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
        - Return whether they differed.
      - `Failed(class)`: `refresh_error = class`, `refresh_checked_at = now`; return `false`.
    - `delete_provider` needs no change: the cascades remove the SAML rows. Add a test.
-9. `store.rs` tests (in its `#[cfg(test)] mod tests`, using `crate::meta::test_db()` as the existing ones do):
+   - One more function, for a save without a metadata source (D-SA-18, used by SA2.4):
+     ```rust
+     /// Updates a SAML provider's display name, JIT role and attribute names, keeping its
+     /// metadata. Returns false when the org's provider is not SAML.
+     pub(crate) async fn update_saml_settings(conn: &mut SqliteConnection, org: OrgId, display_name: &str, jit_role: JitRole, attributes: &SamlAttributes, now: i64) -> Result<bool, MetaError>;
+     ```
+     It reads `provider_tx`; `None` or OIDC → `Ok(false)`. Otherwise it runs `UPDATE org_sso_providers SET display_name = ?, jit_role = ?, updated_at = ? WHERE org_id = ?` and `UPDATE org_sso_saml SET email_attribute = ?, name_attribute = ?, first_name_attribute = ?, last_name_attribute = ? WHERE provider_id = ?`, then returns `Ok(true)`.
+9. **Mechanical adaptations to `ProviderRow { protocol, oidc }`**, so the crate stays coherent. Behaviour for OIDC rows is unchanged.
+   - `settings.rs`, `put_org_sso_provider`:
+     - `changes_identity = existing.as_ref().is_some_and(|row| row.oidc.as_ref().is_none_or(|o| o.issuer != input.issuer || o.client_id != input.client_id))`. A SAML row counts as an identity change, so a switch needs a secret.
+     - `renames_issuer = existing.as_ref().is_some_and(|row| row.oidc.as_ref().is_none_or(|o| o.issuer != input.issuer))`. A switch deletes identities.
+   - `settings.rs`, `unchanged`: compare `before.id == now.id && before.protocol == now.protocol && before.oidc == now.oidc`.
+   - `settings.rs`, `open_stored`: `row.oidc.as_ref().and_then(|o| state.secrets.open(&o.client_secret_enc, store::secret_aad(&row.id)).ok()).and_then(|bytes| String::from_utf8(bytes).ok()).ok_or_else(|| field_error("client_secret", "required"))`.
+   - `settings.rs`, `provider_view`: until SA2.4 changes the response type, `issuer` and `client_id` read `row.oidc.as_ref().map(|o| o.issuer.clone()).unwrap_or_default()` (and the same for `client_id`). SA2.4 replaces this.
+   - `settings.rs` tests that read `row.client_secret_enc`, `row.issuer` or `row.client_id` read them through `row.oidc.as_ref().unwrap()`. A `ProviderRow { .. }` literal gets `protocol: SsoProtocol::Oidc, oidc: Some(OidcColumns { .. })`.
+   - `mod.rs`, `reload`: at the top of the provider loop, `let Some(oidc) = row.oidc.as_ref() else { unreadable += 1; tracing::warn!(org_id = %row.org_id, "org identity provider skipped"); continue; };`, and the OIDC code reads `oidc.issuer`, `oidc.client_id`, `oidc.client_secret_enc`. SA2.3 replaces this with the protocol match. `mod.rs` tests adapt the same way.
+   - `golden_tests/dump.rs`, `sso_section`: add `"protocol": row.protocol.as_str()` as the first key. `"issuer"` and `"client_id"` become `row.oidc.as_ref().map(|o| o.issuer.clone())` and the same for `client_id` (JSON `null` for SAML). `"has_secret"` becomes `row.oidc.as_ref().is_some_and(|o| !o.client_secret_enc.is_empty())`.
+   - Grep `crates/server/src` for `.client_secret_enc`, `.issuer` and `.client_id` on a `ProviderRow` (not on `ProviderWrite` or OIDC config types) and adapt any other hit the same way.
+10. `store.rs` tests (in its `#[cfg(test)] mod tests`, using `crate::meta::test_db()` as the existing ones do; existing tests adapt as in step 9):
    - `an_oidc_row_reads_back_with_its_protocol`;
    - `a_saml_provider_round_trips`: insert via `put_saml_provider` with two certificates and an email attribute, then `provider` and `saml`. The certificates come back in order;
    - `switching_oidc_to_saml_clears_the_oidc_columns_and_the_flags`: OIDC with `enabled = enforced = true` and `last_login_at` set, then `put_saml_provider`. Protocol `saml`, `oidc == None`, flags off, `last_login_at == None`;
@@ -302,6 +333,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - `due_refreshes_skip_pasted_metadata_and_recent_checks`;
    - `a_refresh_with_new_certificates_records_the_change`, `a_refresh_with_the_same_set_in_another_order_is_no_change`, `a_failed_refresh_keeps_the_metadata`;
    - `active_saml_ignores_dropped_orgs`.
+   - `update_saml_settings_keeps_the_metadata`, and `update_saml_settings_refuses_an_oidc_provider` (→ `false`).
 
 **Done when:** written and committed (no build or test).
 
@@ -313,7 +345,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** add the `ee` feature `saml` (D-SA-4).
 
-**Edit:** `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs` (tests), `crates/server/src/config.rs` (test), `web/src/components/plan/feature-label.ts`, `web/src/routes/$org/settings/plan.tsx`.
+**Edit:** `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs` (tests), `crates/server/src/config.rs` (test), `web/src/components/plan/feature-label.ts`, `web/src/routes/$org/settings/plan.tsx`, `web/src/ee/license-card.tsx`.
 
 **Steps:**
 
@@ -322,12 +354,13 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - Add it to `ALL` (length 5), and to `name()` → `"saml"`.
    - Add it to `is_ee()` (the `matches!` list) and to `from_name("saml")`.
    - In `locked_detail()`, use the exact text `"SAML single sign-on needs a licence or plan that includes it."`. Match the style of the `OrgSso` arm: if that arm's sentence has a different form, copy its form and say SAML. Its doc comment: `/// SAML 2.0 single sign-on for an org's provider (track SA, ee).`
-2. `entitlements/mod.rs` tests: wherever a test enumerates `Feature::ALL` or feature names, add `saml` the same way. Grep the file for `OrgSso` and `"org_sso"` in `#[cfg(test)]` code.
-3. `config.rs` test at the loop over `["project_roles", "org_sso", "nope"]` (about line 2796): add `"saml"` to the ee features it expects to be refused in `[entitlements.defaults]`.
-4. `web/src/components/plan/feature-label.ts`: add the `saml` case to the exhaustive switch with label `"SAML single sign-on"`.
-5. `web/src/routes/$org/settings/plan.tsx`: add `saml` to the `FEATURES` list after `org_sso`, using the same label source.
+2. `entitlements/mod.rs`, test `feature_names_round_trip` (about line 564): add `assert_eq!(Feature::from_name("saml"), Some(Feature::Saml));` and `assert!(Feature::Saml.is_ee());` after the `OrgSso` assertions.
+3. `config.rs`, the test at about line 2796 loops over TOML strings like `"[\"project_roles\"]"`: add `"[\"saml\"]"` to that list. Read the loop first and add the entry in the same form.
+4. `web/src/components/plan/feature-label.ts`: `featureOffer` returns an offer sentence per feature. Add `case "saml": return "Available with an enterprise licence that includes SAML.";`. Match the punctuation of the existing returns: if they have no final period, drop it.
+5. `web/src/routes/$org/settings/plan.tsx`: add `"saml"` to `FEATURES` after `"org_sso"`, and `saml: "SAML single sign-on"` to the `FEATURE_NAMES` record.
+6. `web/src/ee/license-card.tsx`: add `saml: "SAML single sign-on"` to its `FEATURE_NAMES` record (about line 14).
 
-**Tests:** the existing entitlement tests with `saml` added, plus `saml_is_an_ee_feature` (`Feature::Saml.is_ee()`, `from_name("saml") == Some(Feature::Saml)`, `name() == "saml"`).
+**Tests:** the extended `feature_names_round_trip` and config test above.
 
 **Done when:** written and committed.
 
@@ -339,7 +372,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** the routing index builds SAML providers, `OrgSso` holds the pending-request table and fetches metadata, and the OIDC callback's sign-in logic becomes a core both protocols call (README § Parts 2).
 
-**Edit:** `crates/server/src/ee/org_sso/mod.rs`, `crates/server/src/ee/org_sso/login.rs`, `crates/server/src/ee/org_sso/saml_pending.rs` (new), `crates/server/src/test_support/mod.rs`, `crates/server/src/serve.rs` (only if `OrgSso::new`'s call needs no change, leave it).
+**Edit:** `crates/server/src/ee/org_sso/mod.rs`, `crates/server/src/ee/org_sso/login.rs`, `crates/server/src/ee/org_sso/saml_pending.rs` (new), `crates/server/src/test_support/mod.rs`. `OrgSso::new` keeps its signature, so `serve.rs` does not change.
 
 **Steps:**
 
@@ -355,7 +388,8 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    pub(crate) const MAX_PER_ORG: usize = 1_000;
    pub(crate) const MAX_TOTAL: usize = 100_000;
 
-   /// One pending login. `Debug` hides the redirect and the binder hash.
+   /// One pending login. A manual `Debug` prints `org`, whether `test_owner` is set and
+   /// `expires_ns` only, hiding the redirect, the binder hash and the IP.
    #[derive(Clone, PartialEq, Eq)]
    pub(crate) struct Pending {
        pub(crate) org: OrgId,
@@ -363,7 +397,8 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
        pub(crate) redirect: String,
        /// Lowercase hex SHA-256 of the binder cookie's value.
        pub(crate) binder_sha256: String,
-       pub(crate) ip: IpAddr,
+       /// `crate::auth::limits::network_key(client ip)`: IPv6 counted by its /64.
+       pub(crate) network: IpAddr,
        pub(crate) expires_ns: i64,
    }
 
@@ -371,12 +406,14 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
    pub(crate) enum TakeError { Unknown, Binder }
 
-   #[derive(Debug, Default)]
+   /// A manual `Debug` prints the entry count only.
+   #[derive(Default)]
    pub(crate) struct PendingTable { entries: HashMap<String, Pending>, order: VecDeque<String> }
 
    impl PendingTable {
-       /// Records `request_id`, evicting expired entries, then the oldest entry of the same IP
-       /// or org while either is at its limit, then the oldest overall at `MAX_TOTAL`.
+       /// Records `request_id`, evicting expired entries, then the oldest entry of the same
+       /// network while it is at its limit, then (org full) the oldest entry of the network that
+       /// holds the most entries of that org, then the oldest overall at `MAX_TOTAL`.
        pub(crate) fn insert(&mut self, request_id: String, entry: Pending, now: i64);
        /// The entry for `request_id` when it exists, is not expired, belongs to `org`, and
        /// `binder`'s SHA-256 matches (constant-time). It is removed only on success; a wrong
@@ -388,8 +425,8 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    ```
    `insert` steps:
    1. Pop from the front of `order` while the front id is absent from `entries` or its entry is expired (`expires_ns <= now`), removing it from `entries`.
-   2. While the count of entries with `entry.ip == ip` is `>= MAX_PER_IP`, remove the first id in `order` whose entry has that IP.
-   3. Same for `org` with `MAX_PER_ORG`.
+   2. While the count of entries with `network == entry.network` is `>= MAX_PER_IP`, remove the first id in `order` whose entry has that network.
+   3. While the count of entries with `org == entry.org` is `>= MAX_PER_ORG`: find the network with the most entries for that org (ties: the network of the oldest such entry), and remove the first id in `order` whose entry has that org and that network. An attacker who fills an org's table from a few networks therefore evicts their own entries first.
    4. While `entries.len() >= MAX_TOTAL`, pop and remove the front.
    5. Insert, and push the id to the back.
 
@@ -399,7 +436,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - `binder` is `None`, or `!crate::auth::secret::constant_time_eq(&hex::encode(Sha256::digest(binder)), &entry.binder_sha256)` → `Binder`, leave it.
    - Otherwise remove it from `entries` and return it. `order` is cleaned lazily by `insert`.
 
-   Tests: `an_entry_is_taken_once`, `a_wrong_binder_keeps_the_entry`, `a_missing_binder_keeps_the_entry`, `another_org_cannot_take_it`, `an_expired_entry_is_unknown_and_removed`, `the_51st_entry_of_an_ip_evicts_its_oldest`, `the_1001st_entry_of_an_org_evicts_its_oldest`, `other_ips_are_not_evicted_by_one_ip`, `debug_hides_the_binder_hash_and_redirect`.
+   Tests: `an_entry_is_taken_once`, `a_wrong_binder_keeps_the_entry`, `a_missing_binder_keeps_the_entry`, `another_org_cannot_take_it`, `an_expired_entry_is_unknown_and_removed`, `the_51st_entry_of_a_network_evicts_its_oldest`, `a_full_org_evicts_from_its_largest_network`, `other_networks_keep_their_entries` (one network fills 50, another holds 1, a full org evicts from the first), `debug_hides_the_binder_hash_and_redirect`.
 2. `mod.rs`:
    - Declare `pub(crate) mod saml_pending;`.
    - `ProviderConfig` becomes an enum:
@@ -423,6 +460,15 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
      #[derive(Debug)]
      pub(crate) struct SamlProvider { pub(crate) metadata: cetra_saml::IdpMetadata, pub(crate) attributes: cetra_saml::AttributeNames }
      ```
+   - The SP URLs, used by settings (SA2.4) and the login routes (SA2.5):
+     ```rust
+     /// cetra's SAML endpoints for `org` (D-SA-12). Paths are absolute; URLs join `public_url`.
+     #[derive(Debug, Clone, PartialEq, Eq)]
+     pub(crate) struct SpUrls { pub(crate) entity_id: String, pub(crate) acs_url: String, pub(crate) start_url: String, pub(crate) acs_path: String, pub(crate) start_path: String, pub(crate) saml_path: String }
+
+     pub(crate) fn sp_urls(public_url: &crate::config::PublicUrl, org: OrgId) -> SpUrls;
+     ```
+     `saml_path = format!("/api/auth/saml/{org}")`, `acs_path = saml_path + "/acs"`, `start_path = saml_path + "/start"`, and each URL is `public_url.join(&path)`. Test `sp_urls_follow_the_public_url`.
    - `pub(crate) fn attribute_names(attributes: &store::SamlAttributes) -> cetra_saml::AttributeNames`: start from `AttributeNames::default()`, and for each field that is `Some(name)`, replace that list with `vec![name.clone()]`.
    - `OrgSso` gains `policy: cetra_eval::EgressPolicy` (stored in `new`; it is `Copy`) and `saml_pending: std::sync::Mutex<saml_pending::PendingTable>`. Add the accessors:
      ```rust
@@ -487,7 +533,36 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
    /// [`org_sso_app_with`] for SAML: an https public URL and a licence listing `org_sso` and `saml`.
    pub(crate) async fn saml_app() -> (TestApp, Seeded, Member);
+
+   /// A loopback HTTP server that answers every GET with a body and status the test can change.
+   pub(crate) struct MetadataServer { /* address and Arc<Mutex<(StatusCode, Vec<u8>)>> */ }
+   impl MetadataServer {
+       pub(crate) async fn start(body: Vec<u8>) -> Self;   // 200 with body
+       pub(crate) fn url(&self) -> String;                 // "http://127.0.0.1:<port>/metadata"
+       pub(crate) fn set(&self, status: StatusCode, body: Vec<u8>);
+   }
+
+   /// Starts a SAML login through `/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme`
+   /// (with `cookie` when given) and returns the request ID read back from the redirect, the
+   /// binder cookie (`name=value`) and the response.
+   pub(crate) async fn begin_saml(app: &TestApp, cookie: Option<&str>) -> (String, String, TestResponse);
+
+   /// POSTs `SAMLResponse=<b64>&RelayState=cetra` to org `org`'s ACS with `Origin: https://idp.test`
+   /// and the given cookies.
+   pub(crate) async fn post_acs(app: &TestApp, org: OrgId, b64: &str, cookies: &[&str]) -> TestResponse;
+
+   /// The test IdP's defaults with this app's SP values and `request_id`, NameID and email `ada@acme.test`.
+   pub(crate) fn saml_options(app: &TestApp, org: OrgId, request_id: &str) -> cetra_saml::test_idp::ResponseOptions;
    ```
+   - `MetadataServer` is built like `MockIdp::start` (`test_support/mock_idp.rs`): an axum router with a fallback handler reading the shared state, on a `tokio::net::TcpListener` bound to `127.0.0.1:0`, spawned.
+   - `begin_saml` reads the request ID back in exactly these steps:
+     1. `url::Url::parse(location)` and `query_pairs()` → `SAMLRequest`;
+     2. `base64::engine::general_purpose::STANDARD.decode`;
+     3. `flate2::read::DeflateDecoder` into a `String`;
+     4. the first occurrence of ` ID="_`; the ID is `_` plus the next 32 characters.
+
+     The binder cookie is the `Set-Cookie` header starting with `cetra_saml=`, cut at the first `;`.
+   - `saml_options` sets `audiences = vec![sp.entity_id]`, `recipient = sp.acs_url`, `destination = Some(sp.acs_url)`, both `InResponseTo` fields `Some(request_id)`, `name_id = "ada@acme.test"` and `attributes = vec![("email", vec!["ada@acme.test"]), ("displayName", vec!["Ada Lovelace"])]`, with `sp = sp_urls(&app.state.config.public_url, org)`.
    - `configure_org_saml` parses `cetra_saml::test_idp::metadata_xml(keys)` with `cetra_saml::parse_metadata`. It writes `store::put_saml_provider` with `display_name: "Acme SAML"`, `JitRole::Viewer`, `metadata_url: None`, the entity ID, SSO URL and DER certificates, default attributes and `refreshed_at: None`. Then `set_flags`, `set_last_login`, the domain insert and verification, and `reload_org_sso`, all as `configure_org_sso` does.
    - `saml_app` is `org_sso_app_with(|config| { config.public_url = serde_json::from_str("\"https://cetra.example\"").expect("url"); config.license_key = Some(crate::config::Secret::new(license_key(&["org_sso", "saml"]))); })`.
 
@@ -503,7 +578,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** owners save SAML providers and switch protocols (D-SA-18), with D-SA-2, D-SA-11 and D-SA-19 enforced.
 
-**Edit:** `crates/server/src/api/org_sso.rs`, `crates/server/src/ee/org_sso/settings.rs`, `fixtures/api/static/org-sso.json`, `web/src/ee/org-sso/provider-section.tsx`.
+**Edit:** `crates/server/src/api/org_sso.rs`, `crates/server/src/ee/org_sso/settings.rs`, `fixtures/api/static/org-sso.json`, `web/src/ee/org-sso/org-sso-settings.tsx`, `web/src/mocks/writes.ts`.
 
 **Steps:**
 
@@ -562,7 +637,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
      ```
      `SamlAttributeNames` also derives `Default`.
 2. `settings.rs`, `view()`:
-   - `saml_sp` uses the SP paths of § Conventions with `access.org.id`.
+   - `saml_sp` comes from `super::sp_urls(&state.config.public_url, access.org.id)` (`entity_id`, `acs_url`, `start_url`).
    - `provider_view` maps a row:
      - OIDC → `issuer` / `client_id` `Some`, `saml: None`;
      - SAML → `issuer` / `client_id` `None` and `saml: Some(..)` built from `store::saml(reader, row.id)`.
@@ -575,7 +650,8 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    3. `validate_saml(&body)`:
       - `display_name` is 1..=100 characters after trim (field `display_name`, the same message as OIDC's `validate`).
       - Each attribute name, when set, is 1..=256 characters with no control character (field `attributes.email` and so on, message `"invalid attribute name"`).
-      - Sources: let `url = metadata_url.is_some()`, `xml = metadata_xml.is_some()`, `manual = any of idp_entity_id / sso_url / certificates is Some`. Exactly one of the three must hold, and `manual` needs all three fields. Otherwise field `metadata`, message `"give a metadata URL, the metadata XML, or the entity ID, SSO URL and certificates"`.
+      - Sources: let `url = metadata_url.is_some()`, `xml = metadata_xml.is_some()`, `manual = any of idp_entity_id / sso_url / certificates is Some`. At most one of the three may hold, and `manual` needs all three fields. Otherwise field `metadata`, message `"give a metadata URL, the metadata XML, or the entity ID, SSO URL and certificates"`.
+      - **No source** is a settings-only save (D-SA-18). It is allowed only when the org's provider is already SAML. Skip steps 4 and 5, and in the write transaction call `store::update_saml_settings(conn, org, &display_name, jit_role, &attributes, now)`. On `false` (no SAML provider) answer the same field error `metadata`. Then continue at step 7.
    4. Resolve the metadata:
       - URL:
         1. `refuse_outbound(&state, "identity provider check")?`.
@@ -611,7 +687,9 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - `"start_url"` (`…/start`).
 
    Find the acme org id in `fixtures/api` (`grep -r '"slug": "acme"' fixtures/api`). Add `"protocol": "oidc"` as the provider's first key. Keep the file's existing key order otherwise. `static_files_match_their_types` round-trips it byte for byte, so the key order must equal the struct field order.
-8. `web/src/ee/org-sso/provider-section.tsx`: where it reads `provider.issuer` and `provider.client_id` (now optional in the generated types), use `provider.issuer ?? ""` and `provider.client_id ?? ""`. When the PUT body is built from the form, nothing changes (the OIDC PUT body did not change). No other web change.
+8. Web, for the typecheck and the mock contract test only:
+   - `web/src/ee/org-sso/org-sso-settings.tsx` line 42: `issuer={sso.provider.issuer ?? sso.provider.display_name}`. M3 replaces this. `provider-section.tsx` already reads `provider?.issuer ?? ""` and needs no change.
+   - `web/src/mocks/writes.ts`: add to `WRITE_OPERATIONS`, after the org SSO entries, `{ operationId: "put_org_saml_provider", method: "put", path: "/api/v1/orgs/{org}/sso/saml" }`. After the `/api/auth/` entries add `{ operationId: "post_saml_acs", method: "post", path: "/api/auth/saml/{org_id}/acs" }`. In `RESPONSES` add `put_org_saml_provider: () => HttpResponse.json(orgSsoDocument)` and `post_saml_acs: () => new HttpResponse(null, { status: 302, headers: { Location: "/" } })`. The path parameter style (`{org}` versus `:org`) must match the neighbouring entries; copy theirs.
 
 **Tests** (`settings.rs` tests module; `saml_app()` and its helpers; `metadata_xml(&[TestKey::Idp])` as pasted XML):
 - `an_owner_saves_a_saml_provider_from_xml`:
@@ -624,7 +702,9 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 - `a_metadata_url_is_fetched_and_refreshed_at_is_set`: serve the metadata from a loopback axum server, started like `MockIdp::start` with one route returning `metadata_xml`. `allow_private_network_egress` is already true in `org_sso_app_with`.
 - `an_http_metadata_url_off_loopback_is_refused` → 400 on `metadata_url`.
 - `a_failing_metadata_url_is_400`: the server answers 500.
-- `zero_or_two_sources_are_400` → field `metadata`.
+- `two_sources_are_400` → field `metadata`.
+- `no_source_without_a_saml_provider_is_400` → field `metadata`.
+- `no_source_updates_only_the_settings`: a SAML provider, then a PUT with a new display name, an email attribute and no source → 200; the certificates and entity ID are unchanged, and the identities are kept.
 - `bad_metadata_is_400_with_a_static_message`: XML without a signing certificate → the field error's message equals `MetadataError::NoSigningCertificate.to_string()`.
 - `saml_needs_both_features`: licence `["org_sso"]` only → 403 `plan_required`.
 - `saml_needs_an_https_public_url`: `org_sso_app_with` licence `["org_sso", "saml"]`, default http URL → 409.
@@ -649,15 +729,16 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** the SP-initiated login, the ACS, the unsolicited restart and the SP metadata (D-SA-5, D-SA-10, D-SA-12).
 
-**Edit:** `crates/server/src/ee/org_sso/saml.rs` (new), `crates/server/src/ee/org_sso/mod.rs` (one `mod` line), `crates/server/src/ee/org_sso/login.rs` (the authorize branch and tests), `crates/server/src/auth/oidc/flow.rs` (`LoginError`), `crates/server/src/http/csrf.rs`, `crates/server/src/http/access.rs` (`routes.extend`), `crates/server/src/auth/limits.rs`.
+**Edit:** `crates/server/src/ee/org_sso/saml.rs` (new), `crates/server/src/ee/org_sso/mod.rs` (one `mod` line), `crates/server/src/ee/org_sso/login.rs` (the authorize branch), `crates/server/src/auth/oidc/flow.rs` (`LoginError`), `crates/server/src/http/csrf.rs`, `crates/server/src/http/access.rs` (`routes.extend`), `crates/server/src/auth/limits.rs`.
 
 **Steps:**
 
 1. `flow.rs`: add `LoginError::SamlInvalid` (doc: `/// A SAML response failed validation, or did not match a pending request (D-SA-9, D-SA-10).`) and `LoginError::SamlUnsupported` (doc: `/// A SAML response used a feature cetra refuses, such as an encrypted assertion (D-SA-8).`). Their codes are `"saml_invalid"` and `"saml_unsupported"`.
 2. `limits.rs`: add `pub(crate) saml_acs: KeyedLimiter<IpAddr>` with the doc comment `/// 60 per minute per client IP for the SAML ACS (D-SA-10).`. Build it in `Limits::new` as `KeyedLimiter::new(Bucket { capacity: 60, per: Duration::from_secs(60) }, MAX_KEYS)`, and prune it in `Limits::prune` like `sso_discover`.
-3. `csrf.rs`, in `must_check`, before the `session ||` expression: if the request's matched path (`request.extensions().get::<axum::extract::MatchedPath>()`) is exactly `"/api/auth/saml/{org_id}/acs"`, return `false`. If `MatchedPath` is absent, a fallback compares the raw path. It must have exactly the segments `["", "api", "auth", "saml", <36-char id>, "acs"]`. Never use a prefix test. The comment above it: `// The IdP's cross-site POST carries the IdP's Origin; the binder cookie and the signature protect the ACS (D-SA-10, D-SA-12).`
-   - If the `csrf` middleware runs before routing, `MatchedPath` is not available there. Check where `csrf` sits in `finish()` (`http/mod.rs`): the layers run before the router matches. In that case use only the raw-path segment test and drop the `MatchedPath` branch.
-4. `saml.rs` (new, `ee` header). Constants from § Conventions, plus:
+3. `csrf.rs`, in `must_check`, as the first check (before `session` is computed): `if request.extensions().get::<axum::extract::MatchedPath>().is_some_and(|path| path.as_str() == "/api/auth/saml/{org_id}/acs") { return false; }`, with the comment `// The IdP's cross-site POST carries the IdP's Origin; the binder cookie and the signature protect the ACS (D-SA-10, D-SA-12).`. `MatchedPath` is set there: `finish()` adds the layers with `Router::layer`, which runs after routing, and `log_request` already reads `MatchedPath` in the same stack. There is no raw-path fallback. Tests in `http/csrf.rs`'s module, or next to the existing Origin tests in `http/mod.rs`; use whichever file holds them:
+   - `the_saml_acs_skips_the_origin_check`: a POST to a real org's ACS with `Origin: https://evil.test` and a session cookie → not 403 (404, since there is no SAML provider);
+   - `other_saml_paths_keep_the_origin_check`: a POST to `/api/auth/saml/<id>/start` and to `/api/auth/saml/<id>/acs/x` with a foreign Origin → 403 (or 405/404 from routing, never accepted past CSRF). Assert the status is not 2xx or 3xx.
+4. `saml.rs` (new, `ee` header). The 413 for an oversized body comes from axum's `Bytes` rejection as plain text, not a problem document; that is accepted (tests assert the status only). Constants from § Conventions, plus:
    ```rust
    const ACS_BODY_LIMIT: usize = 256 * 1024;
    const RESTART_MAX_AGE_SECS: u64 = 120;
@@ -674,25 +755,26 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    ```rust
    /// The SP entity ID, ACS URL and start URL of `org` (D-SA-12).
    pub(crate) fn sp_urls(state: &AppState, org: OrgId) -> (String, String, String);
-   /// The org's SAML provider, when the org's provider is SAML.
-   fn saml_provider(state: &AppState, org: OrgId) -> Option<(Arc<OrgProvider>, &SamlProvider)>; // or return Arc and match at the call site; lifetimes decide
+   /// The org's provider, when it is SAML. Callers bind it with
+   /// `let ProviderKind::Saml(saml) = &provider.kind else { unreachable-free fallback }`.
+   fn saml_provider(state: &AppState, org: OrgId) -> Option<Arc<OrgProvider>>;
    /// Starts an SP-initiated login: a pending entry, the binder cookie, the redirect (D-SA-10).
    pub(crate) async fn begin(state: &AppState, org: OrgId, provider: &SamlProvider, ip: IpAddr, test_owner: Option<Uuid>, redirect: String) -> Result<Response, ApiError>;
    fn cookie(name: &str, value: &str, path: &str, max_age: u64) -> HeaderValue; // "{name}={value}; HttpOnly; Secure; SameSite=None; Path={path}; Max-Age={max_age}"
    fn named_cookie(headers: &HeaderMap, name: &str) -> Option<String>;       // the body of state_cookie::cookie_value with `name`
    ```
-   - `sp_urls` joins the three paths of § Conventions onto `state.config.public_url`.
+   - `sp_urls` is `super::sp_urls` (SA2.3); do not redefine it.
    - `begin` steps:
      1. `!state.config.public_url.is_https()` → `redirect("/login?error=sso_unavailable", empty)`.
      2. `url::Url::parse(provider.metadata.sso_url())` and `state.org_sso.policy().allows_url(&url)`. Either failing → the same `sso_unavailable` redirect.
-     3. `request_id = format!("_{}", hex::encode(random_bytes(16)?))`, where `crate::auth::secret::random_bytes` maps its error to `internal`.
-     4. `binder = new_opaque_token().map_err(internal)?.plaintext`.
-     5. `state.org_sso.with_pending(|table| table.insert(request_id.clone(), Pending { org, test_owner, redirect, binder_sha256: hex::encode(Sha256::digest(binder.as_bytes())), ip, expires_ns: now + PENDING_TTL_NS }, now))`.
-     6. `let (entity, acs, _) = sp_urls(state, org)`. `location = cetra_saml::authn_request_redirect_url(&AuthnRequest { sp_entity_id: &entity, acs_url: &acs, sso_url: provider.metadata.sso_url(), request_id: &request_id, relay_state: RELAY_STATE, issue_instant_ns: now })`. An error → `internal`.
-     7. `routes::oauth::redirect(&location, [cookie(SAML_COOKIE, &binder, <ACS path>, BINDER_MAX_AGE_SECS)])`. The cookie path is the ACS path without the origin: `format!("/api/auth/saml/{org}/acs")`.
+     3. `request_id = format!("_{}", hex::encode(crate::auth::secret::random_bytes(16).map_err(|e| ApiError::Internal(Box::new(e)))?))`.
+     4. `binder = new_opaque_token().map_err(|e| ApiError::Internal(Box::new(e)))?.plaintext`.
+     5. `state.org_sso.with_pending(|table| table.insert(request_id.clone(), Pending { org, test_owner, redirect, binder_sha256: hex::encode(Sha256::digest(binder.as_bytes())), network: crate::auth::limits::network_key(ip), expires_ns: now + PENDING_TTL_NS }, now))`.
+     6. `let sp = super::sp_urls(&state.config.public_url, org)`. `location = cetra_saml::authn_request_redirect_url(&AuthnRequest { sp_entity_id: &sp.entity_id, acs_url: &sp.acs_url, sso_url: provider.metadata.sso_url(), request_id: &request_id, relay_state: RELAY_STATE, issue_instant_ns: now })`. An error → `ApiError::Internal(Box::new(e))`.
+     7. `routes::oauth::redirect(&location, [cookie(SAML_COOKIE, &binder, &sp.acs_path, BINDER_MAX_AGE_SECS)])`.
    - `sp_metadata`:
      - org not parsed or no SAML provider for it in the index → `ApiError::NotFound`.
-     - Otherwise 200, `Content-Type: application/samlmetadata+xml`, body `cetra_saml::sp_metadata_xml(&entity, &acs)`.
+     - Otherwise 200, `Content-Type: application/samlmetadata+xml`, body `cetra_saml::sp_metadata_xml(&sp.entity_id, &sp.acs_url)`.
    - `start`:
      1. `refuse_outbound(&state, "external sign-in")?`.
      2. `state.limits.sso_discover.check(&ip, now)` (D-P-60's bucket) → 429.
@@ -702,34 +784,30 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - `acs` (arguments: `State`, `ClientIp(ip)`, `headers`, the path, `body: axum::body::Bytes`). Steps:
      1. `state.limits.saml_acs.check(&ip, now)` → 429.
      2. No SAML provider for the org → `ApiError::NotFound`.
-     3. `#[derive(Deserialize)] struct AcsForm { #[serde(rename = "SAMLResponse")] saml_response: String }` via `serde_urlencoded::from_bytes(&body)`. An error → `fail(LoginError::SamlInvalid)`.
-     4. `received = cetra_saml::decode_response(&form.saml_response)`. An error → log the class and `fail(SamlInvalid)`.
+     3. `#[derive(Deserialize)] struct AcsForm { #[serde(rename = "SAMLResponse")] saml_response: String }` via `serde_urlencoded::from_bytes(&body)`. An error → `refuse(LoginError::SamlInvalid)`.
+     4. `received = cetra_saml::decode_response(&form.saml_response)`. An error → log the class (`tracing::info!(target: "audit", org_id = %org, reason = ?e, "saml response refused")`) and `refuse(SamlInvalid)`.
      5. **Unsolicited** (`received.in_response_to()` is `None`):
-        - `named_cookie(&headers, SAML_RESTART_COOKIE).is_some()` → `fail(SamlInvalid)` (the loop guard).
-        - Otherwise `redirect(<start path>, [cookie(SAML_RESTART_COOKIE, "1", &format!("/api/auth/saml/{org}"), RESTART_MAX_AGE_SECS)])`. The start path is relative, `/api/auth/saml/{org}/start`.
-     6. `let id = in_response_to.to_owned();`, then `state.org_sso.with_pending(|t| t.take(&id, org, named_cookie(&headers, SAML_COOKIE).as_deref(), now))`. An `Err(_)` → `fail(SamlInvalid)`.
+        - `named_cookie(&headers, SAML_RESTART_COOKIE).is_some()` → `refuse(SamlInvalid)` (the loop guard).
+        - Otherwise `redirect(&sp.start_path, [cookie(SAML_RESTART_COOKIE, "1", &sp.saml_path, RESTART_MAX_AGE_SECS)])`.
+     6. `let id = in_response_to.to_owned();`, then `state.org_sso.with_pending(|t| t.take(&id, org, named_cookie(&headers, SAML_COOKIE).as_deref(), now))`. An `Err(_)` → `refuse(SamlInvalid)`. From here on, the entry is consumed, and failures use `fail`.
      7. Flags: `let enabled = state.org_sso.flags(org).is_some_and(|f| f.enabled); if !enabled && pending.test_owner.is_none()` → `fail(SsoUnavailable)`.
-     8. `let (entity, acs, _) = sp_urls(&state, org)`. Call `validate_response(&received, &ExpectedResponse { sp_entity_id: &entity, acs_url: &acs, idp: &provider.metadata, request_id: &id, now_ns: now, attributes: &provider.attributes })`:
+     8. Call `validate_response(&received, &ExpectedResponse { sp_entity_id: &sp.entity_id, acs_url: &sp.acs_url, idp: &saml.metadata, request_id: &id, now_ns: now, attributes: &saml.attributes })`:
         - `Err(ResponseError::EncryptedAssertion)` → `fail(SamlUnsupported)`;
         - any other `Err(e)` → `tracing::info!(target: "audit", org_id = %org, reason = ?e, "saml response refused")` and `fail(SamlInvalid)`.
-     9. `email`: `assertion.email.as_deref().and_then(normalize_email)` (the same function `finish` uses), else `fail(EmailNotVerified)`.
+     9. `email`: `assertion.email.as_deref().and_then(|e| crate::meta::users::normalize_email(e).ok())` (the function `finish` uses; it returns a `Result`), else `fail(EmailNotVerified)`.
      10. `sign_in_core(&state, SignIn { org, protocol: SsoProtocol::Saml, jit_role: org_provider.jit_role, subject: assertion.name_id, email, name: display_name(assertion.display_name), test: pending.test_owner.is_some(), test_owner: pending.test_owner, redirect: pending.redirect })`. An `Err(e)` → `fail(e)`.
      11. Success:
          - `start_session(&state, logged_in.user_id, user_agent, Some(ip), SessionOrigin::OrgProvider(org))`;
          - `tracing::info!(target: "audit", user_id = %logged_in.user_id, org_id = %org, provider = "saml", "login")`;
-         - `redirect(&logged_in.redirect, [clear(SAML_COOKIE, acs path), clear(SAML_RESTART_COOKIE, saml path), session_cookie])`, where `clear` is `cookie(name, "", path, 0)`.
-     - `fail(error: LoginError) -> Result<Response, ApiError>`: `Internal` → `Err(ApiError::Internal(..))`. Otherwise `redirect(&format!("/login?error={code}"), [clear(SAML_COOKIE, acs path)])`. The restart cookie is left in place, so a loop stops.
+         - `redirect(&logged_in.redirect, [clear(SAML_COOKIE, &sp.acs_path), clear(SAML_RESTART_COOKIE, &sp.saml_path), session_cookie])`, where `clear` is `cookie(name, "", path, 0)`.
+     - Two failure helpers. A hostile page can POST junk to the ACS, so nothing before a successful `take` may touch the victim's cookies:
+       - `refuse(error: LoginError) -> Result<Response, ApiError>`: `redirect(&format!("/login?error={code}"), std::iter::empty())`, with **no** `Set-Cookie`.
+       - `fail(error: LoginError, sp: &SpUrls)`: `Internal` → `Err(ApiError::Internal(..))`. Otherwise `redirect(&format!("/login?error={code}"), [clear(SAML_COOKIE, &sp.acs_path)])`. Only steps after a successful `take` use it. The restart cookie is left in place, so a loop stops.
    - `mod.rs`: `pub(crate) mod saml;`.
    - `access.rs`: after `routes.extend(crate::ee::org_sso::login::routes());`, add `routes.extend(crate::ee::org_sso::saml::routes());`.
 5. `login.rs`, `authorize`: replace SA2.3's temporary `unavailable()` arm for `ProviderKind::Saml(saml)` with `return crate::ee::org_sso::saml::begin(&state, route.org_id, saml, ip, test_owner, state_cookie::safe_redirect(query.redirect.as_deref())).await;`. That branch sits after the test-owner resolution and before the OIDC-only code.
 
-**Tests** (`saml.rs` tests module). Helpers in that module:
-- `begin_saml(app, cookie: Option<&str>) -> (String /*request id*/, String /*binder cookie value*/, TestResponse)`:
-  1. GET `/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme`.
-  2. Read `Location`, parse the URL, take `SAMLRequest`, base64-decode, raw-inflate (`flate2::read::DeflateDecoder`) and parse with `roxmltree`. If `roxmltree` is not a server dependency, use a byte search for `ID="` instead; do not add a dependency.
-  3. Take the `ID` attribute and the `cetra_saml` `Set-Cookie` value.
-- `post_acs(app, org, b64, cookies: &[&str]) -> TestResponse`: POST with `content-type: application/x-www-form-urlencoded` and body `SAMLResponse=<urlencoded b64>&RelayState=cetra`, with `Origin: https://idp.test` and the given cookies.
-- `options_for(app, org, request_id) -> ResponseOptions`: the test IdP defaults with `audiences = vec![entity]`, `recipient = acs`, `destination = Some(acs)`, and both `InResponseTo` values `= Some(request_id)`, from `sp_urls`. It also sets `name_id: "ada@acme.test"` and the email attribute `ada@acme.test`.
+**Tests** (`saml.rs` tests module), using `saml_app`, `configure_org_saml`, `begin_saml`, `post_acs` and `saml_options` from `test_support` (SA2.3).
 
 Cases:
 - `a_saml_user_signs_in_and_joins_with_the_jit_role`: `saml_app`, then `configure_org_saml(.., &[Idp], "acme.test", true, false)`, then begin and post.
@@ -740,7 +818,8 @@ Cases:
 - `the_authorize_redirect_carries_a_valid_authn_request`: Destination = `IDP_SSO_URL`, ACS URL, the 33-character ID, and the cookie attributes `HttpOnly`, `Secure`, `SameSite=None` and `Path=/api/auth/saml/<org>/acs`.
 - `the_acs_ignores_a_foreign_origin`: the POST with `Origin: https://evil.test` still signs in (no 403), and with a session cookie of another user present too.
 - `a_response_is_accepted_once`: the same POST again → `/login?error=saml_invalid`.
-- `a_missing_binder_is_invalid_and_keeps_the_entry`: POST without the cookie → `saml_invalid`, then the same POST with the cookie → signed in.
+- `a_missing_binder_is_invalid_and_keeps_the_entry`: POST without the cookie → `saml_invalid` with no `Set-Cookie`, then the same POST with the cookie → signed in.
+- `junk_posted_cross_site_does_not_clear_the_binder`: a POST with a garbage `SAMLResponse` → `saml_invalid` and no `Set-Cookie` header; then the real response → signed in.
 - `another_browsers_binder_is_invalid`: two begins, response for the first with the second's cookie → `saml_invalid`.
 - `a_restart_drops_pending_logins`: begin, then replace `app.state.org_sso` pending table contents via `with_pending(|t| *t = PendingTable::default())`, then post → `saml_invalid`.
 - `an_unsolicited_response_restarts_once`:
@@ -810,11 +889,11 @@ Cases:
    - `fn spawn_org_sso_saml_refresh(state: AppState) -> JoinHandle<()>`, a copy of `spawn_org_sso_recheck`'s shape: interval, `MissedTickBehavior::Skip`, the first tick consumed, `refresh_once`, an `info` with the counts only when something rotated or failed, `warn` on `MetaError`.
    - Push it inside the existing `if !state.config.restore_mode { … }` block, after the recheck task.
 
-**Tests** (in `saml_refresh.rs`; a loopback metadata server as in SA2.4, whose answer the test can change between runs):
+**Tests** (in `saml_refresh.rs`, with `test_support::MetadataServer`):
 - `a_rotated_certificate_is_picked_up`:
   - Save from the URL serving `[Idp]`, then switch the server to `[Idp, IdpNext]`.
   - Advance the manual clock one day plus one second, then `refresh_once` → `rotated == 1`.
-  - The view's `certificates_changed_at` is set, and a response signed by `IdpNext` now signs in (reuse SA2.5's helpers via `super::saml::tests`. If they are private, copy the minimal begin and post code).
+  - The view's `certificates_changed_at` is set, and a response signed by `IdpNext` now signs in (with `begin_saml`, `post_acs` and `saml_options` from `test_support`).
 - `a_changed_entity_id_is_refused_and_kept`: the server serves metadata with another entity ID → `failed == 1`, `refresh_error == "entity_id_changed"`, and the certificates are unchanged.
 - `a_failing_url_keeps_the_last_good_metadata`.
 - `a_recent_check_is_not_due`: running twice in the same day refreshes once.
@@ -831,31 +910,40 @@ Cases:
 
 **Goal:** the API contract, the contract tests, the golden data and the break-glass test cover SAML.
 
-**Edit:** `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/src/golden_tests/build.rs`, `crates/server/src/golden_tests/dump.rs`, `crates/server/src/admin.rs` (test only), `crates/server/src/http/access_suite.rs` (only if a test there fails on the new routes by design; then add the minimal expectation).
+**Edit:** `crates/server/src/api/openapi.rs`, `crates/server/tests/openapi.rs`, `crates/server/tests/api_examples.rs`, `crates/server/src/golden_tests/build.rs`, `crates/server/src/golden_tests/dump.rs`, `crates/server/src/admin.rs` (test only).
 
 **Steps:**
 
 1. `openapi.rs`:
    - Register the new schemas next to the org SSO ones: `SsoProtocol`, `OrgSsoSaml`, `OrgSsoCertificate`, `SamlAttributeNames`, `SamlRefreshError`, `OrgSsoSamlSp`, `PutOrgSamlProvider`.
-   - Add to `org_sso_paths` the operation `put_org_saml_provider` on `PUT /api/v1/orgs/{org}/sso/saml`, built like `put_org_sso_provider`: the same tag, parameters and security, `json_body("PutOrgSamlProvider")`, and `responses("200", json_of::<OrgSso>("The org's SSO settings."), &[400, 401, 403, 404, 409, 429, 503])`. The description names D-SA-18's sources, the `confirm_entity_id_change` rule, and the https requirement.
+   - Add to `org_sso_paths` the operation `put_org_saml_provider` on `PUT /api/v1/orgs/{org}/sso/saml`, built like `put_org_sso_provider`: the same tag, parameters and security, `json_body("PutOrgSamlProvider")`, and **the same error list as `put_org_sso_provider`** (copy its `responses(..)` call and change only the description). The description names D-SA-18's sources, the `confirm_entity_id_change` rule, and the https requirement.
    - Add a public auth group, after `post_sso_discover`, built like `get_sso_authorize`:
      - `get_saml_metadata` on `GET /api/auth/saml/{org_id}`: a path parameter `org_id` (string, "Org UUID"). Success `200` with content type `application/samlmetadata+xml` (a `ResponseBuilder` with `.content("application/samlmetadata+xml", Content::new(Some(string_schema())))`, mirroring `json_named`). Errors `&[404]`.
      - `get_saml_start` on `GET /api/auth/saml/{org_id}/start`: `responses("302", redirect_to("To the org's IdP, or to /login?error=sso_unavailable."), &[429, 503])`.
-     - `post_saml_acs` on `POST /api/auth/saml/{org_id}/acs`. Request body via a new helper `form_body(name)` that mirrors `json_body` with content type `application/x-www-form-urlencoded` and the schema `SamlAcsForm` (register a small `ToSchema` struct `SamlAcsForm { SAMLResponse: String, RelayState: Option<String> }` in `api/org_sso.rs`… that file belongs to SA2.4. Instead define the schema inline in `openapi.rs` with `ObjectBuilder` (two string properties, `SAMLResponse` required), registered under the name `SamlAcsForm`). Responses: `responses("302", redirect_to("To the saved page, the start URL for an unsolicited response, or /login?error=<code>."), &[404, 413, 429])`.
+     - `post_saml_acs` on `POST /api/auth/saml/{org_id}/acs`:
+       - A component schema named `SamlAcsForm`, built with `ObjectBuilder` (properties `SAMLResponse`: string, required; `RelayState`: string). Register it in the components map under that name wherever the document's schema set is assembled (read how `set.insert::<T>()` ends up in `components.schemas`, and insert this one by name the same way).
+       - A new helper `fn form_body(name: &str) -> RequestBody`, a copy of `json_body` with content type `application/x-www-form-urlencoded`. The request body is `form_body("SamlAcsForm")`, so it is a `$ref` to the component.
+       - Responses: `responses("302", redirect_to("To the saved page, the start URL for an unsolicited response, or /login?error=<code>."), &[404, 413, 429])`.
 
      All three use `.securities(Some(Vec::new()))`, or whatever the existing public auth operations use: copy `get_sso_authorize`.
    - The `get_oauth_callback` description's code list gains `saml_invalid` and `saml_unsupported` (D-SA-12). Keep the list's order and append them at the end.
 2. `tests/openapi.rs`:
    - Add the four operations to the hand-written table: `("put", "/api/v1/orgs/{org}/sso/saml", "put_org_saml_provider")`, `("get", "/api/auth/saml/{org_id}", "get_saml_metadata")`, `("get", "/api/auth/saml/{org_id}/start", "get_saml_start")`, `("post", "/api/auth/saml/{org_id}/acs", "post_saml_acs")`.
    - Add the three public ones to the public `matches!` list (security `[]`), and `put_org_saml_provider` to the session-only list next to `put_org_sso_provider`.
-   - Add their expected 4xx codes to the per-id ladder, matching step 1's lists.
-3. `golden_tests/build.rs`:
-   - After the org that has the OIDC provider, add a second golden org `beta` (slug `beta`, through the same helper the builder uses for orgs) with a SAML provider.
-   - Write it with `store::put_saml_provider`, using fixed values: entity ID `https://idp.beta.test/metadata`, SSO URL `https://idp.beta.test/sso`, the DER of `cetra_saml::test_idp::TestKey::Idp.certificate()`, `metadata_url: Some("https://idp.beta.test/metadata")`, the email attribute `mail`, and `refreshed_at` = the builder's fixed time. Then one verified domain `beta.test`.
+   - Add their expected 4xx codes to the per-id ladder: `put_org_saml_provider` exactly as `put_org_sso_provider`'s; `get_saml_metadata` `[404]`; `get_saml_start` `[429]` (plus 503 if the ladder lists 5xx; follow `get_sso_authorize`'s entry); `post_saml_acs` `[404, 413, 429]`.
+3. `tests/api_examples.rs` (about line 908): add `&& id != "get_saml_metadata"` (XML, not JSON) and `&& id != "get_saml_start"` (a redirect) to the exclusions next to `get_sso_authorize`.
+4. `golden_tests/build.rs`, after the SSO block of the golden org (about line 1030):
+   - `let saml_org = orgs::insert_org(conn, OrgId::new_v7(), "Golden SAML", "golden-saml", now).await?;` (the same `orgs::insert_org` the builder uses at line 422).
+   - `sso::put_saml_provider(conn, saml_org.id, Uuid::now_v7(), sso::SamlWrite { display_name: "Golden SAML".to_owned(), jit_role: JitRole::Viewer, metadata_url: Some("https://idp.golden.test/metadata".to_owned()), idp_entity_id: "https://idp.golden.test/metadata".to_owned(), sso_url: "https://idp.golden.test/sso".to_owned(), certificates: vec![cetra_saml::test_idp::TestKey::Idp.certificate().der().to_vec()], attributes: sso::SamlAttributes { email: Some("mail".to_owned()), ..Default::default() }, refreshed_at: Some(now) }, now).await?;`
+   - One verified domain `golden-saml.example.com` for `saml_org`, in the same `sso::insert_domain` shape as the golden org's.
 
-   `dump.rs`'s `sso_section`: add the SAML rows and the certificates, as hex SHA-256 rather than the DER, in the dump's existing style (read `sso_section` and follow it). `every_table_has_a_golden_row` then passes for both new tables.
-4. `admin.rs` tests: `org_sso_disable_turns_a_saml_provider_off`, the twin of `org_sso_disable_turns_a_provider_and_enforcement_off`, with `store::put_saml_provider` as the seed.
-5. `access_suite.rs`: no change is expected. Every principal gets 404 or 302 from the public SAML routes for the world's org, which has no SAML provider. If the suite needs an entry for a `Public` route that answers 404, add it where it lists comparable routes. Read the suite first, and change nothing if it passes by design.
+   `dump.rs`, `sso_section`:
+   - After the `"golden-org"` entry, read the second org with `crate::meta::orgs::org_by_slug(world.pool, "golden-saml")` and dump it under the key `"golden-saml"` with the same provider and domain shape.
+   - Add `"saml"`: `{ "idp_entity_id", "sso_url", "metadata_url", "attributes": {email, display_name, first_name, last_name}, "certificates": [hex SHA-256 of each DER], "refreshed": refreshed_at.is_some(), "refresh_error" }` from `sso::saml(pool, row.id)`. For OIDC rows it is `null`.
+
+   Other sections that list every org (orgs, entitlements, …) will show `golden-saml` too; that is expected. No server golden directory is committed before the first release (`RELEASES` is empty), so nothing else changes. `every_table_has_a_golden_row` then passes for both new tables.
+5. `admin.rs` tests: `org_sso_disable_turns_a_saml_provider_off`, the twin of `org_sso_disable_turns_a_provider_and_enforcement_off`, with `store::put_saml_provider` as the seed.
+6. `access_suite.rs` needs no change: every principal gets 404 or 302 from the public SAML routes for the world's org, which has no SAML provider, and public routes are `Allowed`.
 
 **Done when:** written and committed.
 
@@ -889,7 +977,8 @@ Cases:
      - the validation contract by reference to D-SA-9 and `cetra-saml`;
      - the attributes and JIT (D-SA-6);
      - identities (D-SA-13);
-     - no SLO (D-SA-16).
+     - no SLO (D-SA-16);
+     - one SAML login in flight per browser and org: a second login started in another tab replaces the binder cookie, and the first one then fails with `saml_invalid`.
 3. **Spec 09**:
    - Auth table: add rows for the three `/api/auth/saml/{org_id}` routes (public; the ACS without Origin; 256 KiB form).
    - Org SSO row (line 73): add `PUT /api/v1/orgs/{org}/sso/saml` with its rules, and the response's `protocol`, `saml` and `saml_sp`.
