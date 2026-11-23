@@ -248,13 +248,14 @@ pub(crate) struct ContextFields {
 /// Fill the scalar and context columns. Rule 3: these columns are filled for every kind.
 ///
 /// `scope_name` is the span's instrumentation scope name (`""` when absent);
-/// the Mirascope model-prefix rule is gated on it. `_conventions` is the
-/// conventions detected on the span; no rule reads it yet.
+/// the Mirascope model-prefix rule is gated on it. `conventions` is the
+/// conventions detected on the span; VoltAgent's model and session fills
+/// (D-IN-6) are gated on it.
 pub(crate) fn fill(
     bag: &mut AttrBag<'_>,
     resource: &ResourceView<'_>,
     scope_name: &str,
-    _conventions: &[Convention],
+    conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> ContextFields {
     let request_model = string_field(bag, resource, REQUEST_MODEL);
@@ -262,10 +263,12 @@ pub(crate) fn fill(
     // Stripped before `provider` consumes `gen_ai.provider.name`.
     let request_model = mirascope_model(bag, scope_name, request_model);
     let response_model = mirascope_model(bag, scope_name, response_model);
+    let request_model = voltagent_model(bag, conventions, request_model);
     let provider = provider(bag, resource);
     let operation = string_field(bag, resource, OPERATION);
     let request_params = request_params(bag, warnings);
     let session_id = string_field(bag, resource, SESSION_ID);
+    let session_id = voltagent_session(bag, conventions, session_id);
     let user_id = string_field(bag, resource, USER_ID);
     let environment = string_field(bag, resource, ENVIRONMENT);
     let release = string_field(bag, resource, RELEASE);
@@ -377,6 +380,56 @@ fn mirascope_model(bag: &AttrBag<'_>, scope_name: &str, model: Option<String>) -
         Some(bare) if !bare.is_empty() => Some(bare.to_owned()),
         _ => Some(model),
     }
+}
+
+/// V3 (D-IN-6): on a `voltagent` span whose model is still empty, `llm.model`
+/// (the `llm` span), then `ai.model.name` (the agent span), fill it. Not rows
+/// in [`REQUEST_MODEL`]: OpenInference and OpenLLMetry use the `llm.` namespace
+/// too, so the keys are read only here (D-IN-23). A key is consumed when it
+/// fills the column.
+fn voltagent_model(
+    bag: &mut AttrBag<'_>,
+    conventions: &[Convention],
+    model: Option<String>,
+) -> Option<String> {
+    if model.is_some() || !conventions.contains(&Convention::Voltagent) {
+        return model;
+    }
+    for key in ["llm.model", "ai.model.name"] {
+        if let Some(text) = bag
+            .get(key)
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())
+        {
+            bag.take(key);
+            return Some(text.to_owned());
+        }
+    }
+    model
+}
+
+/// V6 (D-IN-6): on a `voltagent` span whose session is still empty,
+/// `conversation.id`, else `voltagent.conversation_id`, fills it. Not rows in
+/// [`SESSION_ID`]: the keys are VoltAgent's, and read only on its spans.
+fn voltagent_session(
+    bag: &mut AttrBag<'_>,
+    conventions: &[Convention],
+    session: Option<String>,
+) -> Option<String> {
+    if session.is_some() || !conventions.contains(&Convention::Voltagent) {
+        return session;
+    }
+    for key in ["conversation.id", "voltagent.conversation_id"] {
+        if let Some(text) = bag
+            .get(key)
+            .and_then(as_str)
+            .filter(|text| !text.is_empty())
+        {
+            bag.take(key);
+            return Some(text.to_owned());
+        }
+    }
+    session
 }
 
 /// The provider after the endpoint rule (D-IN-2, spec 02 § Provider from the endpoint).
@@ -855,6 +908,18 @@ mod tests {
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let view = ResourceView::new(&[]);
         let fields = fill(&mut bag, &view, scope, &[], &mut warnings);
+        (fields, bag)
+    }
+
+    fn filled_as<'a>(
+        scope: &str,
+        attrs: &'a [KeyValue],
+        conventions: &[Convention],
+    ) -> (ContextFields, AttrBag<'a>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let view = ResourceView::new(&[]);
+        let fields = fill(&mut bag, &view, scope, conventions, &mut warnings);
         (fields, bag)
     }
 
@@ -1466,6 +1531,113 @@ mod tests {
         let (fields, bag) = filled(&attrs, &[]);
         assert_eq!(fields.session_id.as_deref(), Some("sess-1"));
         assert_eq!(bag.state("mirascope.ops.session.id"), Some(Use::Consumed));
+    }
+
+    #[test]
+    fn voltagent_model_fills_an_empty_request_model_on_voltagent_spans() {
+        // V3 (D-IN-6): `llm.model` on the `llm` span, `ai.model.name` on the
+        // agent span, each after the sources of the table.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [string_attr("llm.model", "gpt-4o-mini")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Consumed));
+
+        let attrs = [string_attr("ai.model.name", "gpt-4o-mini")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("ai.model.name"), Some(Use::Consumed));
+        // Neither is a response model.
+        assert_eq!(fields.response_model, None);
+
+        // `llm.model` comes first; an empty value is skipped.
+        let attrs = [
+            string_attr("llm.model", "gpt-oss-120b"),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-oss-120b"));
+        assert_eq!(bag.state("ai.model.name"), Some(Use::Unread));
+
+        let attrs = [
+            string_attr("llm.model", ""),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        // The table's sources win, and leave the VoltAgent keys unread.
+        let attrs = [
+            string_attr("gen_ai.request.model", "genai-model"),
+            string_attr("llm.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("genai-model"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        let attrs = [
+            string_attr("llm.model_name", "openinference-model"),
+            string_attr("llm.model", "gpt-4o-mini"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.request_model.as_deref(), Some("openinference-model"));
+        assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+
+        // Without the `voltagent` convention `llm.model` is no model source:
+        // the span stays OpenInference (D-IN-23).
+        let attrs = [
+            string_attr("llm.model", "gpt-4o-mini"),
+            string_attr("ai.model.name", "gpt-4o-mini"),
+        ];
+        for conventions in [vec![], vec![Convention::Openinference, Convention::Vercel]] {
+            let (fields, bag) = filled_as("other.framework", &attrs, &conventions);
+            assert_eq!(fields.request_model, None);
+            assert_eq!(bag.state("llm.model"), Some(Use::Unread));
+            assert_eq!(bag.state("ai.model.name"), Some(Use::Unread));
+        }
+    }
+
+    #[test]
+    fn voltagent_session_fills_an_empty_session_on_voltagent_spans() {
+        // V6 (D-IN-6): `conversation.id`, else `voltagent.conversation_id`.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [string_attr("conversation.id", "conv-1")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Consumed));
+
+        let attrs = [string_attr("voltagent.conversation_id", "conv-2")];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-2"));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Consumed));
+
+        let attrs = [
+            string_attr("conversation.id", "conv-1"),
+            string_attr("voltagent.conversation_id", "conv-2"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("conv-1"));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Unread));
+
+        // The table's sources win.
+        let attrs = [
+            string_attr("session.id", "otel-session"),
+            string_attr("conversation.id", "conv-1"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, VOLTAGENT);
+        assert_eq!(fields.session_id.as_deref(), Some("otel-session"));
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+
+        // Without the `voltagent` convention neither key is a session source.
+        let attrs = [
+            string_attr("conversation.id", "conv-1"),
+            string_attr("voltagent.conversation_id", "conv-2"),
+        ];
+        let (fields, bag) = filled_as("@voltagent/core", &attrs, &[Convention::Openinference]);
+        assert_eq!(fields.session_id, None);
+        assert_eq!(bag.state("conversation.id"), Some(Use::Unread));
+        assert_eq!(bag.state("voltagent.conversation_id"), Some(Use::Unread));
     }
 
     #[test]

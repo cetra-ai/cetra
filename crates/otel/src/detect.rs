@@ -8,9 +8,15 @@ use opentelemetry_proto::tonic::trace::v1::span::Event;
 
 use crate::bag::{AttrBag, is_decimal_index};
 
-const PRECEDENCE: [Convention; 8] = [
+/// VoltAgent's instrumentation scope names start with this (`@voltagent/core`
+/// by default). `VoltAgentObservability({ instrumentationScopeName })` can
+/// rename the scope, and then only the `voltagent.*` keys detect it.
+const VOLTAGENT_SCOPE: &str = "@voltagent/";
+
+const PRECEDENCE: [Convention; 9] = [
     Convention::Cetra,
     Convention::Genai,
+    Convention::Voltagent,
     Convention::Openinference,
     Convention::Vercel,
     Convention::Openllmetry,
@@ -21,16 +27,24 @@ const PRECEDENCE: [Convention; 8] = [
 
 /// Conventions present on this span, in precedence order, without duplicates.
 ///
-/// `_scope_name` is the span's instrumentation scope name, `""` when absent.
-/// No rule reads it yet.
-pub(crate) fn detect(bag: &AttrBag<'_>, events: &[Event], _scope_name: &str) -> Vec<Convention> {
+/// `scope_name` is the span's instrumentation scope name, `""` when absent.
+/// Only VoltAgent is detected through it.
+pub(crate) fn detect(bag: &AttrBag<'_>, events: &[Event], scope_name: &str) -> Vec<Convention> {
     let mut present = [false; PRECEDENCE.len()];
+    // Only VoltAgent's root and workflow spans carry `voltagent.*`; the scope
+    // name is the one marker every VoltAgent span has (D-IN-23).
+    if scope_name.starts_with(VOLTAGENT_SCOPE) {
+        mark(&mut present, Convention::Voltagent);
+    }
     for key in bag.keys() {
         if key.starts_with("cetra.") {
             mark(&mut present, Convention::Cetra);
         }
         if key.starts_with("gen_ai.") && !legacy_numbered(key) {
             mark(&mut present, Convention::Genai);
+        }
+        if key.starts_with("voltagent.") {
+            mark(&mut present, Convention::Voltagent);
         }
         if openinference(key) {
             mark(&mut present, Convention::Openinference);
@@ -68,12 +82,13 @@ fn slot(convention: Convention) -> usize {
     match convention {
         Convention::Cetra => 0,
         Convention::Genai => 1,
-        Convention::Openinference => 2,
-        Convention::Vercel => 3,
-        Convention::Openllmetry => 4,
-        Convention::Langfuse => 5,
-        Convention::Laminar => 6,
-        Convention::GoogleAdk => 7,
+        Convention::Voltagent => 2,
+        Convention::Openinference => 3,
+        Convention::Vercel => 4,
+        Convention::Openllmetry => 5,
+        Convention::Langfuse => 6,
+        Convention::Laminar => 7,
+        Convention::GoogleAdk => 8,
     }
 }
 
@@ -117,6 +132,10 @@ mod tests {
     use crate::warn::Warnings;
 
     fn detect_keys(keys: &[&str]) -> Vec<Convention> {
+        detect_in_scope("", keys)
+    }
+
+    fn detect_in_scope(scope: &str, keys: &[&str]) -> Vec<Convention> {
         let attrs: Vec<KeyValue> = keys
             .iter()
             .map(|key| KeyValue {
@@ -128,7 +147,7 @@ mod tests {
             })
             .collect();
         let bag = AttrBag::new(&attrs, &mut Warnings::default());
-        detect(&bag, &[], "")
+        detect(&bag, &[], scope)
     }
 
     fn detect_event(name: &str) -> Vec<Convention> {
@@ -237,5 +256,77 @@ mod tests {
     fn an_empty_span_has_no_convention() {
         assert_eq!(detect_keys(&[]), Vec::new());
         assert_eq!(detect_event("exception"), Vec::new());
+    }
+
+    #[test]
+    fn voltagent_is_detected_by_its_keys_and_by_its_scope() {
+        // D-IN-23 item 9: only the root and workflow spans carry `voltagent.*`.
+        assert_eq!(
+            detect_keys(&["voltagent.operation_id"]),
+            vec![Convention::Voltagent]
+        );
+        assert_eq!(
+            detect_keys(&["voltagent.conversation_id"]),
+            vec![Convention::Voltagent]
+        );
+        assert_eq!(detect_keys(&["voltagent"]), Vec::new());
+        assert_eq!(detect_keys(&["voltagent-x.operation_id"]), Vec::new());
+        // The scope name marks every VoltAgent span.
+        assert_eq!(
+            detect_in_scope("@voltagent/core", &[]),
+            vec![Convention::Voltagent]
+        );
+        assert_eq!(
+            detect_in_scope("@voltagent/logger", &["entity.type"]),
+            vec![Convention::Voltagent]
+        );
+        // Nothing else starts with it.
+        for scope in ["@voltagent", "voltagent/core", "x@voltagent/core", ""] {
+            assert_eq!(detect_in_scope(scope, &[]), Vec::new(), "{scope:?}");
+        }
+    }
+
+    #[test]
+    fn a_span_with_llm_keys_and_no_voltagent_signal_stays_openinference() {
+        assert_eq!(
+            detect_keys(&["llm.model", "llm.usage.prompt_tokens", "span.type"]),
+            vec![Convention::Openinference]
+        );
+        assert_eq!(
+            detect_in_scope("other.framework", &["llm.model", "entity.type"]),
+            vec![Convention::Openinference]
+        );
+        assert_eq!(
+            detect_keys(&["ai.model.name", "entity.type"]),
+            vec![Convention::Vercel]
+        );
+    }
+
+    #[test]
+    fn voltagent_ranks_after_genai_and_before_openinference_and_vercel() {
+        assert_eq!(
+            detect_keys(&["llm.model", "voltagent.operation_id"]),
+            vec![Convention::Voltagent, Convention::Openinference]
+        );
+        assert_eq!(
+            detect_in_scope("@voltagent/core", &["llm.usage.prompt_tokens"]),
+            vec![Convention::Voltagent, Convention::Openinference]
+        );
+        assert_eq!(
+            detect_keys(&["voltagent.operation_id", "ai.model.name"]),
+            vec![Convention::Voltagent, Convention::Vercel]
+        );
+        assert_eq!(
+            detect_keys(&["llm.model", "gen_ai.request.model", "voltagent.label"]),
+            vec![
+                Convention::Genai,
+                Convention::Voltagent,
+                Convention::Openinference
+            ]
+        );
+        assert_eq!(
+            detect_keys(&["cetra.span.kind", "voltagent.label"]),
+            vec![Convention::Cetra, Convention::Voltagent]
+        );
     }
 }

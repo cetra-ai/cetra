@@ -28357,6 +28357,7 @@
         "enum": [
           "cetra",
           "genai",
+          "voltagent",
           "openinference",
           "openllmetry",
           "vercel",

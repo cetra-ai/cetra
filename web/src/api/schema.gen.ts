@@ -4927,7 +4927,7 @@ export interface components {
          *     Spec 01 `conventions` and spec 02 § Convention detection.
          * @enum {string}
          */
-        Convention: "cetra" | "genai" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
+        Convention: "cetra" | "genai" | "voltagent" | "openinference" | "openllmetry" | "vercel" | "langfuse" | "laminar" | "google_adk";
         /**
          * @description Where a span's cost came from.
          *

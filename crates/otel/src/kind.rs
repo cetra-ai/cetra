@@ -13,17 +13,20 @@ use crate::value::as_str;
 /// Kind of one span. Missing and unrecognized values fall through to `span`.
 ///
 /// `scope_name` is the span's instrumentation scope name (`""` when absent);
-/// the Agent Framework and Mirascope rows are gated on it. `_conventions` is
-/// the conventions detected on the span; no row reads it yet.
+/// the Agent Framework and Mirascope rows are gated on it. `conventions` is
+/// the conventions detected on the span; the VoltAgent row is gated on it.
 pub(crate) fn span_kind(
     bag: &mut AttrBag<'_>,
     scope_name: &str,
-    _conventions: &[Convention],
+    conventions: &[Convention],
 ) -> SpanKind {
     if let Some(kind) = decide(bag, "cetra.span.kind", |text| SpanKind::parse(text).ok()) {
         return kind;
     }
     if let Some(kind) = decide(bag, "gen_ai.operation.name", genai_operation) {
+        return kind;
+    }
+    if let Some(kind) = voltagent(bag, conventions) {
         return kind;
     }
     if let Some(kind) = decide(bag, "mastra.span.type", mastra) {
@@ -123,6 +126,30 @@ fn genai_operation(text: &str) -> Option<SpanKind> {
 fn mastra(text: &str) -> Option<SpanKind> {
     Some(match text {
         "model_generation" | "model_step" | "processor_run" | "workflow_step" => SpanKind::Chain,
+        _ => return None,
+    })
+}
+
+/// VoltAgent's rows (V2, D-IN-6, D-IN-23 item 9), only on a `voltagent` span:
+/// `span.type` `llm` and `tool` decide, and only without a `span.type` does
+/// `entity.type` `agent` decide `agent`. The other values the exporter writes
+/// (`memory`, `guardrail`, `workflow-step`, …) wait for a captured case.
+fn voltagent(bag: &mut AttrBag<'_>, conventions: &[Convention]) -> Option<SpanKind> {
+    if !conventions.contains(&Convention::Voltagent) {
+        return None;
+    }
+    if present(bag, "span.type") {
+        return decide(bag, "span.type", voltagent_span_type);
+    }
+    decide(bag, "entity.type", |text| {
+        (text == "agent").then_some(SpanKind::Agent)
+    })
+}
+
+fn voltagent_span_type(text: &str) -> Option<SpanKind> {
+    Some(match text {
+        "llm" => SpanKind::Llm,
+        "tool" => SpanKind::Tool,
         _ => return None,
     })
 }
@@ -469,6 +496,82 @@ mod tests {
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
         assert_eq!(span_kind(&mut bag, "mirascope.ops", &[]), SpanKind::Span);
         assert_eq!(bag.state("mirascope.type"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn voltagent_span_type_and_entity_type_decide_only_on_voltagent_spans() {
+        // V2 (D-IN-6): `span.type` first, `entity.type` only without it.
+        let llm = [
+            string_attr("span.type", "llm"),
+            string_attr("entity.type", "agent"),
+        ];
+        let mut bag = AttrBag::new(&llm, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            SpanKind::Llm
+        );
+        assert_eq!(bag.state("span.type"), Some(Use::Consumed));
+        assert_eq!(bag.state("entity.type"), Some(Use::Unread));
+
+        let tool = [string_attr("span.type", "tool")];
+        let mut bag = AttrBag::new(&tool, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            SpanKind::Tool
+        );
+
+        let agent = [string_attr("entity.type", "agent")];
+        let mut bag = AttrBag::new(&agent, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+            SpanKind::Agent
+        );
+        assert_eq!(bag.state("entity.type"), Some(Use::Consumed));
+
+        // The other values the exporter writes do not decide, and `entity.type`
+        // does not rescue a span that carries an unmapped `span.type`.
+        for text in ["memory", "guardrail", "workflow-step", "summary"] {
+            let attrs = [
+                string_attr("span.type", text),
+                string_attr("entity.type", "agent"),
+            ];
+            let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+            assert_eq!(
+                span_kind(&mut bag, "@voltagent/core", &[Convention::Voltagent]),
+                SpanKind::Span,
+                "{text}"
+            );
+            assert_eq!(bag.state("span.type"), Some(Use::Unread), "{text}");
+        }
+
+        // Without the `voltagent` convention the row does not apply.
+        let attrs = [
+            string_attr("span.type", "llm"),
+            string_attr("entity.type", "agent"),
+        ];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(span_kind(&mut bag, "@voltagent/core", &[]), SpanKind::Span);
+        assert_eq!(bag.state("span.type"), Some(Use::Unread));
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "", &[Convention::Openinference]),
+            SpanKind::Span
+        );
+        assert_eq!(bag.state("entity.type"), Some(Use::Unread));
+
+        // The operation row ahead of it still decides first.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "chat"),
+            string_attr("span.type", "tool"),
+        ];
+        assert_eq!(
+            span_kind(
+                &mut AttrBag::new(&attrs, &mut Warnings::default()),
+                "@voltagent/core",
+                &[Convention::Voltagent]
+            ),
+            SpanKind::Llm
+        );
     }
 
     #[test]

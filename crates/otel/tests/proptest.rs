@@ -53,6 +53,7 @@ const PREFIXES: &[&str] = &[
     "traceloop.",
     "langfuse.",
     "lmnr.",
+    "voltagent.",
     "gcp.vertex.agent.",
     "cetra.",
     "embedding.",
@@ -114,9 +115,10 @@ const GENAI_EVENTS: &[&str] = &[
     "gen_ai.client.inference.operation.details",
 ];
 
-const PRECEDENCE: [Convention; 8] = [
+const PRECEDENCE: [Convention; 9] = [
     Convention::Cetra,
     Convention::Genai,
+    Convention::Voltagent,
     Convention::Openinference,
     Convention::Vercel,
     Convention::Openllmetry,

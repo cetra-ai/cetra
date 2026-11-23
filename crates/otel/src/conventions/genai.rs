@@ -280,8 +280,11 @@ fn strands_messages(ctx: &mut ReadContext<'_, '_>, input: bool) -> Option<(Paylo
         Some("chat" | "execute_event_loop_cycle") => {
             strands_conversation(events, ctx.warnings, input)
         }
+        // An agent span's input is its system and user messages, read as on a
+        // `chat` span. Its output stays the plain-string choice (row 6).
+        Some("invoke_agent") if input => strands_conversation(events, ctx.warnings, input),
+        Some("invoke_agent") => strands_agent(events),
         Some("execute_tool") => strands_tool(events, ctx.warnings, input),
-        Some("invoke_agent") => strands_agent(events, input),
         _ => None,
     }
 }
@@ -350,10 +353,7 @@ fn strands_tool(events: &[Event], warnings: &mut Warnings, input: bool) -> Optio
 
 /// Row 6: an `invoke_agent` span reads its choice's plain-string message as
 /// its output, as is.
-fn strands_agent(events: &[Event], input: bool) -> Option<(Payload, bool)> {
-    if input {
-        return None;
-    }
+fn strands_agent(events: &[Event]) -> Option<(Payload, bool)> {
     let text = find_event(events, CHOICE)
         .and_then(|event| event_attr(event, "message"))
         .and_then(as_str)?;
@@ -512,9 +512,10 @@ fn payload_events(ctx: &ReadContext<'_, '_>) -> Vec<usize> {
 /// `operation`.
 fn strands_places(operation: &str, name: &str) -> bool {
     match operation {
-        "chat" | "execute_event_loop_cycle" => event_role(name).is_some() || name == CHOICE,
+        "chat" | "execute_event_loop_cycle" | "invoke_agent" => {
+            event_role(name).is_some() || name == CHOICE
+        }
         "execute_tool" => name == "gen_ai.tool.message" || name == CHOICE,
-        "invoke_agent" => name == CHOICE,
         _ => false,
     }
 }
@@ -826,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn strands_invoke_agent_reads_the_choice_text_as_its_output() {
+    fn strands_invoke_agent_reads_its_messages_as_input_and_the_choice_text_as_output() {
         let attrs = [string_attr("gen_ai.operation.name", "invoke_agent")];
         let events = [
             event(
@@ -846,16 +847,59 @@ mod tests {
             ),
         ];
         let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Agent);
-        // The table places the message events of an agent span nowhere: its
-        // input stays to the higher sources, which legacy mode has none of,
-        // and those events stay in `events` (only the choice is consumed).
-        assert!(io.input.is_none());
+        let Payload::Messages(messages) = io.input.expect("input") else {
+            panic!("expected messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            concat!(
+                r#"[{"role":"system","parts":[{"type":"text","content":"You are a weather bot."}]},"#,
+                r#"{"role":"user","parts":[{"type":"text","content":"What is the weather in Paris?"}]}]"#
+            )
+        );
         assert_eq!(
             io.output,
             Some(Payload::Text("It is 18C and sunny in Paris. ".to_owned()))
         );
         assert!(io.errors.is_empty());
-        assert_eq!(io.events, [2]);
+        // The message events and the choice are all payload sources.
+        assert_eq!(io.events, [0, 1, 2]);
+    }
+
+    #[test]
+    fn strands_invoke_agent_input_is_the_message_events_and_not_the_choice() {
+        // Amendment K's table: an agent span's message events are its input,
+        // and its choice is the output only, never a message.
+        let attrs = [string_attr("gen_ai.operation.name", "invoke_agent")];
+        let events = [
+            event(
+                "gen_ai.user.message",
+                &[("content", r#"[{"text": "What is the weather in Paris?"}]"#)],
+            ),
+            event(
+                "gen_ai.choice",
+                &[("finish_reason", "end_turn"), ("message", "18C")],
+            ),
+        ];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Agent);
+        let Payload::Messages(messages) = io.input.expect("input") else {
+            panic!("expected messages");
+        };
+        assert_eq!(messages.len(), 1);
+        assert_eq!(io.output, Some(Payload::Text("18C".to_owned())));
+        assert_eq!(io.events, [0, 1]);
+    }
+
+    #[test]
+    fn strands_invoke_agent_with_a_non_converse_message_follows_the_failure_path() {
+        let attrs = [string_attr("gen_ai.operation.name", "invoke_agent")];
+        let events = [event(
+            "gen_ai.user.message",
+            &[("content", "plain text, not blocks")],
+        )];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Agent);
+        assert_eq!(io.errors, ["messages:genai:input"]);
+        assert!(matches!(io.input, Some(Payload::Json(_))));
     }
 
     #[test]

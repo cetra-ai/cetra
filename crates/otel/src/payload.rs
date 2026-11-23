@@ -94,9 +94,8 @@ pub(crate) struct ReadContext<'a, 'b> {
     /// Instrumentation scope name, `""` when absent. The GenAI reader gates
     /// its Pydantic AI, Mirascope and Strands rules on it.
     pub scope: &'a str,
-    /// Conventions detected on the span, in precedence order. No reader uses
-    /// it yet.
-    #[allow(dead_code)]
+    /// Conventions detected on the span, in precedence order. The VoltAgent
+    /// reader gates every one of its rules on it.
     pub conventions: &'a [Convention],
     pub warnings: &'a mut Warnings,
 }
@@ -401,12 +400,13 @@ fn rank(convention: Convention) -> usize {
     match convention {
         Convention::Cetra => 0,
         Convention::Genai => 1,
-        Convention::Openinference => 2,
-        Convention::Vercel => 3,
-        Convention::Openllmetry => 4,
-        Convention::Langfuse => 5,
-        Convention::Laminar => 6,
-        Convention::GoogleAdk => 7,
+        Convention::Voltagent => 2,
+        Convention::Openinference => 3,
+        Convention::Vercel => 4,
+        Convention::Openllmetry => 5,
+        Convention::Langfuse => 6,
+        Convention::Laminar => 7,
+        Convention::GoogleAdk => 8,
     }
 }
 

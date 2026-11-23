@@ -2,7 +2,7 @@
 //!
 //! Spec 02 § Input and output. cetra and GenAI are N13. OpenInference is N18.
 //! Vercel is N19. OpenLLMetry is N20. Langfuse and Laminar are N21.
-//! Google ADK is N22.
+//! Google ADK is N22. VoltAgent is IN4.7.
 
 mod adk;
 mod cetra;
@@ -12,6 +12,7 @@ mod langfuse;
 pub(crate) mod openinference;
 mod openllmetry;
 mod vercel;
+mod voltagent;
 
 use cetra_core::enums::Convention;
 use cetra_core::message::{Message, Part};
@@ -26,8 +27,8 @@ use crate::payload::{
 use crate::value::{as_str, to_json};
 use crate::warn::Warnings;
 
-/// cetra, then GenAI, then OpenInference, then Vercel, then OpenLLMetry,
-/// then Langfuse, then Laminar, then Google ADK.
+/// cetra, then GenAI, then VoltAgent, then OpenInference, then Vercel, then
+/// OpenLLMetry, then Langfuse, then Laminar, then Google ADK.
 pub(crate) const READERS: &[ConventionPayload] = &[
     ConventionPayload {
         convention: Convention::Cetra,
@@ -36,6 +37,10 @@ pub(crate) const READERS: &[ConventionPayload] = &[
     ConventionPayload {
         convention: Convention::Genai,
         read: genai::read,
+    },
+    ConventionPayload {
+        convention: Convention::Voltagent,
+        read: voltagent::read,
     },
     ConventionPayload {
         convention: Convention::Openinference,

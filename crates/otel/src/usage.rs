@@ -313,14 +313,15 @@ pub(crate) struct Usage {
 
 /// Resolve token columns. On any other kind the usage attributes stay unread.
 ///
-/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
-/// and `_conventions` the conventions detected on it. No row reads them yet.
+/// `_scope_name` is the span's instrumentation scope name (`""` when absent);
+/// no row reads it. `conventions` is the conventions detected on the span;
+/// VoltAgent's counts (V4) are gated on it.
 pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     kind: SpanKind,
     provider: Option<&str>,
     _scope_name: &str,
-    _conventions: &[Convention],
+    conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Usage {
     if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
@@ -418,6 +419,28 @@ pub(crate) fn usage(
         metadata.as_ref().and_then(|metadata| metadata.total),
     );
 
+    // V4: VoltAgent's own counts, after the generic extraction (D-IN-6). Each
+    // key is consumed only when it fills its column.
+    let voltagent = voltagent_usage(bag, kind, conventions, warnings);
+    let input = match input {
+        Some(found) => Some(found),
+        None => {
+            take_count(bag, voltagent.input).map(|value| (value, Inclusive::Yes, Inclusive::Yes))
+        }
+    };
+    let output = match output {
+        Some(found) => Some(found),
+        None => {
+            take_count(bag, voltagent.output).map(|value| (value, Inclusive::Yes, Inclusive::Yes))
+        }
+    };
+    if cache_read.is_none() {
+        cache_read = take_count(bag, voltagent.cache_read);
+    }
+    if reasoning.is_none() {
+        reasoning = take_count(bag, voltagent.reasoning);
+    }
+
     let mut input_tokens = input.map(|(value, _, _)| value);
     let mut input_inclusive = input
         .map(|(_, semantics, _)| input_is_inclusive(semantics, legacy))
@@ -489,6 +512,73 @@ fn gemini_usage(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<GeminiUsag
         cache_read: detail_count(object, &["cached_content_token_count"], warnings),
         reasoning: detail_count(object, &["thoughts_token_count"], warnings),
     })
+}
+
+/// VoltAgent's counts (V4), one per column they may fill. Read, not consumed:
+/// [`take_count`] consumes the key that fills its column.
+#[derive(Debug, Default)]
+struct VoltagentUsage {
+    input: Option<Counted>,
+    output: Option<Counted>,
+    cache_read: Option<Counted>,
+    reasoning: Option<Counted>,
+}
+
+/// One count and the key it came from.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    key: &'static str,
+    value: i64,
+}
+
+/// V4 (D-IN-6): `llm.usage.*` on `llm` spans of the `voltagent` convention.
+///
+/// Not rows in the tables above: OpenInference and OpenLLMetry use the `llm.`
+/// namespace too, so only a `voltagent` span reads these keys (D-IN-23). The
+/// input includes the cache and the output the reasoning, like the GenAI row
+/// of the token table, so nothing is added back. `llm.usage.total_tokens` is
+/// already a total source. The root agent span's `usage.*` (the sum of every
+/// step) stay in `attributes`: rule 3.
+fn voltagent_usage(
+    bag: &AttrBag<'_>,
+    kind: SpanKind,
+    conventions: &[Convention],
+    warnings: &mut Warnings,
+) -> VoltagentUsage {
+    if kind != SpanKind::Llm || !conventions.contains(&Convention::Voltagent) {
+        return VoltagentUsage::default();
+    }
+    VoltagentUsage {
+        input: one_count(bag, "llm.usage.prompt_tokens", warnings),
+        output: one_count(bag, "llm.usage.completion_tokens", warnings),
+        cache_read: one_count(bag, "llm.usage.cached_tokens", warnings),
+        reasoning: one_count(bag, "llm.usage.reasoning_tokens", warnings),
+    }
+}
+
+/// One count from one key, read but not consumed. As for a table source
+/// (rule 20): an empty string is absent, and an unusable number is skipped,
+/// left unread and warned.
+fn one_count(bag: &AttrBag<'_>, key: &'static str, warnings: &mut Warnings) -> Option<Counted> {
+    let value = bag.get(key)?;
+    if as_str(value).is_some_and(str::is_empty) {
+        return None;
+    }
+    match as_i64(value) {
+        Ok(Some(value)) => Some(Counted { key, value }),
+        Ok(None) => None,
+        Err(InvalidNumber) => {
+            warnings.add(Warning::InvalidNumber);
+            None
+        }
+    }
+}
+
+/// The value of a count that fills its column, and consumes its key.
+fn take_count(bag: &mut AttrBag<'_>, count: Option<Counted>) -> Option<i64> {
+    let count = count?;
+    bag.take(count.key);
+    Some(count.value)
 }
 
 /// Time to first token, in nanoseconds, for any span kind.
@@ -1283,6 +1373,115 @@ mod tests {
         assert_eq!(usage, Usage::default());
         assert_eq!(bag.state("gen_ai.usage.input_tokens"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.usage.output_tokens"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn voltagent_counts_fill_their_columns_and_are_consumed() {
+        // V4 (D-IN-6): input includes cache, output includes reasoning, so
+        // nothing is added back.
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+            int_attr("llm.usage.cached_tokens", 64),
+            int_attr("llm.usage.reasoning_tokens", 4),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            None,
+            "@voltagent/core",
+            VOLTAGENT,
+            &mut warnings,
+        );
+        assert_eq!(counts.input_tokens, Some(131));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(counts.cache_read_tokens, Some(64));
+        assert_eq!(counts.reasoning_tokens, Some(4));
+        for key in [
+            "llm.usage.prompt_tokens",
+            "llm.usage.completion_tokens",
+            "llm.usage.cached_tokens",
+            "llm.usage.reasoning_tokens",
+        ] {
+            assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_voltagent_key_that_does_not_fill_its_column_stays_unread() {
+        const VOLTAGENT: &[Convention] = &[Convention::Voltagent];
+        // The generic `gen_ai.usage.input_tokens` wins the input column, so
+        // `llm.usage.prompt_tokens` stays unread.
+        let attrs = [
+            int_attr("gen_ai.usage.input_tokens", 50),
+            int_attr("llm.usage.prompt_tokens", 131),
+            int_attr("llm.usage.completion_tokens", 12),
+        ];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(&mut bag, SpanKind::Llm, None, "", VOLTAGENT, &mut warnings);
+        assert_eq!(counts.input_tokens, Some(50));
+        assert_eq!(counts.output_tokens, Some(12));
+        assert_eq!(bag.state("gen_ai.usage.input_tokens"), Some(Use::Consumed));
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        assert_eq!(
+            bag.state("llm.usage.completion_tokens"),
+            Some(Use::Consumed)
+        );
+    }
+
+    #[test]
+    fn voltagent_counts_need_the_convention_and_an_llm_span() {
+        // Without `voltagent` the keys are OpenInference's `llm.` namespace
+        // and stay unread (D-IN-23).
+        let attrs = [
+            int_attr("llm.usage.prompt_tokens", 131),
+            string_attr("llm.usage.completion_tokens", ""),
+        ];
+        for conventions in [&[][..], &[Convention::Openinference][..]] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(
+                &mut bag,
+                SpanKind::Llm,
+                None,
+                "",
+                conventions,
+                &mut warnings,
+            );
+            assert_eq!(counts.input_tokens, None, "{conventions:?}");
+            assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        }
+        // A VoltAgent agent span reads no counts: its `usage.*` are the sum of
+        // every step (rule 3), and it is not `llm`.
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Agent,
+            None,
+            "@voltagent/core",
+            &[Convention::Voltagent],
+            &mut warnings,
+        );
+        assert_eq!(counts, super::Usage::default());
+        assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
+        // An empty count is absent.
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        let counts = usage(
+            &mut bag,
+            SpanKind::Llm,
+            None,
+            "@voltagent/core",
+            &[Convention::Voltagent],
+            &mut warnings,
+        );
+        assert_eq!(counts.output_tokens, None);
+        assert_eq!(bag.state("llm.usage.completion_tokens"), Some(Use::Unread));
     }
 
     #[test]
