@@ -25,7 +25,7 @@
 **What works when it's done:**
 - `telemetry.crash_reports` (boolean, default `false`) in the config and the configuration reference.
 - The switchboard decides `crash_reports`: `CETRA_TELEMETRY` off, `DO_NOT_TRACK` and restore mode turn it off (rules 1–3); debug builds and CI do not; then the config. A second startup line under `cetra_server::observability::notice` says whether crash reports are on, or why not.
-- When on, a `tracing` layer turns each ERROR event (except M1's `panic` event, and except events bridged from the `log` crate, which have no file or line) into a report, and M1's panic hook turns each panic into one, both written synchronously to `<data_dir>/telemetry/spool/` (at most 50 files of at most 63 KiB, oldest dropped, written to a temporary file and renamed). Neither path logs, panics or deadlocks; errors are swallowed.
+- When on, a `tracing` layer turns each ERROR event (except M1's `panic` event, events bridged from the `log` crate, which have no file or line, and events of the OTLP exporter's own stack) into a report, and M1's panic hook turns each panic into one, both written synchronously to `<data_dir>/telemetry/spool/` (at most 50 files of at most 63 KiB, oldest dropped, written to a temporary file and renamed). Neither path logs, panics or deadlocks; errors are swallowed.
 - A report holds exactly the fields of § `CrashReport` and nothing else: no message, no field value, no error text, no path outside the path rule, no exact time.
 - A sender task posts spooled reports to `<telemetry.endpoint>/v1/crash` at startup and every minute, adding the instance id; it deletes a report on 2xx or on a 4xx other than 408 and 429, keeps it otherwise (408, 429, 1xx, 3xx, 5xx, network failure), and drops reports older than 7 days. Its own client: no redirects, 10 s, failures at `debug`.
 - When crash reports are off, nothing is spooled and an existing spool is deleted at startup.
@@ -98,7 +98,7 @@ TL5.2 may run in parallel with TL5.1 and TL5.3–TL5.6 (no shared file). TL5.3�
 | TL5.3 | `observability/mod.rs`, `observability/crash/mod.rs` (new), `observability/crash/report.rs` (new), `observability/facts.rs`, `observability/buckets.rs` | `mod.rs` (M2, M3, M6 add `mod` lines), `facts.rs` (M3), `buckets.rs` (M6) |
 | TL5.4 | `observability/crash/limiter.rs` (new), `observability/crash/mod.rs` | none |
 | TL5.5 | `observability/crash/spool.rs` (new), `observability/crash/mod.rs` | none |
-| TL5.6 | `observability/crash/mod.rs`, `observability/crash/layer.rs` (new) | none |
+| TL5.6 | `observability/crash/mod.rs`, `observability/crash/layer.rs` (new), `observability/subscriber.rs` (one `pub(crate)`) | `subscriber.rs` (M2, M3) |
 | TL5.7 | `observability/panic.rs`, `observability/subscriber.rs` | `subscriber.rs` (M2, M3 add layers) |
 | TL5.8 | `observability/crash/sender.rs` (new), `observability/crash/mod.rs`, `observability/test_receiver.rs` (new, test-only), `observability/mod.rs` (one line), `serve.rs`, `backup.rs` (one test) | `observability/mod.rs`, `serve.rs` (M2, M3, M6), `backup.rs` (M2's `backup` span) |
 | TL5.9 | `observability/crash/leak_tests.rs` (new), `observability/crash/mod.rs` (one line) | none |
@@ -110,7 +110,7 @@ TL5.2 may run in parallel with TL5.1 and TL5.3–TL5.6 (no shared file). TL5.3�
 
 - The implementer is Haiku. Follow the plan exactly. If a step is unclear, contradicts the code, or cannot be done as written, stop and report the question; do not improvise.
 - Edit only the files in the phase's **Edit** list. Report any change needed elsewhere.
-- **Do not run** `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo nextest` or any `just` recipe: the machine is loaded, and the coordinator runs the checks once at the end of the milestone. Allowed: `git diff`, `grep`, reading sources under `~/.cargo/registry/src`, `cargo info`, `rustfmt --edition 2024 <your .rs files>` (run it on every Rust file you changed before committing), and, where a phase says so, `cargo metadata --format-version 1 --offline > /dev/null`.
+- **Do not run** `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo nextest` or any `just` recipe: the machine is loaded, and the coordinator runs the checks once at the end of the milestone. Allowed: `git diff`, `grep`, reading sources under `~/.cargo/registry/src`, `cargo info`, `rustfmt --edition 2024 <file>` **only on leaf files you created or changed**, i.e. files with no `mod x;` child declaration (rustfmt follows `mod` declarations and would rewrite sibling files another agent is editing). Never run it on `observability/mod.rs`, `crash/mod.rs`, `lib.rs`, `main.rs` or any other file that declares child modules: the coordinator's `just fmt` formats those, and, where a phase says so, `cargo metadata --format-version 1 --offline > /dev/null`.
 - Write every listed test, even though you do not run it. Make it compile by reading the APIs; never guess a signature: look it up in the code or the registry sources of **Read first**.
 - **Done when** for every phase: the listed files changed as specified, nothing else changed (`git status`), and one commit with the phase's subject exists.
 - Commit only your phase's files: `git add <files> && git commit -m "<subject>" -- <files>` (the `git add` is needed for new files). Other agents commit in the same checkout: if `.git/index.lock` exists, wait a few seconds and retry. Never `git stash`, never `git add -A`.
@@ -168,7 +168,7 @@ TL5.2 may run in parallel with TL5.1 and TL5.3–TL5.6 (no shared file). TL5.3�
 Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat and may have added fields to `Features`, the golden JSON or `FEATURE_KEYS`; M3 reads `Decision`. Keep their additions.
 
 **Steps.**
-1. Before editing, run `grep -rn "Decision {\|Inputs {\|TelemetryConfig {\|Features {" crates/server/src` (ignore `routes/saved_views.rs`, whose `Decision` is another type). Every literal of the telemetry types must be in `switchboard.rs`, `heartbeat.rs` or `config.rs`, or use `..TelemetryConfig::default()` (`test_support/mod.rs`, `ingest/fixtures_tests.rs`). If another file builds a `Decision`, `Inputs`, `Features` or full `TelemetryConfig` literal (M3 or M6 may have added one), add the M5 field to it only if that file is in this phase's Edit list; otherwise stop and report.
+1. Before editing, run `grep -rn -e "Decision {" -e "Inputs {" -e "TelemetryConfig {" -e "Features {" crates/server/src` (one `-e` per pattern: `grep` here is a ripgrep wrapper, where `\|` is an error) (ignore `routes/saved_views.rs`, whose `Decision` is another type). Every literal of the telemetry types must be in `switchboard.rs`, `heartbeat.rs` or `config.rs`, or use `..TelemetryConfig::default()` (`test_support/mod.rs`, `ingest/fixtures_tests.rs`). If another file builds a `Decision`, `Inputs`, `Features` or full `TelemetryConfig` literal (M3 or M6 may have added one), add the M5 field to it only if that file is in this phase's Edit list; otherwise stop and report.
 2. `config.rs`, `TelemetryConfig`: add after the `heartbeat` field:
    ```rust
    /// Opt-in crash reports to `<endpoint>/v1/crash` (D-TL-5). Default false.
@@ -1112,10 +1112,12 @@ Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat
 **Edit:**
 - `crates/server/src/observability/crash/mod.rs`
 - `crates/server/src/observability/crash/layer.rs` (new)
+- `crates/server/src/observability/subscriber.rs` (one visibility change only)
 
-**M1 names used here:** `crate::observability::panic::PANIC_EVENT_TARGET`, `crate::observability::subscriber::BoxedLayer`. **M4 names:** `facts::{deployment, probe_host, process_uptime, Deployment}`.
+**M1 names used here:** `crate::observability::panic::PANIC_EVENT_TARGET`, `crate::observability::subscriber::{BoxedLayer, EXPORT_DROPPED_TARGETS}` (`EXPORT_DROPPED_TARGETS` is today a private `const EXPORT_DROPPED_TARGETS: &[&str]`: the exporter's own stack, `opentelemetry`, `hyper`, `reqwest`, `h2`, `tower`, `rustls`, `tokio_rustls`, `webpki`, `want`, `http_body`, and `EXPORT_FAILURE_TARGET`). **M4 names:** `facts::{deployment, probe_host, process_uptime, Deployment}`.
 
 **Steps.**
+0. `subscriber.rs`: change `const EXPORT_DROPPED_TARGETS: &[&str] = &[` to `pub(crate) const EXPORT_DROPPED_TARGETS: &[&str] = &[`, and add one sentence to its doc comment: `The crash layer skips the same targets (track TL M5).` Nothing else in that file changes in this phase.
 1. `crash/mod.rs`: add `pub(crate) mod layer;` (alphabetical), then below the `mod` lines, in full:
    ```rust
    use std::cell::Cell;
@@ -1244,7 +1246,7 @@ Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat
    use super::Reporter;
    use super::report::EventSite;
    use crate::observability::panic::PANIC_EVENT_TARGET;
-   use crate::observability::subscriber::BoxedLayer;
+   use crate::observability::subscriber::{BoxedLayer, EXPORT_DROPPED_TARGETS};
 
    /// Turns ERROR events into crash reports.
    #[derive(Debug, Clone)]
@@ -1279,11 +1281,19 @@ Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat
    }
 
    /// An ERROR event that is not the panic hook's `panic` event (the hook reports panics itself,
-   /// so a panic is reported once) and has a source file. Events bridged from the `log` crate
-   /// have none: they would all share one report saying nothing (target `log`, location
-   /// `unknown`), so they are skipped.
+   /// so a panic is reported once), has a source file, and does not come from the OTLP
+   /// exporter's own stack. Events bridged from the `log` crate have no file: they would all
+   /// share one report saying nothing (target `log`, location `unknown`). The exporter's stack
+   /// ([`EXPORT_DROPPED_TARGETS`]) logs errors when the operator's own endpoint is down: that is
+   /// their network, not a cetra bug, and it would eat the hourly cap.
    fn reportable(is_event: bool, level: Level, target: &str, has_file: bool) -> bool {
-       is_event && level == Level::ERROR && target != PANIC_EVENT_TARGET && has_file
+       is_event
+           && level == Level::ERROR
+           && target != PANIC_EVENT_TARGET
+           && has_file
+           && !EXPORT_DROPPED_TARGETS
+               .iter()
+               .any(|dropped| target.starts_with(dropped))
    }
 
    /// The crash layer as one of the subscriber's layers, with its own filter: it sees ERROR
@@ -1302,7 +1312,7 @@ Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat
 - `an_error_event_is_spooled_with_its_field_names_only`: under `tracing::dispatcher::with_default(&dispatch, || …)`, `tracing::error!(key = "sk-cetra-planted0000000000000000000000000", user = "planted-user@example.com", input = "planted prompt text", "failed for planted-user@example.com")`. One file; kind `ErrorEvent`; location starts with `crates/server/src/observability/crash/layer.rs:`; `event_target == Some(module_path!().to_owned())`; `fields == ["key", "user", "input"]`; `count == 1`; `first_hour == 490_896`. The raw text contains none of `sk-cetra-`, `planted`, `example.com`, `prompt text`, `failed for`.
 - `warn_and_info_events_are_not_reported` (no spool directory).
 - `the_panic_event_is_not_reported` (`tracing::error!(target: PANIC_EVENT_TARGET, location = "x", "panic")` → no file).
-- `reportable_rules` (pure: `(true, ERROR, "cetra_x", true)` → true; a span (`is_event` false), `WARN`, the target `PANIC_EVENT_TARGET`, and `has_file` false (a `log`-bridged event) → false each).
+- `reportable_rules` (pure: `(true, ERROR, "cetra_x", true)` → true; a span (`is_event` false), `WARN`, the target `PANIC_EVENT_TARGET`, `has_file` false (a `log`-bridged event), and the targets `opentelemetry_sdk::logs`, `hyper_util::client::legacy`, `reqwest::connect` and `cetra_self_monitoring` → false each).
 - `errors_below_a_quiet_stdout_level_are_still_seen` (the layer has its own filter: a `registry().with(vec![boxed(r), fmt layer filtered at "off"])` still spools one file).
 - `one_callsite_is_reported_once_an_hour` (`emit_one()` × 5 → one file; advance the clock by one hour; `reporter.flush_pending()` → two files, the second with `count == 4`, `first_hour == last_hour == 490_896`).
 - `distinct_callsites_get_distinct_reports` (two different `error!` lines → two files).
@@ -1310,7 +1320,7 @@ Every edit here is additive (§ Prerequisites). M6 adds `usage` to the heartbeat
 - `concurrent_errors_from_one_callsite_spool_one_report` (8 `std::thread`s, each `tracing::dispatcher::with_default(&dispatch.clone(), || for _ in 0..50 { emit_one() })` → one file; after one hour and `flush_pending` → a second file with `count == 399`).
 - `a_spool_failure_is_swallowed` (spool dir path is a regular file; `error!` → no panic, the file is unchanged).
 - `report_panic_writes_a_panic_report` (`reporter.report_panic(Some(Location::caller()))` → kind `Panic`, location from this file, `fields` empty, `event_target` and `module` absent from the raw text, the backtrace's first frame does not start with `backtrace::`, `std::` or `cetra_server::observability::crash::Reporter`).
-In `crash/mod.rs` (`#[cfg(test)] mod tests` at the end of the file):
+In `crash/mod.rs` (`#[cfg(test)] mod tests` at the end of the file; its imports, for this phase and TL5.8's tests together: `use super::*;` (brings the parent's items and its `use` imports: `Reporter`, `ReportGuard`, `REPORTER`, `Spool`, `EventSite`, `Deployment`, …), `std::sync::atomic::{AtomicI64, Ordering}`, `std::time::Duration`, and, from TL5.8 on, `crate::meta::instance_settings::{TELEMETRY_INSTANCE_ID, get_setting}`, `crate::observability::switchboard::OffReason`, `crate::observability::test_receiver::Receiver`, `crate::test_support::{TestApp, capture_logs}`; drop any import that ends up unused, since `just lint` denies warnings):
 - `report_guard_refuses_a_second_entry` (as M1's `hook_guard_refuses_a_second_entry`).
 - `an_occurrence_while_reporting_is_skipped` (hold `ReportGuard::enter()`, call `reporter.report_event(…)` → no file; drop the guard, call again → one file).
 - `report_panic_without_a_reporter_does_nothing`: not testable without a `PanicHookInfo`; instead `the_global_reporter_is_unset_in_tests` asserts `REPORTER.get().is_none()` (no test sets it; TL5.9's child process does, in its own process).
@@ -1355,7 +1365,7 @@ In `crash/mod.rs` (`#[cfg(test)] mod tests` at the end of the file):
           self.crash.is_some()
       }
       ```
-      `Observability::shutdown` does not change. Run `grep -rn "Observability {" crates/server/src crates/cli/src` and add `crash: None` to every literal other than the one in `build` (none exists in the committed code; M3 or M2 may have added one).
+      `Observability::shutdown` does not change. Run `grep -rn -e "Observability {" crates/server/src crates/cli/src` and add `crash: None` to every literal other than the one in `build` (none exists in the committed code; M3 or M2 may have added one).
    3. In `build`, add right before the final `Ok(…)` (after any layer M2 or M3 pushed):
       ```rust
       // Crash reports to us, when the switchboard allows them (track TL M5, D-TL-11). The
@@ -1486,6 +1496,8 @@ In `crash/mod.rs` (`#[cfg(test)] mod tests` at the end of the file):
               if let Some(reporter) = REPORTER.get() {
                   reporter.flush_pending();
               }
+              // `flush_pending` writes at most 20 small files a minute: synchronous I/O here is
+              // fine, no `spawn_blocking` needed.
               let summary = send_spool(&client, &url, &spool, instance_id, clock.now_ns()).await;
               if summary != SendSummary::default() {
                   tracing::debug!(
@@ -1618,7 +1630,7 @@ In `crash/mod.rs` (`#[cfg(test)] mod tests` at the end of the file):
 5. `backup.rs`, test module only: add the test below. Do not change `write` or any other code: it copies `meta.db` (`VACUUM INTO`), `catalog.db`, the objects the catalog lists, `secret.key` and `manifest.json` by name, so `telemetry/` is never copied.
 
 **Tests.**
-In `sender.rs` (`#[tokio::test]`; the receiver is `crate::observability::test_receiver::Receiver::start("/v1/crash", status, Duration::ZERO)`; the client is `heartbeat::client(heartbeat::REQUEST_TIMEOUT).unwrap()`; reports come from `report::event_report(…, Vec::new(), …)` with `count`, `first_hour` and `last_hour` set, written with `Spool::write`; `NOW = 1_767_225_600_000_000_000`, passed as `send_spool`'s `now_ns`):
+In `sender.rs` (`#[tokio::test]`; imports of its test module: `use super::*;`, `crate::observability::crash::report::{EventSite, event_report}`, `crate::observability::crash::spool::file_name`, `crate::observability::facts::{self, Deployment}`, `crate::observability::heartbeat`, `crate::observability::test_receiver::Receiver`, and `axum::http::header` for the header names; the receiver is `crate::observability::test_receiver::Receiver::start("/v1/crash", status, Duration::ZERO)`; the client is `heartbeat::client(heartbeat::REQUEST_TIMEOUT).unwrap()`; reports come from `report::event_report(…, Vec::new(), …)` with `count`, `first_hour` and `last_hour` set, written with `Spool::write`; `NOW = 1_767_225_600_000_000_000`, passed as `send_spool`'s `now_ns`):
 - `crash_url_appends_the_path` (`https://telemetry.cetra.sh` and `https://r.example.com/cetra/` → `…/v1/crash`).
 - `a_report_is_posted_with_the_instance_id_and_deleted` (one spooled file at `NOW`; `Some(id)` → one request; the body parses to the report with `instance_id == Some(id)`; `content-type` starts with `application/json`; `user-agent == format!("cetra/{}", facts::VERSION)`; the file is gone; summary `sent: 1`).
 - `without_an_instance_id_the_key_is_absent` (the body JSON has no `instance_id` key).
@@ -1659,7 +1671,27 @@ In `backup.rs` tests:
 
 **Steps.**
 1. `crash/mod.rs`: add `#[cfg(test)] mod leak_tests;` at the end of the file, right before `#[cfg(test)] mod tests`.
-2. Create `leak_tests.rs`. Module doc: `//! Leak tests for crash reports (design § 3 Never). The child-process test runs the real panic hook, which is process-global, in its own process, so no other test sees it.` Constants:
+2. Create `leak_tests.rs`. Module doc: `//! Leak tests for crash reports (design § 3 Never). The child-process test runs the real panic hook, which is process-global, in its own process, so no other test sees it.` Imports (the whole file is test-only through its `#[cfg(test)]` `mod` line):
+   ```rust
+   use std::panic::Location;
+   use std::path::PathBuf;
+   use std::process::Stdio;
+   use std::sync::Arc;
+   use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+   use tracing::Dispatch;
+   use tracing_subscriber::layer::SubscriberExt;
+   use uuid::Uuid;
+
+   use super::report::{CrashReport, EventSite, ReportKind};
+   use super::sender::{crash_url, send_spool};
+   use super::spool::Spool;
+   use super::{Reporter, enable_panic_reports, layer};
+   use crate::observability::facts::Deployment;
+   use crate::observability::heartbeat;
+   use crate::observability::test_receiver::Receiver;
+   ```
+   Drop any that ends up unused. Constants:
    ```rust
    const PLANTED_KEY: &str = "sk-cetra-planted0000000000000000000000000";
    const PLANTED_EMAIL: &str = "planted-user@example.com";
@@ -1737,10 +1769,14 @@ Every edit below replaces or follows a text M4 (TL4.9, TL4.10) wrote. If a quote
 1. `telemetry.md`:
    1. After the paragraph that starts `cetra sends one anonymous heartbeat a day`, add the paragraph: `cetra can also send crash reports. They are off unless you turn them on: see [Crash reports](#crash-reports).`
    2. After the `## Turn it off` table's following paragraph (the one starting `Any other value of \`CETRA_TELEMETRY\``), add: `` `CETRA_TELEMETRY=off` and `DO_NOT_TRACK` turn crash reports off too. ``
-   3. In `## The startup line`, replace the paragraph with:
-      ```markdown
-      At every start, cetra logs two lines, at `info` with the target `cetra_server::observability::notice`: one says whether the heartbeat is on, the other whether crash reports are on. They show even when `log.level` is `warn`. When the heartbeat is on, its line gives the instance id and a link to this page. When something is off, the line's `reason` field says why: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, `restore_mode`, `ci`, `debug_build` or `config` (crash reports are never off for `ci` or `debug_build`).
-      ```
+   3. In `## The startup line`, edit the first paragraph (the one that starts `At every start, cetra logs one line`) **in place**, word by word; do not replace the paragraph or the section, and keep every other sentence or paragraph there (M3 adds its own paragraph under this heading, which must survive):
+      - `logs one line, at` → `logs two lines, at`;
+      - `, that says whether the heartbeat is on.` → `: one says whether the heartbeat is on, the other whether crash reports are on.`;
+      - `It shows even when` → `They show even when`;
+      - `When the heartbeat is on, the line gives` → `When the heartbeat is on, its line gives`;
+      - `When it is off, its \`reason\` field says why:` → `When something is off, the line's \`reason\` field says why:`;
+      - after `` `debug_build` or `config`. `` (the end of that sentence), add ` Crash reports are never off for \`ci\` or \`debug_build\`.`
+      If one of these phrases is not in the paragraph, stop and report.
    4. In the `## What it sends` table, add after the `features.self_monitoring` row:
       ```markdown
       | `features.crash_reports_on` | `true`, `false` | Crash reports are on. |
@@ -1801,7 +1837,7 @@ Every edit below replaces or follows a text M4 (TL4.9, TL4.10) wrote. If a quote
       - The same place in the code is reported at most once an hour; later occurrences are counted and sent as one report after the hour. At most 20 reports go out an hour.
       - cetra writes each report to `<data_dir>/telemetry/spool/` the moment it happens, so a panic that stops the server is sent at the next start. The spool holds at most 50 reports; the oldest go first.
       - Every minute, cetra sends the spooled reports to `https://telemetry.cetra.sh/v1/crash` (or [`telemetry.endpoint`](/docs/self-hosting/configuration-reference/#telemetry)`/v1/crash`) and deletes each one the relay accepts or refuses. A report that cannot be sent (the relay is down, busy or rate-limiting) waits for the next try and is deleted unsent after 7 days. Requests follow no redirect and give up after 10 seconds; failures are logged at `debug` only.
-      - Writing a report takes a moment the first time in a process, while cetra reads its own function names. Error-level events of libraries that log through the `log` crate are not reported: they carry no code location.
+      - Writing a report takes a moment the first time in a process, while cetra reads its own function names. Error-level events of libraries that log through the `log` crate are not reported, since they carry no code location, and neither are errors of the HTTP stack that exports cetra's own logs to your OTLP endpoint (a down endpoint is not a cetra bug).
 - Turning crash reports off deletes the spool at the next start. Backups do not include it.
       ````
 2. `backup.md`: replace `` `tmp/` (query spill files) and `LOCK` can be left out. `` with `` `tmp/` (query spill files), `LOCK` and `telemetry/` (unsent [crash reports](/docs/self-hosting/telemetry/#crash-reports)) can be left out. `` If the sentence differs, stop and report.
@@ -1825,7 +1861,7 @@ Every edit below replaces or follows a text M4 (TL4.9, TL4.10) wrote. If a quote
       ```markdown
       ### Crash reports (track TL M5)
 
-      Opt-in (`telemetry.crash_reports`, D-TL-5). Every panic (from the panic hook, before its `panic` event) and every ERROR `tracing` event with a source file (from the crash layer, which skips the hook's own `panic` event and events bridged from the `log` crate, and has its own filter, so `log.level` does not hide errors from it) becomes a report: `schema` 1, `version`, `target`, `profile`, `deployment`, `uptime` bucket, `kind` (`panic`, `error_event`), `location` (`path:line[:column]`; a `crates/…` path is kept, a path under `/.cargo/registry/src/<index>/` or `/.cargo/git/checkouts/` keeps what follows, anything else, or a path with `..`, keeps its file name), `event_target` and `module` (events only), `fields` (callsite field names, `message` excluded), `backtrace` (demangled function names from the `backtrace` crate, hash suffix removed, the leading reporter and runtime frames dropped, at most 48), `count`, `first_hour`, `last_hour` (Unix hours). Never a message, a field value, error text, thread or host names, other paths, environment, config or exact times. Dedup per kind and location per clock hour (the first occurrence spooled at once, later ones counted and spooled after the hour), at most 20 reports an hour. Reports are written synchronously to `<data_dir>/telemetry/spool/` (temporary file then rename, at most 50 files of at most 63 KiB, oldest dropped; only `telemetry/` and `spool/` are created, never the data directory; no logging and no panic on that path, D-TL-12; a stuck disk delays the writing thread). A sender task posts them to `<endpoint>/v1/crash` at startup and every minute with `instance_id` added, deletes a report on 2xx or on a 4xx other than 408 and 429, keeps it otherwise (the pass stops), and drops reports older than 7 days; no redirects, 10 s timeout, failures at `debug`. When crash reports are off, nothing is spooled and the spool is deleted at startup. Backups do not copy the spool.
+      Opt-in (`telemetry.crash_reports`, D-TL-5). Every panic (from the panic hook, before its `panic` event) and every ERROR `tracing` event with a source file (from the crash layer, which skips the hook's own `panic` event, events bridged from the `log` crate, and the targets the OTLP export drops (`EXPORT_DROPPED_TARGETS`: the exporter's own stack), and has its own filter, so `log.level` does not hide errors from it) becomes a report: `schema` 1, `version`, `target`, `profile`, `deployment`, `uptime` bucket, `kind` (`panic`, `error_event`), `location` (`path:line[:column]`; a `crates/…` path is kept, a path under `/.cargo/registry/src/<index>/` or `/.cargo/git/checkouts/` keeps what follows, anything else, or a path with `..`, keeps its file name), `event_target` and `module` (events only), `fields` (callsite field names, `message` excluded), `backtrace` (demangled function names from the `backtrace` crate, hash suffix removed, the leading reporter and runtime frames dropped, at most 48), `count`, `first_hour`, `last_hour` (Unix hours). Never a message, a field value, error text, thread or host names, other paths, environment, config or exact times. Dedup per kind and location per clock hour (the first occurrence spooled at once, later ones counted and spooled after the hour), at most 20 reports an hour. Reports are written synchronously to `<data_dir>/telemetry/spool/` (temporary file then rename, at most 50 files of at most 63 KiB, oldest dropped; only `telemetry/` and `spool/` are created, never the data directory; no logging and no panic on that path, D-TL-12; a stuck disk delays the writing thread). A sender task posts them to `<endpoint>/v1/crash` at startup and every minute with `instance_id` added, deletes a report on 2xx or on a 4xx other than 408 and 429, keeps it otherwise (the pass stops), and drops reports older than 7 days; no redirects, 10 s timeout, failures at `debug`. When crash reports are off, nothing is spooled and the spool is deleted at startup. Backups do not copy the spool.
       ```
 5. The Q notes file: if it does not exist, stop and report (M4's TL4.10 writes it). In § TL-Q1, after the table of exact strings (`| Field | Values |`, which ends with the `features.*` row), add:
    ````markdown
@@ -1849,4 +1885,4 @@ Every edit below replaces or follows a text M4 (TL4.9, TL4.10) wrote. If a quote
 - A Sonnet code review of the milestone; fixes by a Haiku agent with an exact brief.
 - If M2, M3 or M6 lands after M5 and builds an `Observability`, `Decision`, `Inputs` or `Features` literal, or edits the heartbeat golden JSON, it must add M5's `crash`, `crash_reports` or `crash_reports_on` (M3's plan has an `Observability { logs: None }` test literal).
 - Update the TL row of `docs/roadmap.md` when the track's status changes. Hand the Q notes file to track Q.
-- Tell M3 that `Decision.crash_reports` exists, if its debug-bundle telemetry state should show it.
+- If M3 landed before M5: add `telemetry.crash_reports` to `SHOWN_KEYS` in `crates/server/src/observability/config_view.rs` (otherwise `every_reference_key_is_classified` fails on TL5.2's reference row), and fill `TelemetryState.crash_reports` from `Decision.crash_reports` if that field exists. If M3 lands after M5, its plan does both.
