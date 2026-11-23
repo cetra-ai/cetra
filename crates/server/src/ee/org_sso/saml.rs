@@ -231,7 +231,7 @@ pub(crate) async fn begin(
 
 /// A refusal before the pending entry is consumed. No cookie is set, so a POST from another
 /// site cannot clear a browser's binder (D-SA-10).
-fn refuse(error: LoginError) -> Result<Response, ApiError> {
+fn refuse(error: &LoginError) -> Result<Response, ApiError> {
     redirect(
         &format!("/login?error={}", error.code().unwrap_or("provider_error")),
         std::iter::empty(),
@@ -280,20 +280,20 @@ async fn acs(
     };
     // 3. The form.
     let Ok(form) = serde_urlencoded::from_bytes::<AcsForm>(&body) else {
-        return refuse(LoginError::SamlInvalid);
+        return refuse(&LoginError::SamlInvalid);
     };
     // 4. The decode.
     let received = match cetra_saml::decode_response(&form.saml_response) {
         Ok(received) => received,
         Err(error) => {
             tracing::info!(target: "audit", org_id = %org, reason = ?error, "saml response refused");
-            return refuse(LoginError::SamlInvalid);
+            return refuse(&LoginError::SamlInvalid);
         }
     };
     // 5. An unsolicited Response restarts the login once, through the start URL (D-SA-5).
     let Some(in_response_to) = received.in_response_to().map(str::to_owned) else {
         if named_cookie(&headers, SAML_RESTART_COOKIE).is_some() {
-            return refuse(LoginError::SamlInvalid);
+            return refuse(&LoginError::SamlInvalid);
         }
         let sp = super::sp_urls(&state.config.public_url, org);
         return redirect(
@@ -312,7 +312,7 @@ async fn acs(
         .org_sso
         .with_pending(|table| table.take(&in_response_to, org, binder.as_deref(), now))
     else {
-        return refuse(LoginError::SamlInvalid);
+        return refuse(&LoginError::SamlInvalid);
     };
     // From here the entry is consumed, and failures clear the binder cookie with `fail`.
     let sp = super::sp_urls(&state.config.public_url, org);
@@ -482,7 +482,9 @@ mod tests {
         assert!(cookie_header(&response, "cetra_saml").contains("Max-Age=0"));
         let provider = store::identity_provider(org);
         assert_eq!(
-            count(&app, format!(
+            count(
+                &app,
+                format!(
                     "SELECT COUNT(*) FROM identities WHERE provider = '{provider}' \
                      AND subject = 'ada@acme.test'"
                 ),
@@ -491,7 +493,9 @@ mod tests {
             1
         );
         assert_eq!(
-            count(&app, format!(
+            count(
+                &app,
+                format!(
                     "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
                      WHERE u.email = 'ada@acme.test' AND m.org_id = '{org}' AND m.role = '{}'",
                     org_role_str(OrgRole::Viewer)
@@ -723,7 +727,9 @@ mod tests {
         assert_eq!(count(&app, members.clone()).await, members_before);
         let now = app.state.clock.now_ns();
         assert_eq!(
-            count(&app, format!(
+            count(
+                &app,
+                format!(
                     "SELECT COUNT(*) FROM org_sso_providers WHERE org_id = '{org}' \
                      AND last_login_at = {now}"
                 ),

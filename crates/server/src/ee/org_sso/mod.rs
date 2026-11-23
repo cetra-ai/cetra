@@ -78,7 +78,8 @@ pub(crate) struct OrgProvider {
 /// The protocol-specific part of a built provider.
 #[derive(Debug)]
 pub(crate) enum ProviderKind {
-    Oidc(OidcProvider),
+    // Boxed: an `OidcProvider` is far larger than a `SamlProvider`.
+    Oidc(Box<OidcProvider>),
     Saml(SamlProvider),
 }
 
@@ -159,7 +160,8 @@ pub(crate) struct OrgSso {
     /// The egress policy `http` enforces.
     policy: cetra_eval::EgressPolicy,
     /// Pending SAML AuthnRequests (D-SA-10).
-    saml_pending: Mutex<saml_pending::PendingTable>,
+    // Boxed so `OrgSso` stays small inside the server's startup future (clippy::large_futures).
+    saml_pending: Box<Mutex<saml_pending::PendingTable>>,
     pub(crate) dns: dns::TxtResolver,
 }
 
@@ -196,7 +198,7 @@ impl OrgSso {
             reload_lock: tokio::sync::Mutex::new(()),
             http: IdpHttp::guarded(client, policy),
             policy,
-            saml_pending: Mutex::new(saml_pending::PendingTable::default()),
+            saml_pending: Box::new(Mutex::new(saml_pending::PendingTable::default())),
             dns,
         })
     }
@@ -371,7 +373,7 @@ impl OrgSso {
                     Secret::new(secret),
                 )
                 .ok()
-                .map(ProviderKind::Oidc)
+                .map(|oidc| ProviderKind::Oidc(Box::new(oidc)))
             }
             ProviderConfig::Saml {
                 idp_entity_id,

@@ -2390,7 +2390,7 @@ mod tests {
         assert!(!provider.enabled);
         assert_eq!(provider.issuer, None);
         assert_eq!(provider.client_id, None);
-        let saml = provider.saml.clone().expect("saml settings");
+        let saml = provider.saml.expect("saml settings");
         assert_eq!(saml.idp_entity_id, IDP_ENTITY_ID);
         assert_eq!(saml.certificates.len(), 1);
         assert_eq!(saml.certificates[0].sha256.len(), 64);
@@ -2536,11 +2536,7 @@ mod tests {
         assert_eq!(body["errors"][0]["field"], "metadata_xml");
         assert_eq!(
             body["errors"][0]["message"].as_str(),
-            Some(
-                MetadataError::NoSigningCertificate
-                    .to_string()
-                    .as_str()
-            )
+            Some(MetadataError::NoSigningCertificate.to_string().as_str())
         );
     }
 
@@ -2590,7 +2586,7 @@ mod tests {
         let idp = MockIdp::start().await;
 
         // An enforced OIDC provider cannot switch to SAML.
-        let (app, seeded, owner) = saml_app().await;
+        let (app, seeded, _owner) = saml_app().await;
         configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, true).await;
         // The covered owner's password session is revoked by enforcement; the instance admin
         // owner (`seeded`) is exempt (D-P-58).
@@ -2599,7 +2595,7 @@ mod tests {
         assert_eq!(detail(&refused), SWITCH_ENFORCED);
 
         // An enforced SAML provider cannot switch to OIDC.
-        let (app, seeded, owner) = saml_app().await;
+        let (app, seeded, _owner) = saml_app().await;
         configure_org_saml(
             &app,
             seeded.org_id,

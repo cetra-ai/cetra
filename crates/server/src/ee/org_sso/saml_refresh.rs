@@ -356,11 +356,7 @@ mod tests {
         app.state.clock.advance(DAY + Duration::from_secs(1));
         let now = app.state.clock.now_ns();
         let failed = assert_logs_clean(
-            &[
-                url.as_str(),
-                IDP_ENTITY_ID,
-                "BEGIN CERTIFICATE",
-            ],
+            &[url.as_str(), IDP_ENTITY_ID, "BEGIN CERTIFICATE"],
             refresh_once(&app.state, now),
         )
         .await
@@ -373,11 +369,7 @@ mod tests {
         app.state.clock.advance(DAY + Duration::from_secs(1));
         let now = app.state.clock.now_ns();
         let rotated = assert_logs_clean(
-            &[
-                url.as_str(),
-                IDP_ENTITY_ID,
-                "BEGIN CERTIFICATE",
-            ],
+            &[url.as_str(), IDP_ENTITY_ID, "BEGIN CERTIFICATE"],
             refresh_once(&app.state, now),
         )
         .await
