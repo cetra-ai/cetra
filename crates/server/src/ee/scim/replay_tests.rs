@@ -108,30 +108,48 @@ async fn replay(scenario: &str) {
 
 #[tokio::test]
 async fn okta_connection_replays() {
-    replay(include_str!("../../../../../fixtures/scim/okta/connection.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/okta/connection.json"
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn okta_user_lifecycle_replays() {
-    replay(include_str!("../../../../../fixtures/scim/okta/user_lifecycle.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/okta/user_lifecycle.json"
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn okta_groups_replays() {
-    replay(include_str!("../../../../../fixtures/scim/okta/groups.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/okta/groups.json"
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn entra_connection_replays() {
-    replay(include_str!("../../../../../fixtures/scim/entra/connection.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/entra/connection.json"
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn entra_user_lifecycle_replays() {
-    replay(include_str!("../../../../../fixtures/scim/entra/user_lifecycle.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/entra/user_lifecycle.json"
+    ))
+    .await;
 }
 
 #[tokio::test]
 async fn entra_groups_replays() {
-    replay(include_str!("../../../../../fixtures/scim/entra/groups.json")).await;
+    replay(include_str!(
+        "../../../../../fixtures/scim/entra/groups.json"
+    ))
+    .await;
 }

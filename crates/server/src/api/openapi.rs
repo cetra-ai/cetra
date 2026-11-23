@@ -1816,7 +1816,7 @@ fn scim_paths(paths: PathsBuilder) -> PathsBuilder {
     .description(Some(
         "The token stops working at once. Works without the feature. Owners only, session only.",
     ))
-    .securities(Some(session_only))
+    .securities(Some(session_only.clone()))
     .parameters(Some(vec![
         path_string("org", "Org UUID or slug."),
         path_uuid("id", "Token id."),

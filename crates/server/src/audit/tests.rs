@@ -183,7 +183,10 @@ fn samples() -> Vec<Action> {
             fields: vec!["displayName", "externalId"],
         }
         .into(),
-        ScimAction::GroupDeleted { scim_group_id: uuid }.into(),
+        ScimAction::GroupDeleted {
+            scim_group_id: uuid,
+        }
+        .into(),
         ScimAction::GroupMembersChanged {
             scim_group_id: uuid,
             added: 1,

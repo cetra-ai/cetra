@@ -251,11 +251,12 @@ async fn projects_in_org_tx(
     projects: &[(ProjectId, ProjectOverride)],
 ) -> Result<bool, MetaError> {
     for (project, _) in projects {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE org_id = ? AND id = ?")
-            .bind(org.to_string())
-            .bind(project.to_string())
-            .fetch_one(&mut *conn)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE org_id = ? AND id = ?")
+                .bind(org.to_string())
+                .bind(project.to_string())
+                .fetch_one(&mut *conn)
+                .await?;
         if count == 0 {
             return Ok(false);
         }
@@ -269,8 +270,7 @@ async fn projects_in_org_tx(
 fn only_lowers(old: &GroupMapping, new: &GroupMapping) -> bool {
     org_level(new.org_role) <= org_level(old.org_role)
         && new.projects.iter().all(|(project, role)| {
-            project_rank_in(old, *project)
-                .is_some_and(|rank| override_rank(*role) <= rank)
+            project_rank_in(old, *project).is_some_and(|rank| override_rank(*role) <= rank)
         })
 }
 
@@ -327,7 +327,11 @@ async fn recompute_group_tx(
 }
 
 /// The group as the API shows it, read after the write.
-async fn group_view(state: &AppState, org: OrgId, row: &ScimGroupRow) -> Result<ScimGroup, ApiError> {
+async fn group_view(
+    state: &AppState,
+    org: OrgId,
+    row: &ScimGroupRow,
+) -> Result<ScimGroup, ApiError> {
     let reader = state.meta.reader();
     let members = store::group_member_ids(reader, row.id).await?;
     let mappings = store::mappings(reader, org).await?;
@@ -472,9 +476,9 @@ mod tests {
             .state
             .meta
             .write(move |conn| {
-                Box::pin(
-                    async move { scim_store::insert_user(conn, org, member.id, &fields, now).await },
-                )
+                Box::pin(async move {
+                    scim_store::insert_user(conn, org, member.id, &fields, now).await
+                })
             })
             .await
             .unwrap();
@@ -538,8 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_maps_a_group_and_roles_follow() {
-        let (app, seeded, token) =
-            app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
+        let (app, seeded, token) = app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
         let (scim_id, user) = provision(&app, &seeded, &token, "grace@acme.test").await;
         let group = group_with(&app, &token, "Engineers", &[scim_id]).await;
         assert_eq!(role_of(&app, &seeded, user).await, Some(OrgRole::Viewer));
@@ -558,7 +561,9 @@ mod tests {
         assert_eq!(role_of(&app, &seeded, user).await, Some(OrgRole::Member));
         let reader = app.state.meta.reader();
         assert_eq!(
-            members::project_override(reader, project, user).await.unwrap(),
+            members::project_override(reader, project, user)
+                .await
+                .unwrap(),
             Some(ProjectOverride::Admin)
         );
     }
@@ -618,7 +623,8 @@ mod tests {
     async fn project_roles_need_the_project_roles_feature() {
         let (app, seeded, token) = app_with(&["scim"], OrgRole::Viewer).await;
         let group = group_with(&app, &token, "Engineers", &[]).await;
-        let body = json!({"projects": [{"project_id": seeded.project.id.as_uuid(), "role": "admin"}]});
+        let body =
+            json!({"projects": [{"project_id": seeded.project.id.as_uuid(), "role": "admin"}]});
         let response = put(&app, &seeded.cookie, group, &body).await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         assert_eq!(response.problem().code, ProblemCode::PlanRequired);
@@ -626,8 +632,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_mapping_returns_members_to_the_default() {
-        let (app, seeded, token) =
-            app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
+        let (app, seeded, token) = app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
         let (scim_id, user) = provision(&app, &seeded, &token, "grace@acme.test").await;
         let group = group_with(&app, &token, "Engineers", &[scim_id]).await;
         let set = put(&app, &seeded.cookie, group, &json!({"org_role": "member"})).await;
@@ -659,9 +664,9 @@ mod tests {
             .state
             .meta
             .write(move |conn| {
-                Box::pin(async move {
-                    scim_store::insert_group(conn, other, "Ops", None, now).await
-                })
+                Box::pin(
+                    async move { scim_store::insert_group(conn, other, "Ops", None, now).await },
+                )
             })
             .await
             .unwrap();
@@ -690,8 +695,7 @@ mod tests {
 
     #[tokio::test]
     async fn mapping_changes_with_scim_off_recompute_nothing() {
-        let (app, seeded, token) =
-            app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
+        let (app, seeded, token) = app_with(&["scim", "project_roles"], OrgRole::Viewer).await;
         let (scim_id, user) = provision(&app, &seeded, &token, "grace@acme.test").await;
         let group = group_with(&app, &token, "Engineers", &[scim_id]).await;
         let org = seeded.org_id;

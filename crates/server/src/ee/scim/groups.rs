@@ -43,7 +43,11 @@ pub(crate) fn routes() -> Vec<RouteDef> {
         users::route(Method::GET, "/scim/v2/Groups/{id}", get(get_group)),
         users::route(Method::PUT, "/scim/v2/Groups/{id}", put(replace_group)),
         users::route(Method::PATCH, "/scim/v2/Groups/{id}", patch(patch_group)),
-        users::route(Method::DELETE, "/scim/v2/Groups/{id}", delete(delete_group_row)),
+        users::route(
+            Method::DELETE,
+            "/scim/v2/Groups/{id}",
+            delete(delete_group_row),
+        ),
     ]
 }
 
@@ -347,7 +351,12 @@ async fn write_edit(
         })
         .await
         .map_err(group_error)??;
-    Ok(ScimJson(group_resource(&row, Some(&members), &users::base_url(state))).into_response())
+    Ok(ScimJson(group_resource(
+        &row,
+        Some(&members),
+        &users::base_url(state),
+    ))
+    .into_response())
 }
 
 /// GET /Groups: a page of the org's groups, filtered by `displayName eq` or `externalId eq`,
@@ -365,14 +374,8 @@ async fn list_groups(
         .map(parse_group_filter)
         .transpose()?;
     let (start, count) = users::page(&query.list);
-    let (total, rows) = scim_store::list_groups(
-        state.meta.reader(),
-        org,
-        filter.as_ref(),
-        start,
-        count,
-    )
-    .await?;
+    let (total, rows) =
+        scim_store::list_groups(state.meta.reader(), org, filter.as_ref(), start, count).await?;
     let base = users::base_url(&state);
     let with_members = !excludes_members(query.excluded_attributes.as_deref());
     let mut resources = Vec::with_capacity(rows.len());
@@ -399,7 +402,12 @@ async fn get_group(
         .await?
         .ok_or_else(ScimError::not_found)?;
     let members = scim_store::group_member_ids(state.meta.reader(), id).await?;
-    Ok(ScimJson(group_resource(&row, Some(&members), &users::base_url(&state))).into_response())
+    Ok(ScimJson(group_resource(
+        &row,
+        Some(&members),
+        &users::base_url(&state),
+    ))
+    .into_response())
 }
 
 /// POST /Groups: creates a group, with the listed members, and recomputes the roles of the
@@ -534,11 +542,9 @@ async fn delete_group_row(
                 audit::record(
                     conn,
                     &ctx,
-                    Event::new(ScimAction::GroupDeleted {
-                        scim_group_id: id,
-                    })
-                    .org(org)
-                    .target(TargetKind::ScimGroup, id),
+                    Event::new(ScimAction::GroupDeleted { scim_group_id: id })
+                        .org(org)
+                        .target(TargetKind::ScimGroup, id),
                     scope.now,
                 )
                 .await?;
@@ -595,7 +601,12 @@ mod tests {
     }
 
     /// POST a group with `display_name` and the given SCIM member ids.
-    async fn create(app: &TestApp, token: &str, display_name: &str, members: &[&str]) -> TestResponse {
+    async fn create(
+        app: &TestApp,
+        token: &str,
+        display_name: &str,
+        members: &[&str],
+    ) -> TestResponse {
         let members: Vec<Value> = members.iter().map(|id| json!({"value": id})).collect();
         scim_request(
             app,
@@ -813,10 +824,7 @@ mod tests {
             .await
             .unwrap();
         let path = format!("/scim/v2/Groups/{other_group}");
-        assert_eq!(
-            get(&app, &token, &path).await.status,
-            StatusCode::NOT_FOUND
-        );
+        assert_eq!(get(&app, &token, &path).await.status, StatusCode::NOT_FOUND);
         let deleted = app
             .request(Method::DELETE, &path)
             .header("authorization", &bearer(&token))
@@ -944,7 +952,8 @@ mod tests {
             .meta
             .write(move |conn| {
                 Box::pin(async move {
-                    let row = scim_store::insert_group(conn, seeded.org_id, "Team", None, now).await?;
+                    let row =
+                        scim_store::insert_group(conn, seeded.org_id, "Team", None, now).await?;
                     scim_store::add_group_members_tx(conn, seeded.org_id, row.id, &[ada]).await?;
                     Ok(row.id)
                 })
@@ -961,7 +970,10 @@ mod tests {
         )
         .await;
         assert_eq!(added.status, StatusCode::FORBIDDEN);
-        assert_eq!(create(&app, &token, "New", &[]).await.status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            create(&app, &token, "New", &[]).await.status,
+            StatusCode::FORBIDDEN
+        );
 
         let removed = patch(
             &app,

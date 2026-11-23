@@ -144,11 +144,13 @@ pub(crate) async fn recompute_tx(
             // Both sides use the final org role, so only the override change is judged (P-5).
             let before = effective_project_role(role, before_override);
             let after = effective_project_role(role, after_override);
-            if before == after {
+            if before_override == after_override {
                 continue;
             }
-            let lowers = effective_rank(after) < effective_rank(before);
-            if !lowers && !(scope.scim && scope.project_roles) {
+            // A change that leaves effective access the same is neither a raise nor a lowering,
+            // so no entitlement gates it: it removes or rewrites a stale override.
+            let raises = effective_rank(after) > effective_rank(before);
+            if raises && !(scope.scim && scope.project_roles) {
                 continue;
             }
             match after_override {
@@ -454,9 +456,28 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
-        group_with(&app, org, "viewers", vec![scim_id], mapped(Some(OrgRole::Viewer))).await;
-        group_with(&app, org, "members", vec![scim_id], mapped(Some(OrgRole::Member))).await;
-        recompute(&app, scope(&app, org, OrgRole::Viewer, None, true, true), vec![scim_id]).await;
+        group_with(
+            &app,
+            org,
+            "viewers",
+            vec![scim_id],
+            mapped(Some(OrgRole::Viewer)),
+        )
+        .await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![scim_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
     }
 
@@ -465,7 +486,12 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
-        recompute(&app, scope(&app, org, OrgRole::Member, None, true, true), vec![scim_id]).await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Member, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
     }
 
@@ -474,8 +500,20 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Owner).await;
-        group_with(&app, org, "viewers", vec![scim_id], mapped(Some(OrgRole::Viewer))).await;
-        recompute(&app, scope(&app, org, OrgRole::Viewer, None, true, true), vec![scim_id]).await;
+        group_with(
+            &app,
+            org,
+            "viewers",
+            vec![scim_id],
+            mapped(Some(OrgRole::Viewer)),
+        )
+        .await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Owner));
     }
 
@@ -497,7 +535,12 @@ mod tests {
             },
         )
         .await;
-        recompute(&app, scope(&app, org, OrgRole::Viewer, None, true, true), vec![scim_id]).await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Admin));
         assert_eq!(override_of(&app, project, user).await, None);
     }
@@ -509,7 +552,12 @@ mod tests {
         let project = seeded.project.id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
         set_override(&app, project, user, ProjectOverride::Admin).await;
-        recompute(&app, scope(&app, org, OrgRole::Member, None, true, true), vec![scim_id]).await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Member, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         // Admin lowers to the Member fallback, so the removal is a lowering.
         assert_eq!(override_of(&app, project, user).await, None);
     }
@@ -519,7 +567,14 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
-        group_with(&app, org, "members", vec![scim_id], mapped(Some(OrgRole::Member))).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![scim_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
         // The owner takes the only seat.
         let limited = scope(&app, org, OrgRole::Viewer, Some(1), true, true);
         recompute(&app, limited, vec![scim_id]).await;
@@ -534,7 +589,14 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
-        group_with(&app, org, "admins", vec![scim_id], mapped(Some(OrgRole::Admin))).await;
+        group_with(
+            &app,
+            org,
+            "admins",
+            vec![scim_id],
+            mapped(Some(OrgRole::Admin)),
+        )
+        .await;
         // Over the limit already: a Member raised to Admin takes no seat, so it still applies.
         let limited = scope(&app, org, OrgRole::Viewer, Some(1), true, true);
         recompute(&app, limited, vec![scim_id]).await;
@@ -547,7 +609,14 @@ mod tests {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
         let (raise_id, raised) = managed(&app, org, "a@acme.test", OrgRole::Viewer).await;
-        group_with(&app, org, "members", vec![raise_id], mapped(Some(OrgRole::Member))).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![raise_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
         let (lower_id, lowered) = managed(&app, org, "b@acme.test", OrgRole::Admin).await;
         let lapsed = scope(&app, org, OrgRole::Viewer, None, false, false);
         recompute(&app, lapsed, vec![raise_id, lower_id]).await;
@@ -560,7 +629,10 @@ mod tests {
     async fn without_project_roles_no_new_override_is_written() {
         let (app, seeded) = app_with(&["scim"]).await;
         let org = seeded.org_id;
-        let (first, second) = (seeded.project.id, app.add_project(&seeded, "second", None).await.0.id);
+        let (first, second) = (
+            seeded.project.id,
+            app.add_project(&seeded, "second", None).await.0.id,
+        );
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
         group_with(
             &app,
@@ -581,7 +653,10 @@ mod tests {
         let no_roles = scope(&app, org, OrgRole::Member, None, true, false);
         recompute(&app, no_roles, vec![scim_id]).await;
         assert_eq!(override_of(&app, second, user).await, None);
-        assert_eq!(override_of(&app, first, user).await, Some(ProjectOverride::Viewer));
+        assert_eq!(
+            override_of(&app, first, user).await,
+            Some(ProjectOverride::Viewer)
+        );
     }
 
     #[tokio::test]
@@ -592,11 +667,43 @@ mod tests {
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
         set_override(&app, project, user, ProjectOverride::None).await;
         // Lapsed: the removal would raise access, so it is skipped.
-        recompute(&app, scope(&app, org, OrgRole::Member, None, false, true), vec![scim_id]).await;
-        assert_eq!(override_of(&app, project, user).await, Some(ProjectOverride::None));
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Member, None, false, true),
+            vec![scim_id],
+        )
+        .await;
+        assert_eq!(
+            override_of(&app, project, user).await,
+            Some(ProjectOverride::None)
+        );
         // Entitled: the removal applies.
-        recompute(&app, scope(&app, org, OrgRole::Member, None, true, true), vec![scim_id]).await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Member, None, true, true),
+            vec![scim_id],
+        )
+        .await;
         assert_eq!(override_of(&app, project, user).await, None);
+    }
+
+    #[tokio::test]
+    async fn a_neutral_stale_override_is_removed_even_when_lapsed() {
+        let (app, seeded) = app_with(&["scim", "project_roles"]).await;
+        let org = seeded.org_id;
+        let project = seeded.project.id;
+        let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
+        // A Member override on a Member: the effective access is Member with or without it.
+        set_override(&app, project, user, ProjectOverride::Member).await;
+        // Lapsed, and no group maps the project: the removal is neither a raise nor a lowering.
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Member, None, false, false),
+            vec![scim_id],
+        )
+        .await;
+        assert_eq!(override_of(&app, project, user).await, None);
+        assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
     }
 
     #[tokio::test]
@@ -607,8 +714,20 @@ mod tests {
         for email in ["a@acme.test", "b@acme.test", "c@acme.test"] {
             ids.push(managed(&app, org, email, OrgRole::Viewer).await.0);
         }
-        group_with(&app, org, "members", ids.clone(), mapped(Some(OrgRole::Member))).await;
-        recompute(&app, scope(&app, org, OrgRole::Viewer, None, true, true), ids).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            ids.clone(),
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            ids,
+        )
+        .await;
         let records = details_of(&app, "scim.roles_recomputed").await;
         assert_eq!(records.len(), 1);
         assert!(records[0].contains("\"changed\":3"));
@@ -622,8 +741,20 @@ mod tests {
         for email in ["a@acme.test", "b@acme.test"] {
             ids.push(managed(&app, org, email, OrgRole::Viewer).await.0);
         }
-        group_with(&app, org, "members", ids.clone(), mapped(Some(OrgRole::Member))).await;
-        recompute(&app, scope(&app, org, OrgRole::Viewer, Some(1), true, true), ids).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            ids.clone(),
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, Some(1), true, true),
+            ids,
+        )
+        .await;
         let records = details_of(&app, "scim.role_raise_refused").await;
         assert_eq!(records.len(), 1);
         assert!(records[0].contains("\"count\":2"));
@@ -632,7 +763,9 @@ mod tests {
     #[tokio::test]
     async fn linking_an_existing_member_recomputes_at_once() {
         let (app, seeded) = app_with(&["scim", "org_sso"]).await;
-        let existing = app.add_member(&seeded, "x@acme.test", OrgRole::Viewer).await;
+        let existing = app
+            .add_member(&seeded, "x@acme.test", OrgRole::Viewer)
+            .await;
         let token = scim_org(&app, &seeded, "acme.test", OrgRole::Member).await;
         let response = create_user(&app, &token, "x@acme.test").await;
         assert_eq!(response.status, StatusCode::CREATED);
@@ -694,17 +827,28 @@ mod tests {
         let org = seeded.org_id;
         let token = scim_org(&app, &seeded, "acme.test", OrgRole::Viewer).await;
         let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Member).await;
-        group_with(&app, org, "members", vec![scim_id], mapped(Some(OrgRole::Member))).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![scim_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
         let path = format!("{SCIM_USERS}/{scim_id}");
         let off = json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": false}}]});
         assert_eq!(
-            scim_request(&app, &token, Method::PATCH, &path, &off).await.status,
+            scim_request(&app, &token, Method::PATCH, &path, &off)
+                .await
+                .status,
             StatusCode::OK
         );
         assert_eq!(role_of(&app, org, user).await, None);
         let on = json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": true}}]});
         assert_eq!(
-            scim_request(&app, &token, Method::PATCH, &path, &on).await.status,
+            scim_request(&app, &token, Method::PATCH, &path, &on)
+                .await
+                .status,
             StatusCode::OK
         );
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));

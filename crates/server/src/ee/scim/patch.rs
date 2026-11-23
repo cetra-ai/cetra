@@ -194,8 +194,8 @@ fn member_filter_id(filter: &str) -> Result<String, ScimError> {
     let unsupported = || ScimError::invalid_value("Unsupported members path.");
     let inner = filter.strip_suffix(']').ok_or_else(unsupported)?.trim();
     let rest = strip_prefix_ci(inner, "value").ok_or_else(unsupported)?;
-    let rest = strip_prefix_ci(spaces(rest).map_err(|_| unsupported())?, "eq")
-        .ok_or_else(unsupported)?;
+    let rest =
+        strip_prefix_ci(spaces(rest).map_err(|_| unsupported())?, "eq").ok_or_else(unsupported)?;
     parse_comp_value(spaces(rest).map_err(|_| unsupported())?).map_err(|_| unsupported())
 }
 
@@ -616,7 +616,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             changes,
-            vec![GroupChange::RemoveMembers(vec!["a".to_owned(), "b".to_owned()])]
+            vec![GroupChange::RemoveMembers(vec![
+                "a".to_owned(),
+                "b".to_owned()
+            ])]
         );
     }
 

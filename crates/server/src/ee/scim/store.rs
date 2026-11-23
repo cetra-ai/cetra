@@ -944,14 +944,13 @@ pub(crate) async fn remove_group_members_tx(
 ) -> Result<Vec<Uuid>, MetaError> {
     let mut removed = Vec::new();
     for user in users {
-        let changed = sqlx::query(
-            "DELETE FROM scim_group_members WHERE group_id = ? AND scim_user_id = ?",
-        )
-        .bind(group.to_string())
-        .bind(user.to_string())
-        .execute(&mut *conn)
-        .await?
-        .rows_affected();
+        let changed =
+            sqlx::query("DELETE FROM scim_group_members WHERE group_id = ? AND scim_user_id = ?")
+                .bind(group.to_string())
+                .bind(user.to_string())
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
         if changed == 1 {
             removed.push(*user);
         }
@@ -1279,9 +1278,7 @@ fn group_row(record: GroupRecord) -> Result<ScimGroupRow, MetaError> {
 fn group_filter_clause(filter: Option<&GroupFilter>) -> (&'static str, Option<&str>) {
     match filter {
         None => ("", None),
-        Some(GroupFilter::DisplayName(value)) => {
-            (" AND display_name = ?", Some(value.as_str()))
-        }
+        Some(GroupFilter::DisplayName(value)) => (" AND display_name = ?", Some(value.as_str())),
         Some(GroupFilter::ExternalId(value)) => (" AND external_id = ?", Some(value.as_str())),
     }
 }
@@ -1366,8 +1363,8 @@ mod tests {
     use super::*;
     use crate::meta::MetaDb;
     use crate::meta::orgs::{delete_org, insert_org, mark_org_deleting};
-    use crate::meta::test_db;
     use crate::meta::projects::insert_project;
+    use crate::meta::test_db;
     use crate::meta::users::{NewUser, insert_user as insert_account};
 
     async fn org_named(db: &MetaDb, slug: &'static str) -> OrgId {
@@ -1466,9 +1463,10 @@ mod tests {
                     let ada_scim = insert_user(conn, acme, ada, &fields("ada@acme.test", None), 1)
                         .await?
                         .id;
-                    let bob_scim = insert_user(conn, other, bob, &fields("bob@other.test", None), 1)
-                        .await?
-                        .id;
+                    let bob_scim =
+                        insert_user(conn, other, bob, &fields("bob@other.test", None), 1)
+                            .await?
+                            .id;
                     let added =
                         add_group_members_tx(conn, acme, group, &[ada_scim, bob_scim]).await?;
                     assert_eq!(added, vec![ada_scim]);
@@ -1490,7 +1488,9 @@ mod tests {
         let second = project_named(&db, acme, "second").await;
         let group = db
             .write(move |conn| {
-                Box::pin(async move { Ok(insert_group(conn, acme, "Engineering", None, 1).await?.id) })
+                Box::pin(
+                    async move { Ok(insert_group(conn, acme, "Engineering", None, 1).await?.id) },
+                )
             })
             .await
             .unwrap();
@@ -1510,7 +1510,10 @@ mod tests {
                     ],
                 };
                 let refused = put_mapping(conn, group, &duplicate, 3).await;
-                assert!(matches!(refused, Err(MetaError::Conflict("duplicate project"))));
+                assert!(matches!(
+                    refused,
+                    Err(MetaError::Conflict("duplicate project"))
+                ));
 
                 let owner = GroupMapping {
                     org_role: Some(OrgRole::Owner),
@@ -1554,10 +1557,12 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(!mappings(db.reader(), acme)
-            .await
-            .unwrap()
-            .contains_key(&group));
+        assert!(
+            !mappings(db.reader(), acme)
+                .await
+                .unwrap()
+                .contains_key(&group)
+        );
     }
 
     #[tokio::test]

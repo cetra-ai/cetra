@@ -66,7 +66,11 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     ]
 }
 
-pub(crate) fn route(method: Method, path: &'static str, handler: MethodRouter<AppState>) -> RouteDef {
+pub(crate) fn route(
+    method: Method,
+    path: &'static str,
+    handler: MethodRouter<AppState>,
+) -> RouteDef {
     RouteDef {
         method,
         path,
@@ -79,7 +83,10 @@ pub(crate) fn route(method: Method, path: &'static str, handler: MethodRouter<Ap
 /// The checks every SCIM handler starts with: the token's rate limit (D-EA-15) and SCIM being on
 /// for the org. Returns the org and its default role (P-4). The entitlement is checked per
 /// operation, so a lapsed org still deprovisions (D-EA-19).
-pub(crate) async fn admit(state: &AppState, principal: &Principal) -> Result<(OrgId, OrgRole), ScimError> {
+pub(crate) async fn admit(
+    state: &AppState,
+    principal: &Principal,
+) -> Result<(OrgId, OrgRole), ScimError> {
     let Principal::Scim { org_id, token_id } = principal else {
         return Err(ScimError::forbidden(
             "SCIM is turned off for this organization.",
@@ -946,7 +953,7 @@ mod tests {
     use crate::meta::users::{
         EmailVerifiedVia, NewUser, insert_user as insert_account, set_disabled,
     };
-    use crate::test_support::{Seeded, TestApp, make_instance_admin, second_org, set_limits};
+    use crate::test_support::{TestApp, make_instance_admin, second_org, set_limits};
 
     const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
@@ -1351,7 +1358,10 @@ mod tests {
         app.state
             .meta
             .write(move |conn| {
-                Box::pin(async move { put_org_scim(conn, org, false, OrgRole::Viewer, now).await })
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(conn, org, false, OrgRole::Viewer, now)
+                        .await
+                })
             })
             .await
             .unwrap();

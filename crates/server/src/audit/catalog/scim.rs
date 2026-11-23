@@ -81,7 +81,8 @@ pub(crate) enum ScimAction {
         org_role: Option<&'static str>,
         projects: u32,
     },
-    /// No target. `users` is the managed members checked, `changed` the ones whose roles changed.
+    /// No target. `users` counts the members checked. `changed` counts the applied changes, org-role
+    /// and project-override changes alike.
     #[serde(rename = "scim.roles_recomputed")]
     #[serde(rename_all = "snake_case")]
     RolesRecomputed { users: u32, changed: u32 },
