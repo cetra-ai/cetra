@@ -76,7 +76,7 @@ cetra.flush()
 - Do not also enable `openai`: each model call would be recorded twice and counted twice.
 - Cost is the one BeeAI reports (through LiteLLM), not cetra's price table. A model LiteLLM cannot price reports a cost of 0.
 - TypeScript is not supported: OpenInference's BeeAI instrumentation only covers 2025 versions of the TypeScript framework.
-- The `beeai` extra needs Python 3.14 or earlier: the OpenInference BeeAI instrumentation does not support Python 3.15 yet.
+- beeai-framework needs Python 3.13 or earlier: it does not support Python 3.14 yet. The `beeai` extra itself needs Python 3.14 or earlier: the OpenInference BeeAI instrumentation does not support Python 3.15 yet.
 - The fixture was captured with beeai-framework 0.1.85 and openinference-instrumentation-beeai 0.1.36.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

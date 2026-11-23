@@ -344,7 +344,7 @@ Depends on: M1. Leaves out: gateways (M5).
 
 **M3 — OpenInference frameworks.** Delivers pages, registry rows and captured cases for Instructor, Agno, smolagents, Haystack, BeeAI (Python and TypeScript), Guardrails AI, DeepAgents and Temporal, and own pages for LangGraph and the Claude Agent SDK. No normalizer work. A capture that shows a gap moves that integration to M4, and this doc says so. Depends on: M2 (lockfiles and index).
 
-**M4 — Native GenAI frameworks.** Delivers captured cases, the D-IN-5 and D-IN-6 rules and pages for Pydantic AI, Mastra, Semantic Kernel (Python), Strands Agents and Bedrock AgentCore, Microsoft Agent Framework (Python), AG2, AutoGen, Mirascope, the OpenHands SDK and VoltAgent (with `Convention::Voltagent`). Spikes: none (the research read their source); the captures pin the keys. Depends on: M3. Leaves out: .NET and Java (M8).
+**M4 — Native GenAI frameworks.** Delivers captured cases, the D-IN-5 and D-IN-6 rules and pages for Pydantic AI, Mastra, Semantic Kernel (Python), Strands Agents and Bedrock AgentCore, Microsoft Agent Framework (Python), AG2, AutoGen, Mirascope, the OpenHands SDK and VoltAgent (with `Convention::Voltagent`). It also fixes OpenInference `output.value` labelled `application/json` that is not JSON (Agno's agent spans): read it as text, without a normalize error (found by M3's capture). Spikes: none (the research read their source); the captures pin the keys. Depends on: M3. Leaves out: .NET and Java (M8).
 
 **M5 — Gateways.** Delivers:
 - a page for every gateway in § Gateways that its spike keeps;

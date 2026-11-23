@@ -49,7 +49,7 @@ cohere = ["openinference-instrumentation-cohere>=0.1.22"]
 ollama = ["openinference-instrumentation-ollama>=0.1.20"]
 together = ["openinference-instrumentation-together>=0.1.20"]
 instructor = ['openinference-instrumentation-instructor>=0.1.35; python_version < "3.14"']
-agno = ["openinference-instrumentation-agno>=1.2.1"]
+agno = ["openinference-instrumentation-agno>=1.2.0"]
 smolagents = ["openinference-instrumentation-smolagents>=0.1.50"]
 haystack = ["openinference-instrumentation-haystack>=0.1.53"]
 beeai = ['openinference-instrumentation-beeai>=0.1.36; python_version < "3.15"']
@@ -70,7 +70,7 @@ all = [
   "openinference-instrumentation-ollama>=0.1.20",
   "openinference-instrumentation-together>=0.1.20",
   'openinference-instrumentation-instructor>=0.1.35; python_version < "3.14"',
-  "openinference-instrumentation-agno>=1.2.1",
+  "openinference-instrumentation-agno>=1.2.0",
   "openinference-instrumentation-smolagents>=0.1.50",
   "openinference-instrumentation-haystack>=0.1.53",
   'openinference-instrumentation-beeai>=0.1.36; python_version < "3.15"',

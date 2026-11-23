@@ -81,8 +81,10 @@ Guardrails writes its spans on the global tracer provider, so pass `use_global_p
 ## Limits
 
 - Pass the API key through `OPENAI_API_KEY`: a key passed as an argument ends up in the recorded parameters.
+- Guardrails AI needs Python 3.13 or earlier.
 - Guardrails sends usage metrics unless `enable_metrics` is off in `~/.guardrailsrc`.
 - Guardrails writes its own spans; the OpenInference Guardrails instrumentation does not support current versions.
+- Guardrails writes `user.id=unknown` on its spans, so traces show the user `unknown` unless you set the user with cetra's context ([`cetra.context(user_id=…)`](/docs/tracing/users/)), which takes precedence.
 - The captured fixture does not include Guardrails' `step` span: its input and output embed per-run ids that cannot be normalized. A live run shows it as another `guardrail` span between the guard and the call.
 - The fixture was captured with guardrails-ai 0.11.0 and openinference-instrumentation-openai 0.1.69.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).

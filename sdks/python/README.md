@@ -40,6 +40,10 @@ Auto-instrumentation is optional, one extra per library:
 | `haystack` | `cetra-sdk[haystack]` |
 | `beeai` | `cetra-sdk[beeai]` |
 
+The `instructor` and `beeai` distributions do not support every Python
+version: the `instructor` extra installs on Python 3.13 or earlier, and `beeai`
+on Python 3.14 or earlier.
+
 `cetra-sdk[all]` installs every instrumentor. The core package pulls in only
 `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http`
 and `requests`.
