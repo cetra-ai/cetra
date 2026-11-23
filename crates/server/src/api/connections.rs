@@ -223,13 +223,14 @@ pub struct UpdateLlmConnectionRequest {
     /// Display name, 1 to 100 characters after trimming.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// The provider API the connection talks to.
+    /// The provider API the connection talks to. Without `api_key`, the saved key is kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter: Option<LlmAdapter>,
     /// Replaces the API key. Write-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// Provider endpoint. An empty string clears it.
+    /// Provider endpoint. An empty string clears it. Without `api_key`, the saved key is kept and
+    /// sent to the new endpoint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     /// Model used when a caller names none. An empty string clears it.
@@ -249,7 +250,11 @@ pub struct UpdateLlmConnectionRequest {
     pub extra_headers: Option<BTreeMap<String, String>>,
 }
 
-/// `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body.
+/// `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. The draft fields (`adapter`,
+/// `api_key`, `base_url`, `structured_output`, `extra_headers`) have PATCH semantics: absent means
+/// the saved value, including the saved key, which a draft `base_url` or `adapter` also uses
+/// when `api_key` is absent. A test with a draft field that differs from the saved
+/// value, or with `api_key` or `extra_headers`, stores nothing (D-I-53).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TestLlmConnectionRequest {
@@ -258,6 +263,47 @@ pub struct TestLlmConnectionRequest {
     pub model: Option<String>,
     /// Embedding model to test instead: the test embeds `"ping"` and does not ask for a
     /// judgement. Not for an Anthropic connection, which has no embeddings API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+    /// Draft provider API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<LlmAdapter>,
+    /// Draft API key. Write-only. Absent: the saved key, whatever the draft `base_url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Draft provider endpoint. An empty string means the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Draft structured output mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<StructuredOutputMode>,
+    /// Draft extra headers, replacing the saved ones. Values are write-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_headers: Option<BTreeMap<String, String>>,
+}
+
+/// `POST /api/v1/orgs/{org}/llm-connections/test` body: a connection that is not saved. Nothing
+/// is stored (D-I-53).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct TestUnsavedLlmConnectionRequest {
+    /// The provider API.
+    pub adapter: LlmAdapter,
+    /// Provider API key, 1 to 4096 bytes. Write-only.
+    pub api_key: String,
+    /// Provider endpoint overriding the provider's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// How the provider is asked to fill the answer schema. Default `native`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<StructuredOutputMode>,
+    /// Extra headers sent with the call, at most 20. Values are write-only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra_headers: BTreeMap<String, String>,
+    /// Model to call. Required unless `embedding_model` is given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Embedding model to test instead. Not for Anthropic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_model: Option<String>,
 }

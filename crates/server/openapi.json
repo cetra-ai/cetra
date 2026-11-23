@@ -4701,6 +4701,99 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/llm-connections/test": {
+      "post": {
+        "tags": [
+          "llm_connections"
+        ],
+        "summary": "Test an unsaved LLM connection",
+        "description": "Organization admins and owners. Nothing is stored.",
+        "operationId": "post_unsaved_llm_connection_test",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestUnsavedLlmConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The outcome. A provider failure is ok: false, not an error status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmConnectionTestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/orgs/{org}/llm-connections/{id}": {
       "get": {
         "tags": [
@@ -5005,7 +5098,7 @@
           "llm_connections"
         ],
         "summary": "Test an LLM connection",
-        "description": "Organization admins and owners.",
+        "description": "Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.",
         "operationId": "post_llm_connection_test",
         "parameters": [
           {
@@ -38825,15 +38918,86 @@
       },
       "TestLlmConnectionRequest": {
         "type": "object",
-        "description": "`POST /api/v1/orgs/{org}/llm-connections/{id}/test` body.",
+        "description": "`POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. The draft fields (`adapter`,\n`api_key`, `base_url`, `structured_output`, `extra_headers`) have PATCH semantics: absent means\nthe saved value, including the saved key, which a draft `base_url` or `adapter` also uses\nwhen `api_key` is absent. A test with a draft field that differs from the saved\nvalue, or with `api_key` or `extra_headers`, stores nothing (D-I-53).",
         "properties": {
+          "adapter": {
+            "$ref": "#/components/schemas/LlmAdapter",
+            "description": "Draft provider API."
+          },
+          "api_key": {
+            "type": "string",
+            "description": "Draft API key. Write-only. Absent: the saved key, whatever the draft `base_url`."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Draft provider endpoint. An empty string means the provider's default."
+          },
           "embedding_model": {
             "type": "string",
             "description": "Embedding model to test instead: the test embeds `\"ping\"` and does not ask for a\njudgement. Not for an Anthropic connection, which has no embeddings API."
           },
+          "extra_headers": {
+            "type": "object",
+            "description": "Draft extra headers, replacing the saved ones. Values are write-only.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "model": {
             "type": "string",
             "description": "Model to call. Default: the connection's `default_model`."
+          },
+          "structured_output": {
+            "$ref": "#/components/schemas/StructuredOutputMode",
+            "description": "Draft structured output mode."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TestUnsavedLlmConnectionRequest": {
+        "type": "object",
+        "description": "`POST /api/v1/orgs/{org}/llm-connections/test` body: a connection that is not saved. Nothing\nis stored (D-I-53).",
+        "required": [
+          "adapter",
+          "api_key"
+        ],
+        "properties": {
+          "adapter": {
+            "$ref": "#/components/schemas/LlmAdapter",
+            "description": "The provider API."
+          },
+          "api_key": {
+            "type": "string",
+            "description": "Provider API key, 1 to 4096 bytes. Write-only."
+          },
+          "base_url": {
+            "type": "string",
+            "description": "Provider endpoint overriding the provider's default."
+          },
+          "embedding_model": {
+            "type": "string",
+            "description": "Embedding model to test instead. Not for Anthropic."
+          },
+          "extra_headers": {
+            "type": "object",
+            "description": "Extra headers sent with the call, at most 20. Values are write-only.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "model": {
+            "type": "string",
+            "description": "Model to call. Required unless `embedding_model` is given."
+          },
+          "structured_output": {
+            "$ref": "#/components/schemas/StructuredOutputMode",
+            "description": "How the provider is asked to fill the answer schema. Default `native`."
           }
         },
         "additionalProperties": false
@@ -39635,7 +39799,7 @@
         "properties": {
           "adapter": {
             "$ref": "#/components/schemas/LlmAdapter",
-            "description": "The provider API the connection talks to."
+            "description": "The provider API the connection talks to. Without `api_key`, the saved key is kept."
           },
           "api_key": {
             "type": "string",
@@ -39643,7 +39807,7 @@
           },
           "base_url": {
             "type": "string",
-            "description": "Provider endpoint. An empty string clears it."
+            "description": "Provider endpoint. An empty string clears it. Without `api_key`, the saved key is kept and\nsent to the new endpoint."
           },
           "default_model": {
             "type": "string",

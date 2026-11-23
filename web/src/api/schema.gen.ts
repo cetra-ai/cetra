@@ -998,6 +998,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/llm-connections/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test an unsaved LLM connection
+         * @description Organization admins and owners. Nothing is stored.
+         */
+        post: operations["post_unsaved_llm_connection_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/llm-connections/{id}": {
         parameters: {
             query?: never;
@@ -1037,7 +1057,7 @@ export interface paths {
         put?: never;
         /**
          * Test an LLM connection
-         * @description Organization admins and owners.
+         * @description Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.
          */
         post: operations["post_llm_connection_test"];
         delete?: never;
@@ -10578,15 +10598,55 @@ export interface components {
              */
             webhook_secret?: string;
         };
-        /** @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. */
+        /**
+         * @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. The draft fields (`adapter`,
+         *     `api_key`, `base_url`, `structured_output`, `extra_headers`) have PATCH semantics: absent means
+         *     the saved value, including the saved key, which a draft `base_url` or `adapter` also uses
+         *     when `api_key` is absent. A test with a draft field that differs from the saved
+         *     value, or with `api_key` or `extra_headers`, stores nothing (D-I-53).
+         */
         TestLlmConnectionRequest: {
+            /** @description Draft provider API. */
+            adapter?: components["schemas"]["LlmAdapter"];
+            /** @description Draft API key. Write-only. Absent: the saved key, whatever the draft `base_url`. */
+            api_key?: string;
+            /** @description Draft provider endpoint. An empty string means the provider's default. */
+            base_url?: string;
             /**
              * @description Embedding model to test instead: the test embeds `"ping"` and does not ask for a
              *     judgement. Not for an Anthropic connection, which has no embeddings API.
              */
             embedding_model?: string;
+            /** @description Draft extra headers, replacing the saved ones. Values are write-only. */
+            extra_headers?: {
+                [key: string]: string;
+            };
             /** @description Model to call. Default: the connection's `default_model`. */
             model?: string;
+            /** @description Draft structured output mode. */
+            structured_output?: components["schemas"]["StructuredOutputMode"];
+        };
+        /**
+         * @description `POST /api/v1/orgs/{org}/llm-connections/test` body: a connection that is not saved. Nothing
+         *     is stored (D-I-53).
+         */
+        TestUnsavedLlmConnectionRequest: {
+            /** @description The provider API. */
+            adapter: components["schemas"]["LlmAdapter"];
+            /** @description Provider API key, 1 to 4096 bytes. Write-only. */
+            api_key: string;
+            /** @description Provider endpoint overriding the provider's default. */
+            base_url?: string;
+            /** @description Embedding model to test instead. Not for Anthropic. */
+            embedding_model?: string;
+            /** @description Extra headers sent with the call, at most 20. Values are write-only. */
+            extra_headers?: {
+                [key: string]: string;
+            };
+            /** @description Model to call. Required unless `embedding_model` is given. */
+            model?: string;
+            /** @description How the provider is asked to fill the answer schema. Default `native`. */
+            structured_output?: components["schemas"]["StructuredOutputMode"];
         };
         /** @description Plain text. */
         TextPart: {
@@ -11045,11 +11105,14 @@ export interface components {
          *     unchanged; an empty body is valid and changes only `updated_at`.
          */
         UpdateLlmConnectionRequest: {
-            /** @description The provider API the connection talks to. */
+            /** @description The provider API the connection talks to. Without `api_key`, the saved key is kept. */
             adapter?: components["schemas"]["LlmAdapter"];
             /** @description Replaces the API key. Write-only. */
             api_key?: string;
-            /** @description Provider endpoint. An empty string clears it. */
+            /**
+             * @description Provider endpoint. An empty string clears it. Without `api_key`, the saved key is kept and
+             *     sent to the new endpoint.
+             */
             base_url?: string;
             /** @description Model used when a caller names none. An empty string clears it. */
             default_model?: string;
@@ -15105,6 +15168,78 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_unsaved_llm_connection_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestUnsavedLlmConnectionRequest"];
+            };
+        };
+        responses: {
+            /** @description The outcome. A provider failure is ok: false, not an error status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConnectionTestResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
