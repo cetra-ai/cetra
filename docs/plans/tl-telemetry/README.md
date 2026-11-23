@@ -117,7 +117,7 @@ cetra has no `tracing` spans today. This track adds spans where an operator want
 | Span | Attributes |
 |---|---|
 | `http.request` | method, matched route template (D150), status code |
-| `otlp.export` (HTTP and gRPC ingest) | signal, protocol, span count, byte size, outcome |
+| `otlp.export` (HTTP and gRPC trace ingest; logs and metrics requests get none) | protocol, span count, byte size, outcome |
 | `storage.flush`, `storage.compaction`, `storage.gc` | table, level, bytes, files, outcome |
 | `query` (read API, SQL console, MCP) | kind, rows, outcome; never SQL text |
 | `eval.job`, `alerts.evaluate`, `alerts.deliver`, `deletion.apply`, `retention.pass`, `issues.pass`, `backup` | ids, kind, outcome |
