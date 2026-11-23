@@ -16,3 +16,7 @@ Findings:
 - OpenAI v2 always writes `gen_ai.provider.name=openai`.
 - So the host rule of D-IN-2 can fix OpenLLMetry spans only, unless the span gets the host from elsewhere (D-IN-18).
 - The httpx-transport routing of D-IN-3 works: the instrumentation saw the real host.
+
+## Can cetra's Python SDK add the host?
+
+Same environment. After `OpenAIInstrumentor().instrument()`, wrapping `openai.resources.chat.completions.Completions.create` with `wrapt` (so cetra's wrapper is the outermost) to set a context variable to `instance._client.base_url.host`, and a span processor whose `on_start` copies it into `server.address`, gives `server.address=api.novita.ai` on both the OpenInference span and the OpenAI v2 span. Wrapping `SyncAPIClient.request` instead does not work: OpenInference wraps `OpenAI.request`, so a wrapper on the base class runs inside the span. This supports D-IN-18.
