@@ -3,3 +3,5 @@
 //! installs. Prometheus `/metrics` is [`crate::telemetry`] (D-N-28).
 
 pub mod panic;
+pub(crate) mod buckets;
+pub(crate) mod facts;
