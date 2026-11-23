@@ -6194,6 +6194,271 @@
         ]
       }
     },
+    "/api/v1/orgs/{org}/scim/groups": {
+      "get": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "List the SCIM groups and their role mappings",
+        "description": "Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.",
+        "operationId": "list_org_scim_groups",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The org's SCIM groups.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimGroupList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/orgs/{org}/scim/groups/{id}/mapping": {
+      "put": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Set a SCIM group's role mapping",
+        "description": "Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.",
+        "operationId": "put_org_scim_group_mapping",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Group id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PutScimGroupMapping"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The group, with its new mapping.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScimGroup"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "orgs"
+        ],
+        "summary": "Remove a SCIM group's role mapping",
+        "description": "The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.",
+        "operationId": "delete_org_scim_group_mapping",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Group id.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The mapping is removed."
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/orgs/{org}/scim/tokens": {
       "post": {
         "tags": [
@@ -36552,6 +36817,24 @@
         },
         "additionalProperties": false
       },
+      "PutScimGroupMapping": {
+        "type": "object",
+        "description": "`PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` body. The new mapping replaces the old\none; a mapping with neither an org role nor a project is refused (use DELETE).",
+        "properties": {
+          "org_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The org role the group gives: `admin`, `member` or `viewer`. Omit it to give none."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimProjectRole"
+            },
+            "description": "One project role per project, at most 200. Omit the list to map no project."
+          }
+        },
+        "additionalProperties": false
+      },
       "QueueCounts": {
         "type": "object",
         "description": "Item counts of a queue, by status.",
@@ -37139,6 +37422,95 @@
               "$ref": "#/components/schemas/ViewSchema"
             },
             "description": "Logical views."
+          }
+        }
+      },
+      "ScimGroup": {
+        "type": "object",
+        "description": "One SCIM group of the org, with its role mapping (D-EA-14). The display name is shown to\nowners on their settings page only; it is never logged or recorded.",
+        "required": [
+          "id",
+          "display_name",
+          "member_count"
+        ],
+        "properties": {
+          "display_name": {
+            "type": "string",
+            "description": "The name the identity provider gave the group."
+          },
+          "external_id": {
+            "type": "string",
+            "description": "The identity provider's external id, when it sent one."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Group id."
+          },
+          "mapping": {
+            "$ref": "#/components/schemas/ScimGroupMapping",
+            "description": "The group's role mapping. `null` when the group maps nothing."
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many SCIM users are in the group.",
+            "minimum": 0
+          }
+        }
+      },
+      "ScimGroupList": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/scim/groups`: every SCIM group of the org, ordered by display name.",
+        "required": [
+          "groups"
+        ],
+        "properties": {
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimGroup"
+            },
+            "description": "The groups."
+          }
+        }
+      },
+      "ScimGroupMapping": {
+        "type": "object",
+        "description": "A group's role mapping: an org role and one project role per project. Members get the\nhighest of their groups' roles (D-EA-14).",
+        "required": [
+          "projects"
+        ],
+        "properties": {
+          "org_role": {
+            "$ref": "#/components/schemas/OrgRole",
+            "description": "The org role the group gives: `admin`, `member` or `viewer`. `null` when it gives none."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScimProjectRole"
+            },
+            "description": "One project role per project. Empty when the group maps no project."
+          }
+        }
+      },
+      "ScimProjectRole": {
+        "type": "object",
+        "description": "A project role of a group mapping.",
+        "required": [
+          "project_id",
+          "role"
+        ],
+        "properties": {
+          "project_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Project id."
+          },
+          "role": {
+            "$ref": "#/components/schemas/ProjectRoleOverride",
+            "description": "The project role: `admin`, `member`, `viewer` or `none` (hidden)."
           }
         }
       },

@@ -1171,6 +1171,50 @@ export interface paths {
         patch: operations["update_org_scim"];
         trace?: never;
     };
+    "/api/v1/orgs/{org}/scim/groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the SCIM groups and their role mappings
+         * @description Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.
+         */
+        get: operations["list_org_scim_groups"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/scim/groups/{id}/mapping": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set a SCIM group's role mapping
+         * @description Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.
+         */
+        put: operations["put_org_scim_group_mapping"];
+        post?: never;
+        /**
+         * Remove a SCIM group's role mapping
+         * @description The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.
+         */
+        delete: operations["delete_org_scim_group_mapping"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/scim/tokens": {
         parameters: {
             query?: never;
@@ -9177,6 +9221,16 @@ export interface components {
             /** @description A signed `kind: org` token. Never logged. */
             token: string;
         };
+        /**
+         * @description `PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` body. The new mapping replaces the old
+         *     one; a mapping with neither an org role nor a project is refused (use DELETE).
+         */
+        PutScimGroupMapping: {
+            /** @description The org role the group gives: `admin`, `member` or `viewer`. Omit it to give none. */
+            org_role?: components["schemas"]["OrgRole"];
+            /** @description One project role per project, at most 200. Omit the list to map no project. */
+            projects?: components["schemas"]["ScimProjectRole"][];
+        };
         /** @description Item counts of a queue, by status. */
         QueueCounts: {
             /**
@@ -9515,6 +9569,53 @@ export interface components {
             functions: components["schemas"]["FunctionSchema"][];
             /** @description Logical views. */
             views: components["schemas"]["ViewSchema"][];
+        };
+        /**
+         * @description One SCIM group of the org, with its role mapping (D-EA-14). The display name is shown to
+         *     owners on their settings page only; it is never logged or recorded.
+         */
+        ScimGroup: {
+            /** @description The name the identity provider gave the group. */
+            display_name: string;
+            /** @description The identity provider's external id, when it sent one. */
+            external_id?: string;
+            /**
+             * Format: uuid
+             * @description Group id.
+             */
+            id: string;
+            /** @description The group's role mapping. `null` when the group maps nothing. */
+            mapping?: components["schemas"]["ScimGroupMapping"];
+            /**
+             * Format: int32
+             * @description How many SCIM users are in the group.
+             */
+            member_count: number;
+        };
+        /** @description `GET /api/v1/orgs/{org}/scim/groups`: every SCIM group of the org, ordered by display name. */
+        ScimGroupList: {
+            /** @description The groups. */
+            groups: components["schemas"]["ScimGroup"][];
+        };
+        /**
+         * @description A group's role mapping: an org role and one project role per project. Members get the
+         *     highest of their groups' roles (D-EA-14).
+         */
+        ScimGroupMapping: {
+            /** @description The org role the group gives: `admin`, `member` or `viewer`. `null` when it gives none. */
+            org_role?: components["schemas"]["OrgRole"];
+            /** @description One project role per project. Empty when the group maps no project. */
+            projects: components["schemas"]["ScimProjectRole"][];
+        };
+        /** @description A project role of a group mapping. */
+        ScimProjectRole: {
+            /**
+             * Format: uuid
+             * @description Project id.
+             */
+            project_id: string;
+            /** @description The project role: `admin`, `member`, `viewer` or `none` (hidden). */
+            role: components["schemas"]["ProjectRoleOverride"];
         };
         /** @description `GET` and `PATCH /api/v1/orgs/{org}/scim`. */
         ScimSettings: {
@@ -16288,6 +16389,198 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_org_scim_groups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The org's SCIM groups. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimGroupList"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_scim_group_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutScimGroupMapping"];
+            };
+        };
+        responses: {
+            /** @description The group, with its new mapping. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScimGroup"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    delete_org_scim_group_mapping: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+                /** @description Group id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The mapping is removed. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };
