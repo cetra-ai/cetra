@@ -803,6 +803,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "flate2",
  "insta",
  "mimalloc",
  "opentelemetry-proto",
@@ -817,7 +818,6 @@ dependencies = [
  "toml_edit 0.25.19+spec-1.1.0",
  "tonic",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

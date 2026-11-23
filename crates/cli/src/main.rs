@@ -21,12 +21,12 @@ use cetra_server::admin_socket::{
 };
 use cetra_server::api::entitlements::OrgLimits;
 use cetra_server::backup::BackupMode;
-use cetra_server::config::{LogConfig, LogFormat, ServerConfig};
+use cetra_server::config::{LogFormat, ServerConfig};
+use cetra_server::observability;
 use cetra_server::serve::{self, ServeError};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tracing_subscriber::EnvFilter;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -372,10 +372,25 @@ async fn run_cli(
 }
 
 async fn serve(config_path: Option<&Path>) -> anyhow::Result<()> {
+    // Before the config loads, so a panic while loading it is reported too (track TL).
+    observability::panic::install();
     let config = ServerConfig::load(config_path)
         .map_err(ServeError::from)
         .context("loading config")?;
-    init_tracing(&config.log)?;
+    let format = config.log.format.unwrap_or_else(default_log_format);
+    let observability =
+        observability::subscriber::init(&config, format).context("loading config")?;
+    let result = run_server(config).await;
+    if let Err(error) = &result {
+        // The chain stderr prints, also exported (track TL § Lifecycle).
+        let chain = format!("{error:#}");
+        tracing::error!(error = %chain, "cetra serve failed");
+    }
+    observability.shutdown().await;
+    result
+}
+
+async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     let signals = Signals::install().context("installing signal handlers")?;
     serve::run(config, Some(cetra_ui::router()), signals.wait())
         .await
@@ -395,43 +410,6 @@ fn annotate(error: ServeError) -> anyhow::Error {
         ServeError::Init { .. } => "applying init",
     };
     anyhow::Error::from(error).context(context)
-}
-
-/// The `rmcp` crate logs whole MCP requests and results below `warn`; they can hold prompts
-/// and SQL text, so its level is capped whatever `log.level` says (README § Privacy).
-const RMCP_DIRECTIVE: &str = "rmcp=warn";
-
-/// `log.level` as an `EnvFilter`, with [`RMCP_DIRECTIVE`] added last so it replaces any
-/// `rmcp=…` directive in `level`.
-fn log_filter(level: &str) -> anyhow::Result<EnvFilter> {
-    let directive = RMCP_DIRECTIVE
-        .parse()
-        .context("parsing the rmcp log directive")?;
-    Ok(EnvFilter::try_new(level)
-        .context("loading config")?
-        .add_directive(directive))
-}
-
-fn init_tracing(log: &LogConfig) -> anyhow::Result<()> {
-    let filter = log_filter(&log.level)?;
-    let format = log.format.unwrap_or_else(default_log_format);
-    match format {
-        LogFormat::Pretty => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .pretty()
-                .with_writer(io::stdout)
-                .init();
-        }
-        LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .with_writer(io::stdout)
-                .init();
-        }
-    }
-    Ok(())
 }
 
 fn default_log_format() -> LogFormat {
@@ -955,11 +933,21 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use bytes::Bytes;
     use clap::Parser;
+    use flate2::read::GzDecoder;
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value;
+    use opentelemetry_proto::tonic::logs::v1::LogRecord;
+    use prost::Message;
 
     use super::{
         AdminCommand, Cli, Command, EntitlementsCommand, OrgSsoCommand, humantime_duration,
-        log_filter, run_cli,
+        run_cli,
     };
     use crate::output;
     use crate::test_server::TestServer;
@@ -1018,55 +1006,6 @@ mod tests {
     }
 
     #[test]
-    fn log_filter_caps_rmcp() {
-        for level in ["info", "trace", "info,rmcp=trace"] {
-            let filter = log_filter(level).unwrap().to_string();
-            assert!(filter.contains("rmcp=warn"), "{level}: {filter}");
-            assert!(!filter.contains("rmcp=trace"), "{level}: {filter}");
-        }
-    }
-
-    /// `log_filter("debug")` admits debug events, but not rmcp's: a subscriber built from it
-    /// drops an rmcp event (rmcp logs whole requests and results at debug) and still emits a
-    /// debug event for another target.
-    #[test]
-    fn a_debug_filter_drops_rmcp_debug_events() {
-        use tracing_subscriber::Layer;
-        use tracing_subscriber::layer::SubscriberExt;
-
-        let buffer = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let writer = Arc::clone(&buffer);
-        let layer = tracing_subscriber::fmt::layer()
-            .with_writer(move || Buffer(Arc::clone(&writer)))
-            .with_ansi(false)
-            .with_target(true)
-            .with_filter(log_filter("debug").unwrap());
-        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(layer));
-        let guard = tracing::dispatcher::set_default(&dispatch);
-        tracing::debug!(target: "rmcp::service", "dropped-canary");
-        tracing::debug!(target: "cetra::serve", "kept-canary");
-        drop(guard);
-        drop(dispatch);
-        let logs = String::from_utf8_lossy(&buffer.lock().unwrap().clone()).into_owned();
-        assert!(!logs.contains("dropped-canary"), "{logs}");
-        assert!(logs.contains("kept-canary"), "{logs}");
-        assert!(logs.contains("cetra::serve"), "{logs}");
-    }
-
-    /// `io::Write` over the shared buffer of [`a_debug_filter_drops_rmcp_debug_events`].
-    struct Buffer(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Buffer {
-        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().write(data)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
     fn health_parses_with_and_without_url() {
         let url_of = |argv: &[&str]| match Cli::try_parse_from(argv).unwrap().command {
             Command::Health { url } => url,
@@ -1109,6 +1048,98 @@ mod tests {
         let text = format!("{error:#}");
         assert!(text.contains("loading config"), "{text}");
         assert!(text.contains(&path.display().to_string()), "{text}");
+    }
+
+    /// The OTLP/HTTP receiver of `serve_exports_its_start_up_error_before_exiting`: each
+    /// gzipped protobuf body of `POST /otlp/v1/logs` is decoded into `received`.
+    async fn receive_logs(
+        State(received): State<Arc<Mutex<Vec<ExportLogsServiceRequest>>>>,
+        body: Bytes,
+    ) -> StatusCode {
+        use std::io::Read;
+
+        let mut raw = Vec::new();
+        if GzDecoder::new(&body[..]).read_to_end(&mut raw).is_err() {
+            return StatusCode::BAD_REQUEST;
+        }
+        let Ok(request) = ExportLogsServiceRequest::decode(raw.as_slice()) else {
+            return StatusCode::BAD_REQUEST;
+        };
+        received.lock().unwrap().push(request);
+        StatusCode::OK
+    }
+
+    /// `cetra serve` exports its start-up error before it exits (track TL, D-TL-1). The HTTP
+    /// port is taken, so `serve` fails at binding, and the error reaches the receiver.
+    /// This installs the process's global subscriber and panic hook. Under nextest each test
+    /// is its own process; under `cargo test` it is the only CLI test that reaches
+    /// `subscriber::init` (`missing_config_exits_with_the_path` stops at the config load).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn serve_exports_its_start_up_error_before_exiting() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let receiver = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let receiver_addr = receiver.local_addr().unwrap();
+        let app = Router::new()
+            .route("/otlp/v1/logs", post(receive_logs))
+            .with_state(Arc::clone(&received));
+        tokio::spawn(async move {
+            let _ = axum::serve(receiver, app).await;
+        });
+
+        // Held until `serve` has failed, so its HTTP port is taken.
+        let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken_addr = taken.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("cetra.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                "data_dir = {:?}\nhttp_addr = \"{taken_addr}\"\notlp_http_addr = \"\"\ngrpc_addr = \"\"\n\n[self_monitoring]\notlp_endpoint = \"http://{receiver_addr}/otlp\"\n",
+                dir.path().join("data").display().to_string()
+            ),
+        )
+        .unwrap();
+
+        let error = run_cli(["cetra", "serve", "--config", config_path.to_str().unwrap()])
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("binding"), "{error:#}");
+        drop(taken);
+
+        // `serve` flushed the export before it returned, so the receiver has the records.
+        let requests = received.lock().unwrap();
+        let records: Vec<&LogRecord> = requests
+            .iter()
+            .flat_map(|request| &request.resource_logs)
+            .flat_map(|resource| &resource.scope_logs)
+            .flat_map(|scope| &scope.log_records)
+            .collect();
+        let record = records
+            .iter()
+            .find(|record| {
+                matches!(
+                    record.body.as_ref().and_then(|body| body.value.as_ref()),
+                    Some(any_value::Value::StringValue(text)) if text == "cetra serve failed"
+                )
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} records exported, none is the start-up error",
+                    records.len()
+                )
+            });
+        assert_eq!(record.severity_number, 17, "ERROR");
+        let chain = record
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "error")
+            .and_then(|attribute| attribute.value.as_ref()?.value.as_ref())
+            .map(|value| match value {
+                any_value::Value::StringValue(text) => text.clone(),
+                other => format!("{other:?}"),
+            })
+            .unwrap_or_default();
+        assert!(chain.contains("binding"), "{chain}");
     }
 
     #[test]
