@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Elastic-2.0
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
