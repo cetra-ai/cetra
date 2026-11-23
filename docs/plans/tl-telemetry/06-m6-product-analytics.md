@@ -12,7 +12,8 @@ The coordinator's answers to the planning questions are recorded in the design (
   - `crate::observability::heartbeat`: `pub(crate) struct Heartbeat` (15 fields, `features` last, line ≈63), `collect` (its literal at ≈206), `client` (with the `#[cfg(test)] no_proxy()` line, ≈255), `Sender::tick` (≈342: `let payload = match collect(…) { Ok(payload) => payload, … };`, then `self.send(&payload)`, then the `put_setting(conn, TELEMETRY_LAST_HEARTBEAT_AT, …)` write and `tracing::debug!("telemetry: heartbeat sent")`), `start` (≈408); in its tests: `const KEYS: [&str; 15]`, `fn golden() -> Heartbeat`, `the_payload_matches_the_golden_json` (≈554), `the_key_set_is_fixed` (≈590), `a_fresh_instance_collects_zeros` (≈602), `the_payload_is_small` (≈962), `tick_sends_and_records_the_time`, `tick_waits_when_sent_recently`, `tick_does_not_record_a_failure`, the test `Receiver` and `sender_for`.
   - `crate::meta::instance_settings::{get_setting, put_setting, TELEMETRY_INSTANCE_ID, TELEMETRY_LAST_HEARTBEAT_AT}`.
   - `crate::config::{TelemetryConfig (≈412), load_from (≈1013), secret_key (≈1151), validate (≈1179), validate_telemetry (≈1795), is_secret_path (≈2238)}`; `ServerConfig.telemetry` (≈885); the test `the_configuration_reference_matches_the_loader` (≈4447); the `telemetry: TelemetryConfig { endpoint: "http://127.0.0.1:9".to_owned(), ..TelemetryConfig::default() }` blocks in the three `ServerConfig { … }` literals.
-  - In `serve::bind` (≈622): `let decision = crate::observability::switchboard::for_config(&state.config);` then `if let Some(task) = Box::pin(crate::observability::heartbeat::start(&state, decision)).await { tasks.push(task); }`.
+  - In `serve::bind` (≈622): `let decision = crate::observability::switchboard::for_config(&state.config);` then `if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {` / `tasks.push(task);` / `}`.
+- **Order with M2:** the coordinator runs M2's TL2.9 (query spans in `routes/sql.rs` and `mcp/mod.rs`, `02-m2-spans.md`) **before** TL6.10 and TL6.11. Those two phases quote `run_sql` and `McpServer` as TL2.9 leaves them, and their edits there are pure insertions that never replace or move a line of M2's.
   - `website/src/content/docs/docs/self-hosting/telemetry.md` with `## Turn it off`, `## The startup line`, `## When it is sent`, `## What it sends`, `## The instance id`.
   - The Q notes file `/home/sebastien/.config/Claude-extra/side-session-notes/local_1c672712-2cc7-40e9-8d6b-d582417356b7/tl-requests-for-q.md` with a `## TL-Q4 — PostHog (for M6)` section.
 - **M2 (spans), M3 (debug bundle) and M5 (crash reports) are implemented in parallel in the same checkout and may land first in shared files.** Every M6 edit to a shared file is additive and local: add the new item next to the anchor named, and **keep every line another milestone added** (an extra field in `Decision`, `Features`, `AppInner` or `ServerConfig`, a key in the heartbeat's golden JSON, a layer in `finish`, a span or field in a route handler, a CHANGELOG bullet, a docs section). When an anchor moved because another milestone inserted lines, use the anchor's text, not its line number. Shared files, and the M6 phase that touches each (the coordinator serializes a phase with any other milestone's phase on the same file):
@@ -170,7 +171,7 @@ TL6.1 ─► TL6.15 docs, specs, CHANGELOG, Q notes
 - `fixtures/analytics/catalog.json` (new)
 
 **Steps.**
-1. `lib.rs`: add `pub(crate) mod analytics;` in alphabetical order (right after `pub(crate) mod agent_context;`).
+1. `lib.rs`: add `pub(crate) mod analytics;` in alphabetical order (right after `pub(crate) mod alerts;`, before `pub mod api;`).
 2. Create `analytics/mod.rs` with exactly:
    ```rust
    //! Product analytics (track TL M6, D-TL-14, D-TL-15): one typed catalog of product events,
@@ -1097,8 +1098,18 @@ TL6.1 ─► TL6.15 docs, specs, CHANGELOG, Q notes
 - `add_merges_saved_counts` (and saturates at `u64::MAX`).
 - `encode_and_decode_round_trip`; `decode_drops_unknown_names_and_bad_text` (`{"dataset.created": 2, "old.event": 9}` → only `dataset.created`; `not json`, `[]`, `{"dataset.created": -1}` → empty).
 - `concurrent_increments_are_not_lost` (8 threads × 1000 increments → 8000).
-- `start_is_off_without_the_heartbeat` (`TestApp::new()`, `Decision { heartbeat: Switch::Off(OffReason::DebugBuild) }` → `None`; no `telemetry.usage_counts` row written).
-- `start_loads_saved_counts` (`put_setting(TELEMETRY_USAGE_COUNTS, r#"{"org.created":4}"#)`, `start(.., Decision { heartbeat: Switch::On })` → `Some(handle)`; abort it; `counters.get("org.created") == 4`).
+- A test helper builds decisions without naming `Decision`'s other fields (M5 adds `crash_reports`, and may land first), in full:
+  ```rust
+  /// A switchboard decision with `heartbeat` set, whatever other fields `Decision` has.
+  fn decision(heartbeat: Switch) -> Decision {
+      let mut decision = for_config(&crate::test_support::config(std::path::Path::new(".")));
+      decision.heartbeat = heartbeat;
+      decision
+  }
+  ```
+  (import `for_config` and `OffReason` from `crate::observability::switchboard` in the test module). Never write a `Decision { … }` literal.
+- `start_is_off_without_the_heartbeat` (`TestApp::new()`, `decision(Switch::Off(OffReason::DebugBuild))` → `None`; no `telemetry.usage_counts` row written).
+- `start_loads_saved_counts` (`put_setting(TELEMETRY_USAGE_COUNTS, r#"{"org.created":4}"#)`, `start(.., decision(Switch::On))` → `Some(handle)`; abort it; `counters.get("org.created") == 4`).
 - `save_writes_the_snapshot` (increment twice, `save`, `get_setting` → `{"dataset.created":2}`).
 - `the_counter_modules_do_not_touch_licences`: the same scan as M4's `the_telemetry_modules_do_not_touch_licences` over `include_str!("counters.rs")` and `include_str!("catalog.rs")`, each cut at its first `#[cfg(test)]`, forbidding `concat!("crate::", "ee")`, `concat!("licen", "se")`, `concat!("entitle", "ments")`.
 
@@ -1628,7 +1639,13 @@ TL6.1 ─► TL6.15 docs, specs, CHANGELOG, Q notes
    and `analytics,` as the last field of the literal. `Duration` is already imported there.
 4. In `serve.rs` `bind`:
    1. Right before `let state = AppState::new(AppInner {`: `let (analytics, analytics_worker) = crate::analytics::Analytics::new(&config);`, and `analytics,` as the last field of the literal.
-   2. Right after M4's block `if let Some(task) = Box::pin(crate::observability::heartbeat::start(&state, decision)).await { tasks.push(task); }` (and after any block M5 put right after it), add:
+   2. Right after M4's block
+      ```rust
+      if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {
+          tasks.push(task);
+      }
+      ```
+      (and after any block M5 put right after it), add the two blocks below, with the same shape (no `Box::pin`; the coordinator adds one if clippy's `large_futures` asks):
       ```rust
       // Feature counts for the heartbeat's `usage` (track TL M6), loaded and saved while it runs.
       if let Some(task) = crate::analytics::counters::start(&state, decision).await {
@@ -2033,7 +2050,7 @@ In `serve.rs` tests: `serve_starts_without_analytics` (`bind(config(dir.path()),
 | 12 | `routes/backfills.rs` | `create_backfill` | — | arm `Create::Created(row)` | `record(&state, &Event::BackfillStarted, &Actor::project(&principal, &access));` | `create_is_audited` |
 
 13. `mcp/mod.rs`:
-    1. Add a field to `McpServer`: `/// The request opted out of per-user analytics (captured here: rmcp runs tools in spawned tasks, outside the request's scope).` `opted_out: bool,`. In `mcp`, the literal `McpServer { state, user }` becomes `McpServer { state, user, opted_out: crate::analytics::actor::request_opted_out() }` (it is the only literal; if another exists, stop and report).
+    1. Add a field to `McpServer`: `/// The request opted out of per-user analytics (captured here: rmcp runs tools in spawned tasks, outside the request's scope).` `opted_out: bool,`. In `mcp`, the literal as M2's TL2.9 leaves it, `let server = McpServer { state, user, request_span: tracing::Span::current() };`, gains one field at its end: `let server = McpServer { state, user, request_span: tracing::Span::current(), opted_out: crate::analytics::actor::request_opted_out() };`. Keep `request_span` and its doc comment. (It is the only literal; if another exists, or `request_span` is missing because TL2.9 is not in, stop and report.)
     2. Add, after `impl McpServer { … }` (outside it, before the test module), in full:
        ```rust
        /// The catalog events of one finished tool call: `mcp.tool_called`, plus the event of the
@@ -2050,7 +2067,7 @@ In `serve.rs` tests: `serve_starts_without_analytics` (`bind(config(dir.path()),
            events
        }
        ```
-    3. In `call_tool`, right after the `tokio::select!` that yields `(tool, outcome)` and before `let duration_ms …`, add `let ok = outcome.is_ok();`; after the `let result = match outcome { … };` block, add:
+    3. In `call_tool` as TL2.9 leaves it: right after M2's line `span.record(spans::TOOL, tool);` (which follows the `tokio::select!`), insert `let ok = outcome.is_ok();`. Leave M2's `span` lines in the select and in the `match outcome` arms as they are; after the `let result = match outcome { … };` block, add:
        ```rust
        let actor = Actor {
            opted_out: self.opted_out,
@@ -2097,7 +2114,14 @@ In `serve.rs` tests: `serve_starts_without_analytics` (`bind(config(dir.path()),
 | 13 | `sql.rs` | `run_sql` | add the `Principal` extension | sql (below) | `record(&state, &Event::SqlConsoleRun, &Actor::project(&principal, &access));` | `example_request_returns_the_example_result` |
 | 14 | `saved_views.rs` | `create_view` | `let kind = body.kind;` | final | `record(&state, &Event::SavedViewCreated { kind }, &Actor::project(&principal, &access));` | `create_list_update_delete_round_trip` |
 
-Row 13 (`run_sql` returns from two places): (a) in the `let Some(export) = format.export() else { … }` block, right after `log_end(access.project.id, "json", query_len, started, &result);`, add `if result.is_ok() { <record line> }`; (b) in the final `match start_export(…)`, the arm `Ok(response) => Ok(response),` becomes `Ok(response) => { <record line> Ok(response) }`. Keep any span M2 added in this function.
+Row 13 (`run_sql` as M2's TL2.9 leaves it; it returns from two places; both edits are single-line insertions): (a) in the `let Some(export) = format.export() else { … };` block, right after `log_end(access.project.id, "json", query_len, started, &result);` and before `return result.map(…)`, insert `if result.is_ok() { <record line> }`; (b) in the export `match start_export(…).instrument(span.clone()).await`, inside the arm
+   ```rust
+   Ok(response) => {
+       span.record(spans::OUTCOME, "ok");
+       Ok(response)
+   }
+   ```
+   insert the `<record line>` between `span.record(spans::OUTCOME, "ok");` and `Ok(response)`. Change no line of M2's. If `run_sql` does not have this shape (TL2.9 not in), stop and report.
 
 **Tests:** the 14 table rows, as the rules say.
 
@@ -2561,7 +2585,11 @@ Row 13 (`run_sql` returns from two places): (a) in the `let Some(export) = forma
 
       One typed catalog (`crates/server/src/analytics/catalog.rs`, golden `fixtures/analytics/catalog.json`): 6 web events sent by the UI to `POST /api/v1/analytics/events` (60 requests a minute per user), 34 server events recorded by API handlers and MCP tools with `analytics::record`. The UI sends when `GET /api/auth/config` says `analytics`, true when either sink runs. Every event increments a per-name counter; while the heartbeat runs the counters are loaded at startup, saved hourly to `instance_settings['telemetry.usage_counts']`, sent in the heartbeat's `usage` field as buckets (`0`, `1-9`, `10-99`, `100-999`, `1000+`, every catalog name present) and reduced by what an accepted heartbeat sent. When `[analytics]` is set and restore mode is off, events with a user and without `DNT: 1`/`Sec-GPC: 1` (read by a middleware into a task-local; outside a request: opted out) also go to PostHog: a bounded queue of 10 000 (new events dropped when full), batches of 100 or every 10 s to `<posthog_host>/batch/`, no retry, failures at `debug` at most once a minute, its own HTTP client (no redirects, 10 s timeout). A capture carries `distinct_id` = the user's UUID, `$groups.org` = the org id, `project_id`, `via` (server events), the catalog properties, `$set.org_role` when the role is known, `$ip: null`, `$geoip_disable: true`, `$process_person_profile: true`; `$groupidentify` (with `distinct_id` `org_<org id>`, no person profile) sets the group's `plan` at most once an hour per org. Org and project ids of web events are resolved only when the sink runs. Shutdown drops queued events.
       ```
-7. Q notes file: in `## TL-Q4 — PostHog (for M6)`, append:
+7. Q notes file: in `## TL-Q1 — the relay at \`telemetry.cetra.sh\``, append to its bullet list:
+   ```markdown
+   - `usage` (from M6): an object whose keys are the catalog event names (`fixtures/analytics/catalog.json` in the repo, append-only; 40 today, every one present) and whose values are exactly `0`, `1-9`, `10-99`, `100-999` or `1000+`. Accept unknown keys (new events) with those values; a 400 would keep the counts from ever being cleared.
+   ```
+   and add a row to its table of accepted strings: `| \`usage.*\` | \`0\`, \`1-9\`, \`10-99\`, \`100-999\`, \`1000+\` |`. Then, in `## TL-Q4 — PostHog (for M6)`, append:
    ```markdown
 
    Details from M6's plan (`docs/plans/tl-telemetry/06-m6-product-analytics.md`):
