@@ -2,7 +2,7 @@
 
 Design doc. The user reviews it before any plan is written. Each milestone gets its own plan, written from the code that exists when the milestone starts (`roadmap.md` § How the work is organised).
 
-**Status:** design, awaiting review.
+**Status:** design, reviewed and approved by the user on 2026-11-23.
 
 **Decisions:** `D-SA-1` to `D-SA-16`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
 
@@ -290,12 +290,11 @@ Every signing certificate in it is trusted, so an IdP that publishes its next ce
 
 ## Open questions for the user
 
-These came up while writing, after the questions already answered. Each has a proposed answer in the table above, which the review confirms or changes:
-
-1. **Restart on an unsolicited response (D-SA-5).** When a user clicks the IdP tile, cetra ignores the response and starts an SP-initiated login. They land signed in after one extra round trip, and the tile then needs no bookmark-app setup. Is that acceptable, or should an unsolicited response simply show an error?
-2. **Metadata URL refreshed daily (D-SA-11).** Automatic refresh makes rotation hands-off. But whoever controls the metadata URL (normally the IdP vendor, over https) can swap the certificates, and that is a takeover of every account in the org's domains. The entity ID never changes automatically, and a certificate change is audit-logged and shown. The alternative is a manual re-import only, with a warning before the certificate expires. Okta and Entra both publish a metadata URL per app.
-3. **Certificate expiry is warned about, not enforced (D-SA-11).**
-4. **SAML requires an `https` public URL (D-SA-10).** Self-hosted instances on plain http keep OIDC.
+None. The review of 2026-11-23 confirmed the four that writing raised (user):
+1. An unsolicited response restarts an SP-initiated login (D-SA-5).
+2. Metadata from a URL is refreshed daily (D-SA-11).
+3. Certificate expiry is warned about, not enforced (D-SA-11).
+4. SAML requires an `https` public URL (D-SA-10).
 
 ## Milestones
 
