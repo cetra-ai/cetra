@@ -18,6 +18,7 @@ use bytes::Bytes;
 use cetra_core::ids::ProjectId;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
+use tracing::Instrument as _;
 
 use crate::anchor::{AnchorPlan, Anchors};
 use crate::catalog::{Catalog, CatalogEdit, Committer, FileId, FileMeta, FileTable};
@@ -321,10 +322,31 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
     let Some(view) = view else {
         return Ok(None);
     };
+    let span = crate::spans::storage_flush(params.table.name());
+    let result = flush_frozen(params, view, fresh, &span)
+        .instrument(span.clone())
+        .await;
+    span.record(
+        crate::spans::OUTCOME,
+        if result.is_ok() { "ok" } else { "error" },
+    );
+    result.map(Some)
+}
+
+/// [`flush_once`] after the freeze: prepare, stage, write and commit `view` (`fresh`: this
+/// call froze it). Runs in the `storage.flush` span and records its counts there; returns
+/// the committed sequence.
+async fn flush_frozen(
+    params: &FlushParams,
+    view: FrozenView,
+    fresh: bool,
+    span: &tracing::Span,
+) -> Result<u64, FlushError> {
     let state = params.published.load();
     let tombstones = Arc::clone(&state.tombstones);
     let projects = Arc::clone(&state.projects);
     let partitions = view.partitions.len();
+    span.record(crate::spans::PARTITIONS, crate::spans::count(partitions));
     let max_seq = view.max_seq;
     if fresh {
         params.hooks.pause(HookPoint::FlushAfterFreeze);
@@ -348,6 +370,11 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
         sources,
         anchor_plan,
     } = prepared;
+    span.record(crate::spans::FILES, crate::spans::count(files.len()));
+    span.record(
+        crate::spans::BYTES,
+        crate::spans::count(files.iter().map(|file| file.bytes.len()).sum::<usize>()),
+    );
     // A flush left with no file still commits: every row was covered by a
     // pending deletion (spec 03 §7), and the sequence must advance so the WAL
     // segments it covers can go.
@@ -409,7 +436,7 @@ async fn flush_once(params: &FlushParams) -> Result<Option<u64>, FlushError> {
             "flush commit hook failed after the catalog commit"
         );
     }
-    Ok(Some(max_seq))
+    Ok(max_seq)
 }
 
 fn log_retry(table: Table, partitions: usize, error: FlushError) -> FlushError {
@@ -1355,5 +1382,52 @@ mod tests {
         })
         .await;
         storage.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_flush_runs_in_a_storage_flush_span() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let capture = crate::spans::capture::Capture::default();
+        let dispatch = tracing::Dispatch::new(tracing_subscriber::registry().with(capture.clone()));
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let storage = Storage::open(anchor_config(dir.path())).await.unwrap();
+        storage
+            .append_spans(project(), spans_named(&[at(day(), 12, 0, 0)], "one"))
+            .await
+            .unwrap();
+        storage.flush_now(Duration::from_secs(10)).await.unwrap();
+        storage.shutdown().await.unwrap();
+
+        let closed = capture.closed();
+        let flushes: Vec<_> = closed
+            .iter()
+            .filter(|span| span.name == "storage.flush")
+            .collect();
+        assert!(
+            flushes.iter().any(
+                |span| span.fields.get("outcome").map(String::as_str) == Some("ok")
+                    && span.fields.get("table").map(String::as_str) == Some("spans")
+                    && span
+                        .fields
+                        .get("files")
+                        .and_then(|files| files.parse::<i64>().ok())
+                        .is_some_and(|files| files >= 1)
+                    && span
+                        .fields
+                        .get("bytes")
+                        .and_then(|bytes| bytes.parse::<i64>().ok())
+                        .is_some_and(|bytes| bytes > 0)
+            ),
+            "a committed flush span with files and bytes: {flushes:?}"
+        );
+        assert!(
+            !flushes
+                .iter()
+                .any(|span| span.fields.get("outcome").map(String::as_str) == Some("error")),
+            "no flush span failed: {flushes:?}"
+        );
     }
 }

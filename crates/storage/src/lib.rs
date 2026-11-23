@@ -70,6 +70,7 @@ mod query_text;
 pub(crate) mod read_cache;
 mod reads;
 mod snapshot;
+pub(crate) mod spans;
 mod sql;
 pub(crate) mod unwind;
 pub(crate) mod verify;
