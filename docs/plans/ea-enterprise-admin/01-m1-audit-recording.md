@@ -85,6 +85,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 - **Do not compile, test, lint or format.** No `cargo`, `just` or `pnpm`. The coordinating session runs the checks once, when every phase is committed. Write the tests anyway.
 - Commit only your own files: `git add <files> && git commit -m "<subject>" -- <files>`. If `index.lock` exists, wait 5 seconds and retry. Never `git add -A`.
 - No `unwrap()` or `expect()` outside tests unless a comment states the invariant. No payload, email, name or secret in a record, a log or an error.
+- **Id types.** `Event::org` and `Event::project` take `OrgId` / `ProjectId`. Catalog fields holding ids (`project_id`, `taken_from`, `to_org_id`, `follow_up_of`, `token_id`, `key_id`) are `uuid::Uuid`: convert typed ids with `.as_uuid()` and raw ids with `OrgId::from_uuid(..)` / `ProjectId::from_uuid(..)`. An optional project (`Option<ProjectId>`) is added with `if let Some(p) = .. { event = event.project(p) }`.
 - When a deleted tracing line was the only use of a binding, parameter or import (for example `actor_id`, `caller`, `token_id`, `provider`), remove it too, so clippy's unused warnings do not fail. Never add `Extension(principal)` only to get the actor: `audit::Ctx` already reads the principal.
 
 ---
@@ -510,7 +511,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 1. **`auth/session.rs` `start_session`**: in its closure, after `insert_session(…)` succeeds, record `AuthAction::Login { method }`:
    - `method`: `Password` → `LoginMethod::Password`, `Provider` → `Provider`, `OrgProvider(org)` → `OrgProvider`;
    - ctx: `Ctx::for_session_user(user_id, ip, user_agent)` (the function's own parameters);
-   - for `OrgProvider(org)`, record a second event: the same action with `.org(org.as_uuid())`.
+   - for `OrgProvider(org)`, record a second event: the same action with `.org(org)`.
 
    Return the closure's previous value. Every caller (login, signup, setup, OAuth callback, org SSO) then records a login with no change on their side.
 2. **`routes/auth.rs` `login`:** delete the `login` tracing line; `start_session` records it.
@@ -527,14 +528,14 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
    - Inside `provision`'s closure, after `insert_first`, record:
      - for setup (`Some(ctx)`): `AuthAction::SetupCompleted` with `.org(org).project(project)`, ctx `ctx.with_actor(User{id: user, via: Session})`;
      - for `apply_init` (`None`): `InstanceAction::InitApplied` with `.org(org).project(project)`, ctx `Ctx::system()`.
-   - Delete `bootstrap::audit` and its call, and the setup handler's tracing lines.
+   - Delete `bootstrap::audit` and its call, and the setup handler's tracing lines and the `key_id` binding that only fed them (`routes/auth.rs:~177`).
 6. **`routes/auth.rs` `logout`:** in the closure at 328, after `delete_session(…)`, record `AuthAction::Logout` with ctx `ctx.with_actor(User{id: row.user.id, via: Session, credential_id: None})`. Only inside the `if let Some((row, _))` branch.
 7. **`routes/auth.rs` `signup`:**
    - plain branch (closure 701-717): bind `insert_user`'s row, record `AuthAction::Signup { method: Password }`, target `(User, user.id)`, actor the new user;
    - invited branch (closure 635-678): before `Ok(InvitedSignup::User(user))`, record `Signup { method: Invitation }` and `InviteAction::Accepted { role }` (`.org(pending.org_id)`, target `(Invite, pending.id)`), actor the new user.
 8. **`routes/auth.rs` `verify_email`:** before `Ok(Some(()))` (501), record `AuthAction::EmailVerified`, target `(User, id)`, actor the user.
 9. **`routes/auth.rs` `forgot_password`:**
-   - Replace its `reset_link(&state.meta, …)` call: `let minted = auth::reset::mint_reset(&public_url, now)?;` (mapping errors as `reset_link`'s errors are mapped today), then one `state.meta.write` that calls `reset_link_tx(conn, &minted, user.id, now)` (A1) and records `AuthAction::PasswordResetRequested`, target `(User, user.id)`, with `ctx` as is (the requester is anonymous). The mail uses `minted.url`.
+   - Replace its `reset_link(&state.meta, …)` call: `let minted = auth::reset::mint_reset(&public_url, now).map_err(auth_error)?;` (`mint_reset` returns `AuthError`; `auth_error` is already in this file), and drop `reset_link` from the `use` of line 18 (keep `ResetError` and `verification_link`). then one `state.meta.write` that calls `reset_link_tx(conn, &minted, user.id, now)` (A1) and records `AuthAction::PasswordResetRequested`, target `(User, user.id)`, with `ctx` as is (the requester is anonymous). The mail uses `minted.url`.
    - Only the branch that runs today records. An unknown email still does nothing, and the response stays identical.
    - `resend_verification` is unchanged (not in the catalog).
 10. **`routes/me.rs` `change_password`:** in closure 138-144, bind the `revoke_user_tokens` result, record `AuthAction::PasswordChanged` (target `(User, user_id)`), return it.
@@ -593,9 +594,10 @@ The same rules as A2 apply to every site.
 2. `routes/projects.rs`:
    - `create_project` (add `ctx`): before `Ok(ProjectCreate::Created(project))`, record `ProjectAction::Created`, `.org(org).project(project.id)`, target `(Project, project.id)`.
    - `update_project`: before the closure, compute from `access.project` and the request:
-     - `name_changed = body.name.is_some_and(|n| n != access.project.name)` (adapt to the body's field type);
+     - `name_changed = name.as_ref().is_some_and(|n| *n != access.project.name)`, on the trimmed `name` the handler already builds from `body.name`;
      - the retention change. The request's retention is `Option<Option<u32>>`: outer `None` = unchanged, `Some(None)` = clear, `Some(Some(d))` = set. A change exists when the outer value is `Some(new)` and `new != access.project.retention_days`. Then `old_days = access.project.retention_days`, `new_days = new`.
-     - the timeout change, the same way against the current timeout.
+     - the timeout change, the same way against `access.project.trace_completion_timeout_s` (the stored `Option<u32>`, not `completion_timeout_s()`).
+     - `actor_id` becomes unused: keep `principal::session_user(&principal)?;` as the session check and drop the binding.
 
      Inside the closure, after `projects::update_project(…)`, record, each with `.org(…).project(…)` and target `(Project, id)`:
      - `ProjectAction::Renamed` when the name changed (compare with `access.project.name`);
@@ -674,21 +676,23 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
      - `MemberAction::Added { role, via: SsoJit }` when `joined`;
      - `AuthAction::Signup { method: OrgProvider }` when the user was created here (the `Target::New` branch).
    - Make the `org sso join skipped: seat limit` line a plain `tracing::info!` without the audit target (plan P-5).
+   - Remove the fields `linked` and `joined` from `Admitted::User`, which only fed the deleted lines, from every construction of it (the instance-admin early return included), and from the tests that read them. Keep `no_seat`.
 5. `ee/org_sso/recheck.rs`: inside the closure, after `mark_unverified`, record `SsoAction::DomainLapsed`, `.org(row.org_id)`, target `(SsoDomain, id)`, `Ctx::system()`. Delete the `warn!` audit line. Keep a plain `tracing::warn!` with org and domain ids.
 6. `admin.rs` `org_sso_disable_in`: in the closure, when `set_flags` returned true, record `SsoAction::Disabled`, `.org(id)`, `Ctx::cli()`. Delete the tracing line.
 7. `routes/admin.rs`:
    - `create_user`: record `UserAction::Created { instance_admin }`, target `(User, user.id)`.
    - `update_user`: record `UserAction::Updated { disabled, instance_admin }` (the request's options) before returning the row, only when the user exists.
-   - `reset_link`: replace the `reset::reset_link(&state.meta, …)` call with `let minted = reset::mint_reset(&public_url, now)?;` (same error mapping as today), then one `state.meta.write` that calls `reset::reset_link_tx(conn, &minted, id, now)` (A1) and records `UserAction::ResetLinkIssued`, target `(User, id)`. The response uses `minted.url`.
-   - `put_license`: add `ctx`. In the closure, record `InstanceAction::LicenseInstalled { license_id, kid }`, target `(License, license_id)`. Delete the plain info line.
+   - `reset_link`: replace the `reset::reset_link(&state.meta, …)` call with `let minted = reset::mint_reset(&public_url, now).map_err(auth_failure)?;`, and map the write's `MetaError` with `?`. Delete `reset_failure` (~522) and the `ResetError` import (~21), which become unused. `admin.rs:248` (the CLI) keeps calling `reset::reset_link`. then one `state.meta.write` that calls `reset::reset_link_tx(conn, &minted, id, now)` (A1) and records `UserAction::ResetLinkIssued`, target `(User, id)`. The response uses `minted.url`.
+   - `put_license`: add `ctx`. Copy `license.id` and `license.kid` into `String`s before the closure (both `key` and `license` move later). In the closure, record `InstanceAction::LicenseInstalled { license_id, kid }`, target `(License, license_id)`. Delete the plain info line.
 8. `routes/internal_orgs.rs`:
    - `create_org`: before `Ok(Outcome::Created(…))`, record `OrgAction::Created`, `.org(id)`, target `(Org, id)`. The ctx is the extractor's: the control-plane principal gives `Actor::ControlPlane`.
    - `drop_org`: add a `ctx: audit::Ctx` extractor and pass `&ctx` as the new last argument of `crate::deletion::request_org_drop` (A5 adds that parameter). Keep the `(ActorKind, Uuid)` tuple argument as it is.
 9. `routes/internal_users.rs`:
    - `revoke_access`: add `ctx: &audit::Ctx`. Before `Ok(hashes)`, record `UserAction::Disabled` when `disable`, else `SessionsRevoked`, target `(User, user)`.
+   - Delete `Matched` and `Matched::as_str` (~50-63), which only fed the deleted lines. `managed_user` returns the `Uuid`. Update `revoke`, `disable` and `delete`. Keep each handler's `let Principal::ControlPlane { .. } = principal else { .. }` guard, even when `token_id` is no longer used (`{ .. }`).
    - `delete`: before `DELETE FROM users`, run `UPDATE audit_events SET ip = NULL, user_agent = NULL WHERE actor_kind = 'user' AND actor_id = ?`. After it, record `UserAction::Deleted { sole_owner_orgs }`, target `(User, user)`.
    - Delete the three tracing lines.
-10. `routes/entitlements.rs` `put_org_token`: record `OrgAction::EntitlementsUpdated { token_id }`, `.org(org)`, inside the closure when `store_token` returned `Stored`. The ctx is `Ctx { actor: ControlPlane{token_id}, … }` from the extractor's IP and UA (the route is public: the token is the credential).
+10. `routes/entitlements.rs` `put_org_token`: record `OrgAction::EntitlementsUpdated { token_id }`, `.org(org)`, inside the closure when `store_token` returned `Stored`. The ctx is `ctx.with_actor(Actor::ControlPlane { token_id: grant.token_id.to_string() })` from a new `ctx` extractor (the route is public: the token is the credential). `store_token` is a free function; record in the closure after it returns `Stored`.
 11. **Tests:**
     - `routes/internal_orgs.rs:317`: assert an `org.created` row with `actor_kind = 'control_plane'`.
     - `routes/internal_users.rs:620, 884`: assert a `user.deleted` row. New `deleting_a_user_clears_their_ip`: a user signs in (row with IP), is deleted; their `auth.login` row keeps its id, and `ip` is NULL.
@@ -769,12 +773,12 @@ The same rules as A2 apply to every site. `ee/` files keep their SPDX header.
 5. `deletion/mod.rs`. Each record uses `Ctx::system()` unless an actor is given:
    - `request_org_drop`: keep the `actor: (ActorKind, Uuid)` parameter (it still fills the deletion row) and add `ctx: &audit::Ctx` as the last parameter. In the closure, before `Ok(Some(row))`, record `DeletionAction::Requested { kind: "org", follow_up_of: None }`, `.org(org)`, target `(Deletion, row.id)`, using `ctx` as is: its actor comes from the request's principal, so there is no mapping from `ActorKind`.
      - Callers: `routes/deletions.rs` `drop_org` (this phase) passes `&ctx`. `routes/internal_orgs.rs` `drop_org` is A4's file: A4 adds its `ctx` extractor and passes `&ctx`. The two phases agree on this signature.
-   - `follow_up`: copy `row.kind.as_str()`, the org and the project into locals before the closure (it moves `row`), then record `Requested { kind, follow_up_of: Some(parent) }`, `Ctx::system()`.
-   - `applied_now`: record `Applied { kind }` when `mark_applied` returned true.
+   - `follow_up`: the follow-up row is a trace-ids deletion. Copy the org and the project into locals before the closure (it moves `row`), then record `Requested { kind: DeletionKind::TraceIds.as_str(), follow_up_of: Some(parent) }`, `.org(org)` (and the project when `Some`), target `(Deletion, id)` (the new row's id), `Ctx::system()`. Remove the `actor_kind`/`actor_id` locals that only fed the deleted line.
+   - `applied_now` and `fail`: copy `row.kind.as_str()`, `row.org_id`, `row.project_id` and `row.id` before the closure. Record `Applied { kind }` (resp. `Failed { kind }`) when `mark_applied` (resp. `mark_failed`) returned true, with `.org(org)`, the project when `Some`, and target `(Deletion, id)`, using `Ctx::system()`.
    - `drop_project_step`: in the closure, write `let dropped = mark_dropped(conn, id, now).await?; if dropped { audit::record(conn, &Ctx::system(), Event::new(ProjectAction::Dropped).org(..).project(..).target(TargetKind::Project, project), now).await?; } Ok(dropped)`. No `deletion.applied` for a drop.
-   - `drop_org_step`: in the closure, after `delete_org`, write `let dropped = mark_dropped(..).await?; if dropped { delete_org_records(conn, org).await?; audit::record(conn, &Ctx::system(), Event::new(OrgAction::Dropped).target(TargetKind::Org, org), now).await?; } Ok(dropped)`. There is **no** `.org(…)`: it is an instance record (D-EA-7). No `deletion.applied` either: the org's records are gone.
+   - `drop_org_step`: in the closure, after `delete_org`, write `let dropped = mark_dropped(..).await?; if dropped { delete_org_records(conn, org.as_uuid()).await?; audit::record(conn, &Ctx::system(), Event::new(OrgAction::Dropped).target(TargetKind::Org, org), now).await?; } Ok(dropped)`. There is **no** `.org(…)`: it is an instance record (D-EA-7). No `deletion.applied` either: the org's records are gone.
+   - The outer `let dropped = …` bindings after both writes (~605, ~709) become unused once `on_dropped` goes: drop the binding and keep `.await.map_err(..)?;`.
    - Delete `on_dropped` and the `Dropped` struct (`deletion/mod.rs:~196`), and their two calls (in `drop_project_step` and `drop_org_step`). If a test uses `Dropped`, rewrite it to assert the rows.
-   - `fail`: record `Failed { kind }` when `mark_failed` returned true.
    - Delete these sites' tracing lines.
    - `deletion registered` (540) and `deletion/resolve.rs:161` drop `target: "audit"` (plan P-5).
 6. `routes/deletions.rs`:
