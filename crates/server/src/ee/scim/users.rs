@@ -1737,7 +1737,7 @@ mod tests {
         let noop = patch(
             &app,
             &token,
-            &id,
+            &id.to_string(),
             &json!({"Operations": [{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
@@ -1745,7 +1745,7 @@ mod tests {
         let off = patch(
             &app,
             &token,
-            &id,
+            &id.to_string(),
             &json!({"Operations": [{"op": "replace", "value": {"active": false}}]}),
         )
         .await;
@@ -1753,7 +1753,7 @@ mod tests {
         let back = patch(
             &app,
             &token,
-            &id,
+            &id.to_string(),
             &json!({"Operations": [{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
