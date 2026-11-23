@@ -106,7 +106,9 @@ enum Created {
 }
 
 enum Accepted {
-    Done { membership: OrgMembership },
+    Done {
+        membership: OrgMembership,
+    },
     Missing,
     WrongEmail,
     OverLimit(u64),
@@ -1077,6 +1079,102 @@ mod tests {
             .send()
             .await;
         assert_eq!(accepted.status, 404, "{}", body(&accepted));
+    }
+
+    /// Grants `org` these features through a signed org token, as the control plane does.
+    fn grant_features(app: &TestApp, org: OrgId, features: &[&str]) {
+        let token = crate::test_support::org_token(
+            org,
+            "2026-01-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            features,
+            &serde_json::json!({}),
+        );
+        let defaults = app.state.entitlements.defaults().limits;
+        let (granted, grant) = crate::entitlements::tokens::grant_from_token(
+            &token,
+            app.state.config.public_url.origin(),
+            &defaults,
+        )
+        .expect("the test token verifies");
+        app.state.entitlements.put_grant(granted, grant);
+    }
+
+    #[tokio::test]
+    async fn accepting_an_old_invite_to_a_verified_domain_is_409_while_scim_is_on() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org = create_org(&app, &ada).await;
+        let org_id = org.id;
+        let now = app.state.clock.now_ns();
+        let guest_id = insert_unverified(&app, "guest@example.com").await;
+        let guest_cookie = cookie_pair(
+            &start_session(
+                &app.state,
+                guest_id,
+                None,
+                None,
+                crate::auth::session::SessionOrigin::Password,
+            )
+            .await
+            .unwrap(),
+        );
+        // The domain is verified, and the invite is made while SCIM is still off.
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::org_sso::store::insert_domain(
+                        conn,
+                        &crate::ee::org_sso::store::DomainRow {
+                            id: Uuid::now_v7(),
+                            org_id,
+                            domain: "example.com".to_owned(),
+                            token: "golden-domain-token".to_owned(),
+                            verified_at: Some(now),
+                            last_checked_at: Some(now),
+                            created_at: now,
+                        },
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        let invite = post_invite(&app, &ada, &org.slug, "guest@example.com", "member").await;
+
+        // Enable SCIM with the feature after the invite exists.
+        grant_features(&app, org_id, &["scim"]);
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(conn, org_id, true, OrgRole::Viewer, now)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let accepted = app
+            .request(
+                Method::POST,
+                &format!("/api/auth/invites/{}/accept", invite.token),
+            )
+            .header(header::COOKIE.as_str(), &guest_cookie)
+            .send()
+            .await;
+        assert_eq!(accepted.status, 409, "{}", body(&accepted));
+        assert_eq!(accepted.problem().code, ProblemCode::ScimManaged);
+        let members: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM org_members WHERE org_id = ? AND user_id = ?")
+                .bind(org_id.to_string())
+                .bind(guest_id.to_string())
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(members, 0, "a refused accept adds no membership");
     }
 
     #[tokio::test]

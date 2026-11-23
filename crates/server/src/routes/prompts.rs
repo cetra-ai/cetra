@@ -2204,6 +2204,13 @@ mod tests {
         )
         .await;
         assert_eq!(created.status, StatusCode::CREATED);
+        // Creating the prompt with labels records label sets too, so count only the refused move.
+        let label_sets_before: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'prompt.label_set'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
 
         let refused = call(
             &app,
@@ -2214,13 +2221,16 @@ mod tests {
         )
         .await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
-        let label_sets: i64 = sqlx::query_scalar(
+        let label_sets_after: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM audit_events WHERE action = 'prompt.label_set'",
         )
         .fetch_one(app.state.meta.reader())
         .await
         .unwrap();
-        assert_eq!(label_sets, 0, "a refused label move records nothing");
+        assert_eq!(
+            label_sets_after, label_sets_before,
+            "a refused label move records nothing"
+        );
     }
 
     /// The label `label` points at in a prompt's answer, if set.
