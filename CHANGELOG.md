@@ -25,6 +25,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Fixed
 
+- When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 
 ## [0.1.0-rc.2] - 2026-11-22

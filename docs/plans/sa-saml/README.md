@@ -4,7 +4,7 @@ Design doc. The user reviews it before any plan is written. Each milestone gets 
 
 **Status:** design approved by the user on 2026-11-23. M1's plan: [`01-m1-crate.md`](01-m1-crate.md).
 
-**Decisions:** `D-SA-1` to `D-SA-21`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
+**Decisions:** `D-SA-1` to `D-SA-22`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
 
 **Research:** the crate survey and the competitor comparison of 2026-11-23 are summarised in § Library and § Competitors. Versions were looked up that day; each plan looks them up again.
 
@@ -292,6 +292,7 @@ Every signing certificate in it is trusted, so an IdP that publishes its next ce
 | D-SA-19 | **URLs and https.** A SAML provider needs `public_url` to be `https`, with no exception: the binder cookie must be `Secure; SameSite=None`, and tests use an https public URL. A metadata URL follows the OIDC issuer rule (`issuer_problem`): `https`, or `http` on a loopback host, then the egress policy, which refuses loopback unless `allow_private_network_egress` is set. Replaces D-SA-10's debug-build exception. | A debug-build exception for http public URLs (nothing else in the server is debug-only). |
 | D-SA-20 | **`__Host-` cookies (M4 security review).** The binder and restart cookies are `__Host-cetra_saml` and `__Host-cetra_saml_restart`, with `Path=/`, `Secure`, `HttpOnly` and `SameSite=None`. A request carrying two binder cookies is refused. One SAML login can be in flight per browser at a time. Amends D-SA-10's ACS-path scoping. | Path-scoped cookies without a prefix: a sibling subdomain could toss a binder with `Domain=` and force a login CSRF. |
 | D-SA-21 | **Entity-ID changes (M4 security review).** An IdP entity-ID change is refused while SSO is enforced. A confirmed change turns the provider off until a new test sign-in, as a protocol switch does. Amends D-SA-11. | Keeping the flags (enforcing against an IdP nobody has tested); resetting enforcement silently. |
+| D-SA-22 | **Password link in the email step (user, local interop).** The email-first login links to `/login?password=1` ("Sign in with a password instead", or "Instance admin? Sign in with a password" when password login is off), and `?error=link_refused` shows the password form. The server's refusals are unchanged. Amends D-P-60. | Discovery answering "password" for admin emails (reveals admins); reporting enforcement in discovery (API change for little gain). |
 
 ## Open questions for the user
 

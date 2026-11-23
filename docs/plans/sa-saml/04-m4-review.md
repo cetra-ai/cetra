@@ -76,6 +76,7 @@ Against Mock SAML (mocksaml.com) on a local https server:
 | # | Finding | Disposition |
 |---|---|---|
 | I1 | Mock SAML's signing certificate (X.509 v1, valid until 3021) was refused as unreadable: its `notAfter` is past the i64-nanosecond range (April 2262). | **Fixed:** certificate dates saturate at `i64::MAX`; they are shown, never enforced. Test `a_certificate_expiring_after_2262_is_read` with `fixtures/saml/idp-far-future.cert.pem`. |
+| I2 | The email-first login offered no way to the password form, so the instance admin of an SSO domain (never signed in by an org provider) was locked out of the page. | **Fixed (D-SA-22):** the email step links to `/login?password=1`, and `?error=link_refused` shows the password form. |
 
 ## Interop by hand (the user)
 

@@ -65,8 +65,8 @@ function LoginPage() {
     only !== undefined && !adminForm && search.error === undefined && !search.signed_out;
   const startHref =
     only === undefined ? undefined : authorizeHref(only.id, { redirect: search.redirect });
-  // The password form also shows on `?password=1` when password sign-in is off: it is the
-  // instance admins' way in (D-S-4).
+  // The password form also shows on the admin form (`?password=1` or `link_refused`) when
+  // password sign-in is off: it is the instance admins' way in (D-S-4, D-SA-22).
   const showPassword = config.password_enabled || adminForm;
   // Only read while `emailFirst`, so it may start at "email" on every page load.
   const [step, setStep] = useState<"email" | "password">("email");
@@ -154,7 +154,7 @@ function LoginPage() {
     <AuthLayout
       title="Sign in"
       description={
-        !config.password_enabled && search.password
+        !config.password_enabled && adminForm
           ? "Password sign-in is for instance admins."
           : undefined
       }

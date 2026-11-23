@@ -7,7 +7,7 @@ cetra supports password sign-in, GitHub, Google and any OpenID Connect (OIDC) pr
 
 ## What members see
 
-The login page shows a password form when password login is on, and one button per configured provider, such as "Continue with GitHub" or the display name of an OIDC provider. If an org has set up its own single sign-on, the page first asks for an email address and sends members of that org's domains to the org's provider.
+The login page shows a password form when password login is on, and one button per configured provider, such as "Continue with GitHub" or the display name of an OIDC provider. If an org has set up its own single sign-on, the page first asks for an email address and sends members of that org's domains to the org's provider. A link under the email field, "Sign in with a password instead", opens the password form for instance admins and for members whose org has not enforced single sign-on. When an org's provider refuses to sign in an instance admin, the page shows the password form.
 
 When password login is off, no org has its own provider and exactly one instance provider is configured, the login page skips the button and sends you straight to that provider. It does not do this right after you sign out, after a failed sign-in, or on `/login?password=1`.
 
