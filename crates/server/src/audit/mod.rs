@@ -272,13 +272,14 @@ pub(crate) enum TargetKind {
     IssueSource,
     Dashboard,
     AnnotationQueue,
+    AuditStream,
 }
 
 impl TargetKind {
     /// user | invite | api_key | pat | scim_token | scim_group | project | org | sso_provider
     /// | sso_domain | deletion | license | evaluator | online_rule | score_definition
     /// | alert_rule | alert_channel | llm_connection | model_price | prompt | dataset
-    /// | issue_source | dashboard | annotation_queue
+    /// | issue_source | dashboard | annotation_queue | audit_stream
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -305,6 +306,7 @@ impl TargetKind {
             Self::IssueSource => "issue_source",
             Self::Dashboard => "dashboard",
             Self::AnnotationQueue => "annotation_queue",
+            Self::AuditStream => "audit_stream",
         }
     }
 }

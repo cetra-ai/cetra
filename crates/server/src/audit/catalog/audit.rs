@@ -11,4 +11,19 @@ pub(crate) enum AuditAction {
         format: &'static str,
         filters: Vec<&'static str>,
     },
+    /// The org's or the instance's stream destination was created or changed (D-EA-11). `url_host`
+    /// is the endpoint's host; `header` says whether a header is set.
+    #[serde(rename = "audit.stream_set")]
+    #[serde(rename_all = "snake_case")]
+    StreamSet {
+        url_host: String,
+        header: bool,
+        enabled: bool,
+    },
+    /// The stream destination was removed.
+    #[serde(rename = "audit.stream_removed")]
+    StreamRemoved,
+    /// The stream's signing secret was rotated.
+    #[serde(rename = "audit.stream_secret_rotated")]
+    StreamSecretRotated,
 }

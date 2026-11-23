@@ -364,6 +364,14 @@ fn samples() -> Vec<Action> {
             filters: vec!["from", "action"],
         }
         .into(),
+        AuditAction::StreamSet {
+            url_host: "siem.example.com".to_owned(),
+            header: true,
+            enabled: true,
+        }
+        .into(),
+        AuditAction::StreamRemoved.into(),
+        AuditAction::StreamSecretRotated.into(),
     ]
 }
 

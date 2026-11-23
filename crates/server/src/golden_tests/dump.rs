@@ -38,6 +38,7 @@ fn natural_key(table: &str, column: &str) -> &'static str {
     match (table, column) {
         ("llm_connections", _) | ("evaluators", _) | ("notification_channels", _) => "name",
         ("org_sso_providers", _) => "display_name",
+        ("audit_stream_destinations", _) => "url_host",
         _ => panic!(
             "sealed column {table}.{column} has no natural key in golden_tests/dump.rs: add it"
         ),

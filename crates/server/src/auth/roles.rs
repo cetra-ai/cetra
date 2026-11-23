@@ -95,6 +95,8 @@ pub(crate) enum OrgPerm {
     ManageProvisioning,
     /// The org's audit records and their exports (admins and owners, D-EA-10).
     ViewAudit,
+    /// The org's audit stream destination and its signing secret (owner only, D-EA-11).
+    ManageAuditStream,
 }
 
 /// What a project route requires.
@@ -242,7 +244,10 @@ impl OrgPerm {
             | Self::ManagePrices
             | Self::ViewDeletions
             | Self::ViewAudit => OrgRole::Admin,
-            Self::Delete | Self::ManageSso | Self::ManageProvisioning => OrgRole::Owner,
+            Self::Delete
+            | Self::ManageSso
+            | Self::ManageProvisioning
+            | Self::ManageAuditStream => OrgRole::Owner,
         }
     }
 }
@@ -345,6 +350,7 @@ mod tests {
         assert_eq!(OrgPerm::ManageSso.min_role(), OrgRole::Owner);
         assert_eq!(OrgPerm::ManageProvisioning.min_role(), OrgRole::Owner);
         assert_eq!(OrgPerm::ViewAudit.min_role(), OrgRole::Admin);
+        assert_eq!(OrgPerm::ManageAuditStream.min_role(), OrgRole::Owner);
         assert_eq!(ProjectPerm::View.min_role(), Role::Viewer);
         assert_eq!(ProjectPerm::ManageSettings.min_role(), Role::Admin);
         assert_eq!(ProjectPerm::ManageMembers.min_role(), Role::Admin);

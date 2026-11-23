@@ -30,6 +30,7 @@ use crate::auth::roles::{KeyScope, ProjectOverride};
 use crate::auth::secret::hash_token;
 use crate::clock::Clock;
 use crate::crypto::{self, Aad, SecretBox};
+use crate::ee::audit::stream_store::{self, StreamConfig};
 use crate::ee::org_sso::store as sso;
 use crate::ee::scim::store::{self as scim, ScimUserFields};
 use crate::meta::{MetaDb, MetaError};
@@ -935,6 +936,23 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
         })
         .org(org.id)
         .target(crate::audit::TargetKind::User, owner.id),
+        now,
+    )
+    .await?;
+
+    // One SIEM stream destination of the golden org (track EA M4), its config sealed to the row.
+    let stream_id = Uuid::now_v7();
+    let stream_config = StreamConfig {
+        url: "https://siem.example.com/ingest".to_owned(),
+        secret: "golden-stream-secret".to_owned(),
+        header: None,
+    };
+    stream_store::insert(
+        conn,
+        stream_id,
+        Some(org.id),
+        "siem.example.com",
+        &stream_store::seal(&secrets, &stream_id, &stream_config).expect("seal a golden secret"),
         now,
     )
     .await?;

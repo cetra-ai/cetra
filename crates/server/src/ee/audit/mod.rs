@@ -7,6 +7,9 @@
 
 pub(crate) mod export;
 pub(crate) mod read;
+pub(crate) mod stream;
+pub(crate) mod stream_api;
+pub(crate) mod stream_store;
 
 use axum::extract::{Extension, State};
 use axum::http::Method;
@@ -22,9 +25,9 @@ use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, RouteDef};
 use crate::http::error::{self, ApiError};
 
-/// The audit routes: the org and instance lists and their exports.
+/// The audit routes: the org and instance lists, their exports and the SIEM stream's settings.
 pub(crate) fn routes() -> Vec<RouteDef> {
-    vec![
+    let mut routes = vec![
         RouteDef {
             method: Method::GET,
             path: "/api/v1/orgs/{org}/audit-events",
@@ -59,7 +62,9 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: get(export::export_instance),
         },
-    ]
+    ];
+    routes.extend(stream_api::routes());
+    routes
 }
 
 /// Whether the instance log may be read: the licence lists `audit_log` (in force, active or
