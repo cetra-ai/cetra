@@ -212,6 +212,21 @@ The user wants to know what people do in the product: which features they use an
 
 **Feature counters (self-hosted).** Every catalog event, from any source, increments an in-memory counter per event name; counters are saved hourly to `instance_settings['telemetry.usage_counts']` and reset when a heartbeat is sent. The heartbeat gains `usage`: for each event name, the count since the last heartbeat in the buckets `0`, `1-9`, `10-99`, `100-999`, `1000+`. No users, orgs, sequences or timings. Turned off with the heartbeat (the switchboard).
 
+### Details settled while planning (coordinator, 2026-11-23)
+
+Smaller choices the milestone plans needed, within the approved design:
+
+- **Buckets.** `uptime` (time since the process started, the same in heartbeats and crash reports): `<1h`, `1h-1d`, `1d-7d`, `7d-30d`, `30d+`. `install_age` (from the oldest `users.created_at`; no user yet reads `<1d`): `<1d`, `1d-7d`, `7d-30d`, `30d-90d`, `90d-1y`, `1y+`. The relay (TL-Q1) accepts exactly these strings and those of § 5.
+- **Counts.** Active orgs, active projects, users not disabled.
+- **Sign-in features.** Three booleans, `github_sign_in`, `google_sign_in`, `oidc_sign_in`, from the server config only; per-org SSO (`ee`) is not read. `crash_reports_on` joins `features` in M5.
+- **Heartbeat bookkeeping.** `telemetry.last_heartbeat_at` is written only after a 2xx answer.
+- **`telemetry.endpoint` over `http`** only to a loopback IP literal (`127.0.0.0/8`, `::1`); `localhost` is refused, since a name can resolve elsewhere. Test configs set `http://127.0.0.1:9`.
+- **The switchboard's environment** is read once by the config loader (`CETRA_TELEMETRY`, `DO_NOT_TRACK`, the CI variables) and kept beside the config, never as config keys; a bad `CETRA_TELEMETRY` fails every command that loads the config.
+- **`otlp_headers` and `resource`:** at most 32 entries of at most 8192 bytes; duplicate names refused; header values percent-decoded (Grafana's `Basic%20…` snippets work as pasted); `content-type`, `content-encoding`, `content-length`, `host` and `user-agent` refused (cetra sets them); a `resource` key may override cetra's own attributes. Headers and resource without an endpoint are validated and unused.
+- **`otlp_endpoint`** ending in `/v1/logs` or `/v1/traces` is refused (cetra appends the signal path).
+- **Shutdown.** The 2 s export flush sits outside spec 12's 60 s bound, like the final meta writes. The error exit of `cetra serve` emits an ERROR `cetra serve failed` event (on stdout too) so startup errors are exported.
+- **`cetra init`'s local server** (`node-cli`) runs `cetra serve`, so the heartbeat applies there too; the Telemetry page says so.
+
 ### The switchboard (D-TL-11)
 
 One function decides, at startup, what may go to us. The first match wins:
