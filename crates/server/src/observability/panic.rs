@@ -22,6 +22,8 @@ thread_local! {
 /// Installs the hook. Only the first call in a process does anything, so the default hook is
 /// chained once. `cetra serve` calls it before it loads the config.
 pub fn install() {
+    // The crash reports' uptime counts from here (track TL M5); `serve::bind` marks it too.
+    crate::observability::facts::mark_process_start();
     static INSTALLED: Once = Once::new();
     INSTALLED.call_once(|| {
         let default = std::panic::take_hook();
@@ -32,12 +34,15 @@ pub fn install() {
     });
 }
 
-/// What the hook adds to the default hook. Track TL M5 adds the crash-report spool here, after
-/// the event.
+/// What the hook adds to the default hook: the crash report when crash reports are on (track TL M5), then the `panic` event.
 fn report(info: &PanicHookInfo<'_>) {
     let Some(_guard) = HookGuard::enter() else {
         return;
     };
+    // Opt-in crash report first (track TL M5): the event below goes through every layer, which
+    // may block on a lock the panicking thread holds; the spool is what must survive.
+    // Nothing happens until `subscriber::init` enabled it.
+    crate::observability::crash::report_panic(info);
     let location = panic_location(info);
     tracing::error!(target: PANIC_EVENT_TARGET, location = %location, "panic");
 }

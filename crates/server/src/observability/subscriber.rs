@@ -1,5 +1,6 @@
 //! The `tracing` subscriber of `cetra serve` (track TL § Architecture): one registry, one layer per sink, each with its own filter. The stdout layer is `log.level` with `rmcp` capped; it sees events only, so the spans never change its lines. The OTLP log layer is `self_monitoring.level` with the same cap, minus the exporter's own stack. The OTLP span layer exports cetra's own spans (track TL M2) with the events the log layer would export. Later milestones add their layer to [`build`]'s list and their flush to [`Observability::shutdown`]. The flush runs after `serve::run` returns, outside spec 12's 60 s shutdown bound. The ring buffer layer (track TL M3) keeps the stdout-level lines as JSON for the admin socket's `debug_info`.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use opentelemetry_sdk::error::OTelSdkResult;
@@ -14,7 +15,9 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{Layer, Registry};
 
 use crate::config::{LogFormat, ServerConfig};
-use crate::observability::switchboard::NOTICE_DIRECTIVE;
+use crate::observability::crash::spool::Spool;
+use crate::observability::crash::{self, Reporter};
+use crate::observability::switchboard::{NOTICE_DIRECTIVE, Switch, for_config};
 
 use super::ObservabilityError;
 use super::otlp::{EXPORT_FAILURE_TARGET, LogPipeline, SpanPipeline};
@@ -65,6 +68,8 @@ pub struct Observability {
     traces: Option<SpanPipeline>,
     /// The ring buffer of the last log lines (track TL M3), installed by [`init`].
     ring: LogRing,
+    /// The crash reporter when crash reports are on (track TL M5).
+    crash: Option<Arc<Reporter>>,
 }
 
 impl Observability {
@@ -76,6 +81,11 @@ impl Observability {
     /// Whether spans are exported.
     pub fn exporting_traces(&self) -> bool {
         self.traces.is_some()
+    }
+
+    /// Whether the crash layer is installed.
+    pub fn reporting_crashes(&self) -> bool {
+        self.crash.is_some()
     }
 
     /// The ring buffer this subscriber writes.
@@ -131,6 +141,9 @@ pub fn init(config: &ServerConfig, format: LogFormat) -> Result<Observability, O
     subscriber
         .try_init()
         .map_err(|_| ObservabilityError::AlreadyInstalled)?;
+    if let Some(reporter) = &observability.crash {
+        crash::enable_panic_reports(Arc::clone(reporter));
+    }
     ring::install(observability.ring.clone());
     if let Some(pipeline) = &observability.logs {
         tracing::info!(
@@ -220,9 +233,24 @@ pub(crate) fn build(
         }
         None => None,
     };
+    // Crash reports to us, when the switchboard allows them (track TL M5, D-TL-11). The
+    // decision is pure, so `serve::bind` reaches the same one for the sender.
+    let crash = match for_config(config).crash_reports {
+        Switch::On => {
+            let reporter = Arc::new(Reporter::system(Spool::for_data_dir(&config.data_dir)));
+            layers.push(crash::layer::boxed(Arc::clone(&reporter)));
+            Some(reporter)
+        }
+        Switch::Off(_) => None,
+    };
     Ok((
         tracing_subscriber::registry().with(layers),
-        Observability { logs, traces, ring },
+        Observability {
+            logs,
+            traces,
+            ring,
+            crash,
+        },
     ))
 }
 
@@ -1308,5 +1336,116 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// The text of every report file in `dir`'s crash spool (none when the spool is absent).
+    fn spooled(dir: &std::path::Path) -> Vec<String> {
+        let Ok(entries) = std::fs::read_dir(dir.join("telemetry").join("spool")) else {
+            return Vec::new();
+        };
+        entries
+            .flatten()
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn crash_reports_off_means_no_crash_layer() {
+        let (_subscriber, observability) = build_for(None).unwrap();
+        assert!(!observability.reporting_crashes());
+    }
+
+    #[tokio::test]
+    async fn crash_reports_on_adds_the_crash_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "data_dir = '{}'\n[telemetry]\nendpoint = \"http://127.0.0.1:9\"\ncrash_reports = true\n",
+            dir.path().display()
+        );
+        let config = load_from(Some(&toml), &[]).unwrap();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+        assert!(observability.reporting_crashes());
+
+        {
+            let _guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+            tracing::error!("crash-canary");
+        }
+        let reports = spooled(dir.path());
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert!(!reports[0].contains("crash-canary"), "{}", reports[0]);
+    }
+
+    #[tokio::test]
+    async fn cetra_telemetry_off_means_no_crash_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "data_dir = '{}'\n[telemetry]\ncrash_reports = true\n",
+            dir.path().display()
+        );
+        let config = load_from(Some(&toml), &[("CETRA_TELEMETRY", "off")]).unwrap();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+        assert!(!observability.reporting_crashes());
+
+        {
+            let _guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+            tracing::error!("crash-canary");
+        }
+        assert!(!dir.path().join("telemetry").exists());
+    }
+
+    #[tokio::test]
+    async fn restore_mode_means_no_crash_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "data_dir = '{}'\nrestore_mode = true\n[telemetry]\ncrash_reports = true\n",
+            dir.path().display()
+        );
+        let config = load_from(Some(&toml), &[]).unwrap();
+        let (_subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&Buffer::default()),
+            Handle::current(),
+        )
+        .unwrap();
+        assert!(!observability.reporting_crashes());
+    }
+
+    #[tokio::test]
+    async fn the_crash_layer_ignores_the_log_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = format!(
+            "data_dir = '{}'\n[log]\nlevel = \"off\"\n[telemetry]\ncrash_reports = true\n",
+            dir.path().display()
+        );
+        let config = load_from(Some(&toml), &[]).unwrap();
+        let stdout = Buffer::default();
+        let (subscriber, observability) = build(
+            &config,
+            LogFormat::Pretty,
+            stdout_writer(&stdout),
+            Handle::current(),
+        )
+        .unwrap();
+        assert!(observability.reporting_crashes());
+
+        {
+            let _guard = tracing::dispatcher::set_default(&Dispatch::new(subscriber));
+            tracing::error!("crash-canary");
+        }
+        assert_eq!(spooled(dir.path()).len(), 1);
+        assert!(stdout.text().is_empty(), "{}", stdout.text());
     }
 }
