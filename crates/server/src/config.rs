@@ -446,7 +446,7 @@ fn default_telemetry_endpoint() -> String {
 }
 
 /// `self_monitoring.otlp_endpoint` (track TL, D-TL-1): an `http` or `https` base URL without
-/// user info, query or fragment. Its path is kept and `/v1/logs` is appended to it.
+/// user info, query or fragment. Its path is kept and `/v1/logs` or `/v1/traces` is appended to it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct OtlpEndpoint {
     /// The URL without a trailing `/`, for example `https://otlp.example.com/otlp`.
@@ -459,6 +459,11 @@ impl OtlpEndpoint {
     /// The URL log records are posted to: the base followed by `/v1/logs`.
     pub fn logs_url(&self) -> String {
         format!("{}/v1/logs", self.base)
+    }
+
+    /// The URL spans are posted to: the base followed by `/v1/traces` (track TL M2).
+    pub fn traces_url(&self) -> String {
+        format!("{}/v1/traces", self.base)
     }
 
     /// The endpoint's host, the only part of it cetra logs.
@@ -477,7 +482,40 @@ impl fmt::Debug for OtlpEndpoint {
     }
 }
 
-/// `[self_monitoring]`: export of cetra's own logs to the operator's OTLP/HTTP endpoint
+/// `self_monitoring.trace_sample_ratio` (track TL M2): the probability that a root span is
+/// exported, from 0.0 to 1.0; children follow their root. Never NaN, so it is `Eq`.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(try_from = "f64")]
+pub struct TraceSampleRatio(f64);
+
+// `TryFrom` refuses NaN, the only `f64` that is not equal to itself, so equality is reflexive.
+impl Eq for TraceSampleRatio {}
+
+impl TraceSampleRatio {
+    /// The default share of root spans, 10 % (D-TL-3).
+    pub const DEFAULT: Self = Self(0.1);
+
+    /// The ratio as a number in `[0.0, 1.0]`.
+    pub fn get(self) -> f64 {
+        self.0
+    }
+}
+
+impl TryFrom<f64> for TraceSampleRatio {
+    type Error = &'static str;
+
+    /// Accepts `[0.0, 1.0]`; refuses NaN, infinities and anything outside. The reason never
+    /// quotes the input.
+    fn try_from(value: f64) -> Result<Self, Self::Error> {
+        if (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("must be a number from 0.0 to 1.0")
+        }
+    }
+}
+
+/// `[self_monitoring]`: export of cetra's own logs and spans to the operator's OTLP/HTTP endpoint
 /// (track TL, D-TL-1, D-TL-3). Off while `otlp_endpoint` is unset.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -491,10 +529,16 @@ pub struct SelfMonitoringConfig {
     /// Whether log records are exported. Defaults to `true`.
     #[serde(default = "default_self_monitoring_logs")]
     pub logs: bool,
+    /// Whether spans are exported. Defaults to `true` (track TL M2).
+    #[serde(default = "default_self_monitoring_traces")]
+    pub traces: bool,
     /// `EnvFilter` directive of the exported events. Defaults to `warn`. The subscriber
-    /// checks it and caps `rmcp` at `warn`, as for stdout.
+    /// checks it and caps `rmcp` at `warn`, as for stdout. Spans record the events that pass it.
     #[serde(default = "default_self_monitoring_level")]
     pub level: String,
+    /// Probability that a root span is exported; its children follow it. Defaults to 0.1.
+    #[serde(default = "default_trace_sample_ratio")]
+    pub trace_sample_ratio: TraceSampleRatio,
     /// Extra resource attributes, `key=value,key=value` (the `OTEL_RESOURCE_ATTRIBUTES` syntax).
     #[serde(default)]
     pub resource: String,
@@ -506,7 +550,9 @@ impl Default for SelfMonitoringConfig {
             otlp_endpoint: None,
             otlp_headers: None,
             logs: default_self_monitoring_logs(),
+            traces: default_self_monitoring_traces(),
             level: default_self_monitoring_level(),
+            trace_sample_ratio: default_trace_sample_ratio(),
             resource: String::new(),
         }
     }
@@ -518,9 +564,17 @@ impl SelfMonitoringConfig {
         self.otlp_endpoint.as_ref().filter(|_| self.logs)
     }
 
-    /// Whether anything is exported. M1 exports logs only; M2 adds traces here.
+    /// The endpoint, when spans are exported: `otlp_endpoint` is set, `traces` is true and
+    /// `trace_sample_ratio` is above 0. At 0 no span would be kept, so no span layer is built.
+    pub fn traces_endpoint(&self) -> Option<&OtlpEndpoint> {
+        self.otlp_endpoint
+            .as_ref()
+            .filter(|_| self.traces && self.trace_sample_ratio.get() > 0.0)
+    }
+
+    /// Whether anything is exported: logs, spans or both.
     pub fn exports(&self) -> bool {
-        self.logs_endpoint().is_some()
+        self.logs_endpoint().is_some() || self.traces_endpoint().is_some()
     }
 }
 
@@ -881,7 +935,7 @@ pub struct ServerConfig {
     /// Log format and level.
     #[serde(default)]
     pub log: LogConfig,
-    /// `[self_monitoring]`: export of cetra's own logs over OTLP/HTTP (track TL, D-TL-1).
+    /// `[self_monitoring]`: export of cetra's own logs and spans over OTLP/HTTP (track TL, D-TL-1).
     #[serde(default)]
     pub self_monitoring: SelfMonitoringConfig,
     /// `[telemetry]`: the heartbeat to us (D-TL-8).
@@ -1010,6 +1064,14 @@ fn default_self_monitoring_logs() -> bool {
 
 fn default_self_monitoring_level() -> String {
     "warn".to_owned()
+}
+
+fn default_self_monitoring_traces() -> bool {
+    true
+}
+
+fn default_trace_sample_ratio() -> TraceSampleRatio {
+    TraceSampleRatio::DEFAULT
 }
 
 /// Defaults, then `toml`, then `env`, validated. Also used by tests outside this module to
@@ -2299,8 +2361,8 @@ mod tests {
     use super::{
         ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
         MediaConfig, OrgsConfig, Secret, SelfMonitoringConfig, ServerConfig, SmtpUrl,
-        TELEMETRY_VALUES, TelemetryConfig, Tls, issuer_problem, load_from, oidc_env_name,
-        parse_otlp_endpoint, parse_otlp_headers, parse_resource,
+        TELEMETRY_VALUES, TelemetryConfig, Tls, TraceSampleRatio, issuer_problem, load_from,
+        oidc_env_name, parse_otlp_endpoint, parse_otlp_headers, parse_resource,
     };
     use crate::api::account::SignupPolicy;
     use crate::observability::switchboard::TelemetryEnv;
@@ -2563,6 +2625,9 @@ mod tests {
         assert_eq!(monitoring.resource, "");
         assert!(monitoring.logs_endpoint().is_none());
         assert!(!monitoring.exports());
+        assert!(monitoring.traces);
+        assert_eq!(monitoring.trace_sample_ratio.get(), 0.1);
+        assert!(monitoring.traces_endpoint().is_none());
     }
 
     #[test]
@@ -2574,6 +2639,7 @@ mod tests {
                 "authorization=Basic%20abc",
             ),
             ("CETRA_SELF_MONITORING__LOGS", "false"),
+            ("CETRA_SELF_MONITORING__TRACES", "false"),
             ("CETRA_SELF_MONITORING__LEVEL", "info"),
             (
                 "CETRA_SELF_MONITORING__RESOURCE",
@@ -2587,6 +2653,8 @@ mod tests {
         assert_eq!(endpoint.host(), "otlp.example.com");
         assert!(!monitoring.logs);
         assert!(monitoring.logs_endpoint().is_none());
+        assert!(!monitoring.traces);
+        assert!(monitoring.traces_endpoint().is_none());
         assert!(!monitoring.exports());
         assert_eq!(monitoring.level, "info");
         assert_eq!(
@@ -2804,8 +2872,97 @@ mod tests {
 
     #[test]
     fn unknown_self_monitoring_key_is_refused() {
-        // `traces` is M2's key, so M1 refuses it.
-        assert!(load_from(Some("[self_monitoring]\ntraces = true\n"), &[]).is_err());
+        // cetra exports no metrics over OTLP (D-N-28), so `metrics` is refused.
+        assert!(load_from(Some("[self_monitoring]\nmetrics = true\n"), &[]).is_err());
+    }
+
+    #[test]
+    fn trace_sample_ratio_bounds() {
+        for value in [0.0, 0.25, 1.0] {
+            assert_eq!(TraceSampleRatio::try_from(value).unwrap().get(), value);
+        }
+        for value in [-0.1, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                TraceSampleRatio::try_from(value).unwrap_err(),
+                "must be a number from 0.0 to 1.0",
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_settings_load_from_toml_and_env() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n\
+                    traces = false\ntrace_sample_ratio = 0.5\n";
+        let config = load_from(Some(toml), &[]).unwrap();
+        assert!(!config.self_monitoring.traces);
+        assert_eq!(config.self_monitoring.trace_sample_ratio.get(), 0.5);
+        assert!(config.self_monitoring.traces_endpoint().is_none());
+        assert!(config.self_monitoring.exports());
+
+        let env = [
+            ("CETRA_SELF_MONITORING__TRACE_SAMPLE_RATIO", "1"),
+            ("CETRA_SELF_MONITORING__LOGS", "false"),
+        ];
+        let config = load_from(
+            Some("[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n"),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(config.self_monitoring.trace_sample_ratio.get(), 1.0);
+        let endpoint = config.self_monitoring.traces_endpoint().unwrap();
+        assert_eq!(
+            endpoint.traces_url(),
+            "https://otlp.example.com/otlp/v1/traces"
+        );
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn a_trace_sample_ratio_out_of_range_is_refused() {
+        let endpoint = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n";
+        for toml in ["trace_sample_ratio = 1.5\n", "trace_sample_ratio = nan\n"] {
+            let error = load_from(Some(&format!("{endpoint}{toml}")), &[]).unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("must be a number from 0.0 to 1.0"), "{text}");
+            assert!(text.contains("trace_sample_ratio"), "{text}");
+        }
+        let error = load_from(
+            Some(endpoint),
+            &[("CETRA_SELF_MONITORING__TRACE_SAMPLE_RATIO", "-1")],
+        )
+        .unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("must be a number from 0.0 to 1.0"), "{text}");
+        assert!(text.contains("trace_sample_ratio"), "{text}");
+    }
+
+    #[test]
+    fn a_zero_ratio_exports_no_span() {
+        let base = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp\"\n\
+                    logs = false\ntrace_sample_ratio = 0.0\n";
+        let config = load_from(Some(base), &[]).unwrap();
+        assert!(config.self_monitoring.traces_endpoint().is_none());
+        assert!(!config.self_monitoring.exports());
+
+        let with_logs = base.replace("logs = false", "logs = true");
+        let config = load_from(Some(&with_logs), &[]).unwrap();
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn traces_url_appends_v1_traces() {
+        let cases = [
+            ("http://collector:4318/", "http://collector:4318/v1/traces"),
+            (
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp",
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp/v1/traces",
+            ),
+        ];
+        for (raw, traces_url) in cases {
+            let endpoint = parse_otlp_endpoint(raw).unwrap();
+            assert_eq!(endpoint.traces_url(), traces_url, "{raw}");
+        }
     }
 
     #[test]

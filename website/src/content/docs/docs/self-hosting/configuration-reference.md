@@ -205,14 +205,16 @@ These settings create the first admin, organization and project on a database th
 
 ## `[self_monitoring]`
 
-Export cetra's own logs to an OTLP/HTTP endpoint you choose (Sentry, Grafana Cloud, an OpenTelemetry Collector). Off while `otlp_endpoint` is unset. See [Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp).
+Export cetra's own logs and traces to an OTLP/HTTP endpoint you choose (Sentry, Grafana Cloud, an OpenTelemetry Collector). Off while `otlp_endpoint` is unset. See [Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp).
 
 | Key | Environment | Type | Default | Description |
 |---|---|---|---|---|
-| `self_monitoring.otlp_endpoint` | | URL | unset (off) | Base URL of the OTLP/HTTP endpoint, `http` or `https`, without user info, query or fragment. cetra posts protobuf, gzip-compressed, to the URL followed by `/v1/logs`; a URL that already ends in `/v1/logs` or `/v1/traces` is refused. |
+| `self_monitoring.otlp_endpoint` | | URL | unset (off) | Base URL of the OTLP/HTTP endpoint, `http` or `https`, without user info, query or fragment. cetra posts protobuf, gzip-compressed, to the URL followed by `/v1/logs` (logs) and `/v1/traces` (spans); a URL that already ends in `/v1/logs` or `/v1/traces` is refused. |
 | `self_monitoring.otlp_headers` | | secret | unset | Request headers, `name=value` pairs separated by commas, as in `OTEL_EXPORTER_OTLP_HEADERS`. Values may be percent-encoded (`Basic%20…`). At most 32 headers and 8192 bytes; `content-type`, `content-encoding`, `content-length`, `host` and `user-agent` are set by cetra. |
 | `self_monitoring.logs` | | boolean | `true` | Export log records. |
-| `self_monitoring.level` | | string | `"warn"` | A log filter for the exported events, like `log.level`. `rmcp` is capped at `warn`. |
+| `self_monitoring.traces` | | boolean | `true` | Export spans: HTTP requests, OTLP ingest, queries and background work. See [Monitoring](/docs/self-hosting/monitoring/#export-traces-over-otlp). |
+| `self_monitoring.level` | | string | `"warn"` | A log filter for the exported events, like `log.level`. `rmcp` is capped at `warn`. Spans record the events that pass it. |
+| `self_monitoring.trace_sample_ratio` | | number | `0.1` | The probability that a trace is exported, from `0.0` to `1.0`. Each root span is kept with this probability and its child spans follow it. `0.0` exports no span. |
 | `self_monitoring.resource` | | string | `""` | Extra resource attributes, `key=value` pairs separated by commas, as in `OTEL_RESOURCE_ATTRIBUTES`. Values may be percent-encoded (`%2C` for a comma). At most 32 attributes and 8192 bytes. They are added after cetra's own (`service.name`, `service.version`, `service.instance.id`, `host.arch`, `os.type`) and replace one of the same key. |
 
 ## `[telemetry]`
