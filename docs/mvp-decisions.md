@@ -1032,7 +1032,7 @@ Decisions of track IN (`docs/plans/in-integrations/00-design.md`, research in th
 | D-IN-15 | Aliases | **Rule 12 gains `fireworks`, `together`, `togetherai`, `watsonx`, `ibm`, `oracle` and LiteLLM's ids (`bedrock`, `azure_ai`, `mistral`, `vertex_ai*`, `ollama_chat`, `cohere_chat`, `text-completion-openai`), and a table of framework names in `gen_ai.system` that are never providers** (`gcp.vertex.agent`, `autogen`, `spring_ai`). |
 | D-IN-16 | Gateway reported cost | **A gateway's own cost attribute is read as reported cost once a captured case shows its keys** (LiteLLM Proxy, M5). Amends D109's key list. |
 | D-IN-17 | Spikes | **A milestone's spikes run before its plan**, written up in `docs/plans/in-integrations/spikes/`; a result that changes a decision or the scope updates the design first. |
-| D-IN-18 | SDK host stamp | **cetra's Python SDK wraps the OpenAI client's resource methods outermost when `instrument` names `openai` and sets `server.address` from the client's base-URL host on spans started during the call**, because OpenInference and OpenAI v2 write no host. The TypeScript helper does the same if its spike passes (the user, 2026-11-23). |
+| D-IN-18 | SDK host stamp | **cetra's Python SDK wraps the OpenAI client's resource methods outermost when `instrument` names `openai` and sets `server.address` from the client's base-URL host on spans started during the call**, because OpenInference and OpenAI v2 write no host. TypeScript needs nothing: OpenInference JS already writes `server.address` (the user, 2026-11-23). |
 
 ## Open
 

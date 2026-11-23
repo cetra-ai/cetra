@@ -50,7 +50,7 @@ tools/capture ──▶ fixtures/otlp/<group>/<case> ──▶ cetra-otel golden
    │ Java and .NET runners (D-IN-9)
 just prices-update ──▶ crates/otel/prices/builtin.json (D-IN-14)
 sdks/python registry ──▶ instrument=["groq", "agno", …] (D-IN-7)
-sdks (Python, TS helper) ──▶ server.address on OpenAI-client spans (D-IN-18)
+sdks/python ──▶ server.address on OpenAI-client spans (D-IN-18)
 cetra agents setup ──▶ OpenCode, Qwen Code, then Goose and Hermes if their spikes pass (D-IN-12)
 web dashboard templates ──▶ the Coding agents template counts the new agents (D-IN-12)
 website integrations pages ──▶ index, sidebar, check-samples, check-backing, check-integrations (D-IN-1, D-IN-8)
@@ -65,7 +65,7 @@ What changes, by area:
 - **`web/`**: `src/api/schema.gen.ts` (regenerated). The Coding agents template is agent-agnostic and needs no change.
 - **`tools/capture`**: host routing, suffix path matching and new routes in the mock, new `api` values, new groups, Java and .NET runners.
 - **`crates/otel/tests/prices.rs`**: the price converter (test code run by `just prices-update`), and `crates/otel/prices/builtin.json`.
-- **`sdks/python`**: registry rows and extras, and the host stamp of D-IN-18. **`sdks/typescript`**: the host stamp in the `openai(OpenAI)` helper if M1's TypeScript spike shows it works.
+- **`sdks/python`**: registry rows and extras, and the host stamp of D-IN-18. `sdks/typescript` needs no change for attribution.
 - **`website/`**: pages, the index, the sidebar and one new check.
 
 Nothing changes in storage, the server's other routes or the UI pages.
@@ -291,7 +291,7 @@ A spike that finds no OTLP span path moves its item here, and the user is told.
 | D-IN-15 | Aliases and framework names | **Rule 12 gains**: `fireworks` → `fireworks_ai`; `together`, `togetherai` → `together_ai`; `watsonx`, `ibm` → `ibm.watsonx.ai`; `oracle` → `oci`; and LiteLLM's ids `bedrock` → `aws.bedrock`, `azure_ai` → `azure.ai.inference`, `mistral` → `mistral_ai`, `vertex_ai` and `vertex_ai-*` → `gcp.vertex_ai`, `ollama_chat` → `ollama`, `cohere_chat` → `cohere`, `text-completion-openai` → `openai`. M1 checks each LiteLLM id against LiteLLM's provider list. **A named table "framework names in `gen_ai.system`" lists values that are never providers**: `gcp.vertex.agent` (existing, D-B1-8), `autogen`, `spring_ai`, plus any a capture finds. A value in it is skipped and stays unread. | Per-case exceptions in prose, which later frameworks would have to rediscover. |
 | D-IN-16 | Gateway reported cost | **A gateway's own cost attribute is read as reported cost (D109, spec 02 step 1)**, once a captured case shows its exact keys: LiteLLM Proxy's cost keys (M5). Keys that no capture shows are not added. Amends D109's key list. | Ignoring gateway cost: the gateway knows its own fees. |
 | D-IN-17 | Spikes | **A milestone's spikes run before its plan is written**: a throwaway capture or a source read in the track's worktree, written up in `docs/plans/in-integrations/spikes/<item>.md` (what was run, versions, the span names and keys seen, the decision it supports). A spike result that changes a decision or the scope updates this doc first, and the user hears of any change in scope. | Spikes inside plan phases: a plan would then make design decisions. |
-| D-IN-18 | SDK host stamp | **cetra's Python SDK wraps the OpenAI client's resource methods (chat completions, responses, embeddings, sync and async) as the outermost wrapper, once, when `instrument` names `openai`; while a call runs, a context variable holds the client's base-URL host, and cetra's span processor sets `server.address` on spans that start during it and do not already have one.** The server's host rule (D-IN-2) then attributes OpenInference and OpenAI v2 spans. The TypeScript `openai(OpenAI)` helper does the same if M1's TypeScript spike shows it can; otherwise TypeScript pages say the provider shows as `openai` on unknown hosts and recommend OpenLLMetry (the user, 2026-11-23, `spikes/m1-host-keys.md`). The host is not a payload and is not logged. | Docs only (provider `openai` on unknown hosts for SDK users). Wrapping `SyncAPIClient.request`: it runs inside OpenInference's span, so the processor sees nothing. |
+| D-IN-18 | SDK host stamp | **cetra's Python SDK wraps the OpenAI client's resource methods (chat completions, responses, embeddings, sync and async) as the outermost wrapper, once, when `instrument` names `openai`; while a call runs, a context variable holds the client's base-URL host, and cetra's span processor sets `server.address` on spans that start during it and do not already have one.** The server's host rule (D-IN-2) then attributes OpenInference and OpenAI v2 spans. TypeScript needs nothing: OpenInference JS (4.5.0) already writes `server.address` and `server.port` for every client with a string `baseURL` (`spikes/m1-ts-host-stamp.md`), so the host rule attributes its spans as they are (the user, 2026-11-23, `spikes/m1-host-keys.md`). The host is not a payload and is not logged. | Docs only (provider `openai` on unknown hosts for SDK users). Wrapping `SyncAPIClient.request`: it runs inside OpenInference's span, so the processor sees nothing. |
 
 ## Milestones
 
@@ -303,9 +303,9 @@ The milestones run in order. Every milestone that adds libraries edits the captu
 - the converter fix and a refreshed snapshot (D-IN-14);
 - gateway pricing (D-IN-13);
 - host routing in the capture harness and suffix path matching in the mock (D-IN-3, D-IN-4), with captured cases for OpenRouter and Novita through each of OpenInference, OpenLLMetry and OpenAI v2 (six cases), plus unit tests for every host table row;
-- the SDK host stamp (D-IN-18) in Python, and in the TypeScript helper if its spike passes; the OpenInference and OpenAI v2 cases go through cetra's SDK wiring so they pin the stamp.
+- the Python SDK host stamp (D-IN-18); the OpenInference and OpenAI v2 cases go through cetra's SDK wiring so they pin the stamp.
 
-Spikes: done for the host keys and the converter (`spikes/m1-*.md`); the TypeScript host stamp is spiked before M1's plan. Depends on: nothing. Leaves out: the pages (M2).
+Spikes: done (`spikes/m1-*.md`). Depends on: nothing. Leaves out: the pages (M2).
 
 **M2 — Providers.** Delivers:
 - a page for every provider in § Providers and the long-tail providers of the appendix;
