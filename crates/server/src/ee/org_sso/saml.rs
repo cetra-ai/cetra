@@ -790,11 +790,12 @@ mod tests {
     async fn enforcement_refuses_password_login_for_saml_domains() {
         let (app, seeded, owner) = saml_app().await;
         // Org enforcement refuses a password login after the password verifies (D-P-58), so
-        // the covered owner gets a password first.
+        // the covered owner gets a password first, made at run time so no literal is a password.
+        let password = Uuid::now_v7().simple().to_string();
         let hash = crate::auth::password::Hasher::new()
             .await
             .unwrap()
-            .hash("cetra-ok-1")
+            .hash(&password)
             .await
             .unwrap();
         let now = app.state.clock.now_ns();
@@ -819,7 +820,7 @@ mod tests {
         .await;
         let response = app
             .request(Method::POST, "/api/auth/login")
-            .json(&serde_json::json!({ "email": "owner@acme.test", "password": "cetra-ok-1" }))
+            .json(&serde_json::json!({ "email": "owner@acme.test", "password": password }))
             .send()
             .await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
