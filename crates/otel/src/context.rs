@@ -57,14 +57,17 @@ const ENDPOINT_PROVIDERS: &[(&str, &str)] = &[
     ("api.deepseek.com", "deepseek"),
     ("api.fireworks.ai", "fireworks_ai"),
     ("api.together.xyz", "together_ai"),
+    ("api-inference.together.ai", "together_ai"),
     ("api.together.ai", "together_ai"),
     ("api.novita.ai", "novita"),
     ("dashscope.aliyuncs.com", "dashscope"),
     ("dashscope-intl.aliyuncs.com", "dashscope"),
+    ("*.maas.aliyuncs.com", "dashscope"),
     ("router.huggingface.co", "huggingface"),
     ("api.cloudflare.com", "cloudflare"),
     ("*.cloud.databricks.com", "databricks"),
     ("*.azuredatabricks.net", "databricks"),
+    ("*.gcp.databricks.com", "databricks"),
     ("api.cerebras.ai", "cerebras"),
     ("api.perplexity.ai", "perplexity"),
     ("api.moonshot.ai", "moonshot"),
@@ -76,11 +79,25 @@ const ENDPOINT_PROVIDERS: &[(&str, &str)] = &[
     ("api.tokenfactory.nebius.com", "nebius"),
     ("api.mistral.ai", "mistral_ai"),
     ("*.openai.azure.com", "azure.ai.openai"),
+    ("*.services.ai.azure.com", "azure.ai.openai"),
+    ("*.cognitiveservices.azure.com", "azure.ai.openai"),
     ("api.deepinfra.com", "deepinfra"),
     ("inference.baseten.co", "baseten"),
+    ("*.api.baseten.co", "baseten"),
     ("api.hyperbolic.xyz", "hyperbolic"),
     ("integrate.api.nvidia.com", "nvidia_nim"),
     ("api.minimax.io", "minimax"),
+    ("api.minimaxi.com", "minimax"),
+    ("api.cohere.com", "cohere"),
+    ("api.cohere.ai", "cohere"),
+    ("ollama.com", "ollama"),
+    ("aiplatform.googleapis.com", "gcp.vertex_ai"),
+    ("ark.cn-beijing.volces.com", "volcengine"),
+    ("ark.ap-southeast.bytepluses.com", "byteplus"),
+    ("api.sarvam.ai", "sarvam"),
+    ("qianfan.baidubce.com", "qianfan"),
+    ("api.cometapi.com", "cometapi"),
+    ("api.doubleword.ai", "doubleword"),
     ("ai-gateway.vercel.sh", "vercel_ai_gateway"),
     ("oai.helicone.ai", "helicone"),
     ("ai-gateway.helicone.ai", "helicone"),
@@ -996,6 +1013,16 @@ mod tests {
             Some("databricks")
         );
         assert_eq!(match_endpoint("api.openai.com"), None);
+        assert_eq!(match_endpoint("x.maas.aliyuncs.com"), Some("dashscope"));
+        assert_eq!(
+            match_endpoint("us-central1-aiplatform.googleapis.com"),
+            None
+        );
+        assert_eq!(match_endpoint("model-abc.api.baseten.co"), Some("baseten"));
+        assert_eq!(
+            match_endpoint("res.services.ai.azure.com"),
+            Some("azure.ai.openai")
+        );
     }
 
     #[test]
@@ -1436,11 +1463,15 @@ mod tests {
         // LiteLLM has no chat rows for these; the gateways among them are priced by the
         // publisher's row (D-IN-13).
         const UNPRICED_ENDPOINT_PROVIDERS: &[&str] = &[
+            "byteplus",
+            "cometapi",
+            "doubleword",
             "helicone",
             "huggingface",
             "nvidia_nim",
             "openrouter",
             "portkey",
+            "qianfan",
         ];
         let priced: std::collections::BTreeSet<String> = crate::cost::builtin_price_rows()
             .into_iter()
