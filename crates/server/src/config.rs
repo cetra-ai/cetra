@@ -2000,7 +2000,8 @@ fn parse_pairs(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
         if name.is_empty() {
             return Err("a name is empty");
         }
-        let value = percent_decode(value.trim()).map_err(|()| "a value is not valid percent-encoding")?;
+        let value =
+            percent_decode(value.trim()).map_err(|()| "a value is not valid percent-encoding")?;
         pairs.push((name.to_owned(), value));
     }
     if pairs.len() > MAX_PAIRS {
