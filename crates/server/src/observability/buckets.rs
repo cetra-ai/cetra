@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A count of orgs, projects or users.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -76,7 +76,7 @@ const HOUR: u64 = 3_600;
 const DAY: u64 = 24 * HOUR;
 
 /// How long the process has run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum UptimeBucket {
     #[serde(rename = "<1h")]
     UnderHour,

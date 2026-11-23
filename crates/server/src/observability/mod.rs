@@ -3,6 +3,7 @@
 //! `tracing` subscriber the CLI installs. Prometheus `/metrics` is [`crate::telemetry`] (D-N-28).
 
 pub(crate) mod buckets;
+pub(crate) mod crash;
 pub(crate) mod facts;
 pub(crate) mod heartbeat;
 pub(crate) mod instance;

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// When the process started, as far as this crate knows (see [`mark_process_start`]).
 static PROCESS_START: OnceLock<Instant> = OnceLock::new();
@@ -28,7 +28,7 @@ pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub(crate) const TARGET: &str = env!("BUILD_TARGET");
 
 /// The build profile, by `debug_assertions`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Profile {
     /// `debug_assertions` off.
@@ -47,7 +47,7 @@ pub(crate) const fn profile() -> Profile {
 }
 
 /// How the process runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Deployment {
     /// A container (Docker, Podman, Compose).
