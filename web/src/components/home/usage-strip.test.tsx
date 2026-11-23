@@ -40,8 +40,10 @@ describe("usageDayRows", () => {
     });
     expect(rows.map((row) => row.day)).toEqual(["2026-01-01", "2026-01-02", "2026-01-03"]);
     expect(rows.map((row) => row.units)).toEqual([5, null, 7]);
-    expect(rows[1].time - rows[0].time).toBe(86_400_000);
-    expect(rows[2].time - rows[1].time).toBe(86_400_000);
+    const times = rows.map((row) => row.time);
+    expect(times.slice(1).map((time, index) => time - (times[index] ?? 0))).toEqual([
+      86_400_000, 86_400_000,
+    ]);
   });
 
   it("is empty for an inverted range", () => {

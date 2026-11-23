@@ -10,8 +10,7 @@ describe("sparklineRows", () => {
       { traces: 1, errors: 0 },
       { traces: 1, errors: 0 },
     ]);
-    expect(rows[1].time - rows[0].time).toBe(3_600_000);
-    expect(rows[0].time).toBe(Date.parse(FROM));
+    expect(rows.map((row) => row.time)).toEqual([Date.parse(FROM), Date.parse(FROM) + 3_600_000]);
   });
 
   it("splits OK and errors and nulls zeros", () => {
