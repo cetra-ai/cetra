@@ -121,6 +121,7 @@ pub(crate) const SHOWN_KEYS: &[&str] = &[
     "self_monitoring.traces",
     "self_monitoring.trace_sample_ratio",
     "telemetry.crash_reports",
+    "analytics.posthog_host",
 ];
 
 /// The longest shown string, in bytes; a longer one is cut and ends with `…<truncated>`.
@@ -346,6 +347,7 @@ mod tests {
         // Some vendors put a token in the endpoint's path (M1's `OtlpEndpoint` logs its host
         // only); a running server's `debug_info.self_monitoring.endpoint_host` gives the host.
         "self_monitoring.otlp_endpoint",
+        "analytics.posthog_key",
     ];
     const REFERENCE: &str = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
