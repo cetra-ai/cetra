@@ -74,20 +74,6 @@ export const PLANS = [
   },
 ];
 
-/** What every cloud plan includes, Free too (D191–D194; limits per plan in PLANS[].rules). */
-export const EVERY_PLAN = [
-  "Tracing, sessions and users",
-  "Full-text search and a SQL console",
-  "MCP server for your agents",
-  "LLM judges and checks on live traffic",
-  "Annotation queues",
-  "Datasets and experiments",
-  "Prompts and a playground",
-  "Issue detection",
-  "Alerts to Slack, email and webhooks",
-  "The AI assistant, on your own LLM connection",
-];
-
 export const TEAMS_ADDON = {
   name: "Teams add-on",
   priceMonthly: 300,
