@@ -2,7 +2,7 @@
 
 Design doc. The user reviews it before any plan is written. Each milestone gets its own plan, written from the code that exists when the milestone starts (`roadmap.md` § How the work is organised).
 
-**Status:** design, reviewed and approved by the user on 2026-11-23.
+**Status:** design approved by the user on 2026-11-23. M1's plan: [`01-m1-crate.md`](01-m1-crate.md).
 
 **Decisions:** `D-SA-1` to `D-SA-16`, in `docs/mvp-decisions.md` § Track SA. "(user)" marks the user's answers of 2026-11-23.
 
@@ -100,7 +100,7 @@ Every competitor that ships SAML gates it to Enterprise, and none turns IdP-init
 1. **`crates/saml` (`cetra-saml`).** A library crate under the Elastic-2.0 licence, like `cetra-token` (D-P-26). It depends on no workspace crate and knows nothing of HTTP, `meta.db` or orgs, so the control plane can use it by git commit. It is pure functions over bytes and explicit inputs (the clock, the expected values). Its public surface is the only contract the server and the control plane rely on:
    - **Parse IdP metadata.** Input: XML bytes. Output: the IdP entity ID, the SSO URL for the HTTP-Redirect binding, the signing certificates (at most 4, D-SA-11), and each certificate's validity dates for display. Also refuses metadata it cannot use: no Redirect SSO endpoint, no signing key, or a DOCTYPE.
    - **Build an AuthnRequest.** Input: the SP entity ID, the ACS URL, the IdP SSO URL and a fresh request ID. Output: the redirect URL (DEFLATE, base64 and URL encoding, with `RelayState`). Unsigned (D-SA-8).
-   - **Validate a Response.** Input: the base64 POST body, the expected values (the SP entity ID, the ACS URL, the IdP entity ID, the trusted certificates, the request ID it must answer, now, the allowed skew) and the attribute names to read. Output: the facts of the one Assertion (NameID and its format, email, display name, `NotOnOrAfter`), or a typed error. The full rule set is D-SA-9.
+   - **Validate a Response.** Input: the base64 POST body, the expected values (the SP entity ID, the ACS URL, the IdP entity ID, the trusted certificates, the request ID it must answer, now, the allowed skew) and the attribute names to read. Output: the facts of the one Assertion (NameID and its format, email, display name), or a typed error. The full rule set is D-SA-9.
    - **Tell whether a Response is solicited.** Reads only `InResponseTo`, so the server can treat an unsolicited response as a restart (D-SA-5) without trusting anything in it.
    - **A test IdP**, behind a dev-only feature. It signs Responses with a fixture key and can build every malformed and hostile variant the corpus needs (D-SA-15). Never compiled into release builds.
    - **Errors** are a `thiserror` enum whose messages carry no payload: no NameID, email, attribute value or certificate (`AGENTS.md` § Privacy).
@@ -181,7 +181,7 @@ D183 and D-Q-60 make the control plane the only identity provider of cloud cells
 - Q uses `cetra-saml` by git commit. Its routes, storage and UI are Q's own design, modelled on M2 and M3 as D-Q-60 was modelled on P's M5.
 - Cells change nothing for the cloud.
 
-At the end of M1, the request is written to the shared notes folder (`sa-requests-for-q.md`) and to track Q's request list: the crate's API, the security contract (D-SA-9, D-SA-10) and the gate (Enterprise orgs).
+At the end of M1, the request is written to the shared notes folder (`sa-requests-for-q.md`), as earlier tracks wrote theirs (`ao-requests-for-q.md`). It holds the crate's API, the security contract (D-SA-9, D-SA-10) and the gate (Enterprise orgs).
 
 ## Decisions
 
@@ -207,7 +207,7 @@ Each decision is also in `docs/mvp-decisions.md` § Track SA.
 
 **Parsing**
 1. The decoded body is at most 256 KiB. A `DOCTYPE` or `ENTITY` declaration is refused before parsing. The parse is limited to a depth of 32, 10 000 elements and 64 attributes per element.
-2. One parser, used once.
+2. One parser: every read of the message uses bergshamra's parser (uppsala) with one configuration. No second XML parser ever reads it. The server parses twice with that same parser: once to read `InResponseTo` for the pending lookup (D-SA-10), once to validate.
 
 **Shape**
 3. `Version="2.0"` and status Success.
@@ -224,7 +224,7 @@ Each decision is also in `docs/mvp-decisions.md` § Track SA.
 10. `Issuer` equals the IdP entity ID.
 11. `Destination` (when present) and the bearer `SubjectConfirmationData` `Recipient` equal the ACS URL.
 12. The Assertion has `Conditions` with an `AudienceRestriction` that lists the SP entity ID. Other audiences in it are ignored.
-13. `InResponseTo` on the Response (when present) and on the bearer confirmation data equals the pending request ID.
+13. `InResponseTo` is required on the Response and on the bearer confirmation data, and both equal the pending request ID. A Response without it is unsolicited and never reaches validation (D-SA-5).
 14. At least one bearer `SubjectConfirmation` passes every check. Other confirmations are ignored.
 
 **Times** (60 s skew for every check)
