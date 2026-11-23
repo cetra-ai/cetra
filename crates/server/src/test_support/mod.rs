@@ -132,6 +132,27 @@ pub(crate) fn org_token(
     features: &[&str],
     limits: &serde_json::Value,
 ) -> String {
+    org_token_with_domains(
+        org_id,
+        issued_at,
+        expires_at,
+        grace_ends_at,
+        features,
+        limits,
+        &[],
+    )
+}
+
+/// `org_token` with the `sso_domains` claim (D-EA-17) set to `sso_domains`.
+pub(crate) fn org_token_with_domains(
+    org_id: OrgId,
+    issued_at: &str,
+    expires_at: &str,
+    grace_ends_at: &str,
+    features: &[&str],
+    limits: &serde_json::Value,
+    sso_domains: &[&str],
+) -> String {
     sign_token(&serde_json::json!({
         "kind": "org",
         "id": Uuid::now_v7().to_string(),
@@ -143,6 +164,7 @@ pub(crate) fn org_token(
         "plan": {"id": "pro", "name": "Pro", "add_ons": ["teams"]},
         "features": features,
         "limits": limits,
+        "sso_domains": sso_domains,
     }))
 }
 

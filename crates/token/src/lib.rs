@@ -116,6 +116,9 @@ pub struct OrgClaims {
     /// Limits of the org. Missing: every limit takes the cell's default (D-P-13).
     #[serde(default)]
     pub limits: LimitsClaim,
+    /// The org's verified SSO domains on the control plane, used by cells for SCIM only (D-EA-17).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sso_domains: Vec<String>,
 }
 
 /// The plan an org token names.
@@ -688,6 +691,7 @@ mod tests {
                 max_active_issue_sources: Some(None),
                 max_annotation_queues: Some(None),
             },
+            sso_domains: vec!["acme.test".to_owned()],
         });
         let token = sign(&dev_key(), "dev-1", &claims).unwrap();
         assert_eq!(verify(&token).unwrap().claims, claims);
@@ -718,6 +722,42 @@ mod tests {
             serde_json::from_value::<LimitsClaim>(value).unwrap(),
             queues
         );
+    }
+
+    #[test]
+    fn sso_domains_round_trip_and_default_to_empty() {
+        let base = |sso_domains: Vec<String>| OrgClaims {
+            id: Uuid::parse_str("01900000-0000-7000-8000-000000000521").unwrap(),
+            issued_at: ns("2026-01-01T00:00:00Z"),
+            expires_at: ns("2099-01-01T00:00:00Z"),
+            grace_ends_at: ns("2099-02-01T00:00:00Z"),
+            audience: "http://localhost:8080".to_owned(),
+            org_id: Uuid::parse_str("01900000-0000-7000-8000-000000000010").unwrap(),
+            plan: PlanClaim {
+                id: "pro".to_owned(),
+                name: "Pro".to_owned(),
+                add_ons: Vec::new(),
+            },
+            features: Vec::new(),
+            limits: LimitsClaim::default(),
+            sso_domains,
+        };
+
+        // Empty domains are not written, so an org token without SSO domains keeps its old bytes.
+        let empty = serde_json::to_value(base(Vec::new())).unwrap();
+        assert!(empty.get("sso_domains").is_none(), "{empty}");
+
+        // A token from before the claim existed parses with no domains.
+        let parsed: OrgClaims = serde_json::from_value(empty).unwrap();
+        assert!(parsed.sso_domains.is_empty());
+
+        // Domains round-trip through a signed token.
+        let claims = Claims::Org(base(vec!["acme.test".to_owned(), "acme.example".to_owned()]));
+        let token = sign(&dev_key(), "dev-1", &claims).unwrap();
+        assert_eq!(verify(&token).unwrap().claims, claims);
+        let payload = token.split('.').nth(2).unwrap();
+        let json = String::from_utf8(URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+        assert!(json.contains(r#""sso_domains":["acme.test","acme.example"]"#), "{json}");
     }
 
     #[test]

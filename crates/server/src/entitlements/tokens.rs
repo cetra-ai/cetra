@@ -6,6 +6,7 @@ use cetra_token::{Claims, LimitsClaim, TokenError};
 use uuid::Uuid;
 
 use super::{FeatureSet, Limits};
+use crate::ee::org_sso::normalize_domain;
 
 /// What a valid org token grants. Limits are already merged over the instance defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,9 @@ pub(crate) struct OrgGrant {
     pub(crate) features: FeatureSet,
     /// The limits, with every missing one taken from the instance defaults.
     pub(crate) limits: Limits,
+    /// The token's SSO domains, normalized (invalid ones dropped), sorted, without duplicates.
+    /// Read by SCIM only (D-EA-17).
+    pub(crate) sso_domains: Vec<String>,
 }
 
 /// The plan a token names, for display.
@@ -80,6 +84,13 @@ pub(crate) fn grant_from_token(
     if !ordered || !valid_name(&claims.plan.id) || !valid_name(&claims.plan.name) {
         return Err(OrgTokenError::Fields);
     }
+    let mut sso_domains: Vec<String> = claims
+        .sso_domains
+        .iter()
+        .filter_map(|raw| normalize_domain(raw))
+        .collect();
+    sso_domains.sort();
+    sso_domains.dedup();
     let grant = OrgGrant {
         token_id: claims.id,
         issued_at: claims.issued_at,
@@ -92,6 +103,7 @@ pub(crate) fn grant_from_token(
         },
         features: FeatureSet::from_names(claims.features.iter().map(String::as_str)),
         limits: merge_limits(&claims.limits, defaults),
+        sso_domains,
     };
     Ok((OrgId::from_uuid(claims.org_id), grant))
 }
@@ -137,7 +149,9 @@ mod tests {
     use super::{OrgTokenError, grant_from_token, merge_limits};
     use crate::config::PublicUrl;
     use crate::entitlements::Limits;
-    use crate::test_support::{control_plane_token, license_key, org_token, sign_token};
+    use crate::test_support::{
+        control_plane_token, license_key, org_token, org_token_with_domains, sign_token,
+    };
 
     fn origin() -> String {
         PublicUrl::default().origin().to_owned()
@@ -167,6 +181,36 @@ mod tests {
         assert_eq!(grant.limits.units_included, None);
         assert_eq!(grant.plan.id, "pro");
         assert_eq!(grant.plan.add_ons, vec!["teams".to_owned()]);
+    }
+
+    #[test]
+    fn grant_keeps_normalized_sso_domains() {
+        let org = OrgId::new_v7();
+        let token = org_token_with_domains(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &["project_roles"],
+            &json!({}),
+            &[" Beta.EXAMPLE. ", "acme.test", "bad domain", "10.0.0.1", "acme.test"],
+        );
+        let (_, grant) = grant_from_token(&token, &origin(), &Limits::default()).unwrap();
+        assert_eq!(
+            grant.sso_domains,
+            vec!["acme.test".to_owned(), "beta.example".to_owned()]
+        );
+
+        let plain = org_token(
+            org,
+            "2025-12-01T00:00:00Z",
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+            &[],
+            &json!({}),
+        );
+        let (_, grant) = grant_from_token(&plain, &origin(), &Limits::default()).unwrap();
+        assert!(grant.sso_domains.is_empty());
     }
 
     #[test]
