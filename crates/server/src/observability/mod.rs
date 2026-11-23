@@ -7,6 +7,7 @@ pub mod panic;
 pub mod subscriber;
 pub(crate) mod buckets;
 pub(crate) mod facts;
+pub(crate) mod heartbeat;
 pub(crate) mod instance;
 pub(crate) mod switchboard;
 
