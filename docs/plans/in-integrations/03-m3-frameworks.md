@@ -16,6 +16,36 @@ Implementer: Haiku, one agent per phase.
 - The spike programs in `/tmp/claude-1000/-home-sebastien-travaux-llm-observer/8e518996-ebba-4428-93c2-4baf3ee35424/scratchpad/m3c/` (`t_instructor.py`, `t_agno.py`, `t_smol.py`, `t_haystack.py`, `t_bee.py`, `t_guard2.py`, `t_deep.py`): working code to start each scenario from.
 - `website/STYLE.md`.
 
+## Amendments from the cold review (override the phase text below)
+
+1. **Global-provider mode for Guardrails and Temporal pages.** `cetra.init()` uses its own provider by default, so spans emitted on the global provider never reach cetra. The Guardrails page uses `cetra.init(use_global_provider=True, instrument=["openai"])`. The Temporal page calls `create_tracer_provider()` and `trace.set_tracer_provider(provider)` first, then `cetra.init(use_global_provider=True)`. In that mode cetra's default export filter keeps only spans of LLM instrumentations, so Temporal's own workflow and activity spans are not sent. The Temporal Limits say exactly that, and that the `export_filter` option keeps them, linking [Python OpenTelemetry](/docs/reference/python/opentelemetry/). The "plain spans" sentence is removed. The Guardrails capture is not affected: it uses the harness's global provider directly.
+2. **IN3.2 runs after IN3.1.** `tools/capture/py/uv.lock` records the `cetra-sdk` extras, so run `uv lock` in the capture project after IN3.1's commit. The `cetra-sdk` block rewrite is an expected change.
+3. **Determinism.**
+   - Use the spike's per-framework volatile keys: Agno `session.id`, `graph.node.id`, `agno.run.id`, `agno.agent.id`; BeeAI `metadata.steps.0.id`, `metadata.steps.1.id`, `metadata.id`, `metadata.trace.id`, `metadata.trace.run_id`; Guardrails `instance_id`, `validator.instance_id`, `validation_session_id`, `execution_id`.
+   - `volatile_attributes` also replaces a volatile value of 16 or more characters wherever it appears as a substring, including inside JSON strings, provided the same id is a plain attribute somewhere.
+   - smolagents: list step timing keys in `timing_attributes` if the capture shows any.
+   - Drop a case (step 3) only after `volatile_attributes`, `timing_attributes` and `span_names` were tried. Name what still differs in the report.
+4. **litellm's network fetch.** BeeAI and Guardrails go through litellm, which downloads its cost map at import. In both `main.py` files, set `os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"` before importing anything else.
+5. **Environment in `main.py`.**
+   - Environment settings (`AGNO_TELEMETRY`, `HAYSTACK_TELEMETRY_ENABLED`, `LITELLM_LOCAL_MODEL_COST_MAP`, the Guardrails `HOME`) go in `main.py` before `from <module> import main`, with `# noqa: E402` on that import.
+   - Keys come from `os.environ["OPENAI_API_KEY"]`, never literals.
+   - `[[tool.mypy.overrides]]` entries with `ignore_missing_imports = true` (or `follow_imports = "skip"` for typed-but-broken modules) may be added for any new package mypy reports. Name each one in the report.
+   - Every `scenario.json` has `description`. The modules are `openinference_instructor_structured_output.py`, `openinference_agno_agent_tool.py`, `openinference_smolagents_code_agent.py`, `openinference_haystack_pipeline.py`, `openinference_beeai_agent.py`, `openinference_guardrails_guard.py`, `openinference_deepagents_agent.py`.
+   - smolagents: the spike's `t_smol.py` is a `ToolCallingAgent`. Write the `CodeAgent` program from the spike's smolagents section, with a `@tool get_weather(city: str) -> str` whose docstring has the `Args:` block smolagents requires.
+6. **Complete page samples (STYLE.md).** Each Python sample is complete and runnable, with its imports. Write it from the captured scenario program, without the harness, the mock URL or the volatile handling, with the real model name `gpt-4o-mini` and the key from the environment.
+   - Guardrails: Install adds `guardrails hub install hub://guardrails/toxic_language`, and the sample uses `from guardrails.hub import ToxicLanguage`; `Guard().use(ToxicLanguage, on_fail="exception")`.
+   - Temporal: the imports are `from opentelemetry import trace`, `from temporalio.client import Client`, `from temporalio.contrib.opentelemetry import create_tracer_provider`, `from temporalio.openai_agents import OpenAIAgentsPlugin`, `import cetra`. The sample ends after connecting the client, with a comment saying to run workers and workflows as usual.
+7. **LangGraph and the Claude Agent SDK.**
+   - **LangGraph's Python sample** is written from the `openinference/langgraph-agent` scenario program (`create_agent` with one tool), without the harness. Its TypeScript tab reuses `langchain.mdx`'s TypeScript setup blocks verbatim.
+   - **LangGraph's index row:** TypeScript ✓, tier `captured (Python), SDK test (TypeScript)`, and its `<Backing>` lists the LangGraph fixtures plus the TypeScript SDK test that `langchain.mdx` cites.
+   - **The Claude Agent SDK page** has a Python sample copied from `claude-code.mdx` § Claude Agent SDK. For TypeScript, it has a `bash` block exporting the same environment variables, with one sentence: "The TypeScript SDK starts Claude Code the same way and reads the same variables." No TypeScript code block.
+   - **The Claude Agent SDK's index row:** Python ✓, TypeScript ✓, tier `captured`. Its Limits say: "The captured spans are Claude Code's, recorded from the Claude Code process that the SDK runs."
+   - IN3.3's "Python only" applies to every page except these two.
+8. **BeeAI warning.** The BeeAI Limits also say: "Do not also enable `openai`: each model call would be recorded twice and counted twice."
+9. **The marketing test.** IN3.4's Edit list adds `website/src/marketing/data/integrations.test.mjs`. Update every title it looks up, "LangChain and LangGraph" becoming "LangChain".
+10. **Sidebar.** After adding the pages, sort the whole Frameworks group alphabetically by label (case-insensitive).
+11. **Changelog.** The line says "…with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones)…".
+
 ## What it is, and what it is not
 
 When it is done:
@@ -69,7 +99,7 @@ Capture project overrides: `[tool.uv] override-dependencies = ["jiter>=0.16", "o
 | IN3.3 Pages | ten new pages, `langchain.mdx`, `claude-code.mdx`, generated skill references | IN3.1, IN3.2 |
 | IN3.4 Index, sidebar, records | `index.mdx`, `astro.config.mjs`, generated skill references, `CHANGELOG.md`, `docs/roadmap.md`, `00-design.md`, `docs/mvp-decisions.md` | IN3.3 |
 
-IN3.1 and IN3.2 share no file and can run in parallel. **Rules for every phase:** as in M2. Run only "Done when"; change only the Edit list; commit once with the given subject; stop and report when a step cannot be done as written.
+IN3.2 runs after IN3.1 (amendment 2). **Rules for every phase:** as in M2. Run only "Done when"; change only the Edit list; commit once with the given subject; stop and report when a step cannot be done as written.
 
 ---
 
