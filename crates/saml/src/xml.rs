@@ -28,6 +28,10 @@ pub(crate) const NAMEID_EMAIL: &str = "urn:oasis:names:tc:SAML:1.1:nameid-format
 pub(crate) const NAMEID_TRANSIENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:transient";
 #[allow(dead_code)] // used by later phases or by tests only
 pub(crate) const NAMEID_ENTITY: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:entity";
+#[allow(dead_code)] // used by later phases or by tests only
+pub(crate) const NAMEID_PERSISTENT: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent";
+#[allow(dead_code)] // used by later phases or by tests only
+pub(crate) const CM_HOLDER_OF_KEY: &str = "urn:oasis:names:tc:SAML:2.0:cm:holder-of-key";
 
 #[allow(dead_code)] // used by later phases or by tests only
 pub(crate) const C14N_EXCLUSIVE: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
@@ -49,6 +53,8 @@ pub(crate) const SIG_ECDSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-mor
 pub(crate) const SIG_ECDSA_SHA384: &str = "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha384";
 #[allow(dead_code)] // used by later phases or by tests only
 pub(crate) const SIG_RSA_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#rsa-sha1";
+#[allow(dead_code)] // used by later phases or by tests only
+pub(crate) const SIG_HMAC_SHA1: &str = "http://www.w3.org/2000/09/xmldsig#hmac-sha1";
 #[allow(dead_code)] // used by later phases or by tests only
 pub(crate) const DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
 #[allow(dead_code)] // used by later phases or by tests only
@@ -81,6 +87,7 @@ pub(crate) fn parse_strict(text: &str) -> Result<Document<'_>, ParseFailure> {
     if text.contains("<!DOCTYPE") || text.contains("<!ENTITY") {
         return Err(ParseFailure::Doctype);
     }
+    check_attribute_counts(text)?;
     let doc = Parser::new()
         .with_forbid_dtd(true)
         .with_forbid_entities(true)
@@ -100,6 +107,37 @@ pub(crate) fn parse_strict(text: &str) -> Result<Document<'_>, ParseFailure> {
         stack.extend(doc.children(id));
     }
     Ok(doc)
+}
+
+/// Refuses a start tag with more `="` and `='` pairs than `MAX_ATTRIBUTES` allows, namespace
+/// declarations included (review M1). The parser's duplicate checks cost O(n²) per tag, so this
+/// runs before it. One linear pass: the pairs after each `<` that opens an element, up to the next
+/// `>`; the scan stops at the first pair over the limit.
+fn check_attribute_counts(text: &str) -> Result<(), ParseFailure> {
+    const LIMIT: usize = MAX_ATTRIBUTES + 16;
+    let bytes = text.as_bytes();
+    let mut in_element = false;
+    let mut pairs = 0usize;
+    for (index, &byte) in bytes.iter().enumerate() {
+        match byte {
+            b'<' => {
+                in_element = !matches!(bytes.get(index + 1), Some(b'!' | b'?'));
+                pairs = 0;
+            }
+            b'>' => {
+                in_element = false;
+                pairs = 0;
+            }
+            b'=' if in_element && matches!(bytes.get(index + 1), Some(b'"' | b'\'')) => {
+                pairs += 1;
+                if pairs > LIMIT {
+                    return Err(ParseFailure::Xml);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The concatenated text of `node`'s children. Refuses (`None`) when a child is an element,
@@ -257,6 +295,24 @@ mod tests {
         assert!(parse_strict(&with_attributes(64)).is_ok());
         assert_eq!(
             parse_strict(&with_attributes(65)).err(),
+            Some(ParseFailure::Xml)
+        );
+    }
+
+    #[test]
+    fn a_tag_with_too_many_attributes_is_refused_before_parsing() {
+        let attributes: String = (0..25_000).map(|i| format!(" a{i}=\"1\"")).collect();
+        assert_eq!(
+            parse_strict(&format!("<a{attributes}/>")).err(),
+            Some(ParseFailure::Xml)
+        );
+    }
+
+    #[test]
+    fn a_tag_with_many_namespace_declarations_is_refused() {
+        let declarations: String = (0..100).map(|i| format!(" xmlns:p{i}=\"u\"")).collect();
+        assert_eq!(
+            parse_strict(&format!("<r{declarations}/>")).err(),
             Some(ParseFailure::Xml)
         );
     }

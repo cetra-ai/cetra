@@ -4,9 +4,10 @@
 
 use std::sync::OnceLock;
 
+use crate::response::validate_unsigned;
 use crate::{
     AttributeNames, ExpectedResponse, IdpCertificate, IdpMetadata, ReceivedResponse,
-    parse_metadata, validate_response,
+    decode_response, parse_metadata, validate_response,
 };
 
 // Copied from `test_idp`, which is not compiled under `fuzzing` alone.
@@ -32,9 +33,37 @@ fn idp() -> &'static IdpMetadata {
     })
 }
 
+/// The settings the fuzz targets validate against: the test IdP's, with the attribute defaults.
+fn expected(attributes: &AttributeNames) -> ExpectedResponse<'_> {
+    ExpectedResponse {
+        sp_entity_id: SP_ENTITY_ID,
+        acs_url: ACS_URL,
+        idp: idp(),
+        request_id: REQUEST_ID,
+        now_ns: NOW_NS,
+        attributes,
+    }
+}
+
 /// Validates arbitrary bytes as a decoded Response XML against the test IdP's settings (track SA
-/// M1, D-SA-15).
+/// M1, D-SA-15). The bytes are also read as a `SAMLResponse` form value, so the base64 path is
+/// reached from the same corpus (review M2).
 pub fn saml_response(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let _ = decode_response(text);
+    let Ok(received) = ReceivedResponse::from_xml(text.to_owned()) else {
+        return;
+    };
+    let attributes = AttributeNames::default();
+    let _ = validate_response(&received, &expected(&attributes));
+}
+
+/// Validates arbitrary bytes as a Response XML with the signature checks left out, against the
+/// same settings as `saml_response`, so mutated inputs reach the NameID, confirmation, conditions
+/// and attribute checks (review M2).
+pub fn saml_assertion(data: &[u8]) {
     let Ok(text) = std::str::from_utf8(data) else {
         return;
     };
@@ -42,15 +71,7 @@ pub fn saml_response(data: &[u8]) {
         return;
     };
     let attributes = AttributeNames::default();
-    let expected = ExpectedResponse {
-        sp_entity_id: SP_ENTITY_ID,
-        acs_url: ACS_URL,
-        idp: idp(),
-        request_id: REQUEST_ID,
-        now_ns: NOW_NS,
-        attributes: &attributes,
-    };
-    let _ = validate_response(&received, &expected);
+    let _ = validate_unsigned(&received, &expected(&attributes));
 }
 
 /// Parses arbitrary bytes as IdP metadata (track SA M1, D-SA-15).
@@ -64,6 +85,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::test_idp::{ResponseOptions, Signing, TestKey, metadata_xml, response_xml};
+    use crate::xml::{CM_BEARER, CM_HOLDER_OF_KEY, NAMEID_PERSISTENT};
 
     /// Runs `entry` on every file of `fuzz/corpus/<target>/` and
     /// `fuzz/regressions/<target>/`. The corpus must not be empty.
@@ -104,8 +126,14 @@ pub(crate) mod tests {
         replay("saml_metadata", saml_metadata);
     }
 
+    #[test]
+    fn saml_assertion_corpus_replays() {
+        replay("saml_assertion", saml_assertion);
+    }
+
     /// Writes the seed files of the SAML targets (track SA M1, `just fuzz-seed`): decoded
-    /// Response XML into `fuzz/corpus/saml_response/`, IdP metadata into `saml_metadata/`.
+    /// Response XML into `fuzz/corpus/saml_response/`, IdP metadata into `saml_metadata/`, and
+    /// unsigned Responses into `saml_assertion/`.
     #[test]
     #[ignore]
     fn write_seed_corpus() {
@@ -181,5 +209,53 @@ pub(crate) mod tests {
         write("saml_metadata", "two-certs", two_certs.as_bytes());
         let no_redirect = one_cert.replace("HTTP-Redirect", "HTTP-Artifact");
         write("saml_metadata", "no-redirect", no_redirect.as_bytes());
+
+        // Unsigned Responses for `saml_assertion`, the content checks without the signatures.
+        let unsigned = |options: ResponseOptions| {
+            response_xml(&ResponseOptions {
+                signing: Signing::None,
+                ..options
+            })
+        };
+        write(
+            "saml_assertion",
+            "unsigned",
+            unsigned(ResponseOptions::default()).as_bytes(),
+        );
+        let persistent = unsigned(ResponseOptions {
+            name_id_format: Some(NAMEID_PERSISTENT.to_owned()),
+            ..ResponseOptions::default()
+        });
+        write(
+            "saml_assertion",
+            "persistent-name-id",
+            persistent.as_bytes(),
+        );
+        let four_attributes = unsigned(ResponseOptions {
+            attributes: vec![
+                ("email".to_owned(), vec!["ada@example.com".to_owned()]),
+                ("displayName".to_owned(), vec!["Ada Lovelace".to_owned()]),
+                ("firstName".to_owned(), vec!["Ada".to_owned()]),
+                ("lastName".to_owned(), vec!["Lovelace".to_owned()]),
+            ],
+            ..ResponseOptions::default()
+        });
+        write("saml_assertion", "attributes", four_attributes.as_bytes());
+
+        // The bearer confirmation with a copy of it first, whose method is holder-of-key.
+        let base = unsigned(ResponseOptions::default());
+        let start = base
+            .find("<saml:SubjectConfirmation ")
+            .expect("the Response has a SubjectConfirmation");
+        let close = "</saml:SubjectConfirmation>";
+        let end = start + base[start..].find(close).expect("the confirmation closes") + close.len();
+        let confirmation = &base[start..end];
+        let holder = confirmation.replacen(
+            &format!("Method=\"{CM_BEARER}\""),
+            &format!("Method=\"{CM_HOLDER_OF_KEY}\""),
+            1,
+        );
+        let two = base.replacen(confirmation, &format!("{holder}{confirmation}"), 1);
+        write("saml_assertion", "two-confirmations", two.as_bytes());
     }
 }

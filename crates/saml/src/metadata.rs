@@ -3,11 +3,12 @@
 //! certificates (D-SA-11). `validUntil`, `cacheDuration` and the other elements are ignored.
 
 use base64::Engine as _;
+use bergshamra::xml::uppsala::{Document, NodeId};
 
 use crate::cert::IdpCertificate;
 use crate::xml::{
     BINDING_REDIRECT, NS_DSIG, NS_METADATA, NS_PROTOCOL, ParseFailure, attr, children_named,
-    descendants_named, is_element, parse_strict, strict_text,
+    is_element, parse_strict, strict_text,
 };
 
 /// The largest metadata document accepted, in bytes.
@@ -15,8 +16,9 @@ pub const MAX_METADATA_BYTES: usize = 1024 * 1024;
 /// The most signing certificates kept (D-SA-11).
 pub const MAX_CERTIFICATES: usize = 4;
 
-/// The most signing `KeyDescriptor` elements read before the metadata is refused.
-const MAX_SIGNING_KEY_DESCRIPTORS: usize = 16;
+/// The most certificates read from the metadata's signing `KeyDescriptor`s before it is refused;
+/// the next one is not parsed (review L7).
+const MAX_CERTIFICATES_READ: usize = 16;
 /// The longest entity ID accepted, in characters.
 const MAX_ENTITY_ID_CHARS: usize = 1024;
 /// The longest single sign-on URL accepted, in bytes.
@@ -71,11 +73,11 @@ impl IdpMetadata {
         certificates: Vec<IdpCertificate>,
     ) -> Result<Self, MetadataError> {
         check_entity_id(entity_id)?;
-        check_sso_url(sso_url)?;
+        let sso_url = check_sso_url(sso_url)?;
         let certificates = dedup_certificates(certificates)?;
         Ok(Self {
             entity_id: entity_id.to_owned(),
-            sso_url: sso_url.to_owned(),
+            sso_url,
             certificates,
         })
     }
@@ -147,20 +149,18 @@ pub fn parse_metadata(xml: &[u8]) -> Result<IdpMetadata, MetadataError> {
         .into_iter()
         .find(|&service| attr(&doc, service, "Binding") == Some(BINDING_REDIRECT))
         .ok_or(MetadataError::NoRedirectSso)?;
-    let sso_url = attr(&doc, sso, "Location").ok_or(MetadataError::SsoUrl)?;
-    check_sso_url(sso_url)?;
+    let sso_url = check_sso_url(attr(&doc, sso, "Location").ok_or(MetadataError::SsoUrl)?)?;
 
     let mut certificates = Vec::new();
-    let mut signing_descriptors = 0usize;
     for key_descriptor in children_named(&doc, descriptor, NS_METADATA, "KeyDescriptor") {
         if !matches!(attr(&doc, key_descriptor, "use"), None | Some("signing")) {
             continue;
         }
-        signing_descriptors += 1;
-        if signing_descriptors > MAX_SIGNING_KEY_DESCRIPTORS {
-            return Err(MetadataError::TooManyCertificates);
-        }
-        for certificate in descendants_named(&doc, key_descriptor, NS_DSIG, "X509Certificate") {
+        for certificate in key_certificates(&doc, key_descriptor) {
+            // Refused before the next certificate is decoded.
+            if certificates.len() == MAX_CERTIFICATES_READ {
+                return Err(MetadataError::TooManyCertificates);
+            }
             let encoded = strict_text(&doc, certificate).ok_or(MetadataError::Certificate)?;
             let compact: String = encoded
                 .chars()
@@ -175,9 +175,19 @@ pub fn parse_metadata(xml: &[u8]) -> Result<IdpMetadata, MetadataError> {
 
     Ok(IdpMetadata {
         entity_id: entity_id.to_owned(),
-        sso_url: sso_url.to_owned(),
+        sso_url,
         certificates: dedup_certificates(certificates)?,
     })
+}
+
+/// The certificates a `KeyDescriptor` carries at `KeyInfo/X509Data/X509Certificate`, in order.
+/// A certificate anywhere else in the descriptor is not read (review L7).
+fn key_certificates(doc: &Document<'_>, key_descriptor: NodeId) -> Vec<NodeId> {
+    children_named(doc, key_descriptor, NS_DSIG, "KeyInfo")
+        .into_iter()
+        .flat_map(|key_info| children_named(doc, key_info, NS_DSIG, "X509Data"))
+        .flat_map(|data| children_named(doc, data, NS_DSIG, "X509Certificate"))
+        .collect()
 }
 
 /// The entity ID is non-empty, at most 1024 characters, with no control characters.
@@ -191,9 +201,11 @@ fn check_entity_id(value: &str) -> Result<(), MetadataError> {
     Ok(())
 }
 
-/// The single sign-on URL is an `https` URL with no user information and no fragment.
-fn check_sso_url(value: &str) -> Result<(), MetadataError> {
-    if value.len() > MAX_SSO_URL_BYTES {
+/// The single sign-on URL is an `https` URL with no user information and no fragment. Control
+/// characters are refused before parsing, which would strip them silently. Returns the normalized
+/// form, which is what is kept (review L4).
+fn check_sso_url(value: &str) -> Result<String, MetadataError> {
+    if value.len() > MAX_SSO_URL_BYTES || value.chars().any(char::is_control) {
         return Err(MetadataError::SsoUrl);
     }
     let url = url::Url::parse(value).map_err(|_| MetadataError::SsoUrl)?;
@@ -204,7 +216,7 @@ fn check_sso_url(value: &str) -> Result<(), MetadataError> {
     {
         return Err(MetadataError::SsoUrl);
     }
-    Ok(())
+    Ok(url.as_str().to_owned())
 }
 
 /// Keeps the first of each distinct certificate, in order. Refuses an empty list and more than
@@ -488,6 +500,60 @@ mod tests {
             parse_metadata(xml.as_bytes()).err(),
             Some(MetadataError::EntityId)
         );
+    }
+
+    #[test]
+    fn a_certificate_outside_keyinfo_is_ignored() {
+        // A bare certificate under the KeyDescriptor, with no KeyInfo around it, is not read.
+        let bare = format!(
+            "<md:KeyDescriptor use=\"signing\"><ds:X509Certificate>{}</ds:X509Certificate></md:KeyDescriptor>",
+            pem_body(ATTACKER_RSA)
+        );
+        let metadata = parse_ok(&metadata_xml(ENTITY, SSO, &[&pem_body(IDP_RSA)], &bare));
+        assert_eq!(metadata.certificates().len(), 1);
+        let expected = IdpCertificate::from_pem(IDP_RSA).expect("fixture is valid");
+        assert_eq!(metadata.certificates()[0], expected);
+    }
+
+    #[test]
+    fn seventeen_certificates_are_too_many() {
+        let body = pem_body(IDP_RSA);
+        let descriptor = |certificates: Vec<&str>| {
+            let items: String = certificates
+                .iter()
+                .map(|encoded| format!("<ds:X509Certificate>{encoded}</ds:X509Certificate>"))
+                .collect();
+            format!(
+                "<md:KeyDescriptor use=\"signing\"><ds:KeyInfo><ds:X509Data>{items}</ds:X509Data></ds:KeyInfo></md:KeyDescriptor>"
+            )
+        };
+        // Sixteen certificates in one descriptor are read (and kept once).
+        let sixteen = descriptor(vec![body.as_str(); 16]);
+        assert!(parse_metadata(metadata_xml(ENTITY, SSO, &[], &sixteen).as_bytes()).is_ok());
+        // The seventeenth is refused before it is decoded: a garbage one still gives the limit.
+        let mut seventeen = vec![body.as_str(); 16];
+        seventeen.push("!!not base64!!");
+        assert_eq!(
+            parse_metadata(metadata_xml(ENTITY, SSO, &[], &descriptor(seventeen)).as_bytes()).err(),
+            Some(MetadataError::TooManyCertificates)
+        );
+    }
+
+    #[test]
+    fn a_sso_url_with_a_tab_is_refused() {
+        let cert = IdpCertificate::from_pem(IDP_RSA).expect("fixture is valid");
+        assert_eq!(
+            IdpMetadata::from_fields(ENTITY, "https://idp.test/\tsso", vec![cert]).err(),
+            Some(MetadataError::SsoUrl)
+        );
+    }
+
+    #[test]
+    fn the_sso_url_is_kept_in_normalized_form() {
+        let cert = IdpCertificate::from_pem(IDP_RSA).expect("fixture is valid");
+        let metadata = IdpMetadata::from_fields(ENTITY, "HTTPS://IDP.test/sso", vec![cert])
+            .expect("the URL is valid");
+        assert_eq!(metadata.sso_url(), SSO);
     }
 
     #[test]

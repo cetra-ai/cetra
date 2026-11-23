@@ -85,6 +85,8 @@ pub enum ResponseError {
     IssueInstant,
     #[error("the assertion's conditions are missing, not yet valid or expired")]
     Conditions,
+    #[error("the assertion has no authentication statement")]
+    NoAuthnStatement,
     #[error("the assertion is not addressed to this service provider")]
     Audience,
     #[error("no bearer subject confirmation is valid for this request")]
@@ -184,7 +186,7 @@ fn names(list: &[&str]) -> Vec<String> {
 }
 
 /// What the server expects of this Response.
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct ExpectedResponse<'a> {
     pub sp_entity_id: &'a str,
     pub acs_url: &'a str,
@@ -192,6 +194,19 @@ pub struct ExpectedResponse<'a> {
     pub request_id: &'a str,
     pub now_ns: i64,
     pub attributes: &'a AttributeNames,
+}
+
+/// `Debug` prints the lengths of the SP's own URLs, the IdP's metadata and the clock; no URL and
+/// no request ID.
+impl std::fmt::Debug for ExpectedResponse<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExpectedResponse")
+            .field("sp_entity_id_len", &self.sp_entity_id.len())
+            .field("acs_url_len", &self.acs_url.len())
+            .field("idp", &self.idp)
+            .field("now_ns", &self.now_ns)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The facts of the one Assertion. `Debug` prints lengths only.
@@ -255,39 +270,78 @@ pub fn validate_response(
     received: &ReceivedResponse,
     expected: &ExpectedResponse<'_>,
 ) -> Result<Assertion, ResponseError> {
+    // Review L1: an empty or malformed request ID never matches, whatever the Response says.
+    if !crate::is_valid_request_id(expected.request_id) {
+        return Err(ResponseError::InResponseTo);
+    }
     // Rule 2: the Response is read again with the same parser; `from_xml` already accepted it.
     let doc = parse_response_xml(&received.xml)?;
     let root = doc.document_element().ok_or(ResponseError::NotAResponse)?;
-
-    // Rule 3: the version.
-    if attr(&doc, root, "Version") != Some("2.0") {
-        return Err(ResponseError::Version);
-    }
-    // Rule 4: encrypted assertions are refused.
-    if !descendants_named(&doc, root, NS_ASSERTION, "EncryptedAssertion").is_empty() {
-        return Err(ResponseError::EncryptedAssertion);
-    }
-    // Rule 4: exactly one Assertion, directly in the Response.
-    let assertion = one_assertion(&doc, root)?;
-    // Rule 3: the status.
-    check_status(&doc, root)?;
+    let assertion = check_before_signature(&doc, root)?;
     // Rules 5 to 8: the signatures, their layout and their profile, then their verification.
     check_signatures(&doc, root, expected)?;
+    check_after_signature(&doc, root, assertion, expected)
+}
+
+/// `validate_response` without the signature checks, for the fuzzer and the tests only (track SA
+/// M1, D-SA-15). A signed input never reaches the checks on the Assertion's content through the
+/// fuzzer, so those are exercised here.
+#[cfg(any(test, fuzzing))]
+pub(crate) fn validate_unsigned(
+    received: &ReceivedResponse,
+    expected: &ExpectedResponse<'_>,
+) -> Result<Assertion, ResponseError> {
+    if !crate::is_valid_request_id(expected.request_id) {
+        return Err(ResponseError::InResponseTo);
+    }
+    let doc = parse_response_xml(&received.xml)?;
+    let root = doc.document_element().ok_or(ResponseError::NotAResponse)?;
+    let assertion = check_before_signature(&doc, root)?;
+    check_after_signature(&doc, root, assertion, expected)
+}
+
+/// The checks before the signatures: the version (rule 3), no encrypted assertion and exactly one
+/// Assertion directly in the Response (rule 4), and a `Success` status (rule 3). Returns the
+/// Assertion.
+fn check_before_signature(doc: &Document<'_>, root: NodeId) -> Result<NodeId, ResponseError> {
+    if attr(doc, root, "Version") != Some("2.0") {
+        return Err(ResponseError::Version);
+    }
+    if !descendants_named(doc, root, NS_ASSERTION, "EncryptedAssertion").is_empty() {
+        return Err(ResponseError::EncryptedAssertion);
+    }
+    let assertion = one_assertion(doc, root)?;
+    check_status(doc, root)?;
+    Ok(assertion)
+}
+
+/// Every check after the signatures (rules 9 to 19), shared by `validate_response` and
+/// `validate_unsigned`. `assertion` is the Assertion that `check_before_signature` returned.
+fn check_after_signature(
+    doc: &Document<'_>,
+    root: NodeId,
+    assertion: NodeId,
+    expected: &ExpectedResponse<'_>,
+) -> Result<Assertion, ResponseError> {
     // Rules 11, 13, 15: the Response-level values.
-    check_response_level(&doc, root, expected)?;
+    check_response_level(doc, root, expected)?;
     // Rules 3, 14, 15: the Assertion's version, issuer and issue instant.
-    check_assertion_header(&doc, assertion, expected)?;
+    check_assertion_header(doc, assertion, expected)?;
+    // Review L5: the Assertion states the subject's authentication.
+    if children_named(doc, assertion, NS_ASSERTION, "AuthnStatement").is_empty() {
+        return Err(ResponseError::NoAuthnStatement);
+    }
 
     // Rules 18, 19: the subject and its NameID.
     let subject =
-        only_child(&doc, assertion, NS_ASSERTION, "Subject").ok_or(ResponseError::NameIdMissing)?;
+        only_child(doc, assertion, NS_ASSERTION, "Subject").ok_or(ResponseError::NameIdMissing)?;
     let name_id =
-        only_child(&doc, subject, NS_ASSERTION, "NameID").ok_or(ResponseError::NameIdMissing)?;
-    let name_id_format = attr(&doc, name_id, "Format");
+        only_child(doc, subject, NS_ASSERTION, "NameID").ok_or(ResponseError::NameIdMissing)?;
+    let name_id_format = attr(doc, name_id, "Format");
     if name_id_format == Some(NAMEID_TRANSIENT) {
         return Err(ResponseError::NameIdTransient);
     }
-    let name_id_text = strict_text(&doc, name_id).ok_or(ResponseError::ValueContent)?;
+    let name_id_text = strict_text(doc, name_id).ok_or(ResponseError::ValueContent)?;
     if name_id_text.is_empty() {
         return Err(ResponseError::NameIdMissing);
     }
@@ -296,21 +350,21 @@ pub fn validate_response(
     }
 
     // Rules 11, 13, 14, 17: a bearer confirmation that answers this request.
-    if !subject_confirmed(&doc, subject, expected) {
+    if !subject_confirmed(doc, subject, expected) {
         return Err(ResponseError::SubjectConfirmation);
     }
     // Rules 12, 16: the conditions and the audience.
-    check_conditions(&doc, assertion, expected)?;
+    check_conditions(doc, assertion, expected)?;
 
     // Step 14: the attributes (D-SA-6).
     let email = email_of(
-        &doc,
+        doc,
         assertion,
         expected.attributes,
         name_id_format,
         &name_id_text,
     )?;
-    let display_name = display_name_of(&doc, assertion, expected.attributes)?;
+    let display_name = display_name_of(doc, assertion, expected.attributes)?;
 
     Ok(Assertion {
         name_id: name_id_text,
@@ -499,7 +553,12 @@ fn check_response_level(
     root: NodeId,
     expected: &ExpectedResponse<'_>,
 ) -> Result<(), ResponseError> {
-    if attr(doc, root, "Destination").is_some_and(|destination| destination != expected.acs_url) {
+    // Review L3: a signed Response must say where it is going, so the signature covers it.
+    let destination = attr(doc, root, "Destination");
+    let signed_response = !children_named(doc, root, NS_DSIG, "Signature").is_empty();
+    if destination.is_some_and(|value| value != expected.acs_url)
+        || (destination.is_none() && signed_response)
+    {
         return Err(ResponseError::Destination);
     }
     if attr(doc, root, "InResponseTo") != Some(expected.request_id) {
@@ -640,6 +699,16 @@ fn check_conditions(
         not_yet_expired(now, not_on_or_after)
     });
     if !window_holds {
+        return Err(ResponseError::Conditions);
+    }
+    // Review L5: only the condition kinds this SP understands; an unknown one is refused.
+    let understood = doc.children(conditions).into_iter().all(|child| {
+        doc.element(child).is_none()
+            || ["AudienceRestriction", "OneTimeUse", "ProxyRestriction"]
+                .iter()
+                .any(|local| is_element(doc, child, NS_ASSERTION, local))
+    });
+    if !understood {
         return Err(ResponseError::Conditions);
     }
 
@@ -1244,6 +1313,57 @@ mod tests {
             run_with(&ResponseOptions::default(), &[TestKey::Idp], "x", NOW_NS).err(),
             Some(ResponseError::InResponseTo)
         );
+    }
+
+    #[test]
+    fn an_empty_request_id_never_matches() {
+        let options = ResponseOptions {
+            response_in_response_to: Some(String::new()),
+            confirmation_in_response_to: Some(String::new()),
+            ..ResponseOptions::default()
+        };
+        assert_eq!(
+            run_with(&options, &[TestKey::Idp], "", NOW_NS).err(),
+            Some(ResponseError::InResponseTo)
+        );
+    }
+
+    #[test]
+    fn a_signed_response_needs_a_destination() {
+        let options = ResponseOptions {
+            signing: Signing::Response,
+            destination: None,
+            ..ResponseOptions::default()
+        };
+        assert_eq!(run(&options).err(), Some(ResponseError::Destination));
+    }
+
+    #[test]
+    fn an_assertion_signed_response_may_omit_destination() {
+        let options = ResponseOptions {
+            destination: None,
+            ..ResponseOptions::default()
+        };
+        run(&options).expect("only the Assertion is signed, so Destination is optional");
+    }
+
+    #[test]
+    fn debug_of_the_expected_response_hides_its_urls() {
+        let idp = crate::parse_metadata(metadata_xml(&[TestKey::Idp]).as_bytes())
+            .expect("the test metadata is valid");
+        let attributes = AttributeNames::default();
+        let expected = ExpectedResponse {
+            sp_entity_id: SP_ENTITY_ID,
+            acs_url: ACS_URL,
+            idp: &idp,
+            request_id: REQUEST_ID,
+            now_ns: NOW_NS,
+            attributes: &attributes,
+        };
+        let debug = format!("{expected:?}");
+        assert!(!debug.contains(SP_ENTITY_ID));
+        assert!(!debug.contains(ACS_URL));
+        assert!(debug.contains("sp_entity_id_len"));
     }
 
     #[test]

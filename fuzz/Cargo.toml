@@ -94,3 +94,10 @@ path = "fuzz_targets/saml_metadata.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "saml_assertion"
+path = "fuzz_targets/saml_assertion.rs"
+test = false
+doc = false
+bench = false

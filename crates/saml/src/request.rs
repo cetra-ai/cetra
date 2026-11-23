@@ -34,7 +34,7 @@ pub struct AuthnRequest<'a> {
 impl std::fmt::Debug for AuthnRequest<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AuthnRequest")
-            .field("request_id", &self.request_id)
+            .field("request_id_len", &self.request_id.len())
             .field("sso_url_len", &self.sso_url.len())
             .finish()
     }
@@ -55,11 +55,22 @@ pub fn authn_request_redirect_url(request: &AuthnRequest<'_>) -> Result<String, 
     if !is_valid_request_id(request.request_id) {
         return Err(RequestError::RequestId);
     }
+    // Parsing strips tabs and newlines silently, so control characters are refused before it.
+    if [request.sp_entity_id, request.acs_url, request.sso_url]
+        .iter()
+        .any(|value| value.chars().any(char::is_control))
+    {
+        return Err(RequestError::Url);
+    }
     for value in [request.sp_entity_id, request.acs_url] {
         Url::parse(value).map_err(|_| RequestError::Url)?;
     }
     let sso = Url::parse(request.sso_url).map_err(|_| RequestError::Url)?;
-    if sso.scheme() != "https" {
+    if sso.scheme() != "https"
+        || !sso.username().is_empty()
+        || sso.password().is_some()
+        || sso.fragment().is_some()
+    {
         return Err(RequestError::Url);
     }
 
@@ -68,7 +79,8 @@ pub fn authn_request_redirect_url(request: &AuthnRequest<'_>) -> Result<String, 
             .format("%Y-%m-%dT%H:%M:%SZ")
             .to_string();
     let id = xml::escape_attr(request.request_id);
-    let destination = xml::escape_attr(request.sso_url);
+    // The normalized single sign-on URL, which is also the redirect target without its parameters.
+    let destination = xml::escape_attr(sso.as_str());
     let acs = xml::escape_attr(request.acs_url);
     let issuer = xml::escape_text(request.sp_entity_id);
     let xml = format!(
@@ -218,6 +230,76 @@ mod tests {
             .err(),
             Some(RequestError::Url)
         );
+    }
+
+    #[test]
+    fn a_sso_url_with_a_tab_is_refused() {
+        assert_eq!(
+            authn_request_redirect_url(&AuthnRequest {
+                sso_url: "https://idp.test/s\tso",
+                ..request()
+            })
+            .err(),
+            Some(RequestError::Url)
+        );
+    }
+
+    #[test]
+    fn control_characters_in_any_input_are_refused() {
+        let inputs = [
+            AuthnRequest {
+                sp_entity_id: "https://cetra.test/\nsp",
+                ..request()
+            },
+            AuthnRequest {
+                acs_url: "https://cetra.test/a\rcs",
+                ..request()
+            },
+            AuthnRequest {
+                sso_url: "https://idp.test/sso\u{7f}",
+                ..request()
+            },
+        ];
+        for input in &inputs {
+            assert_eq!(
+                authn_request_redirect_url(input).err(),
+                Some(RequestError::Url)
+            );
+        }
+    }
+
+    #[test]
+    fn an_sso_url_with_user_information_or_a_fragment_is_refused() {
+        for sso_url in ["https://u:p@idp.test/sso", "https://idp.test/sso#x"] {
+            assert_eq!(
+                authn_request_redirect_url(&AuthnRequest {
+                    sso_url,
+                    ..request()
+                })
+                .err(),
+                Some(RequestError::Url)
+            );
+        }
+    }
+
+    #[test]
+    fn the_destination_matches_the_redirect_target() {
+        let url = authn_request_redirect_url(&AuthnRequest {
+            sso_url: "HTTPS://Idp.test/sso?tenant=a",
+            ..request()
+        })
+        .expect("valid request");
+        let xml = inflate(&query_value(&url, "SAMLRequest"));
+        assert!(xml.contains("Destination=\"https://idp.test/sso?tenant=a\""));
+        assert!(url.starts_with("https://idp.test/sso?tenant=a&"));
+    }
+
+    #[test]
+    fn debug_hides_the_request_id_and_the_sso_url() {
+        let debug = format!("{:?}", request());
+        assert!(!debug.contains(ID));
+        assert!(!debug.contains(SSO));
+        assert!(debug.contains("request_id_len"));
     }
 
     #[test]

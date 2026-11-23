@@ -15,6 +15,8 @@ use crate::metadata::MetadataError;
 const MAX_CERTIFICATE_DER_BYTES: usize = 16_384;
 /// The smallest RSA modulus accepted, in bytes (2048 bits).
 const MIN_RSA_MODULUS_BYTES: usize = 256;
+/// The largest PEM text accepted, in bytes (review L7).
+const MAX_PEM_BYTES: usize = 65_536;
 
 /// A trusted IdP signing certificate: a pinned key plus its validity dates for display (D-SA-11).
 #[derive(Clone, PartialEq, Eq)]
@@ -62,6 +64,9 @@ impl IdpCertificate {
     pub fn from_pem(text: &str) -> Result<Self, MetadataError> {
         const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
         const END: &str = "-----END CERTIFICATE-----";
+        if text.len() > MAX_PEM_BYTES {
+            return Err(MetadataError::Certificate);
+        }
         let text = text.trim_ascii();
         let body = match text.strip_prefix(BEGIN) {
             Some(rest) => rest
@@ -173,6 +178,16 @@ mod tests {
         );
         assert_eq!(
             IdpCertificate::from_pem("-----BEGIN CERTIFICATE-----\nAAAA").err(),
+            Some(MetadataError::Certificate)
+        );
+    }
+
+    #[test]
+    fn an_oversized_pem_is_refused() {
+        // Valid PEM followed by whitespace past the limit: refused by size, not by content.
+        let text = format!("{IDP_RSA}{}", " ".repeat(65_536));
+        assert_eq!(
+            IdpCertificate::from_pem(&text).err(),
             Some(MetadataError::Certificate)
         );
     }

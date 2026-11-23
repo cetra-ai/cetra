@@ -6,13 +6,18 @@ use std::ops::Range;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use crate::response::validate_unsigned;
 use crate::test_idp::{
     self, ACS_URL, ASSERTION_ID, NOW_NS, REQUEST_ID, RESPONSE_ID, ResponseOptions, SP_ENTITY_ID,
     Signing, TestKey,
 };
-use crate::xml::{C14N_EXCLUSIVE, DIGEST_SHA1, DIGEST_SHA256, SIG_RSA_SHA1, SIG_RSA_SHA256};
+use crate::xml::{
+    C14N_EXCLUSIVE, CM_HOLDER_OF_KEY, DIGEST_SHA1, DIGEST_SHA256, SIG_HMAC_SHA1, SIG_RSA_SHA1,
+    SIG_RSA_SHA256, TRANSFORM_ENVELOPED,
+};
 use crate::{
-    Assertion, AttributeNames, ExpectedResponse, ResponseError, decode_response, validate_response,
+    Assertion, AttributeNames, ExpectedResponse, IdpMetadata, ReceivedResponse, ResponseError,
+    decode_response, validate_response,
 };
 
 /// The canonicalization method that keeps comments, which the corpus swaps in.
@@ -33,12 +38,20 @@ fn response(signing: Signing) -> String {
 
 /// Validates the XML `xml` as the answer to `request_id`, against the test IdP's metadata.
 fn check_with(xml: &str, request_id: &str) -> Result<Assertion, ResponseError> {
-    let idp = test_idp::idp_metadata();
+    check_against(xml, &test_idp::idp_metadata(), request_id)
+}
+
+/// Validates the XML `xml` as the answer to `request_id`, against the metadata `idp`.
+fn check_against(
+    xml: &str,
+    idp: &IdpMetadata,
+    request_id: &str,
+) -> Result<Assertion, ResponseError> {
     let names = AttributeNames::default();
     let expected = ExpectedResponse {
         sp_entity_id: SP_ENTITY_ID,
         acs_url: ACS_URL,
-        idp: &idp,
+        idp,
         request_id,
         now_ns: NOW_NS,
         attributes: &names,
@@ -50,6 +63,28 @@ fn check_with(xml: &str, request_id: &str) -> Result<Assertion, ResponseError> {
 /// `check_with` for the request the test IdP answers by default.
 fn check(xml: &str) -> Result<Assertion, ResponseError> {
     check_with(xml, REQUEST_ID)
+}
+
+/// Runs `validate_unsigned` on `xml` as the answer to `REQUEST_ID`, against the test IdP's metadata.
+fn check_unsigned(xml: &str) -> Result<Assertion, ResponseError> {
+    let idp = test_idp::idp_metadata();
+    let names = AttributeNames::default();
+    let expected = ExpectedResponse {
+        sp_entity_id: SP_ENTITY_ID,
+        acs_url: ACS_URL,
+        idp: &idp,
+        request_id: REQUEST_ID,
+        now_ns: NOW_NS,
+        attributes: &names,
+    };
+    let received = ReceivedResponse::from_xml(xml.to_owned())?;
+    validate_unsigned(&received, &expected)
+}
+
+/// The byte range from the first `open` to the first `close` after it, both included.
+fn element_span(xml: &str, open: &str, close: &str) -> Range<usize> {
+    let start = xml.find(open).expect("the element is present");
+    start..start + xml[start..].find(close).expect("the element closes") + close.len()
 }
 
 /// The unsigned Assertion that `test_idp` writes for `name_id`, with its ID replaced by `id`.
@@ -500,4 +535,214 @@ fn replayed_response_for_another_request() {
         check_with(&xml, "_ffffffffffffffffffffffffffffffff"),
         Err(ResponseError::InResponseTo)
     );
+}
+
+#[test]
+fn signature_under_status() {
+    let xml = response(Signing::Assertion);
+    let signature = assertion_signature(&xml);
+    let altered = without_assertion_signature(&xml).replacen(
+        "<samlp:Status>",
+        &format!("<samlp:Status>{signature}"),
+        1,
+    );
+    assert_eq!(check(&altered), Err(ResponseError::SignatureLayout));
+}
+
+#[test]
+fn two_signatures_under_the_assertion() {
+    let xml = response(Signing::Assertion);
+    let signature = assertion_signature(&xml);
+    let altered = xml.replacen(&signature, &format!("{signature}{signature}"), 1);
+    assert_eq!(check(&altered), Err(ResponseError::SignatureLayout));
+}
+
+#[test]
+fn signature_inside_advice() {
+    let xml = response(Signing::Assertion);
+    let signature = assertion_signature(&xml);
+    // The Advice follows the Assertion's Issuer, so the copy sits under the Assertion, not beside it.
+    let altered = rewrite_signed_assertion(&xml, |signed| {
+        signed.replacen(
+            "</saml:Issuer>",
+            &format!("</saml:Issuer><saml:Advice>{signature}</saml:Advice>"),
+            1,
+        )
+    });
+    assert_eq!(check(&altered), Err(ResponseError::SignatureLayout));
+}
+
+#[test]
+fn one_transform_only() {
+    let xml = response(Signing::Assertion);
+    let marker = format!("<ds:Transform Algorithm=\"{C14N_EXCLUSIVE}\"/></ds:Transforms>");
+    assert!(xml.contains(&marker));
+    let altered = xml.replacen(&marker, "</ds:Transforms>", 1);
+    assert_eq!(check(&altered), Err(ResponseError::Algorithm));
+}
+
+#[test]
+fn three_transforms() {
+    let xml = response(Signing::Assertion);
+    let marker = "</ds:Transforms>";
+    assert!(xml.contains(marker));
+    let extra = format!("<ds:Transform Algorithm=\"{C14N_EXCLUSIVE}\"/>");
+    let altered = xml.replacen(marker, &format!("{extra}{marker}"), 1);
+    assert_eq!(check(&altered), Err(ResponseError::Algorithm));
+}
+
+#[test]
+fn reordered_transforms() {
+    let xml = response(Signing::Assertion);
+    let enveloped = format!("<ds:Transform Algorithm=\"{TRANSFORM_ENVELOPED}\"/>");
+    let exclusive = format!("<ds:Transform Algorithm=\"{C14N_EXCLUSIVE}\"/>");
+    let in_order = format!("{enveloped}{exclusive}");
+    assert!(xml.contains(&in_order));
+    let altered = xml.replacen(&in_order, &format!("{exclusive}{enveloped}"), 1);
+    assert_eq!(check(&altered), Err(ResponseError::Algorithm));
+}
+
+#[test]
+fn two_references() {
+    let xml = response(Signing::Assertion);
+    let signature = assertion_signature(&xml);
+    let start = signature
+        .find("<ds:Reference ")
+        .expect("the signature has a reference");
+    let close = "</ds:Reference>";
+    let end = start
+        + signature[start..]
+            .find(close)
+            .expect("the reference closes")
+        + close.len();
+    let reference = &signature[start..end];
+    let doubled = signature.replacen(reference, &format!("{reference}{reference}"), 1);
+    let altered = xml.replacen(&signature, &doubled, 1);
+    assert_eq!(check(&altered), Err(ResponseError::SignatureLayout));
+}
+
+#[test]
+fn hmac_signature_method() {
+    let xml = response(Signing::Assertion);
+    let marker = format!("<ds:SignatureMethod Algorithm=\"{SIG_RSA_SHA256}\"/>");
+    assert!(xml.contains(&marker));
+    let altered = xml.replacen(
+        &marker,
+        &format!("<ds:SignatureMethod Algorithm=\"{SIG_HMAC_SHA1}\"/>"),
+        1,
+    );
+    assert_eq!(check(&altered), Err(ResponseError::Algorithm));
+}
+
+#[test]
+fn an_rsa_response_against_an_ec_only_set() {
+    let xml = response(Signing::Assertion);
+    let idp = crate::parse_metadata(test_idp::metadata_xml(&[TestKey::IdpEc]).as_bytes())
+        .expect("the test metadata is valid");
+    assert_eq!(
+        check_against(&xml, &idp, REQUEST_ID),
+        Err(ResponseError::SignatureInvalid)
+    );
+}
+
+#[test]
+fn a_trusted_certificate_in_keyinfo_with_another_key_is_refused() {
+    // The attacker signs, and KeyInfo carries the IdP's certificate instead of its own.
+    let options = ResponseOptions {
+        key: TestKey::Attacker,
+        key_info: true,
+        ..ResponseOptions::default()
+    };
+    let xml = test_idp::response_xml(&options);
+    let attacker = STANDARD.encode(TestKey::Attacker.certificate().der());
+    let trusted = STANDARD.encode(TestKey::Idp.certificate().der());
+    assert!(xml.contains(&attacker));
+    let altered = xml.replace(&attacker, &trusted);
+    assert_eq!(check(&altered), Err(ResponseError::SignatureInvalid));
+}
+
+#[test]
+fn a_second_audience_restriction_without_the_sp() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        ..ResponseOptions::default()
+    });
+    let marker = "</saml:AudienceRestriction>";
+    assert!(xml.contains(marker));
+    let other = "<saml:AudienceRestriction><saml:Audience>https://other.test/sp</saml:Audience></saml:AudienceRestriction>";
+    let altered = xml.replacen(marker, &format!("{marker}{other}"), 1);
+    assert_eq!(check_unsigned(&altered), Err(ResponseError::Audience));
+}
+
+#[test]
+fn a_bearer_confirmation_after_a_holder_of_key_one_is_accepted() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        ..ResponseOptions::default()
+    });
+    let marker = "<saml:SubjectConfirmation Method=";
+    assert!(xml.contains(marker));
+    let holder = format!(
+        "<saml:SubjectConfirmation Method=\"{CM_HOLDER_OF_KEY}\"><saml:SubjectConfirmationData Recipient=\"https://other.test/acs\"/></saml:SubjectConfirmation>"
+    );
+    let altered = xml.replacen(marker, &format!("{holder}{marker}"), 1);
+    assert!(check_unsigned(&altered).is_ok());
+}
+
+#[test]
+fn a_wrong_recipient_on_one_of_two_confirmations_is_accepted() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        ..ResponseOptions::default()
+    });
+    let confirmation = &xml[element_span(
+        &xml,
+        "<saml:SubjectConfirmation ",
+        "</saml:SubjectConfirmation>",
+    )];
+    let wrong = confirmation.replacen(
+        &format!("Recipient=\"{ACS_URL}\""),
+        "Recipient=\"https://other.test/acs\"",
+        1,
+    );
+    assert_ne!(wrong, confirmation);
+    let altered = xml.replacen(confirmation, &format!("{wrong}{confirmation}"), 1);
+    assert!(check_unsigned(&altered).is_ok());
+}
+
+#[test]
+fn an_issue_instant_exactly_five_minutes_old_is_accepted() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        issue_instant_ns: NOW_NS - 300 * 1_000_000_000,
+        ..ResponseOptions::default()
+    });
+    assert!(check_unsigned(&xml).is_ok());
+}
+
+#[test]
+fn an_assertion_without_authn_statement_is_refused() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        ..ResponseOptions::default()
+    });
+    let span = element_span(&xml, "<saml:AuthnStatement ", "</saml:AuthnStatement>");
+    let mut altered = xml;
+    altered.replace_range(span, "");
+    assert_eq!(
+        check_unsigned(&altered),
+        Err(ResponseError::NoAuthnStatement)
+    );
+}
+
+#[test]
+fn an_unknown_condition_is_refused() {
+    let xml = test_idp::response_xml(&ResponseOptions {
+        signing: Signing::None,
+        ..ResponseOptions::default()
+    });
+    let marker = "</saml:Conditions>";
+    assert!(xml.contains(marker));
+    let altered = xml.replacen(marker, &format!("<saml:Bogus/>{marker}"), 1);
+    assert_eq!(check_unsigned(&altered), Err(ResponseError::Conditions));
 }
