@@ -277,10 +277,10 @@ fn accept_span(
         .response_model
         .as_deref()
         .or(fields.request_model.as_deref());
-    let request_model = fields
-        .request_model
-        .as_deref()
-        .filter(|request| Some(*request) != model);
+    let request_model = retry_model(
+        fields.response_model.as_deref(),
+        fields.request_model.as_deref(),
+    );
     let priced = crate::cost::apply(
         &mut bag,
         &crate::cost::Charge {
@@ -521,6 +521,17 @@ fn encode_attribute_object(
     }
     // The object is finite JSON: non-finite doubles are already null.
     Some(serde_json::to_string(&Json::Object(object)).unwrap_or_else(|_| "{}".to_owned()))
+}
+
+/// The request model to retry pricing with (D-IN-20). It is returned only when
+/// the response model is the request model with its `vendor/` prefix stripped,
+/// as resellers such as Novita report it. Without a response model the request
+/// model is already the price model, so there is nothing to retry.
+fn retry_model<'a>(response: Option<&'a str>, request: Option<&'a str>) -> Option<&'a str> {
+    let response = response?;
+    let request = request?;
+    let (_, bare) = request.rsplit_once('/')?;
+    (bare == response).then_some(request)
 }
 
 #[cfg(test)]
@@ -844,5 +855,20 @@ mod tests {
             }),
             ..KeyValue::default()
         }
+    }
+
+    #[test]
+    fn the_request_model_is_retried_only_when_the_response_drops_its_vendor_prefix() {
+        assert_eq!(
+            retry_model(Some("deepseek-v3.2"), Some("deepseek/deepseek-v3.2")),
+            Some("deepseek/deepseek-v3.2")
+        );
+        assert_eq!(retry_model(Some("local-llama"), Some("gpt-4")), None);
+        assert_eq!(
+            retry_model(Some("gpt-4o"), Some("openai/gpt-4o-mini")),
+            None
+        );
+        assert_eq!(retry_model(None, Some("openai/x")), None);
+        assert_eq!(retry_model(Some("x"), Some("x")), None);
     }
 }

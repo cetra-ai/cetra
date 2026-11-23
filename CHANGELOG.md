@@ -9,7 +9,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
-- Calls through the OpenAI client to OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and other providers show that provider, read from the endpoint's host; the Python SDK records the OpenAI client's host for this.
+- Calls through the OpenAI client show the provider read from the endpoint's host when the instrumentation records it: cetra's Python SDK with `instrument=["openai"]` (which now records the client's host), OpenLLMetry, and OpenInference for TypeScript. This covers OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and the other hosts in the host table.
 
 ### Changed
 

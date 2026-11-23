@@ -166,7 +166,8 @@ def enable_for(runtime: "Runtime", classes: Sequence[type]) -> None:
 def _stamp_host(runtime: "Runtime") -> None:
     """Wrap the OpenAI client methods with the host stamp; shutdown restores them.
 
-    Imported here, so an empty or non-OpenAI ``instrument`` list never loads it.
+    ``HostStamp`` is only created when ``openai`` is instrumented, so an empty
+    or non-OpenAI ``instrument`` list never creates one.
     """
     from cetra._host import HostStamp
 

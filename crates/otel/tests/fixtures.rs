@@ -929,22 +929,25 @@ fn same_provider(row_provider: &str, span_provider: &str) -> bool {
         || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
 }
 
-/// The models that price a span, in order: the response model, then the request model when it
-/// differs (D-IN-20). Mirrors `cost::apply`, which repeats the lookup with the request model.
+/// The models that price a span, in order: the response model, then the request model when the
+/// response model is the request model with its `vendor/` prefix stripped (D-IN-20). Mirrors
+/// `normalize::retry_model`, which `cost::apply` retries with.
 fn price_models(span: &Span) -> Vec<&str> {
-    let mut models: Vec<&str> = Vec::new();
-    for model in [
-        span.response_model.as_deref(),
-        span.request_model.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if !models.contains(&model) {
-            models.push(model);
+    let response = span.response_model.as_deref();
+    let request = span.request_model.as_deref();
+    match (response, request) {
+        (Some(response), Some(request)) => {
+            let stripped = request
+                .rsplit_once('/')
+                .is_some_and(|(_, bare)| bare == response);
+            if stripped {
+                vec![response, request]
+            } else {
+                vec![response]
+            }
         }
+        _ => response.or(request).into_iter().collect(),
     }
-    models
 }
 
 fn check_media_bounds(case: &Case, failures: &mut Vec<String>) {

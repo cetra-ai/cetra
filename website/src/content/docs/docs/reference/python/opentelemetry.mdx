@@ -28,6 +28,7 @@ everything the SDK enabled. Our provider raises the OTel attribute limit to
 
 With `instrument=["openai"]`, cetra records the host of the OpenAI client's base URL as `server.address`, so calls to OpenRouter, Novita or another provider behind the OpenAI client show that provider.
 The host is the only part of the URL that is recorded.
+Only the `create` methods of chat completions, responses and embeddings record the host; spans of `parse` or `stream` calls do not.
 
 ## Existing OpenTelemetry setups
 
