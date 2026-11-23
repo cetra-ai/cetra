@@ -163,13 +163,7 @@ fn stream(
     };
     let pool = state.meta.reader().clone();
     let pages = futures::stream::try_unfold(cursor, move |cursor| {
-        export_page(
-            pool.clone(),
-            scope.clone(),
-            filters.clone(),
-            format,
-            cursor,
-        )
+        export_page(pool.clone(), scope.clone(), filters.clone(), format, cursor)
     });
     Ok((StatusCode::OK, headers, Body::from_stream(pages)).into_response())
 }
@@ -199,8 +193,7 @@ async fn export_page(
         tracing::error!(error = %error, "audit export failed");
         io::Error::other("audit export failed")
     };
-    let mut rows = match read::page(&pool, &scope, &filters, cursor.before_seq, EXPORT_PAGE).await
-    {
+    let mut rows = match read::page(&pool, &scope, &filters, cursor.before_seq, EXPORT_PAGE).await {
         Ok(rows) => rows,
         Err(error) => return Err(fail(&error)),
     };
@@ -229,7 +222,11 @@ async fn export_page(
 }
 
 /// The bytes of one page: NDJSON lines, or CSV records preceded by the header when asked.
-fn encode(events: &[AuditEvent], format: AuditExportFormat, with_header: bool) -> io::Result<Vec<u8>> {
+fn encode(
+    events: &[AuditEvent],
+    format: AuditExportFormat,
+    with_header: bool,
+) -> io::Result<Vec<u8>> {
     match format {
         AuditExportFormat::Csv => encode_csv(events, with_header),
         AuditExportFormat::Ndjson => {
@@ -255,9 +252,7 @@ fn encode_csv(events: &[AuditEvent], with_header: bool) -> io::Result<Vec<u8>> {
             .write_record(csv_row(event).iter().map(String::as_bytes))
             .map_err(io::Error::other)?;
     }
-    writer
-        .into_inner()
-        .map_err(csv::IntoInnerError::into_error)
+    writer.into_inner().map_err(csv::IntoInnerError::into_error)
 }
 
 /// The cells of one record, in [`CSV_HEADER`]'s order, each through [`safe_cell`].

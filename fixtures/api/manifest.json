@@ -838,6 +838,14 @@
     "file": "responses/users/user-7.json"
   },
   {
+    "operation_id": "list_admin_audit_events",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/admin-audit-events.json"
+  },
+  {
     "operation_id": "list_admin_users",
     "path_params": {},
     "query": {},
@@ -1115,6 +1123,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/online-rules.json"
+  },
+  {
+    "operation_id": "list_org_audit_events",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-audit-events.json"
   },
   {
     "operation_id": "list_org_deletions",

@@ -749,10 +749,7 @@ mod tests {
         };
         let value = serde_json::to_value(&kept).unwrap();
         assert_eq!(value, json!({"audit_retention_days": 0}));
-        assert_eq!(
-            serde_json::from_value::<LimitsClaim>(value).unwrap(),
-            kept
-        );
+        assert_eq!(serde_json::from_value::<LimitsClaim>(value).unwrap(), kept);
     }
 
     #[test]

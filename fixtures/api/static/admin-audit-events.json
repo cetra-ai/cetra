@@ -32,7 +32,7 @@
       "outcome": "failure",
       "actor": {
         "kind": "anonymous",
-        "status": "unresolved"
+        "status": "present"
       },
       "target": {
         "kind": "user",

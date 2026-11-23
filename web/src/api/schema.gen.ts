@@ -628,6 +628,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/admin/audit-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the instance's audit records
+         * @description Newest first. Instance admins only, with a session. Needs a licence that lists `audit_log`, or a cloud cell (403 `plan_required` otherwise). Org records are never listed here.
+         */
+        get: operations["list_admin_audit_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/audit-events/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export the instance's audit records
+         * @description The instance's records as CSV or NDJSON, newest first, at most 1,000,000 of them. Recorded first as `audit.export_started`. Instance admins only, with a session; needs the licence or a cloud cell (403 `plan_required` otherwise).
+         */
+        get: operations["get_admin_audit_export"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/admin/license": {
         parameters: {
             query?: never;
@@ -896,6 +936,46 @@ export interface paths {
          * @description Organization admins and owners, with a session. Runs the tool-calling test on the connection and saves nothing (D-AS-24). A provider failure is `ok: false`, not an error status.
          */
         post: operations["post_org_assistant_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-events": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List an organization's audit records
+         * @description Newest first. Admins and owners, with a session or a personal access token. Needs the `audit_log` feature: without it, 403 `plan_required`.
+         */
+        get: operations["list_org_audit_events"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/audit-events/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Export an organization's audit records
+         * @description The records of the filters as CSV or NDJSON, newest first, at most 1,000,000 of them. The export is recorded first as `audit.export_started`. Admins and owners; needs the `audit_log` feature (403 `plan_required` otherwise).
+         */
+        get: operations["get_org_audit_export"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4678,6 +4758,88 @@ export interface components {
          * @enum {string}
          */
         AssistantUnavailable: "forbidden" | "restore_mode" | "disabled" | "no_connection";
+        /** @description The actor of a record. */
+        AuditActor: {
+            /** @description The personal access token id, when a user acted through one. */
+            credential_id?: string;
+            /** @description The email, for a present user only. */
+            email?: string;
+            /** @description The user, key, token id. Omitted when there is none. */
+            id?: string;
+            /** @description `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system` or `anonymous`. */
+            kind: string;
+            /** @description The display name, when it resolves. */
+            name?: string;
+            status: components["schemas"]["AuditRefStatus"];
+            /** @description `session` or `pat` for a user. */
+            via?: string;
+        };
+        /** @description One audit record. */
+        AuditEvent: {
+            /** @description The action name, `group.name`. */
+            action: string;
+            actor: components["schemas"]["AuditActor"];
+            /**
+             * Format: date-time
+             * @description When the action happened.
+             */
+            at: string;
+            /** @description The action's details: ids, names of changed fields, roles, counts. Never payload. */
+            details: Record<string, never>;
+            /**
+             * Format: uuid
+             * @description Record id.
+             */
+            id: string;
+            /** @description The client IP, when recorded. */
+            ip?: string;
+            outcome: components["schemas"]["AuditOutcome"];
+            /** @description The project the action belongs to. */
+            project?: components["schemas"]["AuditRef"];
+            /** @description The object the action changed. */
+            target?: components["schemas"]["AuditRef"];
+            /** @description The client's user agent, when recorded. */
+            user_agent?: string;
+        };
+        /** @description One page of results. `next_cursor` is null when there is no next page. */
+        AuditEventPage: {
+            /** @description Items in this page. */
+            data: components["schemas"]["AuditEvent"][];
+            /** @description Opaque cursor for the next page, or null when this is the last page. */
+            next_cursor: string | null;
+        };
+        /**
+         * @description The export format (plan step 6).
+         * @enum {string}
+         */
+        AuditExportFormat: "csv" | "ndjson";
+        /**
+         * Format: int32
+         * @description Page size of the audit list: 1 to 500, default 100 (plan P-1).
+         * @default 100
+         */
+        AuditLimit: number;
+        /**
+         * @description Whether the action succeeded.
+         * @enum {string}
+         */
+        AuditOutcome: "success" | "failure";
+        /** @description An object a record names: its target, or the project of a record. */
+        AuditRef: {
+            /** @description The email, for a present user only. */
+            email?: string;
+            id: string;
+            /** @description The target kind, as the record stores it. */
+            kind: string;
+            /** @description The display name, when it resolves. */
+            name?: string;
+            status: components["schemas"]["AuditRefStatus"];
+        };
+        /**
+         * @description How a referenced user, key, project or provider resolves at read time (plan P-3).
+         * @enum {string}
+         */
+        AuditRefStatus: "present" | "former_member" | "deleted" | "unresolved";
         /**
          * @description Login methods the UI should offer.
          *
@@ -6904,7 +7066,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso" | "scim";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso" | "scim" | "audit_log";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -8384,8 +8546,17 @@ export interface components {
          *     Spec README § Cross-cutting conventions and decision D61.
          */
         OrgId: string;
-        /** @description The org's limits (D-P-13). An omitted limit is unlimited. */
+        /**
+         * @description The org's limits (D-P-13). An omitted limit is unlimited, except `audit_retention_days`
+         *     (see its doc).
+         */
         OrgLimits: {
+            /**
+             * Format: int64
+             * @description Audit log retention in days. Omitted: the instance's `audit.retention_days`;
+             *     0: kept forever.
+             */
+            audit_retention_days?: number;
             /**
              * Format: int64
              * @description How many days of data the org may read.
@@ -13333,6 +13504,155 @@ export interface operations {
             };
         };
     };
+    list_admin_audit_events: {
+        parameters: {
+            query?: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id: user, API key or token id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. The instance log has none, so it matches nothing there. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description Maximum number of records (1–500, default 100). */
+                limit?: components["schemas"]["AuditLimit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of records, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_admin_audit_export: {
+        parameters: {
+            query: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description `csv` or `ndjson`. */
+                format: components["schemas"]["AuditExportFormat"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_admin_license: {
         parameters: {
             query?: never;
@@ -14750,6 +15070,179 @@ export interface operations {
             };
             /** @description The server is busy or a dependency is unavailable. Retry later. */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    list_org_audit_events: {
+        parameters: {
+            query?: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id: user, API key or token id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. The instance log has none, so it matches nothing there. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description Maximum number of records (1–500, default 100). */
+                limit?: components["schemas"]["AuditLimit"];
+                /** @description Opaque cursor from a previous page. */
+                cursor?: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description One page of records, newest first. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditEventPage"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_org_audit_export: {
+        parameters: {
+            query: {
+                /** @description Records at or after this time (RFC 3339 or epoch milliseconds). */
+                from?: components["schemas"]["TimeParam"];
+                /** @description Records before this time (RFC 3339 or epoch milliseconds). */
+                to?: components["schemas"]["TimeParam"];
+                /** @description Comma-separated action names or group prefixes, at most 20 entries. */
+                action?: string;
+                /** @description The actor's id. At most 64 characters. */
+                actor_id?: string;
+                /** @description The target's id. At most 64 characters. */
+                target_id?: string;
+                /** @description Records of this project. */
+                project_id?: string;
+                /** @description `success` or `failure`. */
+                outcome?: components["schemas"]["AuditOutcome"];
+                /** @description `csv` or `ndjson`. */
+                format: components["schemas"]["AuditExportFormat"];
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The records, one per line (NDJSON) or one per row (CSV), with `Content-Disposition: attachment`. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-ndjson": string;
+                    "text/csv": string;
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };

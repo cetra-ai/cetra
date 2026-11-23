@@ -35,7 +35,12 @@ pub(crate) async fn purge(state: &AppState, now: i64) -> Result<u64, MetaError> 
         let Ok(org) = id.parse::<OrgId>() else {
             continue;
         };
-        let days = match state.entitlements.resolve(org, now).limits.audit_retention_days {
+        let days = match state
+            .entitlements
+            .resolve(org, now)
+            .limits
+            .audit_retention_days
+        {
             None => instance_days,
             Some(0) => 0,
             Some(days) => u32::try_from(days.max(MIN_RETENTION_DAYS)).unwrap_or(u32::MAX),

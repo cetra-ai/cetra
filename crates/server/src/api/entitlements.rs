@@ -52,11 +52,7 @@ impl Feature {
     pub fn is_ee(self) -> bool {
         matches!(
             self,
-            Self::ProjectRoles
-                | Self::SsoEnforcement
-                | Self::OrgSso
-                | Self::Scim
-                | Self::AuditLog
+            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso | Self::Scim | Self::AuditLog
         )
     }
 

@@ -208,7 +208,18 @@ pub(crate) async fn page(
         query.push(" AND target_id = ").push_bind(target.clone());
     }
     if let Some(project) = filters.project_id {
-        query.push(" AND project_id = ").push_bind(project.to_string());
+        match scope {
+            // Instance records have no project to match, so this filter matches nothing
+            // there (plan P-1).
+            Scope::Instance => {
+                query.push(" AND 0");
+            }
+            Scope::Org(_) => {
+                query
+                    .push(" AND project_id = ")
+                    .push_bind(project.to_string());
+            }
+        }
     }
     if let Some(outcome) = filters.outcome {
         query.push(" AND outcome = ").push_bind(outcome);
@@ -259,13 +270,11 @@ pub(crate) async fn resolve(
     rows: &[Row],
 ) -> Result<Vec<AuditEvent>, MetaError> {
     let names = lookups(pool, scope, rows).await?;
-    rows.iter()
-        .map(|row| event(row, scope, &names))
-        .collect()
+    rows.iter().map(|row| event(row, scope, &names)).collect()
 }
 
 /// `IN (…)` over `ids`, with each id bound as text.
-fn push_in(builder: &mut QueryBuilder<'_, Sqlite>, ids: &BTreeSet<String>) {
+fn push_in(builder: &mut QueryBuilder<Sqlite>, ids: &BTreeSet<String>) {
     builder.push("(");
     let mut separated = builder.separated(", ");
     for id in ids {
@@ -434,6 +443,8 @@ fn actor(row: &Row, scope: &Scope, names: &Names) -> AuditActor {
     let (name, email, status) = match (row.actor_kind.as_str(), row.actor_id.as_deref()) {
         ("user", Some(id)) => user_ref(id, scope, names),
         ("api_key", Some(id)) => key_ref(id, scope, names),
+        // `cli`, `system` and `anonymous` have no id: there is nothing to resolve.
+        (_, None) => (None, None, AuditRefStatus::Present),
         _ => (None, None, AuditRefStatus::Unresolved),
     };
     AuditActor {

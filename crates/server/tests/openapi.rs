@@ -633,7 +633,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/audit-events/export",
         "get_org_audit_export",
     ),
-    ("get", "/api/v1/admin/audit-events", "list_admin_audit_events"),
+    (
+        "get",
+        "/api/v1/admin/audit-events",
+        "list_admin_audit_events",
+    ),
     (
         "get",
         "/api/v1/admin/audit-events/export",
@@ -2038,6 +2042,7 @@ fn assert_nullability(schemas: &serde_json::Map<String, Value>) {
         "BackfillPage",
         "InternalUsagePage",
         "InternalDropPage",
+        "AuditEventPage",
     ];
     let mut expected: BTreeSet<String> = pages
         .iter()

@@ -12,11 +12,11 @@ use uuid::Uuid;
 
 use super::catalog::{
     AlertChannelAction, AlertRuleAction, AnnotationQueueAction, ApiKeyAction, AssistantAction,
-    AuditAction, AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction, InstanceAction,
-    InviteAction, IssueSourceAction, JoinVia, LlmConnectionAction, LoginMethod, McpAction,
-    MemberAction, ModelPriceAction, OnlineRuleAction, OrgAction, PatAction, ProjectAction,
-    PromptAction, ScimAction, ScoreDefinitionAction, SignupMethod, SqlAction, SsoAction,
-    UserAction,
+    AuditAction, AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction,
+    InstanceAction, InviteAction, IssueSourceAction, JoinVia, LlmConnectionAction, LoginMethod,
+    McpAction, MemberAction, ModelPriceAction, OnlineRuleAction, OrgAction, PatAction,
+    ProjectAction, PromptAction, ScimAction, ScoreDefinitionAction, SignupMethod, SqlAction,
+    SsoAction, UserAction,
 };
 use super::{
     Action, Actor, Ctx, Event, LOGIN_FAILED_WINDOW_NS, TargetKind, Via, record, record_alone,

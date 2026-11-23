@@ -1254,7 +1254,10 @@ mod tests {
             text.contains("max_annotation_queues: unlimited\n"),
             "{text}"
         );
-        assert!(text.contains("audit_retention_days: kept forever\n"), "{text}");
+        assert!(
+            text.contains("audit_retention_days: kept forever\n"),
+            "{text}"
+        );
         assert!(text.contains("retention window: unlimited\n"), "{text}");
         assert!(text.contains("units this month: 1240\n"), "{text}");
     }

@@ -296,7 +296,10 @@ mod tests {
         assert_eq!(get(&app, &admin.cookie, &path).await.status, 200);
         let key = app
             .request(Method::GET, &path)
-            .header(header::AUTHORIZATION.as_str(), &format!("Bearer {}", seeded.read_key))
+            .header(
+                header::AUTHORIZATION.as_str(),
+                &format!("Bearer {}", seeded.read_key),
+            )
             .send()
             .await;
         assert_eq!(key.status, 404);
@@ -314,7 +317,12 @@ mod tests {
             problem.detail.as_deref(),
             Some(Feature::AuditLog.locked_detail())
         );
-        let export = get(&app, &seeded.cookie, &export_path(seeded.org_id, "?format=csv")).await;
+        let export = get(
+            &app,
+            &seeded.cookie,
+            &export_path(seeded.org_id, "?format=csv"),
+        )
+        .await;
         assert_eq!(export.status, 403);
         assert_eq!(export.problem().code, ProblemCode::PlanRequired);
     }
@@ -347,16 +355,33 @@ mod tests {
 
         let group = rows(&app, &seeded, "?action=member.").await;
         assert_eq!(group.len(), 2);
-        assert!(group.iter().all(|event| event.action.starts_with("member.")));
-        assert_eq!(rows(&app, &seeded, "?action=api_key.created").await.len(), 1);
+        assert!(
+            group
+                .iter()
+                .all(|event| event.action.starts_with("member."))
+        );
+        assert_eq!(
+            rows(&app, &seeded, "?action=api_key.created").await.len(),
+            1
+        );
         let listed = rows(&app, &seeded, "?action=member.added,api_key.created").await;
         assert_eq!(listed.len(), 2);
         let ada = seeded.user_id;
-        assert_eq!(rows(&app, &seeded, &format!("?actor_id={ada}")).await.len(), 3);
-        assert_eq!(rows(&app, &seeded, &format!("?target_id={bob}")).await.len(), 2);
+        assert_eq!(
+            rows(&app, &seeded, &format!("?actor_id={ada}")).await.len(),
+            3
+        );
+        assert_eq!(
+            rows(&app, &seeded, &format!("?target_id={bob}"))
+                .await
+                .len(),
+            2
+        );
         let project = seeded.project.id;
         assert_eq!(
-            rows(&app, &seeded, &format!("?project_id={project}")).await.len(),
+            rows(&app, &seeded, &format!("?project_id={project}"))
+                .await
+                .len(),
             1
         );
         let failures = rows(&app, &seeded, "?outcome=failure").await;
@@ -478,7 +503,13 @@ mod tests {
             page.data
                 .iter()
                 .find(|event| event.actor.id.as_deref() == Some(id.to_string().as_str()))
-                .map(|event| (event.actor.status, event.actor.name.clone(), event.actor.email.clone()))
+                .map(|event| {
+                    (
+                        event.actor.status,
+                        event.actor.name.clone(),
+                        event.actor.email.clone(),
+                    )
+                })
                 .expect("a row for the actor")
         };
         assert_eq!(
@@ -502,14 +533,24 @@ mod tests {
             1,
         )
         .await;
-        let org_only = page_of(&app, &seeded.cookie, "/api/v1/admin/audit-events?action=member.")
-            .await;
+        let org_only = page_of(
+            &app,
+            &seeded.cookie,
+            "/api/v1/admin/audit-events?action=member.",
+        )
+        .await;
         assert!(org_only.data.is_empty());
-        let instance = page_of(&app, &seeded.cookie, "/api/v1/admin/audit-events?action=instance.")
-            .await;
+        let instance = page_of(
+            &app,
+            &seeded.cookie,
+            "/api/v1/admin/audit-events?action=instance.",
+        )
+        .await;
         assert_eq!(instance.data.len(), 1);
         assert_eq!(instance.data[0].action, "instance.init_applied");
         assert_eq!(instance.data[0].actor.kind, "system");
+        assert_eq!(instance.data[0].actor.id, None);
+        assert_eq!(instance.data[0].actor.status, AuditRefStatus::Present);
     }
 
     #[tokio::test]
@@ -544,7 +585,9 @@ mod tests {
 
     #[tokio::test]
     async fn instance_log_needs_the_licence_or_a_cloud_cell() {
-        let (app, seeded) = app_with(&[]).await;
+        // The default test config is a cloud cell, so this one is a self-hosted instance.
+        let app = TestApp::with_config(|config| config.entitlements.control_plane = false).await;
+        let seeded = app.seed().await;
         let path = "/api/v1/admin/audit-events";
         let locked = get(&app, &seeded.cookie, path).await;
         assert_eq!(locked.status, 403);
@@ -560,10 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn details_never_carry_an_email() {
-        for file in [
-            "org-audit-events.json",
-            "admin-audit-events.json",
-        ] {
+        for file in ["org-audit-events.json", "admin-audit-events.json"] {
             let path = format!(
                 "{}/../../fixtures/api/static/{file}",
                 env!("CARGO_MANIFEST_DIR")
@@ -599,7 +639,10 @@ mod tests {
         let (app, seeded) = app_with(&["audit_log"]).await;
         let event = Event::new(InstanceAction::InitApplied).project(seeded.project.id);
         record_many(&app, &Ctx::system(), event, at_ms(1), 1).await;
-        let path = format!("/api/v1/admin/audit-events?project_id={}", seeded.project.id);
+        let path = format!(
+            "/api/v1/admin/audit-events?project_id={}",
+            seeded.project.id
+        );
         let page = page_of(&app, &seeded.cookie, &path).await;
         assert!(page.data.is_empty());
     }
@@ -662,7 +705,10 @@ mod tests {
         )
         .await;
         assert_eq!(response.status, 200);
-        assert_eq!(response.header("content-type"), Some("application/x-ndjson"));
+        assert_eq!(
+            response.header("content-type"),
+            Some("application/x-ndjson")
+        );
         let lines = lines_of(&response);
         assert_eq!(lines.len(), 3);
         for line in lines {

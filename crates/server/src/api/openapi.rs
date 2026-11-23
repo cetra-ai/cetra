@@ -23,10 +23,6 @@ use utoipa::openapi::tag::{Tag, TagBuilder};
 use utoipa::openapi::{Content, InfoBuilder, OpenApi, OpenApiBuilder, Ref, RefOr, Required};
 use utoipa::{IntoParams, PartialSchema, ToSchema};
 
-use super::audit::{
-    AuditActor, AuditEvent, AuditExportFormat, AuditExportParams, AuditListParams, AuditOutcome,
-    AuditRef, AuditRefStatus,
-};
 use super::account::{
     AuthConfig, ChangePasswordRequest, CreateOrgRequest, CreateProjectRequest,
     ForgotPasswordRequest, LoginRequest, Me, OrgMembership, Project, ResendVerificationRequest,
@@ -56,6 +52,10 @@ use super::assistant::{
     AssistantFeedbackRequest, AssistantMessage, AssistantMessageStatus, AssistantPart,
     AssistantRole, AssistantSettings, AssistantStatus, AssistantTestRequest, AssistantTurnRequest,
     AssistantUnavailable, PutAssistantSettings, UpdateAssistantConversationRequest,
+};
+use super::audit::{
+    AuditActor, AuditEvent, AuditExportFormat, AuditExportParams, AuditLimit, AuditListParams,
+    AuditOutcome, AuditRef, AuditRefStatus,
 };
 use super::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder, TimeParam};
@@ -216,6 +216,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<AuditActor>();
     set.insert::<AuditRef>();
     set.insert::<AuditEvent>();
+    set.insert::<AuditLimit>();
     set.insert_page::<AuditEvent>("AuditEventPage");
     set.insert::<SortOrder>();
     set.insert::<TraceSort>();
