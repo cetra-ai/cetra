@@ -236,6 +236,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/llm-connections/{id}/test",
         "post_llm_connection_test",
     ),
+    (
+        "post",
+        "/api/v1/orgs/{org}/llm-connections/test",
+        "post_unsaved_llm_connection_test",
+    ),
     ("get", "/api/v1/orgs/{org}/models", "list_org_model_prices"),
     ("post", "/api/v1/orgs/{org}/models", "post_org_model_price"),
     (
@@ -250,6 +255,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/projects", "list_projects"),
     ("post", "/api/v1/orgs/{org}/projects", "post_project"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/projects/activity",
+        "get_projects_activity",
+    ),
     ("get", "/api/v1/projects/{project}", "get_project"),
     ("patch", "/api/v1/projects/{project}", "patch_project"),
     (
@@ -1155,6 +1165,7 @@ const QUERY_OR_BODY: &[&str] = &[
     "list_llm_connections",
     "list_project_members",
     "list_projects",
+    "get_projects_activity",
     "list_api_keys",
     "list_personal_tokens",
     "list_traces",
@@ -1558,7 +1569,10 @@ fn document_lint() {
             || *id == "delete_llm_connection"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
-        } else if *id == "get_llm_connection" || *id == "post_llm_connection_test" {
+        } else if *id == "get_llm_connection"
+            || *id == "post_llm_connection_test"
+            || *id == "post_unsaved_llm_connection_test"
+        {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "create_channel"
             || *id == "update_channel"

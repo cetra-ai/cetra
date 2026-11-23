@@ -39,6 +39,7 @@ pub(crate) mod online_rules;
 pub(crate) mod orgs;
 pub(crate) mod otlp;
 pub(crate) mod playground;
+pub(crate) mod project_activity;
 pub(crate) mod projects;
 pub(crate) mod prompts;
 pub(crate) mod read;

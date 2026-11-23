@@ -8,7 +8,7 @@
 
 **Prerequisites.**
 - Branch `claude/ea-enterprise-admin` in `/home/sebastien/travaux/llm-observer/.claude/worktrees/ea-design`, with the approved design (`docs/plans/ea-enterprise-admin/README.md`).
-- Next migration number: `0031`.
+- Next migration number: `0032`.
 
 **Read first.**
 - `docs/plans/ea-enterprise-admin/README.md` § Audit log (all of it) and decisions D-EA-1 to D-EA-9 and D-EA-20 in `docs/mvp-decisions.md` § Track EA.
@@ -95,7 +95,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 **Goal:** the table, the core types, the M1 catalog, `record`, `record_alone`, the throttle and the `Ctx` extractor, with tests.
 
 **Edit:**
-- `crates/server/migrations/meta/0031_audit_events.sql` (new)
+- `crates/server/migrations/meta/0032_audit_events.sql` (new)
 - `crates/server/src/audit/mod.rs` (new)
 - `crates/server/src/audit/catalog/mod.rs` (new)
 - `crates/server/src/audit/catalog/auth.rs`, `org.rs`, `project.rs`, `member.rs`, `invite.rs`, `api_key.rs`, `pat.rs`, `sso.rs`, `user.rs`, `instance.rs`, `deletion.rs` (new)
@@ -106,7 +106,7 @@ A2, A3, A4 and A5 run in parallel after A1: their **Edit** lists do not overlap.
 
 **Steps:**
 
-1. Write `0031_audit_events.sql` exactly:
+1. Write `0032_audit_events.sql` exactly:
 
    ```sql
    -- Audit records (track EA, D-EA-1 to D-EA-9, D-EA-20). No foreign keys: records

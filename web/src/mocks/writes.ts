@@ -181,6 +181,11 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     method: "post",
     path: "/api/v1/orgs/{org}/llm-connections/{id}/test",
   },
+  {
+    operationId: "post_unsaved_llm_connection_test",
+    method: "post",
+    path: "/api/v1/orgs/{org}/llm-connections/test",
+  },
   { operationId: "put_org_assistant", method: "put", path: "/api/v1/orgs/{org}/assistant" },
   {
     operationId: "post_org_assistant_test",
@@ -720,6 +725,7 @@ const RESPONSES: Record<string, Respond> = {
     HttpResponse.json({ ...llmConnectionDocument, ...named(body) }),
   delete_llm_connection: () => noContent(),
   post_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
+  post_unsaved_llm_connection_test: () => HttpResponse.json(llmConnectionTestDocument),
   put_org_assistant: ({ body }) => {
     const enabled = body.enabled === true;
     const connectionId = trimmed(body.connection_id);

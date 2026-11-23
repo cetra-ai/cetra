@@ -114,6 +114,8 @@ export const SELF_HOSTED = {
       "Audit logs, with export and a SIEM stream",
       "SCIM provisioning from your identity provider",
     ],
+    /** A service, not a gated feature (D197). */
+    support: "Email support from the cetra team, with a reply within 2 business days",
   },
 };
 

@@ -66,6 +66,7 @@ use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
 use cetra_server::api::payload::Payload;
 use cetra_server::api::playground::PlaygroundRunRequest;
+use cetra_server::api::project_activity::ProjectsActivity;
 use cetra_server::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptLabelEvent, PromptMetrics,
     PromptSettings, PromptVersion, SetLabelRequest,
@@ -410,6 +411,7 @@ fn static_files_match_their_types() {
     roundtrip::<OrgMembership>("static/org.json");
     roundtrip::<OrgEntitlements>("static/org-entitlements.json");
     roundtrip::<OrgUsage>("static/org-usage.json");
+    roundtrip::<ProjectsActivity>("static/projects-activity.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<CreatedScimToken>("static/scim-token-created.json");
     roundtrip::<ScimGroup>("static/scim-group.json");
@@ -768,6 +770,7 @@ fn generated_files_roundtrip() {
                 roundtrip::<AuditStream>(&example.file);
             }
             "get_org_usage" => roundtrip::<OrgUsage>(&example.file),
+            "get_projects_activity" => roundtrip::<ProjectsActivity>(&example.file),
             "list_assistant_conversations" => {
                 roundtrip::<Page<AssistantConversation>>(&example.file);
             }

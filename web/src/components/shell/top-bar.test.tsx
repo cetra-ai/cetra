@@ -44,7 +44,7 @@ it("shows the breadcrumb with the page as the only heading", async () => {
 it("shows no page heading on org pages", async () => {
   await renderApp("/acme");
 
-  expect(await screen.findByRole("table", { name: "Projects" })).toBeInTheDocument();
+  expect(await screen.findByRole("list", { name: "Projects" })).toBeInTheDocument();
   const crumb = screen.getByRole("navigation", { name: "Breadcrumb" });
   expect(within(crumb).queryByRole("heading")).not.toBeInTheDocument();
 });

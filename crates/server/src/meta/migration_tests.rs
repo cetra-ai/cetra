@@ -178,6 +178,21 @@ const ALTERING_CASES: &[AlteringCase] = &[
             SELECT id || '|' || COALESCE(last_notified_at, 'NULL') FROM issue_sources",
         expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001b7|018f6b4e-7c1a-7c1a-8c1a-0000000001b5|018f6b4e-7c1a-7c1a-8c1a-0000000001b6|failed|3|9|timeout|10|11|NULL\n018f6b4e-7c1a-7c1a-8c1a-0000000001b3|NULL",
     },
+    AlteringCase {
+        version: 31,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO llm_connections (id, org_id, name, adapter, secret_enc, api_key_hint,
+            created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c2', '018f6b4e-7c1a-7c1a-8c1a-0000000001c1',
+            'kept', 'openai', x'01', 'WXYZ', 3, 4)",
+        ],
+        read: "SELECT id || '|' || name || '|' || adapter || '|' || api_key_hint || '|' || status
+            || '|' || created_at || '|' || updated_at || '|' || COALESCE(last_tested_at, 'NULL')
+            || '|' || COALESCE(last_test_ok, 'NULL') FROM llm_connections",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001c2|kept|openai|WXYZ|ok|3|4|NULL|NULL",
+    },
 ];
 
 /// The statements of a migration: `--` comments dropped, split on `;`, whitespace

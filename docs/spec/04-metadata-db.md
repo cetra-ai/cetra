@@ -142,6 +142,8 @@ CREATE TABLE llm_connections (
   status TEXT NOT NULL DEFAULT 'ok',
   last_error TEXT,
   last_error_at INTEGER,
+  last_tested_at INTEGER,             -- last test of the saved values (D-I-54)
+  last_test_ok INTEGER,               -- 1 ok, 0 failed; NULL with last_tested_at
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -149,7 +151,7 @@ CREATE TABLE llm_connections (
 );
 ```
 
-Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are sealed (§ Encryption of secrets); `api_key_hint` and `extra_header_names` are what the API shows.
+Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are sealed (§ Encryption of secrets); `api_key_hint` and `extra_header_names` are what the API shows. `last_tested_at` and `last_test_ok` hold the last test of the saved values; a change of what a test calls clears them (D-I-54).
 
 ## Deletion requests
 
@@ -1091,13 +1093,13 @@ CREATE INDEX audit_events_at ON audit_events (at);
 
 ## Audit stream destinations (track EA M4, `ee`)
 
-Migration `0034_audit_stream.sql` (D-EA-11). One row of `audit_stream_destinations` per org, and one with `org_id` null for the instance; a unique index allows one row per scope. `config_enc` is the sealed stream config (the URL, the signing secret and the optional header), with the row id as associated data (D-I-2). `url_host` is the only part of the URL kept in clear. `cursor_seq` is the last `audit_events.seq` the destination accepted (D-EA-20). `attempts`, `next_attempt_at`, `last_success_at`, `last_error`, `failing_since` and `alerted_at` drive the backoff and the 24 h email. `lost_before_seq` is set when retention deletes records above the cursor (purge, § Audit records); it is kept across edits and secret rotations, and clears only when a new destination row is created. No text column has a `CHECK` (D-R-34).
+Migration `0035_audit_stream.sql` (D-EA-11). One row of `audit_stream_destinations` per org, and one with `org_id` null for the instance; a unique index allows one row per scope. `config_enc` is the sealed stream config (the URL, the signing secret and the optional header), with the row id as associated data (D-I-2). `url_host` is the only part of the URL kept in clear. `cursor_seq` is the last `audit_events.seq` the destination accepted (D-EA-20). `attempts`, `next_attempt_at`, `last_success_at`, `last_error`, `failing_since` and `alerted_at` drive the backoff and the 24 h email. `lost_before_seq` is set when retention deletes records above the cursor (purge, § Audit records); it is kept across edits and secret rotations, and clears only when a new destination row is created. No text column has a `CHECK` (D-R-34).
 
 The delivery task (every 10 s, off in restore mode) reads the records of each destination with `seq > cursor_seq`, oldest first, and moves `cursor_seq` only after a 2xx answer. Its writes match the `updated_at` the task read, so an edit or a delete made during a delivery is kept as the edit left it.
 
 ## SCIM provisioning (track EA M5, `ee`)
 
-Migration `0032_scim.sql` (D-EA-12 to D-EA-19). One row of `org_scim` per org; `scim_tokens` holds the SHA-256 of each `scim-cetra-…` token (at most two live per org, enforced in the write transaction). `scim_users` links an org's SCIM resource to the cetra user it provisions. Its `active` is the SCIM flag, and `disabled_account` records that SCIM disabled the account, so a reactivation can enable it again. No text column has a `CHECK` (D-R-34).
+Migration `0033_scim.sql` (D-EA-12 to D-EA-19). One row of `org_scim` per org; `scim_tokens` holds the SHA-256 of each `scim-cetra-…` token (at most two live per org, enforced in the write transaction). `scim_users` links an org's SCIM resource to the cetra user it provisions. Its `active` is the SCIM flag, and `disabled_account` records that SCIM disabled the account, so a reactivation can enable it again. No text column has a `CHECK` (D-R-34).
 
 ```sql
 CREATE TABLE org_scim (
@@ -1143,7 +1145,7 @@ CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id);
 
 A member is SCIM-managed while an active `scim_users` row links to them (spec 08 § SCIM).
 
-Migration `0033_scim_groups.sql` (track EA M6, D-EA-12, D-EA-14). Groups are per org. `scim_group_members` links groups to `scim_users` rows, and `scim_group_mappings` and `scim_group_project_roles` hold the roles a group gives. A group with neither an org role nor project rows has no mapping row. No text column has a `CHECK` (D-R-34).
+Migration `0034_scim_groups.sql` (track EA M6, D-EA-12, D-EA-14). Groups are per org. `scim_group_members` links groups to `scim_users` rows, and `scim_group_mappings` and `scim_group_project_roles` hold the roles a group gives. A group with neither an org role nor project rows has no mapping row. No text column has a `CHECK` (D-R-34).
 
 ```sql
 CREATE TABLE scim_groups (

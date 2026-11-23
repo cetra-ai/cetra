@@ -209,7 +209,8 @@ test("licence rows match the licence features", () => {
       row.selfHosted[0] === false &&
       row.selfHosted[1] === true,
   );
-  assert.equal(licenceRows.length, SELF_HOSTED.licence.features.length);
+  // The licence's features, plus its email support row: a service, not a gated feature (D197).
+  assert.equal(licenceRows.length, SELF_HOSTED.licence.features.length + 1);
 });
 
 test("retention controls are Pro and up", () => {
@@ -222,7 +223,7 @@ test("retention controls are Pro and up", () => {
 test("each table has about 55 to 65 rows", () => {
   const count = (table) => groupsFor(table).reduce((sum, group) => sum + group.rows.length, 0);
   assert.equal(count("cloud"), 62);
-  assert.equal(count("selfHosted"), 59);
+  assert.equal(count("selfHosted"), 60);
 });
 
 test("groupsFor drops rows and empty groups", () => {
@@ -239,7 +240,7 @@ test("groupsFor drops rows and empty groups", () => {
     "self-hosted table has Dedicated cell",
   );
   const support = selfHosted.find((group) => group.id === "support");
-  assert.equal(support?.rows.length, 1);
+  assert.equal(support?.rows.length, 2);
 
   for (const table of ["cloud", "selfHosted"]) {
     const expected = FEATURE_GROUPS.flatMap((group) =>

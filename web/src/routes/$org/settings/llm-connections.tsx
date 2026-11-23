@@ -13,7 +13,6 @@ import { DisabledReason } from "@/components/disabled-reason";
 import { EmptyState } from "@/components/empty-state";
 import { RelativeTime } from "@/components/relative-time";
 import { ConnectionForm, structuredOutputLabel } from "@/components/settings/connection-form";
-import { ConnectionTest } from "@/components/settings/connection-test";
 import {
   filterRows,
   SettingsListLayout,
@@ -28,7 +27,7 @@ import { StatusPill } from "@/components/settings/status-pill";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import { providerLabel } from "@/lib/llm-adapters";
 import { canManageConnections } from "@/lib/roles";
 import { parseSettingsListSearch, type SettingsListSearch } from "@/lib/search/settings-list";
 
@@ -60,9 +59,9 @@ const COLUMNS: DataTableColumn<Connection>[] = [
     id: "provider",
     size: 180,
     header: "Provider",
-    accessorFn: (connection) => LLM_ADAPTER_LABELS[connection.adapter],
+    accessorFn: (connection) => providerLabel(connection),
     enableSorting: true,
-    cell: ({ row }) => LLM_ADAPTER_LABELS[row.original.adapter],
+    cell: ({ row }) => providerLabel(row.original),
   },
   {
     id: "model",
@@ -112,7 +111,7 @@ const COLUMNS: DataTableColumn<Connection>[] = [
 
 const SORT_KEYS: Record<string, (connection: Connection) => SortValue> = {
   name: (connection) => connection.name,
-  provider: (connection) => LLM_ADAPTER_LABELS[connection.adapter],
+  provider: (connection) => providerLabel(connection),
   model: (connection) => connection.default_model,
   status: (connection) => connection.status,
   // RFC 3339 times with a fixed-width fraction sort as text.
@@ -129,9 +128,6 @@ function LlmConnectionsPage() {
   const role = me.orgs.find((item) => item.slug === org)?.role;
   const canManage = canManageConnections(role);
   const query = $api.useQuery("get", "/api/v1/orgs/{org}/llm-connections", connectionsInit(org));
-  // Never cleared on close, so the dialog does not blank while it animates out.
-  const [testTarget, setTestTarget] = useState<Connection | undefined>();
-  const [testOpen, setTestOpen] = useState(false);
 
   if (query.error) {
     throw query.error;
@@ -156,11 +152,6 @@ function LlmConnectionsPage() {
     void navigate({ search: (prev) => ({ ...prev, open: undefined }), ignoreBlocker });
   }
 
-  function openTest(connection: Connection) {
-    setTestTarget(connection);
-    setTestOpen(true);
-  }
-
   let panel: ReactNode = null;
   if (openId === "new") {
     panel = (
@@ -181,7 +172,6 @@ function LlmConnectionsPage() {
         org={org}
         connection={selected}
         canManage={canManage}
-        onTest={() => openTest(selected)}
         onClose={closePanel}
       />
     );
@@ -198,48 +188,38 @@ function LlmConnectionsPage() {
   }
 
   return (
-    <>
-      <SettingsListLayout open={openId !== undefined} onClose={() => closePanel()} panel={panel}>
-        <SettingsPage
-          width="wide"
-          title="LLM connections"
-          description="Provider keys that evaluators use. Keys are stored encrypted and never shown again."
-          actions={
-            <DisabledReason
-              reason={canManage ? undefined : "Only admins and owners can add connections"}
-            >
-              <Button type="button" disabled={!canManage} onClick={() => openRow("new")}>
-                Add connection
-              </Button>
-            </DisabledReason>
-          }
-        >
-          {query.isPending ? (
-            <>
-              <Skeleton className="h-8 w-full" />
-              <Skeleton className="h-8 w-full" />
-              <Skeleton className="h-8 w-full" />
-            </>
-          ) : rows.length === 0 ? (
-            <EmptyState
-              icon={PlugZap}
-              title="No connections yet"
-              description="Add one to run LLM judges."
-            />
-          ) : (
-            <ConnectionsList rows={rows} search={search} onSearchChange={update} onOpen={openRow} />
-          )}
-        </SettingsPage>
-      </SettingsListLayout>
-      {testTarget === undefined ? null : (
-        <ConnectionTest
-          org={org}
-          connection={testTarget}
-          open={testOpen}
-          onOpenChange={setTestOpen}
-        />
-      )}
-    </>
+    <SettingsListLayout open={openId !== undefined} onClose={() => closePanel()} panel={panel}>
+      <SettingsPage
+        width="wide"
+        title="LLM connections"
+        description="Provider keys that evaluators use. Keys are stored encrypted and never shown again."
+        actions={
+          <DisabledReason
+            reason={canManage ? undefined : "Only admins and owners can add connections"}
+          >
+            <Button type="button" disabled={!canManage} onClick={() => openRow("new")}>
+              Add connection
+            </Button>
+          </DisabledReason>
+        }
+      >
+        {query.isPending ? (
+          <>
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+            <Skeleton className="h-8 w-full" />
+          </>
+        ) : rows.length === 0 ? (
+          <EmptyState
+            icon={PlugZap}
+            title="No connections yet"
+            description="Add one to run LLM judges."
+          />
+        ) : (
+          <ConnectionsList rows={rows} search={search} onSearchChange={update} onOpen={openRow} />
+        )}
+      </SettingsPage>
+    </SettingsListLayout>
   );
 }
 
@@ -265,7 +245,7 @@ function ConnectionsList({
   const visible = sortRows(
     filterRows(rows, search.q, (connection) => [
       connection.name,
-      LLM_ADAPTER_LABELS[connection.adapter],
+      providerLabel(connection),
       connection.default_model,
     ]),
     sorting,
@@ -323,13 +303,11 @@ function ConnectionDetail({
   org,
   connection,
   canManage,
-  onTest,
   onClose,
 }: {
   org: string;
   connection: Connection;
   canManage: boolean;
-  onTest: () => void;
   onClose: (ignoreBlocker?: boolean) => void;
 }) {
   const queryClient = useQueryClient();
@@ -351,7 +329,7 @@ function ConnectionDetail({
       title={connection.name}
       subtitle={
         <span className="flex flex-wrap items-center gap-2">
-          {LLM_ADAPTER_LABELS[connection.adapter]}
+          {providerLabel(connection)}
           {failing ? (
             <StatusPill tone="error" title={connection.last_error}>
               Failing
@@ -359,13 +337,22 @@ function ConnectionDetail({
           ) : (
             <StatusPill tone="ok">OK</StatusPill>
           )}
+          {connection.last_tested_at === undefined ? null : connection.last_test_ok === false ? (
+            <span>
+              Last test failed <RelativeTime value={connection.last_tested_at} />
+            </span>
+          ) : (
+            <span>
+              Tested <RelativeTime value={connection.last_tested_at} />
+            </span>
+          )}
         </span>
       }
       onClose={() => onClose()}
     >
       {canManage ? (
         <>
-          <ConnectionForm org={org} connection={connection} onCreated={noop} onTest={onTest} />
+          <ConnectionForm org={org} connection={connection} onCreated={noop} />
           <DangerZone
             title="Delete connection"
             description={deleteWarning(connection.name)}
@@ -417,7 +404,7 @@ function ConnectionDetail({
 
 function ReadOnlyDetails({ connection }: { connection: Connection }) {
   const details: [string, string][] = [
-    ["Provider", LLM_ADAPTER_LABELS[connection.adapter]],
+    ["Provider", providerLabel(connection)],
     ["Base URL", connection.base_url ?? "Default"],
     ["Default model", connection.default_model ?? "—"],
     ["API key", connection.api_key_hint ? `••••${connection.api_key_hint}` : "••••"],

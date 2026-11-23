@@ -74,7 +74,7 @@ E2 and E3 run in parallel after E1: their files are disjoint. E1 writes every `m
 ### E1 — Table, store, sealing, catalog and permission
 
 **Edit:**
-- `crates/server/migrations/meta/00NN_audit_stream.sql` (new; NN = the next free number, `0033` if M5's `0032_scim.sql` is the latest);
+- `crates/server/migrations/meta/00NN_audit_stream.sql` (new; NN = the next free number, `0035` with M5's `0033_scim.sql` and M6's `0034_scim_groups.sql` as the latest);
 - `crates/server/src/ee/audit/stream_store.rs` (new);
 - `crates/server/src/ee/audit/mod.rs`: `pub(crate) mod stream;`, `pub(crate) mod stream_api;`, `pub(crate) mod stream_store;`, and `routes()` extended with `stream_api::routes()` (E2 and E3 create those files);
 - `crates/server/src/crypto.rs` (`ENCRYPTED_COLUMNS`);

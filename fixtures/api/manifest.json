@@ -485,6 +485,16 @@
     "file": "responses/project-assistant.json"
   },
   {
+    "operation_id": "get_projects_activity",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/projects-activity.json"
+  },
+  {
     "operation_id": "get_prompt",
     "path_params": {
       "prompt": "support-reply"

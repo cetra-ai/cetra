@@ -725,6 +725,7 @@ fn unusable(reason: AssistantUnavailable) -> AssistantStatus {
         reason: Some(reason),
         connection_name: None,
         adapter: None,
+        base_url: None,
         model: None,
     }
 }
@@ -862,6 +863,7 @@ async fn get_project_assistant(
             reason: None,
             connection_name: Some(connection.name),
             adapter: Some(connection.adapter),
+            base_url: connection.base_url,
             model: Some(model),
         },
     };
@@ -1885,6 +1887,7 @@ mod settings_tests {
             Some(true)
         );
         assert_eq!(status["adapter"], "openai");
+        assert_eq!(status["base_url"], base);
         assert_eq!(status["model"], "gpt-test");
         assert!(status.get("reason").is_none());
     }

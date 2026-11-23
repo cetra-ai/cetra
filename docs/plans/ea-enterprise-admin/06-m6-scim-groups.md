@@ -8,7 +8,7 @@
 **Prerequisites.**
 - M5 is committed and green.
 - Branch `claude/ea-enterprise-admin` in `/home/sebastien/travaux/llm-observer/.claude/worktrees/ea-design`.
-- The next free migration number is `0033`: check it. M4 takes the one after.
+- The next free migration number is `0034`: check it. M4 takes the one after.
 
 **Read first.**
 - `docs/plans/ea-enterprise-admin/README.md` § SCIM (Endpoints, Roles from groups, Gating and lapses), D-EA-12, D-EA-14, D-EA-18, D-EA-19.
@@ -44,7 +44,7 @@
 | D139 | Overrides only for org members and viewers |
 
 **Plan-level choices:**
-- **P-1. Migration.** A new `0033_scim_groups.sql` (append-only), not an edit of `0032`.
+- **P-1. Migration.** A new `0034_scim_groups.sql` (append-only), not an edit of `0033`.
 - **P-2. Recompute everywhere.** `ee::scim::recompute::recompute_tx` is the only code that sets a managed member's org role or overrides from SCIM. It replaces M5's P-5 ("SCIM never changes an existing member's role"): a linked existing member is recomputed at once.
 - **P-3. Default-role changes recompute.** Changing `default_role` on the settings route recomputes every active managed member of the org, in the same transaction.
 - **P-4. Audit volume.** One request writes at most:
@@ -88,7 +88,7 @@ G7 (docs) after G2–G4
 
 ### G1a — Tables, store, audit actions and module lines
 
-**Edit:** `crates/server/migrations/meta/0033_scim_groups.sql` (new), `crates/server/src/ee/scim/store.rs`, `crates/server/src/ee/scim/mod.rs`, `crates/server/src/ee/scim/test_helpers.rs` (new, step 5), `crates/server/src/audit/catalog/scim.rs`, `crates/server/src/audit/mod.rs` (`TargetKind::ScimGroup`), `crates/server/src/audit/tests.rs`.
+**Edit:** `crates/server/migrations/meta/0034_scim_groups.sql` (new), `crates/server/src/ee/scim/store.rs`, `crates/server/src/ee/scim/mod.rs`, `crates/server/src/ee/scim/test_helpers.rs` (new, step 5), `crates/server/src/audit/catalog/scim.rs`, `crates/server/src/audit/mod.rs` (`TargetKind::ScimGroup`), `crates/server/src/audit/tests.rs`.
 
 **Steps:**
 

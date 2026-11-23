@@ -63,7 +63,7 @@ use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
-    TestLlmConnectionRequest, UpdateLlmConnectionRequest,
+    TestLlmConnectionRequest, TestUnsavedLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
 use super::dashboards::{
     AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
@@ -144,6 +144,9 @@ use super::org_sso::{
 use super::playground::{
     PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
     PlaygroundTool,
+};
+use super::project_activity::{
+    ActivityBucket, ProjectActivity, ProjectActivityParams, ProjectsActivity,
 };
 use super::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
@@ -273,6 +276,9 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UsageNotice>();
     set.insert::<OrgUsage>();
     set.insert::<UsageDay>();
+    set.insert::<ProjectsActivity>();
+    set.insert::<ProjectActivity>();
+    set.insert::<ActivityBucket>();
     set.insert::<JitRole>();
     set.insert::<OrgSsoProvider>();
     set.insert::<DomainStatus>();
@@ -345,6 +351,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateLlmConnectionRequest>();
     set.insert::<UpdateLlmConnectionRequest>();
     set.insert::<TestLlmConnectionRequest>();
+    set.insert::<TestUnsavedLlmConnectionRequest>();
     set.insert::<LlmConnectionTestError>();
     set.insert::<LlmConnectionTestResult>();
     set.insert_page::<LlmConnection>("LlmConnectionPage");
@@ -2308,6 +2315,24 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             QUERY_ERRORS,
         ))
         .build();
+    let activity = operation(
+        "get_projects_activity",
+        "projects",
+        "Read the projects' last 24 hours",
+    )
+    .description(Some(
+        "The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.",
+    ))
+    .parameters(Some(with_query::<ProjectActivityParams>(vec![path_string(
+        "org",
+        "Org UUID or slug.",
+    )])))
+    .responses(responses(
+        "200",
+        json_of::<ProjectsActivity>("The activity of the requested projects."),
+        QUERY_ERRORS,
+    ))
+    .build();
     let post_project = operation("post_project", "projects", "Create a project")
         .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
         .request_body(Some(json_body("CreateProjectRequest")))
@@ -2668,6 +2693,10 @@ fn project_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, post_internal_device_code),
         )
         .path("/api/v1/orgs/{org}/projects", projects)
+        .path(
+            "/api/v1/orgs/{org}/projects/activity",
+            PathItem::new(HttpMethod::Get, activity),
+        )
         .path("/api/v1/projects/{project}", project)
 }
 
@@ -2853,12 +2882,30 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 409, 429],
     ))
     .build();
+    let test_unsaved = operation(
+        "post_unsaved_llm_connection_test",
+        "llm_connections",
+        "Test an unsaved LLM connection",
+    )
+    .description(Some("Organization admins and owners. Nothing is stored."))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("TestUnsavedLlmConnectionRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let test = operation(
         "post_llm_connection_test",
         "llm_connections",
         "Test an LLM connection",
     )
-    .description(Some("Organization admins and owners."))
+    .description(Some(
+        "Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.",
+    ))
     .parameters(Some(vec![org, id]))
     .request_body(Some(json_body("TestLlmConnectionRequest")))
     .responses(responses(
@@ -2880,6 +2927,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/llm-connections/{id}/test",
             PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            "/api/v1/orgs/{org}/llm-connections/test",
+            PathItem::new(HttpMethod::Post, test_unsaved),
         )
 }
 

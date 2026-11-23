@@ -1214,6 +1214,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/orgs/{org}/llm-connections/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test an unsaved LLM connection
+         * @description Organization admins and owners. Nothing is stored.
+         */
+        post: operations["post_unsaved_llm_connection_test"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/orgs/{org}/llm-connections/{id}": {
         parameters: {
             query?: never;
@@ -1253,7 +1273,7 @@ export interface paths {
         put?: never;
         /**
          * Test an LLM connection
-         * @description Organization admins and owners.
+         * @description Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.
          */
         post: operations["post_llm_connection_test"];
         delete?: never;
@@ -1357,6 +1377,26 @@ export interface paths {
         put?: never;
         /** Create a project */
         post: operations["post_project"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/projects/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the projects' last 24 hours
+         * @description The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.
+         */
+        get: operations["get_projects_activity"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -4135,6 +4175,19 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description One hour of a project's traces. */
+        ActivityBucket: {
+            /**
+             * Format: int64
+             * @description Of those, the traces whose status is `error`.
+             */
+            errors: number;
+            /**
+             * Format: int64
+             * @description Traces that started in the hour.
+             */
+            traces: number;
+        };
         /** @description `POST …/datasets/{dataset}/items` body: 1 to 1 000 items, one new version. */
         AddItemsRequest: {
             /** @description The items, 1 to 1 000 of them. Their ids come back in the same order. */
@@ -4860,6 +4913,11 @@ export interface components {
         AssistantStatus: {
             /** @description The connection's adapter, when `usable`. */
             adapter?: string;
+            /**
+             * @description The connection's base URL, when `usable` and set: it tells OpenAI from an
+             *     OpenAI-compatible server (D-I-51).
+             */
+            base_url?: string;
             /** @description The connection's name, when `usable`, for the panel's notice (D-AS-18). */
             connection_name?: string;
             /** @description The model, when `usable`. */
@@ -8195,6 +8253,15 @@ export interface components {
              * @description When `last_error` was recorded. Omitted when unset.
              */
             last_error_at?: string;
+            /** @description Whether that test succeeded. Omitted with `last_tested_at`. */
+            last_test_ok?: boolean;
+            /**
+             * Format: date-time
+             * @description When the saved values were last tested on the default model or an embedding model.
+             *     Omitted when never tested, and after a change of the adapter, key, base URL, structured
+             *     output or headers. JSON is RFC 3339 (D-I-54).
+             */
+            last_tested_at?: string;
             /**
              * Format: int32
              * @description Provider calls the connection runs at once, 1 to 64.
@@ -9260,8 +9327,9 @@ export interface components {
             /**
              * Format: date-time
              * @description When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
-             *     memory: absent until the first batch after the server starts. Present only when one
-             *     project is read.
+             *     memory: absent until the first batch after the server starts. Present when one project
+             *     is read; lists omit it. `GET /orgs/{org}/projects/activity` also returns it per project
+             *     (D-C-27).
              */
             last_ingest_at?: string;
             /** @description Display name. */
@@ -9283,6 +9351,34 @@ export interface components {
              *     10 to 3600; 60 unless set.
              */
             trace_completion_timeout_s: number;
+        };
+        /** @description One project's traces over the activity window. */
+        ProjectActivity: {
+            /** @description 24 hourly buckets, oldest first. Bucket `i` starts `i` hours after `from`. */
+            buckets: components["schemas"]["ActivityBucket"][];
+            /**
+             * Format: double
+             * @description Sum of the traces' `cost_total`, USD.
+             */
+            cost_usd: number;
+            /**
+             * Format: int64
+             * @description Of those, the traces whose status is `error`.
+             */
+            errors: number;
+            /**
+             * Format: date-time
+             * @description When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
+             *     memory: absent until the first batch after the server starts.
+             */
+            last_ingest_at?: string;
+            /** @description The project. */
+            project_id: components["schemas"]["ProjectId"];
+            /**
+             * Format: int64
+             * @description Traces that started in the window, with the default exclusions (spec 05).
+             */
+            traces: number;
         };
         /**
          * Format: uuid
@@ -9327,6 +9423,23 @@ export interface components {
          * @enum {string}
          */
         ProjectRoleOverride: "admin" | "member" | "viewer" | "none";
+        /** @description `GET /api/v1/orgs/{org}/projects/activity`: the requested projects' last 24 hours (D-C-27). */
+        ProjectsActivity: {
+            /** @description One entry per requested project the caller can see, in request order. */
+            data: components["schemas"]["ProjectActivity"][];
+            /**
+             * Format: date-time
+             * @description Window start: the start of the hour 23 hours before the current one. JSON is RFC 3339.
+             */
+            from: string;
+            /**
+             * Format: date-time
+             * @description Window end, exclusive: one nanosecond after the request time. JSON is RFC 3339.
+             */
+            to: string;
+            /** @description Requested projects whose query failed or ran out of time, in request order. */
+            unavailable: components["schemas"]["ProjectId"][];
+        };
         /** @description A prompt (D-V-2). */
         Prompt: {
             /**
@@ -11096,15 +11209,55 @@ export interface components {
              */
             webhook_secret?: string;
         };
-        /** @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. */
+        /**
+         * @description `POST /api/v1/orgs/{org}/llm-connections/{id}/test` body. The draft fields (`adapter`,
+         *     `api_key`, `base_url`, `structured_output`, `extra_headers`) have PATCH semantics: absent means
+         *     the saved value, including the saved key, which a draft `base_url` or `adapter` also uses
+         *     when `api_key` is absent. A test with a draft field that differs from the saved
+         *     value, or with `api_key` or `extra_headers`, stores nothing (D-I-53).
+         */
         TestLlmConnectionRequest: {
+            /** @description Draft provider API. */
+            adapter?: components["schemas"]["LlmAdapter"];
+            /** @description Draft API key. Write-only. Absent: the saved key, whatever the draft `base_url`. */
+            api_key?: string;
+            /** @description Draft provider endpoint. An empty string means the provider's default. */
+            base_url?: string;
             /**
              * @description Embedding model to test instead: the test embeds `"ping"` and does not ask for a
              *     judgement. Not for an Anthropic connection, which has no embeddings API.
              */
             embedding_model?: string;
+            /** @description Draft extra headers, replacing the saved ones. Values are write-only. */
+            extra_headers?: {
+                [key: string]: string;
+            };
             /** @description Model to call. Default: the connection's `default_model`. */
             model?: string;
+            /** @description Draft structured output mode. */
+            structured_output?: components["schemas"]["StructuredOutputMode"];
+        };
+        /**
+         * @description `POST /api/v1/orgs/{org}/llm-connections/test` body: a connection that is not saved. Nothing
+         *     is stored (D-I-53).
+         */
+        TestUnsavedLlmConnectionRequest: {
+            /** @description The provider API. */
+            adapter: components["schemas"]["LlmAdapter"];
+            /** @description Provider API key, 1 to 4096 bytes. Write-only. */
+            api_key: string;
+            /** @description Provider endpoint overriding the provider's default. */
+            base_url?: string;
+            /** @description Embedding model to test instead. Not for Anthropic. */
+            embedding_model?: string;
+            /** @description Extra headers sent with the call, at most 20. Values are write-only. */
+            extra_headers?: {
+                [key: string]: string;
+            };
+            /** @description Model to call. Required unless `embedding_model` is given. */
+            model?: string;
+            /** @description How the provider is asked to fill the answer schema. Default `native`. */
+            structured_output?: components["schemas"]["StructuredOutputMode"];
         };
         /** @description Plain text. */
         TextPart: {
@@ -11563,11 +11716,14 @@ export interface components {
          *     unchanged; an empty body is valid and changes only `updated_at`.
          */
         UpdateLlmConnectionRequest: {
-            /** @description The provider API the connection talks to. */
+            /** @description The provider API the connection talks to. Without `api_key`, the saved key is kept. */
             adapter?: components["schemas"]["LlmAdapter"];
             /** @description Replaces the API key. Write-only. */
             api_key?: string;
-            /** @description Provider endpoint. An empty string clears it. */
+            /**
+             * @description Provider endpoint. An empty string clears it. Without `api_key`, the saved key is kept and
+             *     sent to the new endpoint.
+             */
             base_url?: string;
             /** @description Model used when a caller names none. An empty string clears it. */
             default_model?: string;
@@ -16648,6 +16804,78 @@ export interface operations {
             };
         };
     };
+    post_unsaved_llm_connection_test: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TestUnsavedLlmConnectionRequest"];
+            };
+        };
+        responses: {
+            /** @description The outcome. A provider failure is ok: false, not an error status. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LlmConnectionTestResult"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     get_llm_connection: {
         parameters: {
             query?: never;
@@ -17630,6 +17858,77 @@ export interface operations {
             };
             /** @description The request conflicts with the current state. */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_projects_activity: {
+        parameters: {
+            query: {
+                /** @description One to 50 distinct project ids, comma-separated, in the order of the answer. */
+                ids: string;
+            };
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The activity of the requested projects. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectsActivity"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

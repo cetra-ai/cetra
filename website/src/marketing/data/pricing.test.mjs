@@ -152,3 +152,19 @@ test("licence features match the docs", () => {
   ]);
   assert.equal(SELF_HOSTED.licence.features.length, 5);
 });
+
+test("licence support matches D197 and the docs", () => {
+  const d197 = decisions.split("\n").find((line) => line.startsWith("| D197 |"));
+  assert.ok(
+    d197?.includes(`"${SELF_HOSTED.licence.support}."`),
+    "D197 does not quote the support line",
+  );
+  const mdx = readFileSync(
+    new URL("../../content/docs/docs/platform/plans-and-licence.mdx", import.meta.url),
+    "utf8",
+  );
+  assert.ok(
+    mdx.includes("email support from the cetra team, with a reply within 2 business days"),
+    "plans-and-licence.mdx does not state the licence support",
+  );
+});
