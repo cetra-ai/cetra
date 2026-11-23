@@ -496,20 +496,30 @@ pub(crate) async fn save_overview(
     }
 }
 
-/// Deletes the project's Overview, so the preset shows again. Returns whether a row was deleted.
+/// Deletes the project's Overview, so the preset shows again. Returns the deleted Overview's id,
+/// or `None` when the project had none.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError::Db`] when the delete fails.
+/// Returns [`MetaError`] when the delete fails or the id it returns is not a UUID.
 pub(crate) async fn reset_overview(
     conn: &mut SqliteConnection,
     project: ProjectId,
-) -> Result<bool, MetaError> {
-    let result = sqlx::query("DELETE FROM dashboards WHERE project_id = ? AND kind = 'overview'")
-        .bind(project.to_string())
-        .execute(&mut *conn)
-        .await?;
-    Ok(result.rows_affected() > 0)
+) -> Result<Option<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "DELETE FROM dashboards WHERE project_id = ? AND kind = 'overview' RETURNING id",
+    )
+    .bind(project.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    ids.first()
+        .map(|id| {
+            Uuid::parse_str(id).map_err(|_| MetaError::Corrupt {
+                table: "dashboards",
+                column: "id",
+            })
+        })
+        .transpose()
 }
 
 impl From<DashboardInfo> for DashboardSummary {

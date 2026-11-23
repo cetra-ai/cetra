@@ -1598,6 +1598,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn budget_period_resume_is_recorded_by_system() {
+        let (app, seeded) = seeded_app(16).await;
+        let evaluator = check(&app, &seeded).await;
+        let turned = rule(&app, &seeded, evaluator).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE online_rules SET budget_usd = 5, budget_period = 'day', \
+                         paused_reason = 'budget', paused_at = 0 WHERE id = ?",
+                    )
+                    .bind(turned.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("pause the rule on a turned budget day");
+
+        assert_eq!(budget_once(&app.state, now).await.expect("budget"), 1);
+
+        let rows: Vec<(String, Option<String>, Option<String>, String, String, String)> =
+            sqlx::query_as(
+                "SELECT actor_kind, org_id, project_id, target_kind, target_id, details \
+                 FROM audit_events WHERE action = 'online_rule.resumed'",
+            )
+            .fetch_all(app.state.meta.reader())
+            .await
+            .expect("read the audit rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (actor_kind, org_id, project_id, target_kind, target_id, details) = &rows[0];
+        assert_eq!(actor_kind, "system");
+        assert_eq!(project_id.as_deref(), Some(seeded.project.id.to_string().as_str()));
+        let project_org: String = sqlx::query_scalar("SELECT org_id FROM projects WHERE id = ?")
+            .bind(seeded.project.id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("read the project's org");
+        assert_eq!(org_id.as_deref(), Some(project_org.as_str()));
+        assert_eq!(target_kind, "online_rule");
+        assert_eq!(target_id, &turned.to_string());
+        let details: Value = serde_json::from_str(details).expect("details are JSON");
+        assert_eq!(details, json!({"reason": "budget period"}));
+    }
+
+    #[tokio::test]
     async fn recover_requeues_and_fails_crash_loops() {
         let (app, seeded) = seeded_app(16).await;
         let trace_id = trace(0x1c);

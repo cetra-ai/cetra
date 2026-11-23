@@ -21,7 +21,7 @@ use crate::api::connections::{
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
     TestLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
-use crate::audit::catalog::LlmConnectionAction;
+use crate::audit::catalog::{LlmConnectionAction, OnlineRuleAction};
 use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
@@ -368,6 +368,7 @@ async fn update_llm_connection(
                 // sources alike (D-I-5, D-I-14).
                 connections::set_connection_status(conn, id, "ok", None, now).await?;
                 let resumed = rules::resume_connection_pauses(conn, id, now).await?;
+                record_connection_resumes(conn, &ctx, &resumed, now).await?;
                 let sources = issues::resume_connection_pauses(conn, id).await?;
                 let using = rules::rule_ids_of_connection(conn, id).await?;
                 Ok(Some((row, resumed, using, sources)))
@@ -441,6 +442,7 @@ async fn test_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<TestLlmConnectionRequest>,
 ) -> Result<error::Json<LlmConnectionTestResult>, ApiError> {
@@ -463,7 +465,7 @@ async fn test_connection(
         .filter(|model| !model.is_empty())
         .map(str::to_owned)
     {
-        return test_embedding(&state, access.org.id, user.id, row, embedding_model)
+        return test_embedding(&state, access.org.id, user.id, row, embedding_model, &ctx)
             .await
             .map(error::Json);
     }
@@ -572,6 +574,7 @@ async fn test_connection(
             default_model,
             default_model,
             now,
+            &ctx,
         )
         .await
         .map(|(rules, sources)| {
@@ -609,6 +612,34 @@ async fn test_connection(
     Ok(error::Json(result))
 }
 
+/// Records each online rule that a connection write resumed: one `online_rule.resumed` row per
+/// rule, reason `connection`, in the write's transaction (D-EA-21). A rule with no project is
+/// skipped.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a lookup or the insert fails; the caller's transaction then rolls back.
+async fn record_connection_resumes(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &audit::Ctx,
+    resumed: &[Uuid],
+    now: i64,
+) -> Result<(), MetaError> {
+    for &rule in resumed {
+        let Some((org, project)) = audit::scope_of_rule(conn, rule).await? else {
+            continue;
+        };
+        let event = Event::new(OnlineRuleAction::Resumed {
+            reason: "connection",
+        })
+        .org(org)
+        .project(project)
+        .target(TargetKind::OnlineRule, rule);
+        audit::record(conn, ctx, event, now).await?;
+    }
+    Ok(())
+}
+
 /// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
 /// write: the rules' when `resume_rules`, the issue sources' when `resume_sources`. Returns the
 /// resumed rules and sources. A test on a typed chat model passes neither: it proves the key works,
@@ -625,7 +656,9 @@ async fn recover_connection(
     resume_rules: bool,
     resume_sources: bool,
     now: i64,
+    ctx: &audit::Ctx,
 ) -> Result<(Vec<Uuid>, Vec<Uuid>), MetaError> {
+    let ctx = ctx.clone();
     state
         .meta
         .write(move |conn| {
@@ -638,6 +671,7 @@ async fn recover_connection(
                 } else {
                     Vec::new()
                 };
+                record_connection_resumes(conn, &ctx, &rules, now).await?;
                 let sources = if resume_sources {
                     issues::resume_connection_pauses(conn, id).await?
                 } else {
@@ -664,6 +698,7 @@ async fn test_embedding(
     user_id: Uuid,
     row: ConnectionRow,
     model: String,
+    ctx: &audit::Ctx,
 ) -> Result<LlmConnectionTestResult, ApiError> {
     let id = row.id;
     if row.adapter == LlmAdapter::Anthropic.as_str() {
@@ -734,7 +769,7 @@ async fn test_embedding(
     // lose the result.
     if result.ok {
         let set_ok = row.status != "ok";
-        match recover_connection(state, id, set_ok, false, true, now).await {
+        match recover_connection(state, id, set_ok, false, true, now, ctx).await {
             Ok((rules, sources)) => {
                 after_connection_write(state, id, &rules, &rules, &sources, "embedding test");
             }
@@ -1585,6 +1620,43 @@ mod tests {
             paused_reason_of(&app, by_errors).await.as_deref(),
             Some(PAUSE_ERRORS)
         );
+    }
+
+    #[tokio::test]
+    async fn a_key_change_records_resumed_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Resumed", "adapter": "openai", "api_key": "sk-test-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        let (by_connection, _by_errors) = paused_rules(&app, &seeded, id).await;
+
+        let patched = patch(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"api_key": "sk-new-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT details, target_kind, target_id FROM audit_events \
+             WHERE action = 'online_rule.resumed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (details, target_kind, target_id) = &rows[0];
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(details["reason"], json!("connection"));
+        assert_eq!(target_kind, "online_rule");
+        assert_eq!(target_id, &by_connection.to_string());
     }
 
     #[tokio::test(flavor = "multi_thread")]

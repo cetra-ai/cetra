@@ -616,13 +616,11 @@ async fn reset_overview(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                let deleted = store::reset_overview(conn, project).await?;
-                if deleted {
-                    // The overview's id is not returned by the store, so the record names the
-                    // project only (no target).
+                if let Some(overview) = store::reset_overview(conn, project).await? {
                     let event = Event::new(DashboardAction::OverviewReset)
                         .org(org)
-                        .project(project);
+                        .project(project)
+                        .target(TargetKind::Dashboard, overview);
                     audit::record(conn, &ctx, event, now).await?;
                 }
                 Ok(())

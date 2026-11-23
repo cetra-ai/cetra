@@ -3388,6 +3388,34 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_audit_write_refuses_the_dataset_export() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_ok(&app, &seeded, "faq").await;
+        let dataset = created["id"].as_str().unwrap().to_owned();
+        add_items(&app, &dataset, vec![json!({ "text": "canary-row" })]).await;
+        // The record cannot be written, so the export must not start.
+        app.state
+            .meta
+            .write(|conn| {
+                Box::pin(async move {
+                    sqlx::query("DROP TABLE audit_events")
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(crate::meta::MetaError::from)?;
+                    Ok::<_, crate::meta::MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = get(&app, &seeded, "faq/export").await;
+        assert_eq!(response.status, 500);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(!body.contains("canary-row"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn other_projects_datasets_are_404() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;

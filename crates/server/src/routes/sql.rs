@@ -1368,6 +1368,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_audit_write_refuses_the_sql_run() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        // The record cannot be written, so the query must not run.
+        app.state
+            .meta
+            .write(|conn| {
+                Box::pin(async move {
+                    sqlx::query("DROP TABLE audit_events")
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(crate::meta::MetaError::from)?;
+                    Ok::<_, crate::meta::MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = post_as(
+            &app,
+            seeded.project.id,
+            ("cookie", &seeded.cookie),
+            None,
+            &json!({"query": "SELECT 'canary-row' AS one"}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(!body.contains("canary-row"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn demo_visitor_sql_is_not_recorded() {
         let w = world_with(|_demo| {}).await;
         let visitor = signed_in(&w.app, "visitor@example.com", false).await;

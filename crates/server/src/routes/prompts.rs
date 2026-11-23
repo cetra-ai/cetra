@@ -552,17 +552,30 @@ async fn create_prompt(
         description,
         tags,
     };
+    // The labels the request set, each moved to the version it creates (plan M2, D-EA-21).
+    let label_names = version.labels.clone();
     let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 let written = create_tx(conn, project, new, version, may, now).await?;
-                if let Written::Done((prompt, _)) = &written {
+                if let Written::Done((prompt, created)) = &written {
                     let event = Event::new(PromptAction::Created)
                         .org(org)
                         .project(project)
                         .target(TargetKind::Prompt, prompt.id);
                     audit::record(conn, &ctx, event, now).await?;
+                    let version = u32::try_from(created.version).unwrap_or(u32::MAX);
+                    for label in &label_names {
+                        let event = Event::new(PromptAction::LabelSet {
+                            label: label.clone(),
+                            version,
+                        })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, prompt.id);
+                        audit::record(conn, &ctx, event, now).await?;
+                    }
                 }
                 Ok(written)
             })
@@ -868,6 +881,8 @@ async fn create_version(
     let org = access.project.org_id;
     let now = state.clock.now_ns();
     let may = may_touch_protected(&principal, &access);
+    // The labels the request set, each moved to the version it creates (plan M2, D-EA-21).
+    let label_names = version.labels.clone();
     let outcome = state
         .meta
         .write(move |conn| {
@@ -876,13 +891,22 @@ async fn create_version(
                     add_version_tx(conn, project, &prompt, validated_for, version, may, now)
                         .await?;
                 if let Written::Done((row, added)) = &written {
-                    let event = Event::new(PromptAction::VersionCreated {
-                        version: u32::try_from(added.version).unwrap_or(u32::MAX),
-                    })
-                    .org(org)
-                    .project(project)
-                    .target(TargetKind::Prompt, row.id);
+                    let version = u32::try_from(added.version).unwrap_or(u32::MAX);
+                    let event = Event::new(PromptAction::VersionCreated { version })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, row.id);
                     audit::record(conn, &ctx, event, now).await?;
+                    for label in &label_names {
+                        let event = Event::new(PromptAction::LabelSet {
+                            label: label.clone(),
+                            version,
+                        })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Prompt, row.id);
+                        audit::record(conn, &ctx, event, now).await?;
+                    }
                 }
                 Ok(written)
             })
@@ -2111,6 +2135,54 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let details: Value = serde_json::from_str(&rows[0].1).unwrap();
         assert_eq!(details, json!({"label": "staging", "version": 1}));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_with_labels_records_label_sets() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let auth = ("cookie", seeded.cookie.as_str());
+        let list = base(&seeded);
+        let created = call(
+            &app,
+            Method::POST,
+            &list,
+            auth,
+            Some(text_body("cwl", &["staging", "canary"])),
+        )
+        .await;
+        assert_eq!(created.status, StatusCode::CREATED);
+        let added = call(
+            &app,
+            Method::POST,
+            &format!("{list}/cwl/versions"),
+            auth,
+            Some(json!({"template": "Hi {{ name }}", "labels": ["staging"]})),
+        )
+        .await;
+        assert_eq!(added.status, StatusCode::CREATED);
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = 'prompt.label_set' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details: Vec<Value> = rows
+            .iter()
+            .map(|(_, details)| serde_json::from_str(details).unwrap())
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                json!({"label": "staging", "version": 1}),
+                json!({"label": "canary", "version": 1}),
+                json!({"label": "staging", "version": 2}),
+            ]
+        );
+        assert_eq!(rows[0].0, rows[1].0);
+        assert_eq!(rows[0].0, rows[2].0);
     }
 
     #[tokio::test(flavor = "multi_thread")]
