@@ -12,7 +12,7 @@ The design is `docs/website/00-design.md`. It has nine milestones, M1–M9, each
 | M6 Benchmarks | not planned: waits for the benchmark | — |
 | M7 Launch | [`07-m7-launch.md`](07-m7-launch.md) | done (L1–L2) |
 | M8 Main sync | [`08-m8-main-sync.md`](08-m8-main-sync.md) | done (S1–S7) |
-| M9 Pricing feature table | [`09-m9-pricing-matrix.md`](09-m9-pricing-matrix.md) | planned (X1–X2) |
+| M9 Pricing feature table | [`09-m9-pricing-matrix.md`](09-m9-pricing-matrix.md) | done (X1–X2) |
 
 ## Branches
 

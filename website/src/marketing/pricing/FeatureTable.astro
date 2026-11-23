@@ -224,6 +224,10 @@ const { id, caption, columns, groups, picker = false } = Astro.props;
     .matrix[data-picker] .feature-table thead th:first-child {
       width: 60%;
     }
+    /* Two value columns without a picker: half for the labels, a quarter for each value. */
+    .matrix:not([data-picker]) .feature-table thead th:first-child {
+      width: 50%;
+    }
     .feature-table tbody th {
       position: static;
     }
