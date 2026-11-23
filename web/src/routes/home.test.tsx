@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -10,6 +10,7 @@ import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import entitlementsFixture from "../../../fixtures/api/static/org-entitlements.json";
 import projectsFixture from "../../../fixtures/api/static/projects.json";
+import activityFixture from "../../../fixtures/api/static/projects-activity.json";
 
 const USER = {
   id: "01900000-0000-7000-8000-000000000100",
@@ -41,7 +42,8 @@ it("redirects a member to their first org and lists its projects", async () => {
 });
 
 it("shows role, retention and slug", async () => {
-  await renderApp("/");
+  const { user } = await renderApp("/");
+  await user.click(screen.getByRole("radio", { name: "Table" }));
 
   const support = screen.getByRole("row", { name: /Support bot/ });
   expect(support).toHaveTextContent("Owner");
@@ -51,6 +53,183 @@ it("shows role, retention and slug", async () => {
   const playground = screen.getByRole("row", { name: /Playground/ });
   expect(playground).toHaveTextContent("Forever");
   expect(playground).toHaveTextContent("playground");
+});
+
+/** The value shown under a card's or a table's label, such as "Traces". */
+function cell(card: HTMLElement, label: string) {
+  const value = within(card).getByText(label).nextElementSibling;
+  if (!(value instanceof HTMLElement)) {
+    throw new Error(`no value under ${label}`);
+  }
+  return value;
+}
+
+it("shows a card per project with its last 24 hours", async () => {
+  await renderApp("/acme");
+
+  const support = screen.getByRole("article", { name: "Support bot" });
+  expect(support).toHaveTextContent("Owner");
+  expect(support).toHaveTextContent("support-bot");
+  await waitFor(() => expect(cell(support, "Traces")).toHaveTextContent("42"));
+  expect(cell(support, "Error rate")).toHaveTextContent("7.1%");
+  expect(cell(support, "Cost")).toHaveTextContent("$1.23");
+  expect(
+    within(support).getByRole("img", { name: "Traces in the last 24 hours" }),
+  ).toBeInTheDocument();
+
+  const playground = screen.getByRole("article", { name: "Playground" });
+  expect(within(playground).getByText("No traces in the last 24 hours")).toBeInTheDocument();
+  expect(cell(playground, "Traces")).toHaveTextContent("0");
+  expect(cell(playground, "Cost")).toHaveTextContent("$0");
+  expect(cell(playground, "Last trace")).toHaveTextContent("—");
+});
+
+it("opens the project when its card body is clicked", async () => {
+  const { router, user } = await renderApp("/acme");
+
+  await user.click(
+    within(screen.getByRole("article", { name: "Support bot" })).getByText("Traces"),
+  );
+  await waitFor(() => expect(router.state.location.pathname).toBe("/acme/support-bot/traces"));
+});
+
+it("shows a dash for an unknown last trace", async () => {
+  const first = activityFixture.data[0];
+  if (first === undefined) {
+    throw new Error("the activity fixture has no first project");
+  }
+  const { last_ingest_at: _lastIngest, ...withoutTime } = first;
+  server.use(
+    http.get("/api/v1/orgs/:org/projects/activity", () =>
+      HttpResponse.json({ ...activityFixture, data: [withoutTime, activityFixture.data[1]] }),
+    ),
+  );
+
+  await renderApp("/acme");
+
+  const support = screen.getByRole("article", { name: "Support bot" });
+  await waitFor(() => expect(cell(support, "Traces")).toHaveTextContent("42"));
+  expect(cell(support, "Last trace")).toHaveTextContent("—");
+});
+
+it("switches to the table and remembers it", async () => {
+  const { user } = await renderApp("/acme");
+
+  await user.click(screen.getByRole("radio", { name: "Table" }));
+  const table = screen.getByRole("table", { name: "Projects" });
+  for (const column of ["Traces", "Error rate", "Cost", "Last trace"]) {
+    expect(within(table).getByRole("columnheader", { name: column })).toBeInTheDocument();
+  }
+  expect(localStorage.getItem("cetra.org_home_view")).toBe("table");
+
+  cleanup();
+  await renderApp("/acme");
+  expect(screen.getByRole("table", { name: "Projects" })).toBeInTheDocument();
+});
+
+it("filters projects by name or slug in both views", async () => {
+  const { user } = await renderApp("/acme");
+  const search = screen.getByRole("textbox", { name: "Search projects" });
+
+  await user.type(search, "play");
+  expect(screen.getByRole("article", { name: "Playground" })).toBeInTheDocument();
+  expect(screen.queryByRole("article", { name: "Support bot" })).not.toBeInTheDocument();
+
+  await user.clear(search);
+  await user.type(search, "SUPPORT-B");
+  expect(screen.getByRole("article", { name: "Support bot" })).toBeInTheDocument();
+  expect(screen.queryByRole("article", { name: "Playground" })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole("radio", { name: "Table" }));
+  const table = screen.getByRole("table", { name: "Projects" });
+  expect(within(table).getByRole("row", { name: /Support bot/ })).toBeInTheDocument();
+  expect(within(table).queryByRole("row", { name: /Playground/ })).not.toBeInTheDocument();
+
+  await user.clear(search);
+  await user.type(search, "zzz");
+  expect(screen.getByText("No projects match the search.")).toBeInTheDocument();
+});
+
+it("hides search and switch when there are no projects", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/projects", () =>
+      HttpResponse.json({ data: [], next_cursor: null }),
+    ),
+  );
+
+  await renderApp("/acme");
+  expect(screen.getByText("No projects yet")).toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Search projects" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("radiogroup", { name: "View" })).not.toBeInTheDocument();
+});
+
+it("shows dashes when the activity request fails", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/projects/activity", () => problemResponse(500, "internal")),
+  );
+
+  await renderApp("/acme");
+  expect(await screen.findAllByText("Activity unavailable")).toHaveLength(2);
+  expect(screen.getByRole("article", { name: "Support bot" })).toBeInTheDocument();
+  expect(screen.getByRole("article", { name: "Playground" })).toBeInTheDocument();
+});
+
+it("asks the activity of each loaded page", async () => {
+  const first = project("First", "first", 30);
+  const second = project("Second", "second");
+  const asked: (string | null)[] = [];
+  server.use(
+    http.get("/api/v1/orgs/:org/projects", ({ request }) => {
+      const url = new URL(request.url);
+      if (url.searchParams.get("cursor") === "c2") {
+        return HttpResponse.json({ data: [second], next_cursor: null });
+      }
+      return HttpResponse.json({ data: [first], next_cursor: "c2" });
+    }),
+    http.get("/api/v1/orgs/:org/projects/activity", ({ request }) => {
+      asked.push(new URL(request.url).searchParams.get("ids"));
+      return HttpResponse.json(activityFixture);
+    }),
+  );
+
+  const { user } = await renderApp("/acme");
+  await user.click(screen.getByRole("button", { name: "Load more" }));
+  await screen.findByText("Second");
+  await waitFor(() => expect(asked).toHaveLength(2));
+  expect(asked[0]).toContain(first.id);
+  expect(asked[1]).toContain(second.id);
+});
+
+it("shows the org usage strip", async () => {
+  await renderApp("/acme");
+
+  const strip = await screen.findByRole("region", { name: "Usage this month" });
+  expect(within(strip).getByText("1,240 of 200,000 units · 1%")).toBeInTheDocument();
+  expect(within(strip).getByRole("img", { name: "Daily units" })).toBeInTheDocument();
+  expect(within(strip).getByRole("link", { name: "Plan" })).toHaveAttribute(
+    "href",
+    "/acme/settings/plan",
+  );
+});
+
+it("keeps the page when usage fails", async () => {
+  server.use(http.get("/api/v1/orgs/:org/usage", () => problemResponse(500, "internal")));
+
+  await renderApp("/acme");
+  expect(await screen.findByRole("article", { name: "Support bot" })).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByRole("region", { name: "Usage this month" })).not.toBeInTheDocument(),
+  );
+});
+
+it("keeps the page when entitlements fail", async () => {
+  server.use(http.get("/api/v1/orgs/:org/entitlements", () => problemResponse(500, "internal")));
+
+  await renderApp("/acme");
+  expect(await screen.findByRole("article", { name: "Support bot" })).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByRole("region", { name: "Usage this month" })).not.toBeInTheDocument(),
+  );
 });
 
 it("loads the next project page", async () => {

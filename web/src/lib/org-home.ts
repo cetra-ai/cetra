@@ -24,11 +24,9 @@ function isProjectView(value: string | null): value is ProjectView {
 function readStored(): ProjectView {
   try {
     const value = localStorage.getItem(PROJECT_VIEW_STORAGE_KEY);
-    if (isProjectView(value)) {
-      return value;
-    }
-    return fallback ?? DEFAULT_PROJECT_VIEW;
+    return isProjectView(value) ? value : DEFAULT_PROJECT_VIEW;
   } catch {
+    // Only when storage throws (private mode) does the in-memory choice stand in for it.
     return fallback ?? DEFAULT_PROJECT_VIEW;
   }
 }
