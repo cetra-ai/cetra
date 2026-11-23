@@ -151,8 +151,9 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genai_log_events: Option<u64>,
     /// When the server last committed spans sent over OTLP to this project (D-C-20). Kept in
-    /// memory: absent until the first batch after the server starts. Present only when one
-    /// project is read.
+    /// memory: absent until the first batch after the server starts. Present when one project
+    /// is read; lists omit it. `GET /orgs/{org}/projects/activity` also returns it per project
+    /// (D-C-27).
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
