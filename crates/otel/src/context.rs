@@ -41,9 +41,16 @@ const PROVIDER: &[Source] = &[
 /// Vercel v7 `context` call option, recorded under `ai.settings.`.
 const VERCEL_CONTEXT: &str = "ai.settings.context.";
 
-/// Values of `gen_ai.system` that name a framework, never a provider (D-B1-8,
-/// D-IN-15). Compared after lowercasing. Sorted (test `framework_names_are_sorted`).
-const FRAMEWORK_NAMES: &[&str] = &["autogen", "gcp.vertex.agent", "spring_ai"];
+/// Values of `gen_ai.provider.name` and `gen_ai.system` that name a framework,
+/// never a provider (D-B1-8, D-IN-15, D-IN-23). Compared after lowercasing.
+/// Sorted (test `framework_names_are_sorted`).
+const FRAMEWORK_NAMES: &[&str] = &[
+    "autogen",
+    "gcp.vertex.agent",
+    "microsoft.agent_framework",
+    "spring_ai",
+    "strands-agents",
+];
 
 /// Keys that carry the endpoint, in order (D-IN-2). Read with `get`, never consumed.
 const HOST_KEYS: &[&str] = &["server.address", "url.full", "gen_ai.openai.api_base"];
@@ -134,6 +141,7 @@ const SESSION_ID: &[Source] = &[
         Convention::Laminar,
     ),
     span("gcp.vertex.agent.session_id", Convention::GoogleAdk),
+    span("mirascope.ops.session.id", Convention::Genai),
 ];
 
 const USER_ID: &[Source] = &[
@@ -239,17 +247,21 @@ pub(crate) struct ContextFields {
 
 /// Fill the scalar and context columns. Rule 3: these columns are filled for every kind.
 ///
-/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
-/// and `_conventions` the conventions detected on it. No rule reads them yet.
+/// `scope_name` is the span's instrumentation scope name (`""` when absent);
+/// the Mirascope model-prefix rule is gated on it. `_conventions` is the
+/// conventions detected on the span; no rule reads it yet.
 pub(crate) fn fill(
     bag: &mut AttrBag<'_>,
     resource: &ResourceView<'_>,
-    _scope_name: &str,
+    scope_name: &str,
     _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> ContextFields {
     let request_model = string_field(bag, resource, REQUEST_MODEL);
     let response_model = string_field(bag, resource, RESPONSE_MODEL);
+    // Stripped before `provider` consumes `gen_ai.provider.name`.
+    let request_model = mirascope_model(bag, scope_name, request_model);
+    let response_model = mirascope_model(bag, scope_name, response_model);
     let provider = provider(bag, resource);
     let operation = string_field(bag, resource, OPERATION);
     let request_params = request_params(bag, warnings);
@@ -315,25 +327,56 @@ fn prompt(bag: &mut AttrBag<'_>, warnings: &mut Warnings) -> (Option<String>, Op
     (Some(name), version)
 }
 
-/// Rule 12 over [`PROVIDER`]. A `gen_ai.system` value that names a framework
-/// ([`FRAMEWORK_NAMES`], D-IN-15, D-B1-8) is skipped and left unread, so the
-/// next source or the price table decides.
+/// Rule 12 over [`PROVIDER`]. A `gen_ai.provider.name` or `gen_ai.system` value
+/// that names a framework ([`FRAMEWORK_NAMES`], D-IN-15, D-B1-8, D-IN-23) is
+/// skipped and left unread, so the next source or the price table decides.
 fn provider(bag: &mut AttrBag<'_>, resource: &ResourceView<'_>) -> Option<String> {
     let sources: Vec<Source> = PROVIDER
         .iter()
         .copied()
-        .filter(|source| {
-            source.key != "gen_ai.system"
-                || bag.get(source.key).and_then(as_str).is_none_or(|value| {
-                    FRAMEWORK_NAMES
-                        .binary_search(&value.to_lowercase().as_str())
-                        .is_err()
-                })
-        })
+        .filter(|source| !names_framework(bag, source.key))
         .collect();
     first_string(bag, resource, &sources).map(|resolved| {
         canonical_provider(&resolved.value, resolved.source.key == "ai.model.provider")
     })
+}
+
+/// Whether `key` is a framework-naming provider key whose value is in
+/// [`FRAMEWORK_NAMES`], compared after lowercasing.
+fn names_framework(bag: &AttrBag<'_>, key: &str) -> bool {
+    matches!(key, "gen_ai.provider.name" | "gen_ai.system")
+        && bag.get(key).and_then(as_str).is_some_and(|value| {
+            FRAMEWORK_NAMES
+                .binary_search(&value.to_lowercase().as_str())
+                .is_ok()
+        })
+}
+
+/// D-IN-23 item 6: on Mirascope spans, a model written `<provider>/<model>` is
+/// stored without that prefix, so cost matches the bare name. The provider is
+/// the raw lowercased `gen_ai.provider.name`, read before rule 12 aliases it.
+/// Nothing is stripped on another scope, or when the prefix differs from the
+/// provider (OpenRouter's `vendor/model`).
+fn mirascope_model(bag: &AttrBag<'_>, scope_name: &str, model: Option<String>) -> Option<String> {
+    let model = model?;
+    if !scope_name.starts_with("mirascope") {
+        return Some(model);
+    }
+    let Some(provider) = bag
+        .get("gen_ai.provider.name")
+        .and_then(as_str)
+        .filter(|provider| !provider.is_empty())
+    else {
+        return Some(model);
+    };
+    let provider = provider.to_lowercase();
+    let bare = model
+        .strip_prefix(provider.as_str())
+        .and_then(|rest| rest.strip_prefix('/'));
+    match bare {
+        Some(bare) if !bare.is_empty() => Some(bare.to_owned()),
+        _ => Some(model),
+    }
 }
 
 /// The provider after the endpoint rule (D-IN-2, spec 02 § Provider from the endpoint).
@@ -425,7 +468,7 @@ fn canonical_provider(value: &str, from_vercel: bool) -> String {
 /// well-known list. `google` is `gcp.gen_ai` (any Google GenAI endpoint), not one platform.
 fn exact_alias(value: &str) -> Option<&'static str> {
     Some(match value {
-        "openai.chat" | "openai.responses" => "openai",
+        "openai.chat" | "openai.responses" | "openai:completions" | "openai:responses" => "openai",
         "anthropic.messages" => "anthropic",
         "xai" => "x_ai",
         "gemini" => "gcp.gemini",
@@ -807,6 +850,14 @@ mod tests {
         (fields, bag, warnings)
     }
 
+    fn filled_in_scope<'a>(scope: &str, attrs: &'a [KeyValue]) -> (ContextFields, AttrBag<'a>) {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        let view = ResourceView::new(&[]);
+        let fields = fill(&mut bag, &view, scope, &[], &mut warnings);
+        (fields, bag)
+    }
+
     #[test]
     fn prompt_from_cetra() {
         let attrs = [
@@ -970,6 +1021,41 @@ mod tests {
         let (fields, bag) = filled(&attrs, &[]);
         assert_eq!(fields.provider.as_deref(), Some("openai"));
         assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+    }
+
+    #[test]
+    fn framework_names_in_gen_ai_provider_name_are_skipped_too() {
+        for name in [
+            "strands-agents",
+            "microsoft.agent_framework",
+            "Strands-Agents",
+        ] {
+            let attrs = [string_attr("gen_ai.provider.name", name)];
+            let (fields, bag) = filled(&attrs, &[]);
+            assert_eq!(fields.provider, None, "{name}");
+            assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        }
+        // Left unread, so the next source decides.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "strands-agents"),
+            string_attr("gen_ai.system", "gcp.vertex.agent"),
+            string_attr("llm.provider", "openai"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Unread));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
+        assert_eq!(bag.state("llm.provider"), Some(Use::Consumed));
+
+        // A framework name on `gen_ai.system` behind a real provider on
+        // `gen_ai.provider.name` keeps the provider.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.system", "microsoft.agent_framework"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
     }
 
     /// The endpoint rule over one span: the attributes, its kind and the provider
@@ -1152,6 +1238,75 @@ mod tests {
     }
 
     #[test]
+    fn mirascope_models_lose_their_provider_prefix_under_its_scope() {
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+            string_attr("gen_ai.response.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.response_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // The registered provider id is aliased for the provider column and
+        // stripped raw from the model.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai:completions"),
+            string_attr("gen_ai.request.model", "openai:completions/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(fields.provider.as_deref(), Some("openai"));
+
+        // A raw provider spelled with capitals still strips.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "OpenAI"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.ops", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("gpt-4o-mini"));
+
+        // Without the scope the model is stored as read.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+        let (fields, _) = filled_in_scope("other.framework", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+
+        // No strip when the prefix differs from the provider, or there is no
+        // provider, or the model has no bare name after the slash.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "groq"),
+            string_attr("gen_ai.request.model", "openai/gpt-oss-120b"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-oss-120b"));
+
+        let attrs = [string_attr("gen_ai.request.model", "openai/gpt-4o-mini")];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/gpt-4o-mini"));
+
+        // An empty provider value is no provider.
+        let attrs = [
+            string_attr("gen_ai.provider.name", ""),
+            string_attr("gen_ai.request.model", "/gpt-4o-mini"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("/gpt-4o-mini"));
+
+        let attrs = [
+            string_attr("gen_ai.provider.name", "openai"),
+            string_attr("gen_ai.request.model", "openai/"),
+        ];
+        let (fields, _) = filled_in_scope("mirascope.llm", &attrs);
+        assert_eq!(fields.request_model.as_deref(), Some("openai/"));
+    }
+
+    #[test]
     fn operation_is_the_gen_ai_name() {
         let attrs = [string_attr("gen_ai.operation.name", "retrieval")];
         let (fields, bag) = filled(&attrs, &[]);
@@ -1175,6 +1330,9 @@ mod tests {
         let cases = [
             ("gen_ai.provider.name", "openai.chat", "openai"),
             ("gen_ai.provider.name", "openai.responses", "openai"),
+            // Mirascope's registered provider ids.
+            ("gen_ai.provider.name", "openai:completions", "openai"),
+            ("gen_ai.provider.name", "openai:responses", "openai"),
             ("gen_ai.provider.name", "anthropic.messages", "anthropic"),
             ("gen_ai.provider.name", "xai", "x_ai"),
             ("gen_ai.provider.name", "XAI", "x_ai"),
@@ -1294,6 +1452,20 @@ mod tests {
 
         let (fields, _) = filled(&[string_attr("gen_ai.conversation.id", "conv")], &[]);
         assert_eq!(fields.session_id.as_deref(), Some("conv"));
+
+        // Mirascope's session is the last source, on every Mirascope span.
+        let attrs = [
+            string_attr("langfuse.session.id", "langfuse"),
+            string_attr("mirascope.ops.session.id", "sess-1"),
+        ];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.session_id.as_deref(), Some("langfuse"));
+        assert_eq!(bag.state("mirascope.ops.session.id"), Some(Use::Unread));
+
+        let attrs = [string_attr("mirascope.ops.session.id", "sess-1")];
+        let (fields, bag) = filled(&attrs, &[]);
+        assert_eq!(fields.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(bag.state("mirascope.ops.session.id"), Some(Use::Consumed));
     }
 
     #[test]

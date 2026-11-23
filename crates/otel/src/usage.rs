@@ -496,13 +496,14 @@ fn gemini_usage(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<GeminiUsag
 /// `warnings` is not in the plan's sketch; a non-numeric candidate records
 /// `invalid_number` and is skipped, matching rule 20.
 ///
-/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
-/// and `_conventions` the conventions detected on it. No row reads them yet.
+/// `scope_name` is the span's instrumentation scope name (`""` when absent);
+/// the Strands row is gated on it. `_conventions` is the conventions detected
+/// on the span; no row reads it yet.
 pub(crate) fn ttft(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     start_time: i64,
-    _scope_name: &str,
+    scope_name: &str,
     _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Option<i64> {
@@ -525,6 +526,17 @@ pub(crate) fn ttft(
     ) {
         return Some(nanos);
     }
+    // Strands writes milliseconds here (D-IN-5); no other emitter was seen.
+    if scope_name.starts_with("strands")
+        && let Some(nanos) = take(
+            bag,
+            "gen_ai.server.time_to_first_token",
+            warnings,
+            read_millis,
+        )
+    {
+        return Some(nanos);
+    }
     if let Some(nanos) = take(bag, "ai.response.msToFirstChunk", warnings, read_millis) {
         return Some(nanos);
     }
@@ -537,6 +549,9 @@ pub(crate) fn ttft(
         start_time,
         warnings,
     ) {
+        return Some(nanos);
+    }
+    if let Some(nanos) = take_instant(bag, "mastra.completion_start_time", start_time, warnings) {
         return Some(nanos);
     }
     event_ttft(events, start_time)
@@ -1330,6 +1345,72 @@ mod tests {
             bag.state("langfuse.observation.completion_start_time"),
             Some(Use::Unread)
         );
+        assert_eq!(warnings.to_attribute(), None);
+    }
+
+    #[test]
+    fn strands_time_to_first_token_is_milliseconds_under_its_scope() {
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [int_attr("gen_ai.server.time_to_first_token", 350)];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(
+                &mut bag,
+                &[],
+                start,
+                "strands.telemetry.tracer",
+                &[],
+                &mut warnings
+            ),
+            Some(350_000_000)
+        );
+        assert_eq!(
+            bag.state("gen_ai.server.time_to_first_token"),
+            Some(Use::Consumed)
+        );
+
+        // Another scope leaves the key unread.
+        for scope in ["", "semantic_kernel.utils.telemetry.agent_diagnostics"] {
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            assert_eq!(
+                ttft(&mut bag, &[], start, scope, &[], &mut warnings),
+                None,
+                "{scope}"
+            );
+            assert_eq!(
+                bag.state("gen_ai.server.time_to_first_token"),
+                Some(Use::Unread)
+            );
+        }
+    }
+
+    #[test]
+    fn mastra_completion_start_time_is_an_instant() {
+        let start = 1_767_225_600_000_000_000;
+        let attrs = [string_attr(
+            "mastra.completion_start_time",
+            "2026-01-01T00:00:00.250000000Z",
+        )];
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
+        assert_eq!(
+            bag.state("mastra.completion_start_time"),
+            Some(Use::Consumed)
+        );
+
+        // An instant before the span start gives no ttft and stays unread.
+        let attrs = [string_attr(
+            "mastra.completion_start_time",
+            "2025-12-31T23:59:59.750000000Z",
+        )];
+        let mut bag = AttrBag::new(&attrs, &mut warnings);
+        assert_eq!(ttft(&mut bag, &[], start, "", &[], &mut warnings), None);
+        assert_eq!(bag.state("mastra.completion_start_time"), Some(Use::Unread));
         assert_eq!(warnings.to_attribute(), None);
     }
 
