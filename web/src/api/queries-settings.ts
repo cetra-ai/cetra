@@ -86,3 +86,7 @@ export function orgSsoQuery(org: string) {
 export function orgScimQuery(org: string) {
   return $api.queryOptions("get", "/api/v1/orgs/{org}/scim", orgInit(org));
 }
+
+export function orgScimGroupsQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/scim/groups", orgInit(org));
+}

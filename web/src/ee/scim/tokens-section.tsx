@@ -20,8 +20,19 @@ const MAX_TOKENS = 2;
 
 type Token = Schema<"ScimToken">;
 
-/** The org's SCIM bearer tokens: create (the secret is shown once) and revoke. */
-export function TokensSection({ org, tokens }: { org: string; tokens: Token[] }) {
+/**
+ * The org's SCIM bearer tokens: create (the secret is shown once) and revoke. `revokeOnly` (a
+ * lapsed `scim` feature, D-EA-19) hides the create form, so only revoking is offered.
+ */
+export function TokensSection({
+  org,
+  tokens,
+  revokeOnly = false,
+}: {
+  org: string;
+  tokens: Token[];
+  revokeOnly?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [secret, setSecret] = useState<string | undefined>();
@@ -103,36 +114,38 @@ export function TokensSection({ org, tokens }: { org: string; tokens: Token[] })
           </tbody>
         </table>
       )}
-      <form
-        noValidate
-        aria-label="Create a token"
-        className="flex flex-col gap-2"
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (full || name.trim() === "") {
-            return;
-          }
-          create.reset();
-          create.mutate({ params: { path: { org } }, body: { name: name.trim() } });
-        }}
-      >
-        <div className="flex flex-wrap items-end gap-2">
-          <TextField
-            id="scim-token-name"
-            label="Token name"
-            value={name}
-            maxLength={100}
-            disabled={full || create.isPending}
-            onChange={setName}
-          />
-          <DisabledReason reason={createReason}>
-            <SubmitButton pending={create.isPending} disabled={full || name.trim() === ""}>
-              Create token
-            </SubmitButton>
-          </DisabledReason>
-        </div>
-        <FormError message={createError} />
-      </form>
+      {revokeOnly ? null : (
+        <form
+          noValidate
+          aria-label="Create a token"
+          className="flex flex-col gap-2"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (full || name.trim() === "") {
+              return;
+            }
+            create.reset();
+            create.mutate({ params: { path: { org } }, body: { name: name.trim() } });
+          }}
+        >
+          <div className="flex flex-wrap items-end gap-2">
+            <TextField
+              id="scim-token-name"
+              label="Token name"
+              value={name}
+              maxLength={100}
+              disabled={full || create.isPending}
+              onChange={setName}
+            />
+            <DisabledReason reason={createReason}>
+              <SubmitButton pending={create.isPending} disabled={full || name.trim() === ""}>
+                Create token
+              </SubmitButton>
+            </DisabledReason>
+          </div>
+          <FormError message={createError} />
+        </form>
+      )}
       <SecretDialog
         open={secret !== undefined}
         title="Token created"

@@ -10,6 +10,7 @@ import { FormError } from "@/components/form/form-error";
 import { LockedFeature } from "@/components/plan/locked-feature";
 import { useOrgEntitlements } from "@/components/plan/use-org-entitlements";
 import { SettingsCard } from "@/components/settings/settings-card";
+import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import {
   Select,
@@ -20,6 +21,7 @@ import {
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
+import { MappingsSection } from "@/ee/scim/mappings-section";
 import { TokensSection } from "@/ee/scim/tokens-section";
 import { roleLabel } from "@/lib/roles";
 
@@ -35,7 +37,15 @@ export function ProvisioningSettings({ org }: { org: string }) {
   const query = useQuery(orgScimQuery(org));
 
   if (entitlements.locked("scim")) {
-    return <LockedFeature feature="scim" upgradeUrl={entitlements.upgradeUrl} />;
+    // A lapse keeps SCIM and its tokens working for removals (D-EA-19), so they can still be turned off.
+    const scim = query.data;
+    const lapsed = scim !== undefined && (scim.enabled || scim.tokens.length > 0);
+    return (
+      <div className="flex flex-col gap-6">
+        <LockedFeature feature="scim" upgradeUrl={entitlements.upgradeUrl} />
+        {scim !== undefined && lapsed ? <LapsedControls org={org} scim={scim} /> : null}
+      </div>
+    );
   }
   if (query.isPending) {
     return <Skeleton className="h-64 w-full" />;
@@ -49,18 +59,60 @@ export function ProvisioningSettings({ org }: { org: string }) {
     <div className="flex flex-col gap-6">
       <StatusCard org={org} scim={scim} />
       <TokensSection org={org} tokens={scim.tokens} />
+      <MappingsSection org={org} />
     </div>
+  );
+}
+
+/** The PATCH that turns SCIM on or off and sets the default role; the answer replaces the cache. */
+function useUpdateScim(org: string) {
+  const queryClient = useQueryClient();
+  return $api.useMutation("patch", "/api/v1/orgs/{org}/scim", {
+    onSuccess: (answer) => {
+      queryClient.setQueryData(orgScimQuery(org).queryKey, answer);
+    },
+  });
+}
+
+/**
+ * A lapsed `scim` feature: the lock, a way to turn SCIM off and the tokens to revoke, but no
+ * way to create tokens or change settings that add members (D-EA-19).
+ */
+function LapsedControls({ org, scim }: { org: string; scim: Schema<"ScimSettings"> }) {
+  const update = useUpdateScim(org);
+  const error = update.error
+    ? problemMessage(update.error, "Could not change provisioning.")
+    : undefined;
+
+  return (
+    <>
+      <SettingsCard
+        title="Status"
+        description="Members and their roles stay as they are. Turning SCIM off lifts the locks they carry."
+      >
+        <div>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={!scim.enabled || update.isPending}
+            onClick={() => {
+              update.reset();
+              update.mutate({ params: { path: { org } }, body: { enabled: false } });
+            }}
+          >
+            Turn off SCIM
+          </Button>
+        </div>
+        <FormError message={error} />
+      </SettingsCard>
+      <TokensSection org={org} tokens={scim.tokens} revokeOnly />
+    </>
   );
 }
 
 /** The on/off switch, the default role and the base URL the identity provider needs. */
 function StatusCard({ org, scim }: { org: string; scim: Schema<"ScimSettings"> }) {
-  const queryClient = useQueryClient();
-  const update = $api.useMutation("patch", "/api/v1/orgs/{org}/scim", {
-    onSuccess: (answer) => {
-      queryClient.setQueryData(orgScimQuery(org).queryKey, answer);
-    },
-  });
+  const update = useUpdateScim(org);
 
   // Turning SCIM off always works; turning it on needs a verified domain (D-EA-18).
   const switchOffWithoutDomain = !scim.enabled && scim.verified_domains === 0;
