@@ -1,226 +1,371 @@
 # Track IN — Integrations: design
 
-Status: **draft, under review with the user** (2026-11-23). Decisions `D-IN-<n>`. The user answered Q1–Q4 on 2026-11-23 (§ User answers).
+Status: **draft, under review with the user** (2026-11-23). The user answered Q1–Q4 on 2026-11-23 (§ User answers). Revised the same day after a Sonnet cold review (6 blockers, 11 majors, all addressed below).
+
+Decisions are `D-IN-<n>`, in `docs/mvp-decisions.md` § Track IN. They are distinct from track I's `D-I-<n>`.
 
 ## Summary
 
-cetra documents 19 integrations; the seven competitors together document about 180 more (`int-competitor-matrix.md` in the session notes, summarised below). The user asked to support all of them (2026-11-23). Integration listings are the main distribution channel before launch, so each supported integration gets its own page, a tested sample where one can be tested, and captured spans where the library runs offline.
+cetra's integrations index has 21 rows: 17 libraries, conventions and migrations, and 4 coding agents. The seven competitors (Langfuse, Phoenix, Opik, LangWatch, Laminar, Helicone, MLflow) list about 180 integrations that cetra does not (session notes `int-competitor-matrix.md`). The user asked to support all of them (2026-11-23). Integration listings are the main distribution channel before launch, so each supported integration gets its own page, a tested sample where one can be tested, and captured spans where the library runs offline.
 
-cetra ingests OTLP, so most integrations are documentation. The research found four kinds of real work behind the pages:
+cetra ingests OTLP, so most integrations are documentation. The research (`int-tech-*.md`) found four kinds of real work behind the pages:
 
-1. **Provider attribution.** OpenAI-compatible providers (OpenRouter, Ollama, vLLM, Novita, DashScope, Hugging Face, Databricks, Cloudflare, SambaNova, Nebius, every gateway) used through the OpenAI client are recorded as provider `openai` by OpenInference, OpenLLMetry and the official OTel instrumentation. Cost is then null, or comes from an `openai` row with the same model name. This is the largest correctness gap and blocks most provider pages.
+1. **Provider attribution.** How a call through the OpenAI client to another provider is attributed depends on the instrumentation, not on the provider:
+   - OpenInference writes `llm.provider` from its own host table (Groq, xAI, DeepSeek, Fireworks, Together, Cerebras, Perplexity, Moonshot's `.cn` host, Z.ai, ollama.com, Azure, IBM, Oracle, MiniMax). Any other host (OpenRouter, Novita, DashScope, Hugging Face, Cloudflare, Databricks, SambaNova, Nebius, every gateway) leaves only `llm.system=openai`.
+   - OpenLLMetry recognises Azure, AWS, Vertex and OpenRouter, and records everything else as `openai`.
+   - The official OpenAI v2 instrumentation always records `openai`, but writes `server.address`.
+
+   cetra then shows provider `openai`, and a provider-specific price never applies. On top of that, the built-in price snapshot has no rows for Groq, OpenRouter, Novita, Nebius, Hugging Face, Cloudflare Workers AI, DeepInfra, Baseten, NVIDIA NIM or watsonx, although LiteLLM's file has rows for several of them. So attribution alone would turn some priced spans into unpriced ones (D-IN-13, D-IN-14).
 2. **Normalizer gaps in native GenAI frameworks.** Pydantic AI, Mastra, Strands, Microsoft Agent Framework, AG2, Semantic Kernel, Mirascope, Pipecat and LiveKit emit `gen_ai.*`, but use operation names, token keys, TTFT keys or input/output keys that spec 02 does not read. VoltAgent uses its own keys and is not read at all.
-3. **Capture infrastructure.** The capture mock serves only the OpenAI, Anthropic and Gemini APIs on `127.0.0.1`. Native SDKs (Cohere, Ollama, Azure, Vertex) need new routes, provider attribution needs the real hostnames to reach the mock, and Java and .NET need runners.
-4. **Integrations that cannot be supported** with spans-only OTLP (D-CA-2) or at all: listed in § Not supported.
+3. **Capture infrastructure.** The capture mock serves only the OpenAI, Anthropic and Gemini APIs, and scenarios reach it through a base URL on `127.0.0.1`. Instrumentations that attribute by host therefore never see a real host. Native SDKs (Cohere, Ollama, Azure, Vertex) need new routes. Java and .NET need runners.
+4. **Integrations that cannot be supported** with spans-only OTLP (D-CA-2) or at all: § Not supported, recorded here only (D-IN-10).
 
 ## Goals
 
-- Every integration that at least one competitor documents and that can send OTLP spans to cetra has a page under `website/src/content/docs/docs/integrations/`.
-- Each page says what it is tested against: captured spans, an SDK test, or setup steps only. No page claims more than its tests show.
+- Every integration that a competitor documents, and that can send OTLP spans to cetra, has a page under `website/src/content/docs/docs/integrations/`. The appendix gives every matrix row a disposition: a milestone, merged into another page, or not supported with a reason. None is dropped silently.
+- Each page says what it is tested against (D-IN-8), and a check keeps the index and the pages in agreement.
 - Spans from each documented integration normalize into the right kinds, model, provider, tokens, cost, input and output, and session, as far as the library sends them.
 - The user knows which integrations are not supported, and why.
 
 ## Non-goals
 
 - New cetra SDKs for Java, Go, .NET, Ruby or Rust. Each language's own OpenTelemetry SDK exports to cetra (D-IN-9).
-- OTLP logs and metrics (D-CA-2 stands): Cursor, Kiro, Cline, E2B and Modal export only those, and wait for a logs-and-metrics track.
+- OTLP logs and metrics. D-CA-2 stands: Cursor, Kiro, Cline, E2B and Modal export only those, and wait for a logs-and-metrics track.
 - Proxy or gateway ingestion by cetra itself (D4 stands).
-- Importing traces from a competitor's API. The Langfuse and Laminar pages keep their SDKs and export spans.
-- Evaluation-library integrations beyond tracing their LLM calls: Ragas and Promptfoo pages show how to trace them and how to send their results as scores with the existing SDK, nothing more.
-- Marketing pages, logos and docs screenshots (these wait until the product is frozen).
+- Importing traces from a competitor's API.
+- Evaluation libraries beyond tracing their LLM calls and sending their results as scores with the existing SDK.
+- Marketing pages, logos and docs screenshots. These wait until the product is frozen.
+- Destinations that are not trace sources: Slack, PagerDuty, Mixpanel, PostHog, Trubrics, ClickHouse, Hugging Face Datasets, and the competitors' own products (appendix).
+
+## Architecture
+
+```
+integration ──OTLP──▶ cetra-otel normalize ──▶ storage
+                         │ provider from the endpoint (D-IN-2), aliases (D-IN-15)
+                         │ gateway pricing (D-IN-13)
+                         │ new keys and operation names (D-IN-5), VoltAgent (D-IN-6)
+                         │ new coding agents (D-IN-12)
+tools/capture ──▶ fixtures/otlp/<group>/<case> ──▶ cetra-otel golden test
+   │ real hosts routed to the mock (D-IN-3), new mock routes (D-IN-4)
+   │ Java and .NET runners (D-IN-9)
+just prices-update ──▶ crates/otel/prices/builtin.json (D-IN-14)
+sdks/python registry ──▶ instrument=["groq", "agno", …] (D-IN-7)
+cetra agents setup ──▶ OpenCode, Qwen Code, then Goose and Hermes if their spikes pass (D-IN-12)
+web dashboard templates ──▶ the Coding agents template counts the new agents (D-IN-12)
+website integrations pages ──▶ index, sidebar, check-samples, check-backing, check-integrations (D-IN-1, D-IN-8)
+```
+
+What changes, by area:
+
+- **`crates/otel`**: the provider-from-endpoint rule, the alias table, gateway pricing, new key and operation mappings, the VoltAgent convention, detection of the new coding agents, and the price converter.
+- **`crates/core`**: one variant, `Convention::Voltagent` (this track's briefs allow that one change).
+- **`crates/server`**: the regenerated `openapi.json` (the `Convention` enum), and the agent-context route's accepted agent names (D-CA-9) for agents with hooks.
+- **`crates/cli`**: `cetra agents setup` and `remove` for the new agents.
+- **`web/`**: `src/api/schema.gen.ts` (regenerated) and the Coding agents template in `src/lib/dashboards/templates.ts`.
+- **`tools/capture`**: host routing, new mock routes, new `api` values, new groups, Java and .NET runners.
+- **`sdks/python`**: registry rows and extras.
+- **`website/`**: pages, the index, the sidebar and one new check.
+
+Nothing changes in storage, the server's other routes or the UI pages.
+
+### Contracts and edit points
+
+- **Spec 02** is the contract for every normalizer change, edited in the same commit as the code:
+  - § Convention detection: the precedence line and the detection table gain `voltagent`.
+  - § Mapping tables: new operation names, token, TTFT, input/output and session keys.
+  - Rule 12: alias rows and the framework-name skip table (D-IN-15).
+  - § Cost computation, step 2: gateway pricing (D-IN-13).
+  - A new subsection, "Provider from the endpoint" (D-IN-2).
+  - § Coding agents: the new agents.
+  - § Testing: the table gains the new libraries.
+- **New fixture group names** are fixed here: `voltagent`, `pydantic_ai`, `mastra`, `strands`, `agent_framework`, `ag2`, `semantic_kernel`, `mirascope`, `pipecat`, `livekit`, `opencode`, `qwen_code`, `goose`, `hermes`, `n8n`, `litellm_proxy`, `java`, `dotnet`. Provider-attribution and provider cases go in `openinference`, `openllmetry` and `genai`. A milestone that adds a group edits all three allow-lists: `tools/capture/src/scenario.rs` `GROUPS`, `crates/otel/tests/support/mod.rs` `GROUPS`, and `fixtures/otlp/README.md` § Layout.
+- **`Convention::Voltagent`** touches:
+  - `crates/core/src/enums.rs`;
+  - `crates/otel/src/detect.rs` (`PRECEDENCE`, `slot`, `mark`);
+  - `crates/otel/src/payload.rs` (the precedence ordinal);
+  - the conventions module;
+  - `crates/otel/tests/proptest.rs`;
+  - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` (both through `just openapi`).
+- **Capture scenarios** gain an optional per-turn `host` (D-IN-3) and the `api` values of D-IN-4. `tools/capture/src/scenario.rs` is the contract. `ENV_PREFIXES` gains the prefixes the Java and .NET runners need.
+- **Python SDK**: the registry rows and extras of D-IN-7. Spec 10 § Python instrumentors lists them.
+- **Docs**: one page per integration (D-IN-1), the index, the sidebar in `website/astro.config.mjs`, and `<Backing>` where fixtures or tests exist. `skills/references.json` keeps only the index and the existing pages: the skill points agents at the index, not at 120 pages.
+- **Each milestone** also adds its decisions to `docs/mvp-decisions.md` § Track IN, updates the track's row in `docs/roadmap.md`, adds a `CHANGELOG.md` line, and updates spec 02 or spec 10 where it changes them.
+
+### Provider from the endpoint (D-IN-2)
+
+The rule, written into spec 02 as its own subsection:
+
+1. **When it applies.** After the provider sources of § Model, provider, usage are read, and only when the resolved provider is empty or `openai`. It runs before inference from the model name, on every span kind (rule 3).
+2. **The host.** The first of these that yields a host wins:
+   - `server.address`;
+   - the host of `url.full`;
+   - the host of `gen_ai.openai.api_base` (OpenLLMetry).
+
+   M1's spike confirms which keys each instrumentation writes. It adds a key to this list only if an instrumentation writes the host under it.
+3. **Parsing.** It never panics, never logs a URL or a host, and reads only the host part. `url.full` may carry `?key=` or `api-key=` query values. The attributes are not consumed and stay in `attributes`.
+4. **Matching.** The host is lowercased and compared with a fixed table in `cetra-otel`. An entry is an exact host, or a `*.` suffix that matches only on a label boundary (`*.openai.azure.com` matches `x.openai.azure.com`, not `evilopenai.azure.com`). The first matching entry gives the provider.
+5. **No match.** An unknown host, a local host (`localhost`, loopback, private ranges) or `api.openai.com` leaves the provider as it was. A self-hosted server (vLLM, Ollama through the OpenAI client, LM Studio) keeps the provider its instrumentation wrote. Track T's custom prices still price it: a custom row without a provider matches any span.
+
+The initial table. M1 checks every host against the provider's documentation, and every provider name against the price snapshot's names:
+
+| Host | Provider |
+|---|---|
+| `openrouter.ai` | `openrouter` |
+| `api.groq.com` | `groq` |
+| `api.x.ai` | `x_ai` |
+| `api.deepseek.com` | `deepseek` |
+| `api.fireworks.ai` | `fireworks_ai` |
+| `api.together.xyz`, `api.together.ai` | `together_ai` |
+| `api.novita.ai` | `novita` |
+| `dashscope.aliyuncs.com`, `dashscope-intl.aliyuncs.com` | `dashscope` |
+| `router.huggingface.co` | `huggingface` |
+| `api.cloudflare.com` | `cloudflare` |
+| `*.cloud.databricks.com`, `*.azuredatabricks.net` | `databricks` |
+| `api.cerebras.ai` | `cerebras` |
+| `api.perplexity.ai` | `perplexity` |
+| `api.moonshot.ai`, `api.moonshot.cn` | `moonshot` |
+| `api.z.ai`, `open.bigmodel.cn` | `zai` |
+| `api.sambanova.ai` | `sambanova` |
+| `api.studio.nebius.com` | `nebius` |
+| `api.mistral.ai` | `mistral_ai` |
+| `*.openai.azure.com` | `azure.ai.openai` |
+| `api.deepinfra.com` | `deepinfra` |
+| `inference.baseten.co` | `baseten` |
+| `api.hyperbolic.xyz` | `hyperbolic` |
+| `integrate.api.nvidia.com` | `nvidia_nim` |
+| `ark.cn-beijing.volces.com`, `ark.ap-southeast.bytepluses.com` | `volcengine` / `byteplus` |
+| `api.minimax.io` | `minimax` |
+| `ai-gateway.vercel.sh` | `vercel_ai_gateway` (gateway) |
+| `oai.helicone.ai`, `ai-gateway.helicone.ai` | `helicone` (gateway) |
+| `api.portkey.ai` | `portkey` (gateway) |
+| `gateway.ai.cloudflare.com` | `cloudflare_ai_gateway` (gateway) |
+
+Rows marked "gateway" are priced by D-IN-13. `openrouter` is also a gateway for pricing.
 
 ## The integration list
 
-Counts are how many of the seven competitors list it (Langfuse, Phoenix, Opik, LangWatch, Laminar, Helicone, MLflow). The route is what cetra's page uses. "Gap" names normalizer work.
+Counts are how many of the seven competitors list the integration. "Route" is what cetra's page uses. "Work" names what the page needs beyond docs. Every OpenAI-compatible provider page covers the three instrumentations; the attribution each one gives is pinned by M1's cases and the host table's unit tests.
 
-### Providers
+### Providers (M2)
 
-| Integration | Count | Route | Gap |
+| Integration | Count | Route | Work |
 |---|---|---|---|
-| OpenRouter | 7 | OpenAI client, base URL | attribution |
-| Groq | 6 | OpenAI client; `openinference-instrumentation-groq` | price rows missing from the snapshot |
-| Ollama | 6 | OpenAI client on localhost; `openinference-instrumentation-ollama` | attribution (localhost) |
+| OpenRouter | 7 | OpenAI client | D-IN-2, D-IN-13, price rows |
+| Groq | 6 | OpenAI client; `openinference-instrumentation-groq` | price rows (D-IN-14); Groq SDK path `/openai/v1/…` on the mock |
+| Ollama | 6 | `openinference-instrumentation-ollama` (provider `ollama`); OpenAI client on localhost keeps `openai` (Limits say so) | mock route `/api/chat` |
 | xAI Grok | 6 | OpenAI client | — |
 | Cohere | 5 | `openinference-instrumentation-cohere` | mock route `/v2/chat` |
-| DeepSeek | 5 | OpenAI client | — |
-| Fireworks AI | 5 | OpenAI client | alias `fireworks` |
+| DeepSeek, Fireworks AI, Together AI | 5 each | OpenAI client; Together also `openinference-instrumentation-together` | aliases (D-IN-15) |
 | Mistral | 5 | `openinference-instrumentation-mistralai` | — |
-| Novita AI | 5 | OpenAI client | attribution, price rows |
-| Together AI | 5 | OpenAI client; `openinference-instrumentation-together` | alias `together`, `togetherai` |
-| Google Vertex AI | 4 | Google Gen AI SDK with Vertex | mock route for Vertex paths |
-| Azure OpenAI | 2+ | OpenAI client (`AzureOpenAI`) | mock route for deployments; deployment names as models |
-| Qwen (DashScope) | 3 | OpenAI client | attribution |
-| Cerebras, Perplexity | 3, 2 | OpenAI client | — |
-| vLLM | 2 | OpenAI client on localhost | attribution (self-hosted) |
-| Hugging Face Inference Providers | 2 | OpenAI client | attribution, price rows |
-| Cloudflare Workers AI | 2 | OpenAI client | attribution, price rows |
-| Databricks | 2 | OpenAI client | attribution |
-| Moonshot (Kimi), Z.ai (GLM), SambaNova, Nebius | 1–2 | OpenAI client | attribution |
-| IBM watsonx | 2 | OpenLLMetry `opentelemetry-instrumentation-watsonx` | alias `watsonx`, `ibm`; new mock route |
+| Novita AI | 5 | OpenAI client | price rows |
+| Google Vertex AI | 4 | Google Gen AI SDK with `vertexai=True` | mock route for Vertex paths; separate page, linked from Google Gen AI |
+| Azure OpenAI | 2+ | `AzureOpenAI` client | mock route `/openai/deployments/{d}/chat/completions?api-version=…`. Priced by `response_model` (the base model Azure returns), per spec 02 step 2 |
+| Qwen (DashScope), Cerebras, Perplexity, Moonshot, Z.ai, SambaNova, Nebius, Hugging Face, Cloudflare Workers AI, Databricks | 1–3 | OpenAI client | price rows where missing |
+| vLLM | 2 | OpenAI client on a local host | none: provider as sent, priced by a custom row (Limits say so) |
+| IBM watsonx | 2 | OpenLLMetry `opentelemetry-instrumentation-watsonx` | setup only (D-IN-11); aliases |
+| Long-tail OpenAI-compatible providers | 1–3 | OpenAI client | appendix: BytePlus, Baseten, DeepInfra, Hyperbolic, MiniMax, NVIDIA NIM, Predibase, Sarvam, Qianfan, CometAPI, Doubleword, Meta Llama API |
 
-### Gateways
+### Gateways (M5)
 
-| Integration | Count | Route | Gap |
+| Integration | Count | Route | Work |
 |---|---|---|---|
-| LiteLLM Proxy | 5 | the proxy's `otel` callback | LiteLLM provider ids, `gen_ai.cost.*` |
-| Portkey | 4 | OpenAI client, or Portkey's OTLP export (enterprise and self-hosted) | provider values unverified |
-| TrueFoundry | 4 | OpenAI client, or its OTLP export | convention unverified |
-| Vercel AI Gateway | 4 | AI SDK or OpenAI client (no OTLP export) | attribution |
-| Kong AI Gateway | 3 | Kong's `opentelemetry` plugin (GenAI semconv) | provider values unverified |
-| Helicone | 3 | OpenAI client (no OTLP export) | attribution |
-| Cloudflare AI Gateway | 1 | OpenAI client, or its OTLP export | `gen_ai.model.provider`, `gen_ai.prompt_json`, `gen_ai.completion_json` |
-| Bifrost | 1 | `otel` plugin, `trace_type: genai_extension` | provider values unverified |
-| Envoy AI Gateway | 1 | OpenInference or GenAI semconv | — |
-| Azure API Management | 1 | unverified; may log to Application Insights only | decided in M5's spike |
+| LiteLLM Proxy | 5 | the proxy's `otel` callback; captured by running the proxy against the mock | LiteLLM provider ids (D-IN-15), its reported-cost keys (D-IN-16) |
+| Portkey | 4 | OpenAI client (D-IN-2, D-IN-13); its OTLP export is enterprise and self-hosted (setup only) | spike: provider values |
+| TrueFoundry | 4 | OpenAI client; its OTLP export is setup only | spike: convention |
+| Vercel AI Gateway | 4 | AI SDK or OpenAI client (no OTLP export) | D-IN-2, D-IN-13 |
+| Kong AI Gateway | 3 | `opentelemetry` plugin (GenAI semconv) | spike: local Kong OSS against the mock |
+| Helicone | 3 | OpenAI client (no OTLP export) | D-IN-2, D-IN-13 |
+| Cloudflare AI Gateway | 1 | OpenAI client; or its OTLP export | spike: `gen_ai.model.provider`, `gen_ai.prompt_json`, `gen_ai.completion_json` |
+| Bifrost | 1 | `otel` plugin, `trace_type: genai_extension` | spike: local run against the mock |
+| Envoy AI Gateway | 1 | OpenInference or GenAI semconv | spike: local run against the mock |
+| Azure API Management, Gravitee, OrcaRouter, Anannas AI, Pydantic AI Gateway | 1 each | spike decides each: OpenAI client page or not supported | spike |
 
-### Agent frameworks
+### Agent frameworks (M3: OpenInference; M4: native GenAI)
 
-| Integration | Count | Route | Gap |
+| Integration | Count | Milestone | Route | Work |
+|---|---|---|---|---|
+| Claude Agent SDK (Python, TS) | 6 | M3 | Claude Code's native spans (D-CA-13) | own page; the Claude Code page links it |
+| Instructor | 6 | M3 | `openinference-instrumentation-instructor` | — |
+| Agno | 5 | M3 | `openinference-instrumentation-agno` | — |
+| Haystack | 5 | M3 | `openinference-instrumentation-haystack` | — |
+| smolagents | 5 | M3 | `openinference-instrumentation-smolagents` | — |
+| BeeAI (Python, TS) | 4 | M3 | OpenInference (both languages) | — |
+| Temporal (with the OpenAI Agents SDK) | 4 | M3 | OpenInference plus Temporal's tracing interceptor; needs the Temporal dev server binary for capture | Temporal's own spans stay `span` |
+| DeepAgents | 3 | M3 | OpenInference LangChain | — |
+| LangGraph | 2+ | M3 | OpenInference LangChain | own page; the LangChain page is retitled "LangChain" and links it |
+| Guardrails AI | 2 | M3 | `openinference-instrumentation-guardrails` | — |
+| Mastra | 6 | M4 | `@mastra/otel-exporter` | D-IN-5 |
+| Pydantic AI | 6 | M4 | native GenAI | D-IN-5 |
+| Semantic Kernel (Python) | 6 | M4 | native GenAI | D-IN-5 |
+| AutoGen (`autogen-agentchat`) | 5 | M4 | `openinference-instrumentation-autogen-agentchat` with the provider's instrumentor | `gen_ai.system=autogen` skipped (D-IN-15) |
+| Microsoft Agent Framework (Python) | 5 | M4 | native GenAI | D-IN-5 |
+| Strands Agents | 5 | M4 | native GenAI | D-IN-5 |
+| AG2 (`ag2`, the AutoGen fork) | 3 | M4 | native telemetry middleware | D-IN-5 |
+| Bedrock AgentCore | 3 | M4 | Strands code captured; the AWS runtime setup only (D-IN-11) | as Strands |
+| VoltAgent | 3 | M4 | its own keys | D-IN-6 |
+| Mirascope | 1 | M4 | native GenAI | D-IN-5 |
+| OpenHands SDK | 1 | M4 | Laminar SDK over OTLP (`gen_ai.usage.cost` is already read as reported cost) | capture only |
+
+### Coding agents (M7)
+
+| Integration | Count | Route | Work |
 |---|---|---|---|
-| Claude Agent SDK (Python, TS) | 6 | Claude Code's native spans (D-CA-13) | — (own page split from Claude Code) |
-| Instructor | 6 | OpenInference | — |
-| Mastra | 6 | `@mastra/otel-exporter` | span types, `mastra.completion_start_time` |
-| Pydantic AI | 6 | native GenAI | agent span input/output in `pydantic_ai.all_messages`, `final_result` |
-| Semantic Kernel (Python) | 6 | native GenAI | `text_completions` |
-| Agno | 5 | OpenInference | — |
-| AutoGen (agentchat) | 5 | OpenInference | `gen_ai.system=autogen` read as provider |
-| Haystack | 5 | OpenInference | — |
-| Microsoft Agent Framework (Python) | 5 | native GenAI | workflow operations |
-| smolagents | 5 | OpenInference | — |
-| Strands Agents | 5 | native GenAI | loop operations, `gen_ai.server.time_to_first_token` |
-| BeeAI (Python, TS) | 4 | OpenInference | — |
-| Temporal (with the OpenAI Agents SDK) | 4 | OpenInference plus Temporal's tracing interceptor | Temporal spans |
-| AG2 | 3 | native middleware | `thinking_tokens`, `record_usage` spans |
-| Bedrock AgentCore | 3 | Strands code; the AWS runtime is untested | as Strands |
-| DeepAgents | 3 | OpenInference LangChain | — |
-| LangGraph | 2+ | OpenInference LangChain | — (own page split from LangChain) |
-| VoltAgent | 3 | its own keys | new convention (D-IN-6) |
-| Mirascope | 1 | native GenAI | `mirascope.trace.*`, `mirascope.ops.session.id` |
-| OpenHands SDK | 1 | Laminar SDK over OTLP | `gen_ai.usage.cost` on its spans |
-| Guardrails AI | 2 | OpenInference | — |
+| OpenCode | 4 | experimental OpenTelemetry flag (AI SDK spans) | first-class (D-IN-12); spike: span names, noise spans to discard as for Codex |
+| Qwen Code | 1 | native GenAI (D-CA-17 research: already normalizes generically) | first-class (D-IN-12) |
+| Hermes Agent | 3 | community plugin (GenAI and OpenInference) | spike decides first-class or page only |
+| Goose | 2 | native OTLP over HTTP | spike decides first-class or page only (no GenAI attributes seen) |
+| OpenClaw, Augment Code, Oh My Pi, Omnigent | 1–3 | unknown | spike decides each |
+| Pi | 1 | community extension; hard-coded provider URLs | setup only |
+| Devin SDK | 1 | the SDK's tracing (the hosted product is not instrumented) | setup only |
 
-### Coding agents
+### Apps, no-code, voice, browser agents, tools and evaluation (M6)
 
-| Integration | Count | Route | Gap |
+| Integration | Count | Route | Work |
 |---|---|---|---|
-| OpenCode | 4 | experimental OpenTelemetry flag (AI SDK spans) | spike: span names, noise spans |
-| Hermes Agent | 3 | community plugin (GenAI and OpenInference) | spike |
-| Goose | 2 | native, OTLP HTTP | no GenAI attributes seen: spike |
-| Qwen Code | 1 | native GenAI (D-CA-17) | already normalizes generically |
-| Pi | 1 | community extension | not capturable (hard-coded provider URLs) |
-| Devin | 1 | Devin SDK tracing only | the hosted product is not instrumented |
-
-### Apps, no-code, voice, browser agents and tools
-
-| Integration | Count | Route | Gap |
-|---|---|---|---|
-| n8n | 6 | native OTLP (2.19 and later) | spike: span names and attributes |
+| n8n | 6 | native OTLP (2.19 and later) | spike, then capture: span names and attributes |
 | Langflow | 5 | Traceloop environment variables | spike |
-| Prompt Flow | 3 | native OTLP | — |
-| LiveKit Agents | 4 | native GenAI plus `lk.*` | content in `lk.pii.*` (Node) |
-| Pipecat | 4 | native GenAI | input and output in plain `input`, `output` |
-| Browser Use | 1 | OpenLIT or Laminar | — |
-| Stagehand | 1 | native (v4) | no GenAI attributes: spike |
-| OpenLIT | — | instrumentation library (GenAI semconv) | `gen_ai.content.*` events (check) |
-| MCP | — | Python MCP SDK native, OpenInference, OpenLLMetry | — |
-| Vector databases (Qdrant, Milvus, Chroma, Pinecone, Weaviate) | 1 | OpenLLMetry or OpenLIT | `db.*` spans as `retriever` |
-| Ragas, Promptfoo | 4, 1 | trace the LLM calls; send results as scores | — |
+| Prompt Flow | 3 | native OTLP | capture |
+| LiveKit Agents | 4 | native GenAI plus `lk.*` | D-IN-5 (content in `lk.pii.*`) |
+| Pipecat | 4 | native GenAI | D-IN-5 (scoped `input`/`output`, D-IN-6) |
+| Browser Use | 1 | OpenLIT or Laminar | capture |
+| Stagehand | 1 | native (v4) | spike: kinds |
+| Kernel (browser), Twilio Agent Connect, Docker and Vercel sandboxes, Daytona | 1 each | spike decides each | spike |
+| OpenLIT | — | instrumentation library page (GenAI semconv) | spike: its `gen_ai.content.*` events against spec 02 |
+| MCP | — | Python MCP SDK native, OpenInference, OpenLLMetry; registry row `mcp` | capture |
+| Vector databases (Qdrant, Milvus, Chroma, Pinecone, Weaviate) | 1 | OpenLLMetry or OpenLIT | D-IN-5 (`retriever`, scoped to those instrumentations) |
+| Tool APIs (Exa, Firecrawl, Tavily, Parallel AI) | 1 each | spike: OpenLIT or OpenLLMetry instrumentation, else not supported | spike |
+| Ragas, Promptfoo, Cleanlab, UQLM, Azure AI Evaluation, Coval, Morph Reflex, Testable Minds | 1–4 | trace the LLM calls; send results as scores with the SDK; the spike drops any without a usable result API | spike |
 | Harbor | 3 | the agent's own tracing inside the container | spike |
-| Daytona | 1 | SDK spans | infrastructure spans only |
 
-### Other languages
+### Other languages (M8)
 
-| Language | Integrations | Route |
-|---|---|---|
-| Java | Spring AI, LangChain4j, Quarkus LangChain4j, Koog (Kotlin) | Spring AI's Micrometer GenAI spans (`gen_ai.system=spring_ai`, content in events); OpenInference Java for LangChain4j; Quarkus and Koog native |
-| .NET | Semantic Kernel, Microsoft Agent Framework, Microsoft.Extensions.AI | native GenAI (older event shape in Semantic Kernel) |
-| Go | Genkit Go, openai-go, langchaingo | OpenInference Go, OpenLIT Go, Genkit native |
-| Ruby | ruby_llm | its OTel gem (GenAI) |
-| Rust | rig | native GenAI |
+| Language | Integrations | Route | Captured |
+|---|---|---|---|
+| Java | Spring AI, LangChain4j, Quarkus LangChain4j, Koog (Kotlin), Arconia, Embabel | Spring AI's Micrometer GenAI spans (`gen_ai.system=spring_ai`, content in events); OpenInference Java for LangChain4j; Quarkus, Koog and Embabel native | yes, Java runner |
+| .NET | Semantic Kernel, Microsoft Agent Framework, Microsoft.Extensions.AI | native GenAI (Semantic Kernel uses an older event shape) | yes, .NET runner |
+| Go | Genkit Go, openai-go, langchaingo | OpenInference Go, OpenLIT Go, Genkit native | setup only |
+| Ruby | ruby_llm | its OTel gem (GenAI) | setup only |
+| Rust | rig, Swiftide | native GenAI | setup only |
+| C++ | AI SDK C++ | its OTel export | setup only |
 
 ### Not supported
 
-None of these can send spans to cetra today. They are recorded here only; the public docs do not list them (D-IN-10):
+Recorded here only; the public docs do not list them (D-IN-10). None of these can send LLM spans to cetra today:
 
 | Integration | Why |
 |---|---|
-| Cursor (CLI and IDE), Kiro | logs and metrics only, Enterprise admin export (D-CA-1, D-CA-2) |
-| Cline | logs and metrics only |
+| Cursor (CLI and IDE), Kiro | logs and metrics only, through an Enterprise admin export (D-CA-1, D-CA-2) |
+| Cline | logs and metrics only (its variables are `CLINE_OTEL_*`) |
 | E2B, Modal | platform logs and metrics only |
 | Antigravity, Roo Code, Aider, Amp, Crush, Skyvern | no OpenTelemetry export found |
 | Zapier, Vapi, Retell, LibreChat | no OTLP export; vendor-specific (Langfuse) or none |
 | ElevenLabs Agents | OTLP-shaped JSON through a webhook; needs a forwarder |
 | Dify, Flowise, Open WebUI | their OTLP export carries HTTP and database spans, not LLM spans; LLM tracing is a per-vendor UI setting |
-| Playwright, Puppeteer | browser automation, not LLM libraries; covered through Browser Use and Stagehand |
-| Devin (hosted product) | not instrumented; the Devin SDK is |
+| Playwright, Puppeteer | browser automation, not LLM libraries; covered by Browser Use and Stagehand |
+| Devin (hosted product) | not instrumented; the Devin SDK is (M7) |
 | langchainrb, PHP libraries, the Rust `genai` crate | no OTLP path found |
 
-## Architecture
-
-The parts this track changes and how they connect. Nothing changes in storage, the server API or the UI.
-
-```
-integration ──OTLP──▶ cetra-otel normalize ──▶ storage
-                         │  provider attribution (D-IN-2)
-                         │  new operation names, keys, VoltAgent convention (D-IN-5, D-IN-6)
-tools/capture ──▶ fixtures/otlp/<group>/<case> ──▶ cetra-otel golden test
-   │ host routing to the mock (D-IN-3), new mock routes, Java and .NET runners (Q2)
-sdks/python registry ──▶ instrument=["groq", "agno", …] (D-IN-7)
-website integrations pages ──▶ check-samples, check-backing, index table, sidebar (D-IN-1, D-IN-8)
-```
-
-### Contracts
-
-- **Spec 02** is the contract for every normalizer change: § Convention detection gains `voltagent`; § Mapping tables gain the new operation names, token, TTFT, input/output and session keys; rule 12's alias table gains the provider ids; a new subsection "Provider from the endpoint" defines D-IN-2. `cetra-core`'s `Convention` enum gains `voltagent` (a shared contract: this track's brief allows that one change).
-- **Fixtures**: new groups only where a library's own convention is new (`voltagent`, and one per native framework whose spans are captured: `pydantic_ai`, `mastra`, `strands`, …; the plans fix the names). Provider-attribution cases go in the existing `openinference`, `openllmetry` and `genai` groups.
-- **Capture scenarios** gain an optional `host` per turn (D-IN-3) and new `api` values for the new routes. The scenario schema in `tools/capture/src/scenario.rs` is the contract.
-- **Python SDK**: new registry rows and extras. TypeScript gets no new helpers; its pages use each library's own exporter or `@cetra-ai/sdk`'s tracer provider.
-- **Docs**: one page per integration (D-IN-1), the index table, the sidebar in `astro.config.mjs`, the `<Backing>` box where fixtures or tests exist.
+A spike that finds no OTLP span path moves its item here, and the user is told.
 
 ## Decisions
 
 | ID | Topic | Decision | Rejected |
 |---|---|---|---|
-| D-IN-1 | Pages | **One page per integration**, including each OpenAI-compatible provider, under `integrations/`. Short pages share one shape: install, set up, what you get, limits, next. A framework page links to the provider pages for the model calls. | One "OpenAI-compatible providers" page: shorter to maintain, but the listings, search and the competitors' parity all count pages. |
-| D-IN-2 | Provider attribution | **`cetra-otel` derives the provider from the endpoint when a span names `openai` (or nothing) as provider and carries the server host**: `server.address` (GenAI semconv, OpenAI v2 instrumentation), `url.full`, `gen_ai.openai.api_base` (OpenLLMetry), or OpenInference's equivalent (M1's spike confirms which keys each instrumentation writes). A fixed host table maps known hosts to provider names (`openrouter.ai` → `openrouter`, `api.groq.com` → `groq`, port `11434` on a local host → `ollama`, …). An explicit provider other than `openai` always wins. A local or unknown host leaves the provider as sent, and track T's custom prices still price it. | Inferring from the model name when the provider is `openai`: wrong for OpenRouter's `vendor/model` names and for open models served everywhere. An SDK-side span processor: helps only cetra's SDK users, not plain OpenInference or OpenLLMetry. |
-| D-IN-3 | Capturing real hosts | **A capture scenario may name the real host of a turn; the capture tool routes that host to the mock** (a client transport or proxy in the harness; the plan picks one), so the recorded spans carry `api.groq.com`, not `127.0.0.1`. | Capturing against `127.0.0.1` with a base URL: the spans would not show the attribution the page claims. |
-| D-IN-4 | Mock routes | **New mock routes only for native wire formats that pages document**: Cohere `/v2/chat`, Ollama `/api/chat`, Azure `/openai/deployments/{d}/chat/completions`, Vertex `…/publishers/google/models/*:generateContent`, watsonx. OpenAI-compatible providers reuse `/v1/chat/completions`. | A generic record/replay proxy: hides wire-format mistakes the mock catches. |
-| D-IN-5 | Native GenAI gaps | **Spec 02 reads the extra keys the research found**: operation names mapped to kinds (Strands' loop and decision operations, Microsoft Agent Framework's executor and workflow operations, Semantic Kernel's `text_completions`, AG2's `await_human_input`); `gen_ai.usage.thinking_tokens` as reasoning; `gen_ai.server.time_to_first_token` and `mastra.completion_start_time` as TTFT; Pydantic AI's agent messages and final result as the agent span's input and output; Mirascope's trace input/output and session id; Pipecat's `input`/`output`; framework names in `gen_ai.system` (`autogen`, `spring_ai`, …) skipped like `gcp.vertex.agent`. Each rule is backed by a captured fixture, never only by documentation. | Leaving them as `span`: the pages would show traces without kinds or I/O. |
-| D-IN-6 | VoltAgent | **A new convention `voltagent`**, detected by `voltagent.*` or `entity.*` keys, reading its kinds, model, tokens and messages; its `llm.*` keys stop counting as OpenInference on spans that carry `voltagent.*`. | An SDK adapter: VoltAgent users do not use cetra's SDK. Not supporting it: three competitors list it. |
-| D-IN-7 | Python registry | **Every OpenInference instrumentor a page documents becomes an `instrument=` name and an extra** (`groq`, `mistralai`, `cohere`, `ollama`, `together`, `agno`, `smolagents`, `haystack`, `instructor`, `autogen-agentchat`, `beeai`, `guardrails`, `mcp`), with the SDK test of the existing rows. Native-OTel frameworks get no registry row; their page sets up the tracer provider with `cetra.init()`. | Pages that install OpenInference by hand: two ways to do one thing for SDK users. |
-| D-IN-8 | Test tiers | **Three tiers, shown in the index's "Tested against" column**: captured (spans recorded from the real library against the mock), SDK test (the registry import test), setup only (no recorded spans; the page says so in Limits, with no `<Backing>` box). Samples that need a provider key or a cloud account are marked `{/* untested: … */}` as today; no test calls a real provider. | Live provider tests in CI: needs paid keys and is flaky; `just eval-live` stays the only live suite (D167). |
-| D-IN-9 | Other languages | **One page per framework or language ecosystem with the language's OTel SDK and the framework's native GenAI spans; no new cetra SDK. Java and .NET get capture runners in `tools/capture` and captured cases; Go, Ruby and Rust pages are setup only** (the user, 2026-11-23). | New cetra SDKs per language: a large surface to maintain for listings that plain OTel already satisfies. |
+| D-IN-1 | Pages | **One page per integration**, including each OpenAI-compatible provider. Short pages share one shape: install, set up, what you get, limits, next. A framework page links to the provider pages for model calls. Existing pages keep their scope: `litellm` stays the LiteLLM SDK (the proxy gets `litellm-proxy`); `google-genai` links the new `vertex-ai`; `bedrock` links the new `bedrock-agentcore`; `langchain` is retitled "LangChain" and links the new `langgraph`; `claude-code` links the new `claude-agent-sdk`. | One "OpenAI-compatible providers" page. It is shorter to maintain, but listings, search and parity with the competitors all count pages. |
+| D-IN-2 | Provider attribution | **The provider comes from the endpoint's host when the instrumentation left it empty or `openai`**, by the rule and table in § Provider from the endpoint. An explicit provider other than `openai` always wins. Local and unknown hosts are left as sent. | Inferring from the model name when the provider is `openai`: wrong for OpenRouter's `vendor/model` names and for open models served everywhere. An SDK span processor: it helps only cetra SDK users, not plain OpenInference or OpenLLMetry. |
+| D-IN-3 | Capturing real hosts | **A scenario turn may set `host` (for example `api.groq.com`). The client is configured with the real base URL, and the harness routes the request to the mock over plain HTTP, without DNS or TLS:** Python passes an `httpx` client whose transport rewrites scheme, host and port to the mock (the OpenAI, Groq, Mistral and Cohere SDKs accept `http_client`); TypeScript passes a `fetch` that rewrites the URL. The instrumentation sees the real host, so its own attribution is what a real run produces. `scrub.rs` rewrites only loopback addresses (D116), so it leaves these spans alone. Java and .NET runners keep a base URL on the mock: their cases do not test attribution. Amends D114. | A per-turn host that only feeds the scrub rewrite: the fixture would carry a host the instrumentation never saw, and the OpenInference and OpenLLMetry cases would prove nothing. |
+| D-IN-4 | Mock routes | **New mock routes only for native wire formats that pages document**: Cohere `/v2/chat`, Ollama `/api/chat`, the Groq SDK's `/openai/v1/chat/completions`, Azure `/openai/deployments/{d}/chat/completions` (with `api-version`, answering the base model in `model`), and Vertex `/v1/projects/{p}/locations/{l}/publishers/google/models/{m}:generateContent`. Ollama's scrub host is `localhost:11434`, and the leak check allows exactly that pair for that route (amends D116). watsonx gets no route: setup only (D-IN-11). OpenAI-compatible providers reuse `/v1/chat/completions`. Amends D114. | A generic record/replay proxy: it hides the wire-format mistakes the mock catches. |
+| D-IN-5 | Native GenAI gaps | **Spec 02 reads the extra keys the research found, each backed by a captured case**: operation names mapped to kinds (Strands' `execute_event_loop_cycle` → `chain`, `execute_structured_output` → `chain`, `decision` → `chain`; Microsoft Agent Framework's `executor.process`, `edge_group.process`, `workflow.build` → `chain` and `message.send` → `span`; Semantic Kernel's `text_completions` → `llm`; AG2's `await_human_input` → `span`); `gen_ai.usage.thinking_tokens` as reasoning; AG2's `record_usage` spans as `llm` when they carry usage and a model; `gen_ai.server.time_to_first_token` (seconds) and `mastra.completion_start_time` (an instant) as TTFT; Pydantic AI's `pydantic_ai.all_messages` and `final_result` as the agent span's input and output; Mirascope's `mirascope.trace.*` input and output and `mirascope.ops.session.id`; LiveKit's `lk.pii.*` content; Mastra's span types; OpenLLMetry and OpenLIT vector-database spans as `retriever`, only under those instrumentations' scopes. The plans pin the exact keys and values from the captures. A capture that contradicts a mapping here changes this decision first. | Leaving them as `span`: the pages would show traces without kinds or I/O. |
+| D-IN-6 | VoltAgent and plain `input`/`output` | **A new convention `voltagent`, detected by any `voltagent.*` attribute, placed in the precedence after `laminar` and before `google_adk`.** On a span with `voltagent.*`, its `llm.*`, `tool.*`, `entity.*` and `ai.*` keys are read by the VoltAgent rules and do not mark `openinference` or `vercel`. **Plain `input` and `output` are read in exactly two cases: on `voltagent` spans, and on spans whose instrumentation scope name starts with `pipecat`.** One rule in spec 02 defines this, and D-IN-5's Pipecat mapping cites it. | Detecting by `entity.*`: a generic key family, so false positives would flip kinds. An SDK adapter: VoltAgent users do not use cetra's SDK. |
+| D-IN-7 | Python registry | **Every OpenInference instrumentor a page documents becomes an `instrument=` name and an extra**: `groq`, `mistralai`, `cohere`, `ollama`, `together` (M2); `agno`, `smolagents`, `haystack`, `instructor`, `beeai`, `guardrails` (M3); `autogen-agentchat` (M4); `mcp` (M6). Each gets an extra, a place in `all`, the dev group (so the parametrized import test covers it), `uv.lock`, and spec 10 § Python instrumentors. A package without Python 3.15 support skips its import test on that runtime, with the reason. Native-OTel frameworks get no row; their page sets up tracing with `cetra.init()`. Amends D-F-7's list. | Pages that install OpenInference by hand: two ways to do one thing for SDK users. |
+| D-IN-8 | Test tiers | **Four tiers, shown in the index's "Tested against" column**: captured (spans recorded from the real library), hand-written (a fixture written from the vendor's attribute reference, as for Copilot), SDK test (the registry import test), setup only (no fixture; the page says so in Limits and has no `<Backing>` box). **A new `website/scripts/check-integrations.mjs` (M2) fails when** an index row's tier disagrees with its page (captured needs a `<Backing>` with a captured fixture, hand-written one with a hand-written fixture, SDK test one with tests, setup only none), or when an index row's page is missing, or a page has no row. Samples that need a provider key or a cloud account are `{/* untested: … */}` as today, so most provider pages carry untested samples. Java, Go, Ruby, Rust and C# blocks are not code samples for `check-samples.mjs`; their pages cite the fixture or say "setup only". No test calls a real provider. | Live provider tests in CI: they need paid keys and are flaky. `just eval-live` stays the only live suite (D167). |
+| D-IN-9 | Other languages | **One page per framework, plus one per language ecosystem for Go, Ruby, Rust and C++. Each uses the language's OTel SDK and the framework's native GenAI spans; there is no new cetra SDK. Java and .NET get capture runners in `tools/capture` (`java/`, a Maven project; `dotnet/`, a .NET project with `packages.lock.json`), with exact pins and the 7-day release-age rule applied by hand, and captured cases in the groups `java` and `dotnet`. Go, Ruby, Rust and C++ pages are setup only** (the user, 2026-11-23). The runners need a JDK 21 and the .NET 10 SDK, only for `just capture` of those groups and `just check-capture`. AGENTS.md § Required tools lists them. Amends D115 and D117. | New cetra SDKs per language: a large surface to maintain, for listings that plain OTel already satisfies. |
 | D-IN-10 | Not supported | **Integrations that cannot send spans are recorded in this design doc only, not on the public site** (the user, 2026-11-23). No page pretends to support them. | A "Not supported yet" section on the index: the user preferred the site to list only what works. |
-| D-IN-11 | Paid or cloud-only | **Integrations whose cloud side needs a paid account are listed with setup-only steps** (the user, 2026-11-23): Bedrock AgentCore's runtime, Vertex AI, Azure OpenAI, Databricks, Portkey's and TrueFoundry's OTLP export, Kong Enterprise. The model-call side is captured against the mock where it can be; the page's Limits say which part is untested. | Leaving them out until someone can test them. |
-| D-IN-12 | New coding agents | **OpenCode, Goose, Hermes Agent and Qwen Code become first-class coding agents as in track CA** (the user, 2026-11-23): `cetra agents setup <agent>` and `remove`, detection in `cetra-otel` with `metadata['coding_agent']`, `repository` and `branch` (D-CA-3, D-CA-4), the session-context hook where the agent has hooks, and the agents in the Coding agents dashboard template. This supersedes D-CA-17's "not added". An agent whose spike shows no usable spans (Goose shows no GenAI attributes yet) gets a page only, and the user is told. | Pages only, with setup later. |
+| D-IN-11 | Paid or cloud-only | **Integrations whose cloud side needs a paid account are listed with setup-only steps** (the user, 2026-11-23): Bedrock AgentCore's runtime, Vertex AI's credentials, Azure OpenAI, Databricks, watsonx, Portkey's and TrueFoundry's OTLP export, Kong Enterprise. The model-call side is captured against the mock where it can be. The page's Limits say which part is untested. | Leaving them out until someone can test them. |
+| D-IN-12 | New coding agents | **OpenCode and Qwen Code become first-class coding agents as in track CA** (the user, 2026-11-23): `cetra agents setup <agent>` and `remove`, detection in `cetra-otel` with `metadata['coding_agent']` (`opencode`, `qwen-code`), `repository` and `branch`, the session-context hook where the agent has hooks, and the agents in the Coding agents dashboard template. **Goose and Hermes Agent get the same treatment if their spikes show stable spans with a model, tokens and tool calls; otherwise they get a page only.** The spike results and the decision are recorded in this doc, and told to the user, before M7's plan is written. Amends D-CA-1 (the agent list), D-CA-3 (detection), D-CA-4 (the `coding_agent` values), D-CA-9 (the accepted agent names) and D-CA-10 (setup); supersedes D-CA-17's "not added". | Pages only, with setup later (the user chose full support). Committing to Goose and Hermes before seeing their spans. |
+| D-IN-13 | Gateway pricing | **A span whose provider is a gateway (`openrouter`, `vercel_ai_gateway`, `helicone`, `portkey`, `cloudflare_ai_gateway`, `litellm_proxy`) and that no row of that gateway prices is priced by the model's publisher**: when the model is `vendor/name`, by the rows of the provider `vendor` maps to (through rule 12) for `name`; otherwise by the rows that would match a span with no provider (publisher first, as spec 02 orders the snapshot). `cost_source` stays `computed`. Gateway fees are not modelled, and the gateway pages say so. Amends spec 02 § Cost computation step 2 ("a row never prices a span of another provider") for gateways only. | Leaving gateway spans unpriced: the headline integration (OpenRouter, 7 of 7) would show no cost. Mapping gateway hosts to the upstream provider: the host does not tell which upstream served the call. |
+| D-IN-14 | Price snapshot | **This track owns the fix to `just prices-update`'s converter** (track T is done) so that LiteLLM's provider-prefixed rows (`groq/…`, `openrouter/…`, `novita/…`, `deepinfra/…`, …) become rows of those providers, with the model name after the prefix. M1 finds why they are missing today, fixes the converter, and refreshes the snapshot under D104's rules (the source commit in the commit message). A provider that LiteLLM does not price stays unpriced, and its page says so. | Hand-written price rows: the snapshot is regenerated each release and would drop them. |
+| D-IN-15 | Aliases and framework names | **Rule 12 gains**: `fireworks` → `fireworks_ai`; `together`, `togetherai` → `together_ai`; `watsonx`, `ibm` → `ibm.watsonx.ai`; `oracle` → `oci`; and LiteLLM's ids `bedrock` → `aws.bedrock`, `azure_ai` → `azure.ai.inference`, `mistral` → `mistral_ai`, `vertex_ai` and `vertex_ai-*` → `gcp.vertex_ai`, `ollama_chat` → `ollama`, `cohere_chat` → `cohere`, `text-completion-openai` → `openai`. M1 checks each LiteLLM id against LiteLLM's provider list. **A named table "framework names in `gen_ai.system`" lists values that are never providers**: `gcp.vertex.agent` (existing, D-B1-8), `autogen`, `spring_ai`, plus any a capture finds. A value in it is skipped and stays unread. | Per-case exceptions in prose, which later frameworks would have to rediscover. |
+| D-IN-16 | Gateway reported cost | **A gateway's own cost attribute is read as reported cost (D109, spec 02 step 1)**, once a captured case shows its exact keys: LiteLLM Proxy's cost keys (M5). Keys that no capture shows are not added. Amends D109's key list. | Ignoring gateway cost: the gateway knows its own fees. |
+| D-IN-17 | Spikes | **A milestone's spikes run before its plan is written**: a throwaway capture or a source read in the track's worktree, written up in `docs/plans/in-integrations/spikes/<item>.md` (what was run, versions, the span names and keys seen, the decision it supports). A spike result that changes a decision or the scope updates this doc first, and the user hears of any change in scope. | Spikes inside plan phases: a plan would then make design decisions. |
 
 ## Milestones
 
-Ordered by how many competitors list them, and grouped by the work they need. Every milestone adds its pages to the index and sidebar, a `CHANGELOG.md` line, and its rows to `docs/roadmap.md`.
+The milestones run in order. Every milestone that adds libraries edits the capture projects' lockfiles (`tools/capture/py/uv.lock`, `tools/capture/ts/pnpm-lock.yaml`), the index, the sidebar and `CHANGELOG.md`, so two milestones never run at once. Phases inside a milestone may run in parallel where its plan's dependency graph allows. Every milestone adds its pages to the index and sidebar, its decisions to `mvp-decisions.md`, a `CHANGELOG.md` line, and updates the track's roadmap row.
 
-**M1 — Provider attribution.** Delivers: calls through the OpenAI client to OpenRouter, Groq, Ollama, Novita, DashScope, Hugging Face, Cloudflare, Databricks, SambaNova, Nebius, Moonshot and Z.ai get the right provider and cost; the alias table gains Fireworks, Together, watsonx, IBM, Oracle and LiteLLM's provider ids; the price snapshot's missing providers (Groq has no rows) are explained or fixed in the converter. The capture tool routes real hosts to the mock (D-IN-3), and captured cases pin attribution for OpenInference, OpenLLMetry and OpenAI v2. Depends on: nothing. Leaves out: the provider pages (M2).
+**M1 — Provider attribution.** Delivers:
+- calls through the OpenAI client to the providers in the host table get the right provider (D-IN-2);
+- the aliases and the framework-name table (D-IN-15);
+- the converter fix and a refreshed snapshot (D-IN-14);
+- gateway pricing (D-IN-13);
+- host routing in the capture harness (D-IN-3), with captured cases for OpenRouter and Novita through each of OpenInference, OpenLLMetry and OpenAI v2 (six cases), plus unit tests for every host table row.
 
-**M2 — Providers.** Delivers: a page for every provider in § Providers, the index regrouped (Providers, Gateways, Frameworks, Coding agents, Apps, Voice, Browser agents, Tools, Languages, Instrumentation libraries, Migrating), the mock routes of D-IN-4 with their captured cases, and the registry rows for Groq, Mistral, Cohere, Ollama and Together. Depends on: M1. Leaves out: gateways (M5).
+Spikes: which host keys each instrumentation writes; why LiteLLM's prefixed rows are missing. Depends on: nothing. Leaves out: the pages (M2).
 
-**M3 — OpenInference frameworks.** Delivers: pages, registry rows and captured cases for Instructor, Agno, smolagents, Haystack, AutoGen, BeeAI (Python and TypeScript), Guardrails AI, DeepAgents and Temporal; own pages for LangGraph and the Claude Agent SDK. No normalizer work expected; a gap found by a capture is fixed in M4. Depends on: nothing (runs in parallel with M1: no shared files except the index, merged in order). Leaves out: native-OTel frameworks.
+**M2 — Providers.** Delivers:
+- a page for every provider in § Providers and the long-tail providers of the appendix;
+- the index regrouped (Providers, Gateways, Frameworks, Coding agents, Apps and no-code, Voice, Browser agents, Tools and data, Evaluation, Languages, Instrumentation libraries, Migrating), and the sidebar likewise;
+- `check-integrations.mjs` (D-IN-8);
+- the mock routes of D-IN-4, with one captured case per native SDK (Groq, Mistral, Cohere, Together, Ollama, Azure, Vertex);
+- the registry rows for Groq, Mistral, Cohere, Ollama and Together (D-IN-7).
 
-**M4 — Native GenAI frameworks.** Delivers: captured cases, the D-IN-5 normalizer rules and pages for Pydantic AI, Mastra, Semantic Kernel (Python), Strands Agents and Bedrock AgentCore, Microsoft Agent Framework (Python), AG2, Mirascope and the OpenHands SDK; the VoltAgent convention (D-IN-6) and its page. Depends on: M1 (both change the normalizer; run in order). Leaves out: .NET and Java (M8).
+Depends on: M1. Leaves out: gateways (M5).
 
-**M5 — Gateways.** Delivers: pages for every gateway in § Gateways; normalization of LiteLLM Proxy's and Cloudflare AI Gateway's keys; captured cases for the gateways that run locally against the mock (LiteLLM Proxy at least; the plan decides Bifrost, Envoy and Kong from a spike); a spike on Azure API Management. Depends on: M1, M2.
+**M3 — OpenInference frameworks.** Delivers pages, registry rows and captured cases for Instructor, Agno, smolagents, Haystack, BeeAI (Python and TypeScript), Guardrails AI, DeepAgents and Temporal, and own pages for LangGraph and the Claude Agent SDK. No normalizer work. A capture that shows a gap moves that integration to M4, and this doc says so. Depends on: M2 (lockfiles and index).
 
-**M6 — Apps, voice, browser agents and tools.** Delivers: pages for n8n, Langflow, Prompt Flow, LiveKit Agents, Pipecat, Browser Use, Stagehand, OpenLIT, MCP, vector databases, Ragas, Promptfoo, Harbor; captured cases and normalizer rules where a spike shows a gap (Pipecat, LiveKit, Stagehand, vector-database spans as `retriever`). Depends on: M4 (normalizer, in order).
+**M4 — Native GenAI frameworks.** Delivers captured cases, the D-IN-5 and D-IN-6 rules and pages for Pydantic AI, Mastra, Semantic Kernel (Python), Strands Agents and Bedrock AgentCore, Microsoft Agent Framework (Python), AG2, AutoGen, Mirascope, the OpenHands SDK and VoltAgent (with `Convention::Voltagent`). Spikes: none (the research read their source); the captures pin the keys. Depends on: M3. Leaves out: .NET and Java (M8).
 
-**M7 — Coding agents.** Delivers: pages for OpenCode, Goose, Hermes Agent, Qwen Code, Pi and the Devin SDK; captured cases and normalization for the ones a spike shows need it (OpenCode's noise spans, as for Codex); `cetra agents setup`, detection, metadata and dashboard-template support for OpenCode, Goose, Hermes Agent and Qwen Code (D-IN-12). Depends on: M4. Leaves out: Pi and the Devin SDK as first-class agents (pages only).
+**M5 — Gateways.** Delivers:
+- a page for every gateway in § Gateways that its spike keeps;
+- LiteLLM Proxy's provider ids and reported cost (D-IN-15, D-IN-16), with a captured case from the proxy running against the mock;
+- captured cases for Bifrost, Envoy and Kong where their spikes show they run locally against the mock, and setup-only pages otherwise.
 
-**M8 — Other languages.** Delivers: pages for Java (Spring AI, LangChain4j, Quarkus, Koog), .NET (Semantic Kernel, Microsoft Agent Framework, Microsoft.Extensions.AI), Go, Ruby and Rust, and Java and .NET capture runners with captured cases (D-IN-9) and the normalizer rules they show (Spring AI's events, Semantic Kernel .NET's older events). Depends on: M4.
+Spikes: Portkey, TrueFoundry, Kong, Cloudflare AI Gateway, Bifrost, Envoy, Azure API Management and the long-tail gateways. Depends on: M4.
 
-M1 and M3 can run in parallel. M2 follows M1; M4 follows M1; M5 follows M2; M6, M7 and M8 follow M4 and can run in parallel with each other when their normalizer edits do not overlap (each plan says).
+**M6 — Apps, voice, browser agents, tools and evaluation.** Delivers pages for n8n, Langflow, Prompt Flow, LiveKit Agents, Pipecat, Browser Use, Stagehand, OpenLIT, MCP (and its registry row), vector databases, Ragas and Promptfoo, plus the spike-approved items of § Apps. It adds captured cases for each item that runs locally, and the D-IN-5 rules for Pipecat, LiveKit and vector databases. Spikes: n8n, Langflow, Stagehand, OpenLIT, Harbor, and every "spike decides" item. Depends on: M5.
+
+**M7 — Coding agents.** Delivers first-class support for OpenCode and Qwen Code (D-IN-12): captures from pinned builds, detection, discard rules where noise spans need them, `cetra agents setup` and `remove`, the hook where the agent has one, and the dashboard template. Goose and Hermes Agent get the same if their spikes pass, else a page. Pi and the Devin SDK get setup-only pages. Spikes: OpenCode, Goose, Hermes Agent, OpenClaw, Augment Code, Oh My Pi, Omnigent. Depends on: M6.
+
+**M8 — Other languages.** Delivers:
+- the Java and .NET capture runners (D-IN-9);
+- captured cases for Spring AI, LangChain4j, Quarkus LangChain4j, Koog, Semantic Kernel .NET, Microsoft Agent Framework .NET and Microsoft.Extensions.AI;
+- the normalizer rules those captures show (Spring AI's content events, Semantic Kernel .NET's older events, `spring_ai` in the framework-name table);
+- pages for each, and setup-only pages for Go, Ruby, Rust and C++.
+
+Depends on: M7.
+
+**M9 — Long-tail frameworks.** Delivers a page for each long-tail framework in the appendix whose spike shows an OTLP path: a captured case when it runs offline, setup only otherwise. The others move to § Not supported, and the user is told. Depends on: M8.
 
 ## User answers
 
 The user, 2026-11-23:
 
 - **Q1. Unsupported integrations:** recorded in this design doc only, not on the site (D-IN-10).
-- **Q2. Java and .NET:** capture runners, captured cases and the normalizer fixes they show; Go, Ruby and Rust setup only (D-IN-9).
+- **Q2. Java and .NET:** capture runners, captured cases and the normalizer fixes they show. Go, Ruby and Rust are setup only (D-IN-9).
 - **Q3. Paid or cloud-only integrations:** listed with setup-only steps (D-IN-11).
-- **Q4. New coding agents:** full setup support for OpenCode, Goose, Hermes Agent and Qwen Code (D-IN-12).
+- **Q4. New coding agents:** full setup support. The cold review's split is recorded in D-IN-12: OpenCode and Qwen Code now; Goose and Hermes Agent after their spikes.
+
+## Open questions
+
+None open. Spike results that change the scope go back to the user (D-IN-17).
+
+## Appendix: every other matrix row
+
+The matrix rows not named above, with their disposition. "Spike" means the milestone's spike decides between a page and § Not supported.
+
+| Row (count) | Disposition |
+|---|---|
+| TypeSafe Jev (5) | Unidentified name in the matrix; M2's spike identifies it, or drops it as an error |
+| BytePlus (3), Baseten, DeepInfra, Hyperbolic, MiniMax, NVIDIA NIM (and Dynamo), Predibase, Sarvam AI, Qianfan, CometAPI, Doubleword, Meta Llama API, PrismML, Anyscale | M2, OpenAI-compatible provider pages. The spike drops any whose endpoint is discontinued |
+| aisuite | M2: no spans of its own; its page uses the provider instrumentors |
+| Claude Platform (Anthropic OTel), OpenAI Assistants API | merged into the Anthropic and OpenAI pages, each as a section |
+| eve (3), AgentSpec, Atomic Agents, Claude Managed Agents, Cloudflare Agents, Flue, Graphite, Inferable, LangServe, mcp-use, MetaGPT, NVIDIA NeMo Agent Toolkit, Pi Durable, TanStack AI, txtai, watsonx Orchestrate, Restate, Embedchain, Pixeltable, EverOS, Weco, Xcode, Upstash QStash, Upstash RAG Chat, Cognee | M9, spike |
+| Arconia, Embabel | M8 (Java) |
+| Swiftide, AI SDK C++ | M8, setup only |
+| OpenClaw (3), Augment Code, Oh My Pi, Omnigent, Open Devin | M7, spike (Open Devin is the old name of OpenHands: merged into the OpenHands SDK page) |
+| Gradio, Langdock, LobeChat, Ragflow, Scalekit, Bubble | M6, spike |
+| Gravitee, OrcaRouter, Anannas AI, Pydantic AI Gateway, Databricks AI Gateway | M5, spike (Databricks AI Gateway is merged into the Databricks page) |
+| Trieve | M6, spike (Helicone lists it as stale) |
+| Hugging Face Datasets, ClickHouse / ClickStack | not trace sources: out of scope |
+| Slack, PagerDuty, Mixpanel, PostHog, Trubrics | destinations or analytics, not trace sources: out of scope (Slack alerts already exist, track K) |
+| MLflow AI Gateway, Opik LLM Gateway, Arize / Phoenix, MLflow, Langfuse (as a backend) | competitors' own products: out of scope; migration pages for Langfuse and Laminar already exist |
