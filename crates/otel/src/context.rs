@@ -340,7 +340,10 @@ pub(crate) fn endpoint_provider(
 /// query, fragment or trailing dot. `None` when nothing is left.
 fn host_of(value: &str) -> Option<String> {
     let rest = value.trim();
-    let rest = rest.split_once("://").map_or(rest, |(_, after)| after);
+    let rest = match rest.find("://") {
+        Some(index) if !rest[..index].contains(['/', '?', '#']) => &rest[index + 3..],
+        _ => rest,
+    };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
     let authority = authority
         .rsplit_once('@')
@@ -970,6 +973,10 @@ mod tests {
             Some("x.openai.azure.com")
         );
         assert_eq!(host_of("http://[::1]:11434/v1").as_deref(), Some("::1"));
+        assert_eq!(
+            host_of("api.groq.com/v1?u=http://x").as_deref(),
+            Some("api.groq.com")
+        );
         assert_eq!(host_of(""), None);
         assert_eq!(host_of("https://"), None);
     }

@@ -489,13 +489,16 @@ fn ranked_lookup<'a>(
     best
 }
 
+/// A provider's `vendor/model` row (resellers and gateways, D-IN-14) prices only spans of that
+/// provider; a span without a provider takes a publisher's row or none.
 fn row_matches(row: &PriceRow, provider: Option<&str>, start_time: i64) -> bool {
     if row.valid_from > start_time {
         return false;
     }
     match (&row.provider, provider) {
         (Some(row_provider), Some(span_provider)) => same_provider(row_provider, span_provider),
-        (Some(_), None) | (None, _) => true,
+        (Some(_), None) => !row.model_name.contains('/'),
+        (None, _) => true,
     }
 }
 
@@ -1188,6 +1191,29 @@ mod tests {
                 .price_for("no-such-model-anywhere", None, 0)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_vendor_model_row_never_prices_a_span_without_provider() {
+        let prices = table(vec![row(
+            &exact_pattern("deepseek/deepseek-v3.2"),
+            PriceScope::Builtin,
+            Some("novita"),
+            0,
+            1.0,
+        )]);
+        let priced = priced_of(&prices, "deepseek/deepseek-v3.2", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.provider, None);
+        let priced = priced_with(&prices, Some("novita"), "deepseek/deepseek-v3.2", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+
+        // A provider-less row keeps pricing a span without a provider, even with a `/`.
+        let custom = table(vec![row("org/model", PriceScope::Org, None, 0, 2.0)]);
+        let priced = priced_of(&custom, "org/model", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(2.0));
     }
 
     #[test]

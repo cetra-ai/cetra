@@ -901,10 +901,14 @@ fn price_row_matches(
     if row.valid_from > start_time {
         return false;
     }
-    if let Some(row_provider) = &row.provider
-        && provider.is_some_and(|span_provider| !same_provider(row_provider, span_provider))
-    {
-        return false;
+    if let Some(row_provider) = &row.provider {
+        let provider_matches = match provider {
+            Some(span_provider) => same_provider(row_provider, span_provider),
+            None => !row.model_name.contains('/'),
+        };
+        if !provider_matches {
+            return false;
+        }
     }
     pattern.is_match(model)
 }

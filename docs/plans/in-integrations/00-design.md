@@ -99,7 +99,7 @@ Nothing changes in storage, the server's other routes or the UI pages.
 The rule, written into spec 02 as its own subsection:
 
 1. **When it applies.** On `llm` and `embedding` spans only (a plain HTTP client span to `api.groq.com` stays without a provider), after the provider sources of § Model, provider, usage are read, and only when the resolved provider is empty or `openai`. It runs before inference from the model name.
-2. **The host.** The first of these that yields a host wins:
+2. **The host.** The keys are tried in this order, and the first one whose value yields a host (a non-empty string from which a host can be read) decides; a key with an empty or unparsable value is skipped:
    - `server.address`;
    - the host of `url.full`;
    - the host of `gen_ai.openai.api_base` (OpenLLMetry).
