@@ -5,6 +5,7 @@
 pub(crate) mod buckets;
 pub(crate) mod config_view;
 pub(crate) mod crash;
+pub mod debug_info;
 pub mod disk;
 pub(crate) mod facts;
 pub(crate) mod heartbeat;

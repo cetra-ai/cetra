@@ -5,7 +5,7 @@
 use uuid::Uuid;
 
 use crate::meta::instance_settings::{
-    TELEMETRY_INSTANCE_ID, get_setting_tx, insert_setting_if_absent,
+    TELEMETRY_INSTANCE_ID, get_setting, get_setting_tx, insert_setting_if_absent,
 };
 use crate::meta::{MetaDb, MetaError};
 
@@ -33,6 +33,23 @@ pub(crate) async fn instance_id(meta: &MetaDb) -> Result<Uuid, MetaError> {
             table: "instance_settings",
             column: "value",
         })
+}
+
+/// This instance's id when one was created, without creating it: a read-only command (the
+/// debug bundle) must not create the id (D-TL-9).
+///
+/// # Errors
+///
+/// [`MetaError`] when the read fails, or [`MetaError::Corrupt`] when the stored value is not
+/// a UUID.
+pub(crate) async fn existing_instance_id(meta: &MetaDb) -> Result<Option<Uuid>, MetaError> {
+    match get_setting(meta.reader(), TELEMETRY_INSTANCE_ID).await? {
+        None => Ok(None),
+        Some(value) => Uuid::parse_str(&value).map(Some).map_err(|_| MetaError::Corrupt {
+            table: "instance_settings",
+            column: "value",
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -77,6 +94,35 @@ mod tests {
         let (_dir, db) = crate::meta::test_db().await;
         let (a, b) = tokio::join!(instance_id(&db), instance_id(&db));
         assert_eq!(a.unwrap(), b.unwrap());
+    }
+
+    #[tokio::test]
+    async fn existing_instance_id_is_none_and_creates_nothing() {
+        let (_dir, db) = crate::meta::test_db().await;
+        assert_eq!(existing_instance_id(&db).await.unwrap(), None);
+        let stored = get_setting(db.reader(), TELEMETRY_INSTANCE_ID)
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+    }
+
+    #[tokio::test]
+    async fn existing_instance_id_reads_a_created_id() {
+        let (_dir, db) = crate::meta::test_db().await;
+        let id = instance_id(&db).await.unwrap();
+        assert_eq!(existing_instance_id(&db).await.unwrap(), Some(id));
+    }
+
+    #[tokio::test]
+    async fn existing_instance_id_refuses_a_corrupt_value() {
+        let (_dir, db) = crate::meta::test_db().await;
+        db.write(|conn| {
+            Box::pin(async move { put_setting(conn, TELEMETRY_INSTANCE_ID, "not-a-uuid").await })
+        })
+        .await
+        .unwrap();
+        let result = existing_instance_id(&db).await;
+        assert!(matches!(result, Err(MetaError::Corrupt { .. })));
     }
 
     #[tokio::test]
