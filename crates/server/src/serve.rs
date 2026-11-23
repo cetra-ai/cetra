@@ -112,6 +112,8 @@ const USAGE_EVERY: Duration = Duration::from_secs(10);
 const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
 /// How often verified domains due for their daily re-proof are checked (D-P-72).
 const ORG_SSO_RECHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How often SAML providers with a metadata URL are checked for their daily refresh (D-SA-11).
+const ORG_SSO_SAML_REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// When dropped orgs' usage is first pruned, then how often (D-P-46).
 const USAGE_PRUNE_FIRST: Duration = Duration::from_secs(60);
 const USAGE_PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -605,11 +607,13 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
-    // Usage notices send email, and the org-SSO recheck looks up DNS, which restore mode does
-    // not do (N M3, D-N-25). `spawn_org_sso` only reloads from `meta.db`, so it keeps running.
+    // Usage notices send email, the org-SSO recheck looks up DNS and the SAML metadata refresh
+    // fetches IdP metadata, which restore mode does not do (N M3, D-N-25). `spawn_org_sso` only
+    // reloads from `meta.db`, so it keeps running.
     if !state.config.restore_mode {
         tasks.push(spawn_notices(state.clone()));
         tasks.push(spawn_org_sso_recheck(state.clone()));
+        tasks.push(spawn_org_sso_saml_refresh(state.clone()));
     }
     tasks.push(spawn_org_sso(state.clone()));
     if state.config.restore_mode {
@@ -869,6 +873,30 @@ fn spawn_org_sso_recheck(state: AppState) -> JoinHandle<()> {
                 ),
                 Ok(_) => {}
                 Err(error) => tracing::warn!(error = %error, "org sso domain recheck failed"),
+            }
+        }
+    })
+}
+
+fn spawn_org_sso_saml_refresh(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_SAML_REFRESH_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::ee::org_sso::saml_refresh::refresh_once(&state, state.clock.now_ns()).await
+            {
+                Ok(run) if run.rotated > 0 || run.failed > 0 => tracing::info!(
+                    refreshed = run.refreshed,
+                    rotated = run.rotated,
+                    failed = run.failed,
+                    "org sso saml metadata refresh"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "org sso saml metadata refresh failed");
+                }
             }
         }
     })
@@ -1188,9 +1216,10 @@ mod tests {
         ));
     }
 
-    /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send
-    /// (evaluation and delivery), usage notices (email) and the org-SSO recheck (DNS). The eval
-    /// dispatcher and backfill runner live in `eval_tasks`, which is not counted here.
+    /// Restore mode starts five fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS) and the SAML
+    /// metadata refresh (IdP metadata fetches). The eval dispatcher and backfill runner live in
+    /// `eval_tasks`, which is not counted here.
     #[tokio::test]
     async fn restore_mode_skips_the_sending_and_dns_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -1202,7 +1231,7 @@ mod tests {
         let restored = bind(restore, None).await.unwrap();
         let restore_tasks = restored.tasks.len();
         restored.shutdown().await.unwrap();
-        assert_eq!(normal_tasks - restore_tasks, 4);
+        assert_eq!(normal_tasks - restore_tasks, 5);
     }
 
     #[tokio::test]

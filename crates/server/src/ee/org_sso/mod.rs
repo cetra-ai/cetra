@@ -20,6 +20,7 @@ pub(crate) mod login;
 pub(crate) mod recheck;
 pub(crate) mod saml;
 pub(crate) mod saml_pending;
+pub(crate) mod saml_refresh;
 pub(crate) mod settings;
 pub(crate) mod store;
 
