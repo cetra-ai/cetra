@@ -909,6 +909,8 @@ fn manifest_covers_the_read_operations() {
                 && id != "get_dataset_export"
                 && id != "get_oauth_authorize"
                 && id != "get_sso_authorize"
+                && id != "get_saml_metadata"
+                && id != "get_saml_start"
                 && id != "get_oauth_callback"
             {
                 gets.insert(id.to_owned());

@@ -1035,6 +1035,48 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     )
     .await?;
 
+    // SAML: a second org whose provider is saved from manual fields, with a verified domain.
+    let saml_org =
+        orgs::insert_org(conn, OrgId::new_v7(), "Golden SAML", "golden-saml", now).await?;
+    sso::put_saml_provider(
+        conn,
+        saml_org.id,
+        Uuid::now_v7(),
+        sso::SamlWrite {
+            display_name: "Golden SAML".to_owned(),
+            jit_role: JitRole::Viewer,
+            metadata_url: Some("https://idp.golden.test/metadata".to_owned()),
+            idp_entity_id: "https://idp.golden.test/metadata".to_owned(),
+            sso_url: "https://idp.golden.test/sso".to_owned(),
+            certificates: vec![
+                cetra_saml::test_idp::TestKey::Idp
+                    .certificate()
+                    .der()
+                    .to_vec(),
+            ],
+            attributes: sso::SamlAttributes {
+                email: Some("mail".to_owned()),
+                ..Default::default()
+            },
+            refreshed_at: Some(now),
+        },
+        now,
+    )
+    .await?;
+    sso::insert_domain(
+        conn,
+        &sso::DomainRow {
+            id: Uuid::now_v7(),
+            org_id: saml_org.id,
+            domain: "golden-saml.example.com".to_owned(),
+            token: "golden-saml-domain-token".to_owned(),
+            verified_at: Some(now),
+            last_checked_at: Some(now),
+            created_at: now,
+        },
+    )
+    .await?;
+
     // Datasets, one version with one item, an experiment with one result, and a model price.
     let dataset_id = Uuid::now_v7();
     datasets::insert_dataset(

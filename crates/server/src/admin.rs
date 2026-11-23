@@ -929,6 +929,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn org_sso_disable_turns_a_saml_provider_off() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let write = crate::ee::org_sso::store::SamlWrite {
+                    display_name: "Acme".to_owned(),
+                    jit_role: crate::api::org_sso::JitRole::Viewer,
+                    metadata_url: None,
+                    idp_entity_id: "https://idp.example".to_owned(),
+                    sso_url: "https://idp.example/sso".to_owned(),
+                    certificates: vec![
+                        cetra_saml::test_idp::TestKey::Idp
+                            .certificate()
+                            .der()
+                            .to_vec(),
+                    ],
+                    attributes: Default::default(),
+                    refreshed_at: None,
+                };
+                crate::ee::org_sso::store::put_saml_provider(conn, org, Uuid::now_v7(), write, 1)
+                    .await?;
+                crate::ee::org_sso::store::set_flags(conn, org, true, true, 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        let row = crate::ee::org_sso::store::provider(db.reader(), org)
+            .await
+            .unwrap()
+            .expect("provider kept");
+        assert!(!row.enabled && !row.enforced);
+        db.close().await;
+    }
+
+    #[tokio::test]
     async fn migrate_without_a_meta_db_refuses_and_creates_nothing() {
         let app = TestApp::new().await;
         let empty = tempfile::tempdir().unwrap();
