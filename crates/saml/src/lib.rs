@@ -7,6 +7,7 @@
 mod cert;
 mod metadata;
 mod request;
+mod response;
 pub(crate) mod xml;
 
 #[cfg(any(test, feature = "test-idp"))]
@@ -18,4 +19,8 @@ pub use metadata::{
 };
 pub use request::{
     AuthnRequest, RequestError, authn_request_redirect_url, is_valid_request_id, sp_metadata_xml,
+};
+pub use response::{
+    Assertion, AttributeNames, ExpectedResponse, MAX_DECODED_BYTES, MAX_ENCODED_BYTES,
+    ReceivedResponse, ResponseError, decode_response, validate_response,
 };
