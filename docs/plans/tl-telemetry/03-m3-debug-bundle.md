@@ -1,7 +1,7 @@
 # TL M3 — `cetra debug-bundle`
 
 **Summary.** This milestone gives a user filing a bug one local, reviewable JSON file instead of a round of questions. It adds:
-- a log ring buffer layer: the last 2000 stdout-level lines as JSON, at most 2 MiB, pushed onto M1's subscriber;
+- a log ring buffer layer: the last 2000 stdout-level lines as JSON (without the HTTP, TLS, OpenTelemetry and `sqlx` libraries' own lines), at most 2 MiB, pushed onto M1's subscriber;
 - an allow-list view of the configuration: the merged sources (the file, then `CETRA_*`) as a key tree where only allow-listed, non-secret keys show their value and every other leaf reads `"<redacted>"`;
 - a second-guard scrubber (emails, `sk-/pk-/pat-cetra-` keys, passwords in URLs), regex-free;
 - a generalized admin socket with a `debug_info` command (additive within protocol 1, D-R-36) and a response size cap. The reply carries uptime, the log lines, storage statistics, catalog files per table and level, the `/readyz` checks, `meta.db` counts, the self-monitoring state, the telemetry switchboard decision and the heartbeat payload as it would be sent;
@@ -109,7 +109,7 @@
 | Design § Details settled while planning, bullet "Debug bundle (M3)" | `config` shows the keys the user set (file and environment) plus the names of the `CETRA_*` variables, without serde defaults; domains, the OIDC issuer and client id, and the `init` org and project names are shown; `config_error` carries the key path, the kind and its static reason, never figment or serde text; catalog file counts come from a read-only query of `catalog.db`; `--output -` writes to stdout; the golden server scenario records one `debug_info` exchange; host facts use `sysinfo` |
 
 Plan-level details (within those decisions):
-- **Ring buffer.** It uses the stdout filter (`log_filter(&config.log.level)`, so the `rmcp` cap and M4's notice directive apply) and always formats JSON, even when stdout is pretty. It has no span fields. Bounds: 2000 lines, 2 MiB of line bytes, 16 KiB per line (a longer line is cut and ends with `…<truncated>`).
+- **Ring buffer.** It uses the stdout filter (`log_filter(&config.log.level)`, so the `rmcp` cap and M4's notice directive apply), minus the OTLP export's dropped library targets (M1's `EXPORT_DROPPED_TARGETS`, through `export_target_allowed`) and `sqlx`, but keeping the export's failure lines, and always formats JSON, even when stdout is pretty. It has no span fields. Bounds: 2000 lines, 2 MiB of line bytes, 16 KiB per line (a longer line is cut and ends with `…<truncated>`).
 - **Where the ring is reached.** `subscriber::init` installs it in a process-wide `OnceLock` (`ring::install`). The socket handler reads it with `ring::installed()`. Servers built by tests have no ring, and their `debug_info.logs` is `null`.
 - **Response cap.** 4 MiB per response line (`MAX_RESPONSE`). The server drops the oldest log lines until the line fits and sets `logs.trimmed`. A client refuses a longer line.
 - **Bundle cap.** 8 MiB (`MAX_BUNDLE_BYTES`), pretty-printed JSON, measured on the scrubbed document. The oldest log lines go first; if the bundle is still too large without them, `BundleError::TooLarge`. Each shown config string is cut at 4096 bytes.
@@ -123,7 +123,7 @@ Plan-level details (within those decisions):
   - `meta.db` and `catalog.db`: `PRAGMA user_version` and `MAX(version)` of `_sqlx_migrations`, on a `read_only` + `immutable` connection. It writes nothing, not even `-shm`, and does not read an un-checkpointed `-wal`.
   - WAL segments: the first 6 bytes of every `*.wal` file in `wal/spans` and `wal/scores` (`LWAL` + `u16` LE version).
 - **Server detection.** `connect` to `<data_dir>/admin.sock`:
-  - `NotFound` or `ConnectionRefused`: the bundle then probes `<data_dir>/LOCK`, which a running server holds with an exclusive `flock` (`cetra_storage`'s `lock_dir`), with a non-blocking shared lock on a read-only handle (never creating the file). Held → `unreachable` ("the data directory is in use but admin.sock does not answer": a server whose data directory path is too long for a Unix socket runs without one, and a starting server has none yet), and nothing in the directory is read. Not held, absent or unreadable → `not_running`;
+  - `NotFound`, `ConnectionRefused` or `InvalidInput` (a socket path too long for a Unix address): the bundle then probes `<data_dir>/LOCK`, which a running server holds with an exclusive `flock` (`cetra_storage`'s `lock_dir`), with a non-blocking shared lock on a read-only handle (never creating the file). Held → `unreachable` ("the data directory is in use but admin.sock does not answer": a server whose data directory path is too long for a Unix socket runs without one, and a starting server has none yet), and nothing in the directory is read. Not held, absent or unreadable → `not_running`;
   - any other connect error means `unreachable`;
   - a `Failed` answer means `refused`, with the code and message.
 - **Environment.** The bundle reads the process environment with `std::env::vars_os`, skipping a pair whose name or value is not UTF-8, so a stray non-UTF-8 variable never makes the support command panic.
@@ -385,7 +385,7 @@ pub(crate) struct ConfigView {
     /// Names of the `CETRA_*` variables set, sorted. Never their values.
     pub(crate) env_names: Vec<String>,
     /// The merged file and environment values, redacted by the allow-list.
-    pub(crate) values: serde_json::Value,
+    pub(crate) values: Value,                 // `serde_json::Value`, imported (the `unused_qualifications` lint refuses the full path)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -556,7 +556,7 @@ TL3.3–TL3.8 run one after the other: each adds a line to `observability/mod.rs
 - Edit only the files of the phase's **Edit** list. Report any change needed elsewhere.
 - **Do not run** `cargo build`, `cargo test`, `cargo check`, `cargo clippy`, `cargo nextest` or any `just` recipe: the machine is loaded, and the coordinator runs the checks once at the end of the milestone. These are fine:
   - read-only commands: `grep`, `git diff`, `cargo info`, reading sources under `~/.cargo/registry/src`;
-  - `rustfmt --edition 2024 <your .rs files>`;
+  - `rustfmt --edition 2024 <file>`, only on a **new leaf file** of your phase (one without `mod x;` declarations: `scrub.rs`, `ring.rs`, `config_view.rs`, `host.rs`, `disk.rs`, `debug_info.rs`, `bundle.rs`, `crates/cli/src/debug_bundle.rs`). rustfmt follows `mod` declarations and would rewrite sibling files another agent is editing, so never run it on `mod.rs`, `main.rs`, `lib.rs` or an existing file you edited (`subscriber.rs`, `config.rs`, `admin_socket.rs`, `health.rs`, `instance.rs`, `golden_tests/build.rs`); format those by hand like the surrounding code, and the coordinator's `just fmt` settles them;
   - where a phase says so, `cargo metadata --format-version 1 --offline > /dev/null`, which only rewrites `Cargo.lock`.
 - Write every test the phase lists, even though you do not run them. Make them compile by reading the APIs; never guess a signature.
 - **Done when** for every phase: the listed files changed as specified, nothing else changed (`git status`), and one commit with the given subject exists.
@@ -569,7 +569,7 @@ TL3.3–TL3.8 run one after the other: each adds a line to `observability/mod.rs
   - logs and errors never carry payload, emails, secrets or config values.
 - New items are `pub(crate)` unless § Contracts marks them `pub`. The CLI and `AdminResponse` reach those through `pub mod` lines. Every item has a doc comment. The workspace lint `unused_qualifications` is on: import a name once rather than writing its path twice.
 - In every new module, all non-test items come before the single `#[cfg(test)] mod tests` at the end of the file.
-- `observability/mod.rs` has one alphabetical list of `mod` lines, whatever their visibility (committed: `buckets, facts, heartbeat, instance, otlp, panic, subscriber, switchboard`). Insert each new line at its alphabetical place in that list, keeping every line another milestone added (M2, M5 and M6 add lines too). This plan adds `bundle` (`pub`, first), `config_view`, `debug_info` (`pub`), `disk` (`pub`), `host`, `ring` and `scrub`.
+- `observability/mod.rs` has one alphabetical list of `mod` lines, whatever their visibility (committed: `buckets, facts, heartbeat, instance, otlp, panic, subscriber, switchboard`). Insert each new line at its alphabetical place in that list, keeping every line another milestone added (M2, M5 and M6 add lines too). This plan adds `bundle` (`pub`, right after `buckets`), `config_view`, `debug_info` (`pub`), `disk` (`pub`), `host`, `ring` and `scrub`.
 - No test asserts that `debug_info.logs` is `None`. Under `cargo test` one process runs every server test, and `ring::install` may have run.
 - The milestone check is the coordinator's, after TL3.10 (§ After the last phase).
 
@@ -733,7 +733,7 @@ TL3.3–TL3.8 run one after the other: each adds a line to `observability/mod.rs
    ```
 2. Create `ring.rs`:
    - Module doc: `//! The log ring buffer of `cetra serve` (track TL § 4): the last log lines at the stdout filter, as JSON, kept in memory for the admin socket's `debug_info`. Bounded by line count, total bytes and line length, so a burst or a huge field cannot grow it.`
-   - Imports: `std::collections::VecDeque`, `std::io::{self, Write}`, `std::sync::{Arc, Mutex, OnceLock, PoisonError}`, `tracing_subscriber::Layer`, `tracing_subscriber::filter::EnvFilter`, `tracing_subscriber::fmt::MakeWriter`, `super::subscriber::BoxedLayer`.
+   - Imports: `std::collections::VecDeque`, `std::io::{self, Write}`, `std::sync::{Arc, Mutex, OnceLock, PoisonError}`, `tracing_subscriber::{Layer, Registry}`, `tracing_subscriber::layer::Filter`, `tracing_subscriber::fmt::MakeWriter`, `super::subscriber::BoxedLayer`. The tests import `tracing_subscriber::filter::EnvFilter`.
    - Contents, verbatim:
    ```rust
    /// Lines kept.
@@ -803,7 +803,7 @@ TL3.3–TL3.8 run one after the other: each adds a line to `observability/mod.rs
        ```
        (Invariant, as a comment: `MAX_LINE_BYTES < MAX_BYTES`, so once the loop ends `bytes + line.len() <= MAX_BYTES`.)
      - `pub(crate) fn snapshot(&self) -> RingSnapshot`: lock (same poison handling), `RingSnapshot { lines: state.lines.iter().cloned().collect(), dropped: state.dropped }`.
-     - `pub(crate) fn layer(&self, filter: EnvFilter) -> BoxedLayer`, verbatim:
+     - `pub(crate) fn layer<F>(&self, filter: F) -> BoxedLayer where F: Filter<Registry> + Send + Sync + 'static`, body verbatim (TL3.2 passes the stdout filter combined with a target filter; the tests pass an `EnvFilter`):
        ```rust
        tracing_subscriber::fmt::layer()
            .json()
@@ -913,7 +913,7 @@ In `ring.rs`:
 
 ### TL3.2 — The ring layer in the subscriber
 
-**Goal.** `subscriber::build` pushes the ring layer, with the stdout filter, onto M1's layer list, and `init` installs the ring for the admin socket.
+**Goal.** `subscriber::build` pushes the ring layer, with the stdout filter minus the libraries' targets, onto M1's layer list, and `init` installs the ring for the admin socket.
 
 **Edit:**
 - `crates/server/src/observability/subscriber.rs` (shared with M2)
@@ -943,11 +943,28 @@ In `ring.rs`:
    ```
 3. In `build`, right after `let mut layers: Vec<BoxedLayer> = vec![stdout];`, add:
    ```rust
-   // The ring keeps what stdout shows, as JSON whatever the stdout format (track TL M3).
+   // The ring keeps what stdout shows, minus the libraries' own lines, as JSON whatever
+   // the stdout format (track TL M3).
    let ring = LogRing::new();
    let ring_filter = log_filter(&config.log.level).map_err(ObservabilityError::LogLevel)?;
-   layers.push(ring.layer(ring_filter));
+   let ring_targets = filter_fn(|metadata| ring_target_allowed(metadata.target()));
+   layers.push(ring.layer(FilterExt::<Registry>::and(ring_filter, ring_targets)));
    ```
+   (`filter_fn`, `FilterExt` and `Registry` are already imported in `subscriber.rs` for the export layer.)
+   Add, right after `export_target_allowed`:
+   ```rust
+   /// Whether an event of `target` may enter the ring buffer, which goes into a file meant for a
+   /// public issue: not the exporter stack of [`EXPORT_DROPPED_TARGETS`] (HTTP, TLS and
+   /// OpenTelemetry crates, whose `debug`/`trace` output can carry headers and URLs) and not
+   /// `sqlx` (statement text), whatever `log.level` lets through. The export's own failure
+   /// lines ([`EXPORT_FAILURE_TARGET`]) are kept: they help a bug report. The `rmcp` cap is in
+   /// the stdout filter already.
+   fn ring_target_allowed(target: &str) -> bool {
+       target == EXPORT_FAILURE_TARGET
+           || (export_target_allowed(target, Level::ERROR) && !target.starts_with("sqlx"))
+   }
+   ```
+   (`export_target_allowed` at `Level::ERROR` applies only its dropped prefixes: its `rmcp` rule never drops an ERROR.)
    and add `ring` to the `Observability { … }` literal in `build`'s last expression (today `Observability { logs }`, which becomes `Observability { logs, ring }`, plus any field M2 added). If M2 pushed its own layer right after `vec![stdout]`, put the three lines after M2's push: layer order does not matter here.
 4. In `init`, right after the statement that ends with `.try_init().map_err(|_| ObservabilityError::AlreadyInstalled)?;` (it spans three lines), add `ring::install(observability.ring.clone());`.
 5. Extend the module doc's layer list by one sentence: `The ring buffer layer (track TL M3) keeps the stdout-level lines as JSON for the admin socket's `debug_info`.`
@@ -964,6 +981,8 @@ In `ring.rs`:
      - has none containing `ring-debug` or `rmcp-info`;
      - every line parses as JSON with the keys `timestamp`, `level`, `fields` and `target`.
 - `the_ring_is_json_when_stdout_is_pretty`: the same build with `LogFormat::Pretty`; `info!("pretty-canary")` → the ring's line parses as JSON.
+- `ring_target_allowed_drops_library_lines`, a table: false for `hyper_util::client`, `h2::codec`, `reqwest::connect`, `rustls::conn`, `opentelemetry_sdk`, `sqlx::query`; true for `cetra_self_monitoring`, `cetra_server::serve`, `cetra_storage::wal`, `rmcp::service`.
+- `the_ring_drops_library_lines_at_debug`: `log.level = "debug"`; `debug!(target: "hyper_util::client", "hyper-canary")`, `debug!(target: "sqlx::query", "sqlx-canary")`, `debug!("cetra-canary")` → the ring has `cetra-canary` only; the stdout buffer has all three.
 - `the_notice_reaches_the_ring_at_warn`: `log.level = "warn"`; `info!(target: crate::observability::switchboard::NOTICE_TARGET, "notice-canary")` → in the ring (M4's directive in `log_filter`).
 - `an_invalid_log_level_is_an_error` (M1's) still passes unchanged: `log_filter` is parsed for stdout first.
 
@@ -1142,7 +1161,7 @@ In `ring.rs`:
    /// The longest shown string, in bytes; a longer one is cut and ends with `…<truncated>`.
    const MAX_VALUE_BYTES: usize = 4096;
    ```
-   Before you write it, list the page's keys (`grep '^| \`' website/src/content/docs/docs/self-hosting/configuration-reference.md`) and compare them with this list and the test's `REDACTED_KEYS`. M2, M5 or M6 may have landed first and added keys. Classify each such key that is on the page:
+   Before you write it, list the page's keys: the lines that start with `|`, a space and a backtick (`grep -n -F '| `' website/src/content/docs/docs/self-hosting/configuration-reference.md`, then keep the lines that start with it) and compare them with this list and the test's `REDACTED_KEYS`. M2, M5 or M6 may have landed first and added keys. Classify each such key that is on the page:
    - shown (add to `SHOWN_KEYS`, at the end): `self_monitoring.traces`, `self_monitoring.trace_sample_ratio` (M2), `telemetry.crash_reports` (M5), `analytics.posthog_host` (M6);
    - redacted (add to the test's `REDACTED_KEYS`): `analytics.posthog_key` (M6).
    Do not add a key that is not on the page: the test also refuses list entries the page lacks. Leave any other unclassified key alone: `every_reference_key_is_classified` fails loudly, naming the key and this file, and the coordinator classifies it. Report it.
@@ -1528,7 +1547,9 @@ In `ring.rs`:
    /// for as long as its storage is open (`cetra_storage`'s `lock_dir`). Opens the file
    /// read-only, never creating it, and tries a shared lock without waiting; a lock it gets is
    /// released when the handle drops at the end of this function. Absent or unreadable: not
-   /// held.
+   /// held. While the shared lock is held (microseconds), a `cetra serve` starting at that very
+   /// instant fails its exclusive `try_lock` with "another cetra is running"; accepted: the
+   /// bundle runs once, by hand.
    pub(crate) fn lock_held(data_dir: &Path) -> bool {
        let Ok(file) = File::open(data_dir.join("LOCK")) else {
            return false;
@@ -1758,7 +1779,14 @@ In `ring.rs`:
    - `level = config.level.clone()`;
    - `reason`: `None` when `exporting`; else `Some("no_endpoint")` when `otlp_endpoint` is `None`; else `Some("logs_off")`. Owned `String`s.
 7. `pub(crate) async fn collect(state: &AppState, ring: Option<&LogRing>) -> DebugInfo`. Doc: "The running server's state now. Never fails: a part that cannot be read is empty and listed in `errors`." Steps, in order:
-   1. `let mut errors = Vec::new();` and a local `let mut fail = |section: &str, kind: &str| errors.push(SectionError { section: section.to_owned(), kind: kind.to_owned() });`. If the borrow checker refuses the closure, write a small `fn section_error(section, kind) -> SectionError` and push it instead.
+   1. `let mut errors = Vec::new();`. Each failure below pushes `section_error(section, kind)`, a private function placed after `collect`:
+      ```rust
+      /// A part of `debug_info` that could not be read, by name and static kind.
+      fn section_error(section: &str, kind: &str) -> SectionError {
+          SectionError { section: section.to_owned(), kind: kind.to_owned() }
+      }
+      ```
+      Below, "`fail(a, b)`" means `errors.push(section_error(a, b))`.
    2. `logs`: `ring.map(|ring| { let snapshot = ring.snapshot(); LogsView { lines: snapshot.lines, dropped: snapshot.dropped, trimmed: false } })`.
    3. `stats = StatsView::from(state.storage.stats().await)`, `health = HealthView::from(state.storage.health())`.
    4. `catalog_files`: `catalog_levels(&state.config.data_dir.join("catalog.db"), false).await`. On `Err(_)`: `fail("storage.catalog_files", "unreadable")` and an empty `Vec`.
@@ -2054,11 +2082,18 @@ In `ring.rs`:
    file.write_all(bytes).map_err(write_error)?;
    file.sync_all().map_err(write_error)
    ```
-4. `pub async fn render(config_path: Option<&Path>, ui_embedded: bool, now: DateTime<Utc>) -> Result<Vec<u8>, BundleError>`. Doc: "The bundle as JSON bytes. Reads the configuration as `cetra serve` does: `config_path`, else `CETRA_CONFIG`, then the process's `CETRA_*` variables. A variable whose name or value is not UTF-8 is skipped, so it never makes this command panic." Body:
+4. Two functions:
    ```rust
-   let env: Vec<(String, String)> = std::env::vars_os()
-       .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
-       .collect();
+   /// The process environment for [`render`]: every pair whose name and value are UTF-8 (a
+   /// non-UTF-8 variable is skipped, so it never makes this command panic).
+   pub fn process_env() -> Vec<(String, String)> {
+       std::env::vars_os()
+           .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
+           .collect()
+   }
+   ```
+   and `pub async fn render(config_path: Option<&Path>, env: &[(String, String)], ui_embedded: bool, now: DateTime<Utc>) -> Result<Vec<u8>, BundleError>`. Doc: "The bundle as JSON bytes. Reads the configuration as `cetra serve` does: `config_path`, else `CETRA_CONFIG`, then the `CETRA_*` variables of `env` (the CLI passes [`process_env`]; tests pass their own, so the developer's shell never changes a test)." Body:
+   ```rust
    let pairs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
    let bundle = build(config_path, &pairs, ui_embedded, now).await;
    let mut document = document(&bundle)?;
@@ -2103,10 +2138,10 @@ In `ring.rs`:
    2. `let unreachable = |reason: &str| ServerSection::Unreachable { data_dir: shown.clone(), reason: reason.to_owned() };`
    3. Connect: `let stream = match tokio::time::timeout(CONNECT_TIMEOUT, UnixStream::connect(&socket)).await { … }` with these arms:
       - `Err(_)` → `return unreachable("connecting timed out")`;
-      - `Ok(Err(e))` with kind `NotFound` or `ConnectionRefused`:
+      - `Ok(Err(e))` with kind `NotFound`, `ConnectionRefused` or `InvalidInput` (`InvalidInput` is what a socket path too long for a Unix address gives, before any `connect(2)`: a server with such a data directory runs without its socket):
         - if `lock_held(data_dir)` → `return unreachable(LOCK_HELD_REASON)` (a server holds the directory: its files are not read);
         - else `return ServerSection::NotRunning { data_dir: shown.clone(), disk: disk_facts(data_dir).await, hint: NOT_RUNNING_HINT }`;
-      - `Ok(Err(e))` otherwise → `return unreachable(&e.kind().to_string())` (a static description, never a path);
+      - `Ok(Err(e))` otherwise → `return unreachable(&e.kind().to_string())` (`ErrorKind`'s `Display` is a static description);
       - `Ok(Ok(stream))` → `stream`.
    4. `let response = match tokio::time::timeout(ANSWER_TIMEOUT, ask_debug_info(stream)).await { Err(_) => return unreachable("the server did not answer within 30 s"), Ok(Err(reason)) => return unreachable(reason), Ok(Ok(response)) => response };`
    5. `match response`:
@@ -2181,7 +2216,7 @@ In `ring.rs`:
         }
     }
     ```
-11. In `observability/mod.rs` add `pub mod bundle;` at its alphabetical place (first in the list).
+11. In `observability/mod.rs` add `pub mod bundle;` at its alphabetical place (right after `pub(crate) mod buckets;`).
 
 **Tests** (in `bundle.rs`; `#[tokio::test]` where async). A helper `fn now() -> DateTime<Utc>` returns `Utc.with_ymd_and_hms(2026, 11, 23, 10, 20, 30).unwrap()` (import `chrono::TimeZone`). A helper `fn toml_for(data: &Path) -> String` returns `format!("data_dir = {:?}\n", data.display().to_string())`, written to `<temp>/cetra.toml`.
 - `a_running_server_is_asked_over_the_socket`:
@@ -2200,6 +2235,9 @@ In `ring.rs`:
      - `hint` contains `docker compose logs` and `journalctl`.
 - `the_not_running_bundle_writes_nothing_to_the_data_dir`: after shutdown, the sorted `(relative path, size)` list of `data` is the same before and after `build`.
 - `a_held_lock_without_a_socket_is_unreachable`: bind a server, then remove `<data>/admin.sock` (`std::fs::remove_file`) while it runs → `server` is `Unreachable { reason, .. }` with `reason == LOCK_HELD_REASON`; shut down.
+- `a_long_data_dir_path_reaches_the_lock_probe`: a data directory whose path is over 110 bytes (`tempdir().path().join("d".repeat(110 - base))` as in `admin_socket.rs`'s `a_too_long_socket_path_does_not_stop_the_server`):
+  - no server → `NotRunning` with `disk.data_dir_present` as the directory is (create it first, so `data_dir_present` is `true`);
+  - with `bind(test_support::config(&data), None)` on that path (the server runs without a socket) → `Unreachable` with `reason == LOCK_HELD_REASON`; shut down.
 - `a_missing_data_dir_is_not_running`: a config pointing at `<temp>/absent` → `NotRunning` with `disk.data_dir_present == false`.
 - `an_unusable_socket_is_unreachable`: create a regular file named `admin.sock` in `data` → `server` is `Unreachable` (the error kind is not `NotFound`/`ConnectionRefused`). If the platform reports `ConnectionRefused` for a regular file, assert `NotRunning` instead: accept either and assert the bundle was built. Comment why.
 - `a_missing_config_file_is_reported`: `build(Some(Path::new("/nonexistent/cetra.toml")), &[], false, now())` → `config_error == Some(ConfigErrorView { kind: MissingFile, key: None, reason: None })`; `host.os` is set; `config.values == {}`.
@@ -2256,12 +2294,13 @@ In `ring.rs`:
    pub(crate) async fn run(
        config: Option<&Path>,
        output: Option<&Path>,
+       env: &[(String, String)],
        ui_embedded: bool,
        out: &mut impl Write,
        err: &mut impl Write,
    ) -> anyhow::Result<()> {
        let now = chrono::Utc::now();
-       let bytes = bundle::render(config, ui_embedded, now)
+       let bytes = bundle::render(config, env, ui_embedded, now)
            .await
            .context("building the debug bundle")?;
        if output == Some(Path::new("-")) {
@@ -2282,12 +2321,14 @@ In `ring.rs`:
    1. Add `mod debug_bundle;` in alphabetical position among the `mod` lines at the top (after `mod credentials;`, before `mod health;`).
    2. Add the `DebugBundle` variant of § Contracts to `Command`, right after the `Health { … }` variant (line ~57).
    3. In `run_cli`'s `match cli.command`, add this arm right after `Command::Health { url } => health::check(&url).await?,` (line ~297):
+      (import `cetra_server::observability::bundle` in `main.rs`'s `use` lines)
       ```rust
       Command::DebugBundle { config, output } => {
           let (mut out, mut err) = (io::stdout().lock(), io::stderr().lock());
           debug_bundle::run(
               config.as_deref(),
               output.as_deref(),
+              &bundle::process_env(),
               cetra_ui::embedded(),
               &mut out,
               &mut err,
@@ -2299,8 +2340,9 @@ In `ring.rs`:
    The regenerated `website/src/content/docs/docs/reference/cli.md` is the coordinator's (§ After the last phase). Do not edit it by hand.
 
 **Tests.** In `debug_bundle.rs` `mod tests` (`#[tokio::test]`; each test writes a `cetra.toml` with `data_dir` in a `tempfile::tempdir()`, and no server runs):
+Every test passes `env = &[]`, so the developer's `CETRA_*` variables never reach it (`CETRA_CONFIG` is read by `read_toml` only when no `--config` is given; every test gives one).
 - `it_writes_a_reviewable_file`:
-  1. `run(Some(&toml), Some(&out_path), false, &mut out, &mut err)`.
+  1. `run(Some(&toml), Some(&out_path), &[], false, &mut out, &mut err)`.
   2. The file exists and parses as JSON with `server.state == "not_running"` and `schema == 1`.
   3. `out` is `wrote <absolute out_path>\n` followed by `REVIEW_NOTICE` and a newline; `err` is empty.
 - `dash_writes_the_json_to_stdout`: `output = Some(Path::new("-"))` → `out` parses as JSON, `err` contains `review it before you share it`, and no file was created in the temp dir.
@@ -2374,7 +2416,7 @@ In `main.rs` tests:
 
    Open the file and read it before you attach it to a public issue. The bundle replaces the values of secret and email settings (`encryption_key`, `license_key`, `smtp_url`, `email_from`, the `client_secret` of each sign-in provider, the `init` passwords and keys, `self_monitoring.otlp_headers`, and `self_monitoring.otlp_endpoint`, whose path can hold a token; a running server's section gives the endpoint's host) and of any setting it does not know with `<redacted>`. It keeps host names, bucket names, paths, domains and the names of your organization and project. Remove anything you do not want to share.
 
-   Log lines never contain prompts, completions, keys or email addresses. As a second check, the bundle replaces anything that looks like an email address, a cetra key (`sk-cetra-…`, `pk-cetra-…`, `pat-cetra-…`) or a password in a URL with `<redacted>`.
+   Log lines never contain prompts, completions, keys or email addresses. The bundle keeps the lines your `log.level` shows, without the HTTP, TLS, OpenTelemetry and `sqlx` libraries' own lines. If you raised `log.level` to `debug` or `trace` for a module, read those lines with care: library and debug output can include more detail than the default `info`. As a second check, the bundle replaces anything that looks like an email address, a cetra key (`sk-cetra-…`, `pk-cetra-…`, `pat-cetra-…`) or a password in a URL with `<redacted>`.
 
    ## When the server does not start
 
@@ -2411,7 +2453,7 @@ In `main.rs` tests:
    ```markdown
    - **A bug or a missing feature:** open an issue at [github.com/cetra-ai/cetra/issues](https://github.com/cetra-ai/cetra/issues). For a bug, attach a debug bundle: [Reporting a bug](/docs/help/reporting-a-bug/) shows how to write one with `cetra debug-bundle` and what to check before you share it. Do not paste prompts, completions or keys.
    ```
-4. In `telemetry.md` (shared with M5 and M6, which add sections: additive, keep them), at the end of the paragraph of "## The startup line" that starts "At every start, cetra logs one line", add the sentence: `` `cetra debug-bundle` shows the instance id too, with the heartbeat the server would send now ([Reporting a bug](/docs/help/reporting-a-bug/)). `` If the paragraph is not there (M4's TL4.9 wording changed), stop and report.
+4. In `telemetry.md` (shared with M5 and M6: additive), under the heading `## The startup line`, add this one-sentence paragraph right after the paragraph that follows the heading (a blank line before and after it): `` `cetra debug-bundle` shows the instance id too, with the heartbeat the server would send now ([Reporting a bug](/docs/help/reporting-a-bug/)). `` Anchor on the heading, never on that paragraph's words, and do not edit them: M5 edits its own words in that paragraph in place.
 5. Create `.github/ISSUE_TEMPLATE/bug_report.yml` with exactly:
    ```yaml
    name: Bug report
@@ -2492,7 +2534,7 @@ In `main.rs` tests:
    ```
 9. In `docs/spec/12-operations.md` § Backups, add this paragraph right after the paragraph that starts `**Online backups (track N's M2` (shared with M2, M5 and M6, which edit § Self-monitoring: additive):
    ```markdown
-   **Debug bundle (track TL M3, D-TL-6):** `cetra debug-bundle` asks the server through the same socket with the command `debug_info` (additive within protocol 1, no new error code). The answer is one line of at most 4 MiB. It carries uptime, the last log lines (a ring of 2000 JSON lines at the stdout filter, at most 2 MiB, oldest dropped first when the line would be longer), storage statistics, live catalog files per table and level (read from `catalog.db` with a read-only connection), the `/readyz` checks, `meta.db` counts, the self-monitoring state, the telemetry switchboard decision and the heartbeat as it would be sent (the instance id is read, never created). When the socket does not answer and no process holds `<data_dir>/LOCK`, the bundle reads the sizes and format markers of `meta.db`, `catalog.db` (immutable read-only connections, so nothing is written) and the WAL segment headers; when `LOCK` is held, it reads nothing and says the socket does not answer. The configuration is shown as the merged file and `CETRA_*` values, where only allow-listed keys show their value; a load error is its key path and kind, never its text. In the written file, log lines that are JSON are embedded as objects, and every string has emails, cetra keys and URL passwords replaced by `<redacted>`.
+   **Debug bundle (track TL M3, D-TL-6):** `cetra debug-bundle` asks the server through the same socket with the command `debug_info` (additive within protocol 1, no new error code). The answer is one line of at most 4 MiB. It carries uptime, the last log lines (a ring of 2000 JSON lines at the stdout filter without the HTTP, TLS, OpenTelemetry and `sqlx` libraries' lines, at most 2 MiB, oldest dropped first when the line would be longer), storage statistics, live catalog files per table and level (read from `catalog.db` with a read-only connection), the `/readyz` checks, `meta.db` counts, the self-monitoring state, the telemetry switchboard decision and the heartbeat as it would be sent (the instance id is read, never created). When the socket does not answer and no process holds `<data_dir>/LOCK`, the bundle reads the sizes and format markers of `meta.db`, `catalog.db` (immutable read-only connections, so nothing is written) and the WAL segment headers; when `LOCK` is held, it reads nothing and says the socket does not answer. The configuration is shown as the merged file and `CETRA_*` values, where only allow-listed keys show their value; a load error is its key path and kind, never its text. In the written file, log lines that are JSON are embedded as objects, and every string has emails, cetra keys and URL passwords replaced by `<redacted>`.
    ```
 
 **Tests.** None in Rust. The docs checks run at the milestone check: `check-terms`, `check-samples` (only `bash`/`yaml` blocks), `check-env-vars`, and the link validator. The link `/docs/reference/cli/#cetra-debug-bundle` resolves once the coordinator regenerates `cli.md`, and `/docs/self-hosting/telemetry/` exists since M4.
