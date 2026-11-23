@@ -24,7 +24,7 @@ pip install cetra-sdk "strands-agents[openai]"
 
 ## Set up
 
-Write the agent as a Strands agent, as on the [Strands Agents](/docs/integrations/strands/) page. Start cetra and point Strands at cetra's tracer provider before you create the agent. Set `CETRA_API_KEY` to your `sk-cetra-…` key.
+Write the agent as a Strands agent, as on the [Strands Agents](/docs/integrations/strands/) page. Start cetra with `use_global_provider=True` before you create the agent, because Strands writes its spans to the global tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key.
 
 <Tabs syncKey="lang">
   <TabItem label="Python">
@@ -32,10 +32,8 @@ Write the agent as a Strands agent, as on the [Strands Agents](/docs/integration
 {/* untested: needs CETRA_API_KEY and an AWS account for the AgentCore runtime */}
 ```python
 import cetra
-from strands.telemetry import StrandsTelemetry
 
-cetra.init()
-StrandsTelemetry(tracer_provider=cetra.tracer_provider())
+cetra.init(use_global_provider=True)
 
 # Create the Strands agent and run it as on the Strands Agents page.
 

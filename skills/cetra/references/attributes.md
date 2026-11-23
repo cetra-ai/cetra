@@ -96,7 +96,7 @@ Read on spans that VoltAgent writes: spans with a `voltagent.*` attribute, or wh
 | `llm.usage.cached_tokens` | Cache read token count, on `llm` spans |
 | `llm.usage.reasoning_tokens` | Reasoning token count, on `llm` spans |
 | `llm.messages` | Input messages, on `llm` spans (AI SDK messages) |
-| `input`, `output` | Input and output, when `llm.messages` does not supply them |
+| `input`, `output` | Input, when `llm.messages` does not supply it, and output |
 | `conversation.id`, `voltagent.conversation_id` | Session |
 
 ### OpenInference

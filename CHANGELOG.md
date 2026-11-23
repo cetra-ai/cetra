@@ -20,12 +20,14 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
+- Strands time to first token is read in milliseconds; framework names written as the provider (Strands, Microsoft Agent Framework, AutoGen, Spring AI) are skipped; Microsoft Agent Framework workflow steps and Mirascope trace spans are chain spans.
 
 ### Fixed
 
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic and Together models that were missing.
 - OpenInference outputs labelled as JSON that hold plain text, as Agno's do, no longer record a `cetra.normalize_error` attribute.
+- A Laminar `LLM` span without a model or token counts (such as the OpenHands SDK's wrapper) is now a chain span, so its reported cost is not counted twice.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

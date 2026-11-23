@@ -119,6 +119,7 @@ The rule applies on spans whose scope name starts with `strands` (gate), to the 
 | `chat`, `execute_event_loop_cycle` | `gen_ai.choice` | `message`: Converse blocks (text and/or `toolUse`); `finish_reason`; on the cycle span also `tool.result`, which is ignored | the output assistant message, with that finish reason |
 | `execute_tool` | `gen_ai.tool.message` | `content`: the tool's arguments as JSON (e.g. `{"city":"Paris"}`), plus `id` | the span's input (`json`), not a message |
 | `execute_tool` | `gen_ai.choice` | `message`: `[{"text": …}]`, plus `id` | the span's output: the joined text of the text blocks (`text`) |
+| `invoke_agent` | `gen_ai.system.message`, `gen_ai.user.message` | `content`: the instructions and the user's messages (the same shape as above) | input messages, one each, with the role from the event name (commit 7806873) |
 | `invoke_agent` | `gen_ai.choice` | `message`: a plain string (with a trailing newline) | the span's output (`text`), as is |
 
 These rules fill a field only when no higher source filled it. If the dump shows a shape this table does not cover, stop and report.

@@ -36,12 +36,12 @@ AutoGen reads its runtime tracing switch when it is imported, so set it before t
 import asyncio
 import os
 
-# Only the AutoGen instrumentor is enabled. Enabling the OpenAI instrumentor as well
-# would record each model call twice.
 os.environ["AUTOGEN_DISABLE_RUNTIME_TRACING"] = "true"
 
 import cetra
 
+# Only the AutoGen instrumentor is enabled. Enabling the OpenAI instrumentor as well
+# would record each model call twice.
 cetra.init(instrument=["autogen-agentchat"])
 
 from autogen_agentchat.agents import AssistantAgent  # noqa: E402
@@ -84,6 +84,7 @@ With one tool call, a run produces:
 
 - an `agent` span for the agent's creation, and an `agent` span for the run;
 - an `agent` span named `weather_agent.on_messages_stream`, with the messages as its input;
+- AutoGen's native spans, `create_agent weather_agent`, `invoke_agent weather_agent` and `execute_tool get_weather`, which carry the agent and tool names but no model, tokens or messages;
 - an `llm` span for each model call, named `OpenAIChatCompletionClient.create`, with the provider `openai`, the model, the token counts, the cost computed from the built-in prices and the messages;
 - `tool` spans for the tool call, with its arguments and result.
 

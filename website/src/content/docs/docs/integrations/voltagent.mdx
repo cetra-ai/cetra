@@ -16,7 +16,7 @@ cetra traces VoltAgent agent runs from TypeScript. VoltAgent's own observability
   <TabItem label="TypeScript">
 
 ```bash
-npm install @cetra-ai/sdk @voltagent/core ai @ai-sdk/openai zod
+npm install @cetra-ai/sdk @voltagent/core@2 ai@6 @ai-sdk/openai@3 zod
 ```
 
   </TabItem>
@@ -80,7 +80,7 @@ With one tool call inside a conversation, a run produces:
 
 - The `llm` span records only the last step's token counts. When the run calls tools, the cost of the earlier steps is not counted, so the cost is an undercount.
 - The fixture was captured with `@voltagent/core` 2.11.1 and `ai` 6.0.322.
-- cetra recognises a VoltAgent trace from its `voltagent.*` attributes or from its instrumentation scope, which starts with `@voltagent/`. If you rename VoltAgent's instrumentation scope, only the agent span is recognised as VoltAgent.
+- cetra recognizes a VoltAgent trace from its `voltagent.*` attributes or from its instrumentation scope, which starts with `@voltagent/`. If you rename VoltAgent's instrumentation scope, only the agent span is recognized as VoltAgent.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 
 ## Next

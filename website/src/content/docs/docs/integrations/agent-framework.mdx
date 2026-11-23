@@ -85,6 +85,7 @@ cetra.flush()
 - Workflow steps are `chain` spans. A workflow with no model call has no `llm` span.
 - The fixtures were captured with `agent-framework-core` 1.26.0 and `agent-framework-openai` 1.18.2, not with the `agent-framework` meta package.
 - Set `enable_sensitive_data=True` to record content. The sample sets it.
+- Leave `OTEL_SEMCONV_STABILITY_OPT_IN` unset, or include `gen_ai_latest_experimental` in it. A value without that token (for example `http`) switches the framework to its older GenAI conventions, and the spans then carry no message content.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 
 ## Next

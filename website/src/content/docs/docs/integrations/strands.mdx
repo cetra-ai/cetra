@@ -24,7 +24,7 @@ pip install cetra-sdk "strands-agents[openai]"
 
 ## Set up
 
-Strands writes its spans to the tracer provider that you pass to `StrandsTelemetry`. Start cetra first and pass it cetra's tracer provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
+Strands writes its spans to the global OpenTelemetry tracer provider. Start cetra with `use_global_provider=True` so that it joins that provider. Set `CETRA_API_KEY` to your `sk-cetra-…` key and `OPENAI_API_KEY` to your OpenAI key.
 
 <Tabs syncKey="lang">
   <TabItem label="Python">
@@ -36,10 +36,8 @@ import os
 import cetra
 from strands import Agent, tool
 from strands.models.openai import OpenAIModel
-from strands.telemetry import StrandsTelemetry
 
-cetra.init()
-StrandsTelemetry(tracer_provider=cetra.tracer_provider())
+cetra.init(use_global_provider=True)
 
 
 @tool
