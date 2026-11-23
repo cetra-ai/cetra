@@ -3,11 +3,13 @@
 //! § 3.4.2, track EA M5, D-EA-12). Absent optional values are omitted, never `null`.
 
 use serde_json::{Map, Value, json};
+use uuid::Uuid;
 
 use super::patch::ENTERPRISE_USER;
-use super::store::ScimUserRow;
+use super::store::{ScimGroupRow, ScimUserRow};
 
 pub(crate) const USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
+pub(crate) const GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";
 pub(crate) const LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 const SERVICE_PROVIDER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig";
 const RESOURCE_TYPE_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:ResourceType";
@@ -64,6 +66,42 @@ pub(crate) fn user_resource(row: &ScimUserRow, base_url: &str) -> Value {
     Value::Object(resource)
 }
 
+/// One group as the IdP reads it. `members` holds the org's SCIM user ids, or `None` when the
+/// request excludes them (`excludedAttributes=members`), in which case the key is absent. Member
+/// entries carry no display name. `base_url` is as for [`user_resource`].
+pub(crate) fn group_resource(
+    row: &ScimGroupRow,
+    members: Option<&[Uuid]>,
+    base_url: &str,
+) -> Value {
+    let id = row.id.to_string();
+    let mut resource = Map::new();
+    resource.insert("schemas".to_owned(), json!([GROUP_SCHEMA]));
+    resource.insert("id".to_owned(), json!(id));
+    resource.insert("displayName".to_owned(), json!(row.display_name));
+    insert_optional(&mut resource, "externalId", row.external_id.as_deref());
+    if let Some(members) = members {
+        let refs: Vec<Value> = members
+            .iter()
+            .map(|member| {
+                let member = member.to_string();
+                json!({"value": member, "$ref": format!("{base_url}/Users/{member}")})
+            })
+            .collect();
+        resource.insert("members".to_owned(), Value::Array(refs));
+    }
+    resource.insert(
+        "meta".to_owned(),
+        json!({
+            "resourceType": "Group",
+            "created": rfc3339(row.created_at),
+            "lastModified": rfc3339(row.updated_at),
+            "location": format!("{base_url}/Groups/{id}"),
+        }),
+    );
+    Value::Object(resource)
+}
+
 /// A ListResponse. `itemsPerPage` is the number of resources in this page.
 pub(crate) fn list_response(total: u64, start_index: u32, resources: &[Value]) -> Value {
     let items = resources.len();
@@ -96,7 +134,7 @@ pub(crate) fn service_provider_config(_base_url: &str) -> Value {
     })
 }
 
-/// The ResourceTypes ListResponse. M5 has the User type only.
+/// The ResourceTypes ListResponse: the User and the Group types.
 pub(crate) fn resource_types(base_url: &str) -> Value {
     let user = json!({
         "schemas": [RESOURCE_TYPE_SCHEMA],
@@ -110,11 +148,22 @@ pub(crate) fn resource_types(base_url: &str) -> Value {
             "location": format!("{base_url}/ResourceTypes/User"),
         },
     });
-    list_response(1, 1, &[user])
+    let group = json!({
+        "schemas": [RESOURCE_TYPE_SCHEMA],
+        "id": "Group",
+        "name": "Group",
+        "endpoint": "/Groups",
+        "schema": GROUP_SCHEMA,
+        "meta": {
+            "resourceType": "ResourceType",
+            "location": format!("{base_url}/ResourceTypes/Group"),
+        },
+    });
+    list_response(2, 1, &[user, group])
 }
 
-/// The Schemas ListResponse: the core User and the enterprise User, with the attributes cetra
-/// supports.
+/// The Schemas ListResponse: the core User, the enterprise User and the core Group, with the
+/// attributes cetra supports.
 pub(crate) fn schemas() -> Value {
     let core = json!({
         "schemas": [SCHEMA_SCHEMA],
@@ -165,7 +214,30 @@ pub(crate) fn schemas() -> Value {
             attribute("employeeNumber", "string", false),
         ],
     });
-    list_response(2, 1, &[core, enterprise])
+    let group = json!({
+        "schemas": [SCHEMA_SCHEMA],
+        "id": GROUP_SCHEMA,
+        "name": "Group",
+        "description": "Group of users.",
+        "attributes": [
+            attribute("displayName", "string", true),
+            attribute("externalId", "string", false),
+            {
+                "name": "members",
+                "type": "complex",
+                "multiValued": true,
+                "required": false,
+                "mutability": "readWrite",
+                "returned": "default",
+                "uniqueness": "none",
+                "subAttributes": [
+                    attribute("value", "string", false),
+                    attribute("$ref", "reference", false),
+                ],
+            },
+        ],
+    });
+    list_response(3, 1, &[core, enterprise, group])
 }
 
 /// One simple attribute of a schema.
@@ -286,18 +358,76 @@ mod tests {
         );
     }
 
+    fn group_row() -> ScimGroupRow {
+        ScimGroupRow {
+            id: Uuid::from_u128(9),
+            display_name: "Engineering".to_owned(),
+            external_id: Some("okta-00g1".to_owned()),
+            // 2023-11-14T22:13:20Z and 500 ms later.
+            created_at: 1_700_000_000_000_000_000,
+            updated_at: 1_700_000_001_500_000_000,
+        }
+    }
+
     #[test]
-    fn resource_types_lists_only_users() {
+    fn group_resource_omits_members_when_excluded() {
+        let resource = group_resource(&group_row(), None, BASE);
+        assert_eq!(resource["schemas"], json!([GROUP_SCHEMA]));
+        assert_eq!(resource["id"], "00000000-0000-0000-0000-000000000009");
+        assert_eq!(resource["displayName"], "Engineering");
+        assert_eq!(resource["externalId"], "okta-00g1");
+        assert!(resource.get("members").is_none());
+        assert_eq!(resource["meta"]["resourceType"], "Group");
+        assert_eq!(resource["meta"]["created"], "2023-11-14T22:13:20.000Z");
+        assert_eq!(resource["meta"]["lastModified"], "2023-11-14T22:13:21.500Z");
+        assert_eq!(
+            resource["meta"]["location"],
+            "https://cetra.example/scim/v2/Groups/00000000-0000-0000-0000-000000000009"
+        );
+    }
+
+    #[test]
+    fn group_resource_lists_member_references_without_display_names() {
+        let member = Uuid::from_u128(1);
+        let mut row = group_row();
+        row.external_id = None;
+        let resource = group_resource(&row, Some(&[member]), BASE);
+        assert!(resource.get("externalId").is_none());
+        assert_eq!(
+            resource["members"],
+            json!([{
+                "value": "00000000-0000-0000-0000-000000000001",
+                "$ref": "https://cetra.example/scim/v2/Users/00000000-0000-0000-0000-000000000001",
+            }])
+        );
+        assert_eq!(resource["members"][0].get("display"), None);
+    }
+
+    #[test]
+    fn resource_types_lists_users_and_groups() {
         let types = resource_types(BASE);
-        assert_eq!(types["totalResults"], 1);
+        assert_eq!(types["totalResults"], 2);
         assert_eq!(types["Resources"][0]["endpoint"], "/Users");
+        assert_eq!(types["Resources"][1]["endpoint"], "/Groups");
+        assert_eq!(types["Resources"][1]["schema"], GROUP_SCHEMA);
     }
 
     #[test]
     fn schemas_lists_the_core_and_the_enterprise_user() {
         let all = schemas();
-        assert_eq!(all["totalResults"], 2);
+        assert_eq!(all["totalResults"], 3);
         assert_eq!(all["Resources"][0]["id"], USER_SCHEMA);
         assert_eq!(all["Resources"][1]["id"], ENTERPRISE_USER);
+    }
+
+    #[test]
+    fn discovery_lists_users_and_groups() {
+        let all = schemas();
+        let group = &all["Resources"][2];
+        assert_eq!(group["id"], GROUP_SCHEMA);
+        assert_eq!(group["attributes"][0]["name"], "displayName");
+        assert_eq!(group["attributes"][0]["required"], true);
+        assert_eq!(group["attributes"][2]["name"], "members");
+        assert_eq!(group["attributes"][2]["multiValued"], true);
     }
 }

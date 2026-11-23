@@ -6,7 +6,7 @@
 use std::str::Chars;
 
 use super::error::ScimError;
-use super::store::UserFilter;
+use super::store::{GroupFilter, UserFilter};
 
 /// The longest accepted value, in characters.
 const MAX_VALUE_CHARS: usize = 320;
@@ -34,6 +34,31 @@ pub(crate) fn parse_user_filter(input: &str) -> Result<UserFilter, ScimError> {
         Attribute::ExternalId => UserFilter::ExternalId(value),
         Attribute::Email => UserFilter::Email(value),
     })
+}
+
+/// Parses a `/Groups` filter such as `displayName eq "Engineering"`. Only one `eq` on
+/// `displayName` or `externalId` is accepted; member filters are refused (D-EA-12).
+///
+/// # Errors
+///
+/// Returns `invalidFilter` with the group wording for anything else.
+pub(crate) fn parse_group_filter(input: &str) -> Result<GroupFilter, ScimError> {
+    let refused = |_: ScimError| ScimError::invalid_group_filter();
+    let input = input.trim();
+    let end = input
+        .find(' ')
+        .ok_or_else(ScimError::invalid_group_filter)?;
+    let (name, rest) = input.split_at(end);
+    let rest = spaces(rest).map_err(refused)?;
+    let rest = strip_prefix_ci(rest, "eq").ok_or_else(ScimError::invalid_group_filter)?;
+    let value = parse_comp_value(spaces(rest).map_err(refused)?).map_err(refused)?;
+    if name.eq_ignore_ascii_case("displayName") {
+        Ok(GroupFilter::DisplayName(value))
+    } else if name.eq_ignore_ascii_case("externalId") {
+        Ok(GroupFilter::ExternalId(value))
+    } else {
+        Err(ScimError::invalid_group_filter())
+    }
 }
 
 /// `input` without the case-insensitive `prefix`, or `None` when it does not start with it.
@@ -78,7 +103,7 @@ fn parse_attribute(input: &str) -> Result<(Attribute, &str), ScimError> {
 }
 
 /// `input` after one or more spaces. Extra spaces are accepted; no space is an invalid filter.
-fn spaces(input: &str) -> Result<&str, ScimError> {
+pub(crate) fn spaces(input: &str) -> Result<&str, ScimError> {
     let rest = input.trim_start_matches(' ');
     if rest.len() == input.len() {
         Err(ScimError::invalid_filter())
@@ -88,7 +113,7 @@ fn spaces(input: &str) -> Result<&str, ScimError> {
 }
 
 /// A quoted JSON string that is the whole of `input`. Escapes follow JSON.
-fn parse_comp_value(input: &str) -> Result<String, ScimError> {
+pub(crate) fn parse_comp_value(input: &str) -> Result<String, ScimError> {
     let body = input
         .strip_prefix('"')
         .ok_or_else(ScimError::invalid_filter)?;
@@ -296,6 +321,51 @@ mod tests {
         assert!(parse_user_filter(&format!(r#"userName eq "{long}""#)).is_ok());
         let too_long = "a".repeat(MAX_VALUE_CHARS + 1);
         assert!(parse_user_filter(&format!(r#"userName eq "{too_long}""#)).is_err());
+    }
+
+    /// The group filter's kind and value, or `None` when it is refused.
+    fn group_kind_and_value(input: &str) -> Option<(&'static str, String)> {
+        match parse_group_filter(input).ok()? {
+            GroupFilter::DisplayName(value) => Some(("displayName", value)),
+            GroupFilter::ExternalId(value) => Some(("externalId", value)),
+        }
+    }
+
+    #[test]
+    fn parses_display_name_eq() {
+        assert_eq!(
+            group_kind_and_value(r#"displayName eq "Engineering""#),
+            Some(("displayName", "Engineering".to_owned()))
+        );
+        assert_eq!(
+            group_kind_and_value(r#"DISPLAYNAME   EQ "Eng \"A\"""#),
+            Some(("displayName", "Eng \"A\"".to_owned()))
+        );
+        assert_eq!(
+            group_kind_and_value(r#"externalId eq "okta-00g1""#),
+            Some(("externalId", "okta-00g1".to_owned()))
+        );
+    }
+
+    #[test]
+    fn refuses_member_filters_on_groups() {
+        let long = "a".repeat(MAX_VALUE_CHARS + 1);
+        let too_long = format!(r#"displayName eq "{long}""#);
+        for input in [
+            r#"members[value eq "u1"]"#,
+            r#"members eq "u1""#,
+            r#"emails.value eq "a@x.io""#,
+            r#"userName eq "a@x.io""#,
+            r#"displayName co "Eng""#,
+            r#"displayName eq "a" and externalId eq "b""#,
+            r#"displayName eq Eng"#,
+            r#"displayName eq "abc"#,
+            "displayName",
+            "",
+            too_long.as_str(),
+        ] {
+            assert!(parse_group_filter(input).is_err(), "refused: {input:.40}");
+        }
     }
 
     #[test]

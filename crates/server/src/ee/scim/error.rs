@@ -43,6 +43,15 @@ impl ScimError {
         )
     }
 
+    /// A `/Groups` filter other than one `eq` on `displayName` or `externalId`.
+    pub(crate) fn invalid_group_filter() -> Self {
+        Self::new(
+            StatusCode::BAD_REQUEST,
+            Some("invalidFilter"),
+            "Only eq filters on displayName and externalId are supported.",
+        )
+    }
+
     pub(crate) fn invalid_value(detail: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, Some("invalidValue"), detail)
     }
@@ -66,6 +75,15 @@ impl ScimError {
     /// RFC 7644 § 3.12 `mutability`: the attribute cannot be changed.
     pub(crate) fn mutability(detail: &'static str) -> Self {
         Self::new(StatusCode::BAD_REQUEST, Some("mutability"), detail)
+    }
+
+    /// A group with the same displayName or externalId exists.
+    pub(crate) fn group_uniqueness() -> Self {
+        Self::new(
+            StatusCode::CONFLICT,
+            Some("uniqueness"),
+            "A group with this displayName or externalId already exists.",
+        )
     }
 
     pub(crate) fn not_found() -> Self {
@@ -242,6 +260,20 @@ mod tests {
         let error = ScimError::uniqueness();
         assert_eq!(error.status, StatusCode::CONFLICT);
         assert_eq!(error.body()["scimType"], "uniqueness");
+    }
+
+    #[test]
+    fn the_group_errors_carry_their_scim_types_and_fixed_details() {
+        let filter = ScimError::invalid_group_filter();
+        assert_eq!(filter.status, StatusCode::BAD_REQUEST);
+        assert_eq!(filter.body()["scimType"], "invalidFilter");
+        assert_eq!(
+            filter.detail,
+            "Only eq filters on displayName and externalId are supported."
+        );
+        let uniqueness = ScimError::group_uniqueness();
+        assert_eq!(uniqueness.status, StatusCode::CONFLICT);
+        assert_eq!(uniqueness.body()["scimType"], "uniqueness");
     }
 
     #[test]

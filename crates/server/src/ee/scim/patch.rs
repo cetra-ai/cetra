@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use super::error::ScimError;
-use super::filter::strip_prefix_ci;
+use super::filter::{parse_comp_value, spaces, strip_prefix_ci};
 
 pub(crate) const PATCH_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 pub(crate) const ENTERPRISE_USER: &str =
@@ -33,6 +33,18 @@ pub(crate) enum UserChange {
     Email(String),
 }
 
+/// One normalized change to a SCIM group. Member values are the strings the PATCH carries; the
+/// handler parses them as user ids. Group names are never logged.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum GroupChange {
+    DisplayName(String),
+    ExternalId(Option<String>),
+    AddMembers(Vec<String>),
+    RemoveMembers(Vec<String>),
+    /// An explicit empty list is allowed: it is how an IdP empties a group on purpose.
+    ReplaceMembers(Vec<String>),
+}
+
 /// The changes a PATCH body asks for, in order. Unsupported attributes give no change.
 ///
 /// # Errors
@@ -42,6 +54,22 @@ pub(crate) enum UserChange {
 /// for more than 100 operations, a `remove` of `active` or `userName`, and a value of the wrong
 /// type.
 pub(crate) fn user_changes(body: &Value) -> Result<Vec<UserChange>, ScimError> {
+    let operations = operations(body)?;
+    let mut changes = Vec::new();
+    for operation in operations {
+        changes.extend(operation_changes(operation)?);
+    }
+    Ok(changes)
+}
+
+/// The operations of a PATCH body after the checks every PATCH shares: the PATCH schema, a
+/// non-empty `Operations` (or `operations`) array, and at most 100 operations.
+///
+/// # Errors
+///
+/// Returns `invalidSyntax` for a body without the schema or without a non-empty array, and
+/// `invalidValue` for more than 100 operations.
+fn operations(body: &Value) -> Result<&Vec<Value>, ScimError> {
     let schemas = body
         .get("schemas")
         .and_then(Value::as_array)
@@ -65,11 +93,157 @@ pub(crate) fn user_changes(body: &Value) -> Result<Vec<UserChange>, ScimError> {
             "At most 100 operations are accepted.",
         ));
     }
+    Ok(operations)
+}
+
+/// The changes a Groups PATCH body asks for, in order. Unsupported paths give no change. A
+/// malformed PATCH never empties a group.
+///
+/// # Errors
+///
+/// Returns `invalidSyntax` for a body or an operation that is not well formed, and `invalidValue`
+/// for a value of the wrong type, a `remove` of `displayName` or of every member, and a `members`
+/// path cetra does not support.
+pub(crate) fn group_changes(body: &Value) -> Result<Vec<GroupChange>, ScimError> {
     let mut changes = Vec::new();
-    for operation in operations {
-        changes.extend(operation_changes(operation)?);
+    for operation in operations(body)? {
+        changes.extend(group_operation_changes(operation)?);
     }
     Ok(changes)
+}
+
+fn group_operation_changes(operation: &Value) -> Result<Vec<GroupChange>, ScimError> {
+    let fields = operation
+        .as_object()
+        .ok_or_else(ScimError::invalid_syntax)?;
+    let op = fields
+        .get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(ScimError::invalid_syntax)?;
+    let path = match fields.get("path") {
+        None => None,
+        Some(Value::String(path)) => Some(path.as_str()),
+        Some(_) => return Err(ScimError::invalid_syntax()),
+    };
+    if op.eq_ignore_ascii_case("remove") {
+        let path = path.ok_or_else(ScimError::invalid_syntax)?;
+        return group_remove_change(path, fields.get("value"));
+    }
+    let add = op.eq_ignore_ascii_case("add");
+    if !(add || op.eq_ignore_ascii_case("replace")) {
+        return Err(ScimError::invalid_syntax());
+    }
+    let value = fields.get("value").ok_or_else(ScimError::invalid_syntax)?;
+    match path {
+        Some(path) => group_path_change(path, value, add),
+        None => group_map_changes(value, add),
+    }
+}
+
+/// The change of an `add` or `replace` with a path. `add` on `members` appends; `replace` sets
+/// the whole list. Scalar attributes are set the same way by both.
+fn group_path_change(path: &str, value: &Value, add: bool) -> Result<Vec<GroupChange>, ScimError> {
+    Ok(match path.to_ascii_lowercase().as_str() {
+        "members" => vec![members_change(value, add)?],
+        "displayname" => vec![GroupChange::DisplayName(group_name(value)?)],
+        "externalid" => vec![GroupChange::ExternalId(external_id(value)?)],
+        _ => Vec::new(),
+    })
+}
+
+/// The changes of an `add` or `replace` without a path: an object whose keys are handled as
+/// paths. Okta sends `id` with a `replace`; it is not an attribute cetra stores, so it is a no-op.
+fn group_map_changes(value: &Value, add: bool) -> Result<Vec<GroupChange>, ScimError> {
+    let fields = value.as_object().ok_or_else(ScimError::invalid_syntax)?;
+    let mut changes = Vec::new();
+    for (key, item) in fields {
+        changes.extend(group_path_change(key, item, add)?);
+    }
+    Ok(changes)
+}
+
+/// The change of a `remove`. A `members` path with a value lists the members to remove (Entra);
+/// `members[value eq "<id>"]` names one member in the path (Okta).
+fn group_remove_change(path: &str, value: Option<&Value>) -> Result<Vec<GroupChange>, ScimError> {
+    if let Some(filter) = strip_prefix_ci(path, "members[") {
+        return Ok(vec![GroupChange::RemoveMembers(vec![member_filter_id(
+            filter,
+        )?])]);
+    }
+    match path.to_ascii_lowercase().as_str() {
+        "members" => {
+            let ids = match value {
+                Some(value) => member_values(value)?,
+                None => Vec::new(),
+            };
+            if ids.is_empty() {
+                return Err(ScimError::invalid_value(
+                    "Removing every member needs a replace with an empty list.",
+                ));
+            }
+            Ok(vec![GroupChange::RemoveMembers(ids)])
+        }
+        "externalid" => Ok(vec![GroupChange::ExternalId(None)]),
+        "displayname" => Err(ScimError::invalid_value("displayName cannot be removed.")),
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// The id of an Okta `members[value eq "<id>"]` path, given the text after `members[`.
+fn member_filter_id(filter: &str) -> Result<String, ScimError> {
+    let unsupported = || ScimError::invalid_value("Unsupported members path.");
+    let inner = filter.strip_suffix(']').ok_or_else(unsupported)?.trim();
+    let rest = strip_prefix_ci(inner, "value").ok_or_else(unsupported)?;
+    let rest = strip_prefix_ci(spaces(rest).map_err(|_| unsupported())?, "eq")
+        .ok_or_else(unsupported)?;
+    parse_comp_value(spaces(rest).map_err(|_| unsupported())?).map_err(|_| unsupported())
+}
+
+fn members_change(value: &Value, add: bool) -> Result<GroupChange, ScimError> {
+    let ids = member_values(value)?;
+    Ok(if add {
+        GroupChange::AddMembers(ids)
+    } else {
+        GroupChange::ReplaceMembers(ids)
+    })
+}
+
+/// The member ids of a `members` value: an array of objects, each with a string `value`.
+fn member_values(value: &Value) -> Result<Vec<String>, ScimError> {
+    let entries = value
+        .as_array()
+        .ok_or_else(|| ScimError::invalid_value("members must be an array."))?;
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("value")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| ScimError::invalid_value("Member entries need a string value."))
+        })
+        .collect()
+}
+
+/// A displayName: a non-empty string.
+fn group_name(value: &Value) -> Result<String, ScimError> {
+    match value {
+        Value::String(text) if !text.trim().is_empty() => Ok(text.clone()),
+        _ => Err(ScimError::invalid_value(
+            "displayName must be a non-empty string.",
+        )),
+    }
+}
+
+/// An externalId: a non-empty string, or `null` to clear it.
+fn external_id(value: &Value) -> Result<Option<String>, ScimError> {
+    match value {
+        Value::Null => Ok(None),
+        Value::String(text) if !text.trim().is_empty() => Ok(Some(text.clone())),
+        _ => Err(ScimError::invalid_value(
+            "externalId must be a non-empty string or null.",
+        )),
+    }
 }
 
 fn operation_changes(operation: &Value) -> Result<Vec<UserChange>, ScimError> {
@@ -403,6 +577,164 @@ mod tests {
                 {"op": "replace", "path": "active", "value": "yes"}
             ])))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn okta_add_members_with_path() {
+        let changes = group_changes(&body(json!([
+            {"op": "add", "path": "members", "value": [
+                {"value": "00000000-0000-0000-0000-000000000001", "display": "Ada"}
+            ]}
+        ])))
+        .unwrap();
+        assert_eq!(
+            changes,
+            vec![GroupChange::AddMembers(vec![
+                "00000000-0000-0000-0000-000000000001".to_owned()
+            ])]
+        );
+    }
+
+    #[test]
+    fn okta_replace_display_name_without_path() {
+        let changes = group_changes(&body(json!([
+            {"op": "replace", "value": {"id": "g1", "displayName": "Engineering"}}
+        ])))
+        .unwrap();
+        assert_eq!(
+            changes,
+            vec![GroupChange::DisplayName("Engineering".to_owned())]
+        );
+    }
+
+    #[test]
+    fn entra_remove_members_by_value_array() {
+        let changes = group_changes(&body(json!([
+            {"op": "remove", "path": "members", "value": [{"value": "a"}, {"value": "b"}]}
+        ])))
+        .unwrap();
+        assert_eq!(
+            changes,
+            vec![GroupChange::RemoveMembers(vec!["a".to_owned(), "b".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn entra_remove_member_by_filter_path() {
+        let changes = group_changes(&body(json!([
+            {"op": "remove", "path": "members[value eq \"a\\\"b\"]"}
+        ])))
+        .unwrap();
+        assert_eq!(
+            changes,
+            vec![GroupChange::RemoveMembers(vec!["a\"b".to_owned()])]
+        );
+        assert!(
+            group_changes(&body(json!([
+                {"op": "remove", "path": "members[display eq \"a\"]"}
+            ])))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remove_members_without_value_is_invalid() {
+        for operation in [
+            json!({"op": "remove", "path": "members"}),
+            json!({"op": "remove", "path": "members", "value": []}),
+        ] {
+            let result = group_changes(&body(json!([operation])));
+            assert!(result.is_err(), "a member removal must name members");
+        }
+    }
+
+    #[test]
+    fn replace_members_with_empty_list_empties_on_purpose() {
+        let changes = group_changes(&body(json!([
+            {"op": "replace", "path": "members", "value": []}
+        ])))
+        .unwrap();
+        assert_eq!(changes, vec![GroupChange::ReplaceMembers(Vec::new())]);
+    }
+
+    #[test]
+    fn capitalised_ops_on_groups() {
+        let changes = group_changes(&body(json!([
+            {"op": "ADD", "path": "Members", "value": [{"value": "a"}]},
+            {"op": "Replace", "path": "DisplayName", "value": "Ops"},
+            {"op": "REPLACE", "path": "externalId", "value": null}
+        ])))
+        .unwrap();
+        assert_eq!(
+            changes,
+            vec![
+                GroupChange::AddMembers(vec!["a".to_owned()]),
+                GroupChange::DisplayName("Ops".to_owned()),
+                GroupChange::ExternalId(None),
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_group_path_is_a_noop() {
+        let changes = group_changes(&body(json!([
+            {"op": "replace", "path": "title", "value": "x"},
+            {"op": "remove", "path": "nickName"}
+        ])))
+        .unwrap();
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn malformed_group_values_are_invalid() {
+        for operation in [
+            json!({"op": "replace", "path": "members", "value": null}),
+            json!({"op": "replace", "path": "members", "value": "a"}),
+            json!({"op": "add", "path": "members", "value": [{"display": "no value"}]}),
+            json!({"op": "replace", "path": "displayName", "value": ""}),
+            json!({"op": "replace", "path": "displayName", "value": 3}),
+            json!({"op": "remove", "path": "displayName"}),
+            json!({"op": "replace", "value": {"members": "a"}}),
+            json!({"op": "remove"}),
+            json!({"op": "copy", "path": "members", "value": []}),
+        ] {
+            assert!(
+                group_changes(&body(json!([operation]))).is_err(),
+                "refused: {operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn group_body_checks_are_the_shared_ones() {
+        let no_schema = json!({"Operations": [{"op": "replace", "value": {"displayName": "x"}}]});
+        assert_eq!(
+            group_changes(&no_schema).unwrap_err().scim_type,
+            Some("invalidSyntax")
+        );
+        assert!(group_changes(&body(json!([]))).is_err());
+        let too_many: Vec<Value> = (0..101)
+            .map(|_| json!({"op": "replace", "value": {"displayName": "x"}}))
+            .collect();
+        assert!(group_changes(&body(Value::Array(too_many))).is_err());
+    }
+
+    #[test]
+    fn user_patch_still_validates_the_body() {
+        let no_schema = json!({"Operations": [{"op": "replace", "value": {"active": false}}]});
+        assert_eq!(
+            user_changes(&no_schema).unwrap_err().scim_type,
+            Some("invalidSyntax")
+        );
+        assert!(user_changes(&body(json!([]))).is_err());
+        let too_many: Vec<Value> = (0..101)
+            .map(|_| json!({"op": "replace", "value": {"active": true}}))
+            .collect();
+        assert!(user_changes(&body(Value::Array(too_many))).is_err());
+        assert_eq!(
+            user_changes(&body(json!([{"op": "replace", "value": {"active": true}}]))).unwrap(),
+            vec![UserChange::Active(true)]
         );
     }
 
