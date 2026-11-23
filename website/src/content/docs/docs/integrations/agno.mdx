@@ -68,7 +68,6 @@ cetra.flush()
 
 - Do not also enable `openai`: each model call would be recorded twice and counted twice.
 - Agno sends its own telemetry unless `AGNO_TELEMETRY` is `false`.
-- Agno labels the agent's output as JSON when it is plain text, so cetra stores the agent span's output as raw text and records a normalize error on it; the model and tool spans are not affected.
 - The fixture was captured with agno 3.2.0 and openinference-instrumentation-agno 1.2.0.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

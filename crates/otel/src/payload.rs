@@ -91,8 +91,8 @@ pub(crate) struct ReadContext<'a, 'b> {
     pub bag: &'a mut AttrBag<'b>,
     pub events: &'a [Event],
     pub kind: SpanKind,
-    /// Instrumentation scope name, `""` when absent. No reader uses it yet.
-    #[allow(dead_code)]
+    /// Instrumentation scope name, `""` when absent. The GenAI reader gates
+    /// its Pydantic AI, Mirascope and Strands rules on it.
     pub scope: &'a str,
     /// Conventions detected on the span, in precedence order. No reader uses
     /// it yet.

@@ -104,20 +104,61 @@ pub(crate) const REGISTRIES: &[PayloadKeys] = &[
 /// A non-JSON string is text. `failed` means the source was recognized as
 /// messages and could not be converted.
 pub(super) fn messages_from_value(value: &AnyValue, warnings: &mut Warnings) -> (Payload, bool) {
-    if let Some(json) = decode_json_text(value, warnings) {
+    if let Some(mut json) = decode_json_text(value, warnings) {
+        let renamed = rename_result_response(&mut json);
         let text = serde_json::to_string(&json).unwrap_or_else(|_| "null".to_owned());
         return match cetra_core::message::parse_messages(&text) {
             Ok(mut messages) => {
                 parse_tool_values(&mut messages);
                 (Payload::Messages(messages), false)
             }
-            Err(_) => (Payload::Json(json), true),
+            // The raw value, as sent: decoding again is cheaper than a clone
+            // on every read, and it only happens on this failure path.
+            Err(_) => {
+                let raw = if renamed {
+                    decode_json_text(value, warnings).unwrap_or(json)
+                } else {
+                    json
+                };
+                (Payload::Json(raw), true)
+            }
         };
     }
     if let Some(text) = as_str(value) {
         return (Payload::Text(text.to_owned()), true);
     }
     (Payload::Json(to_json(value, warnings)), true)
+}
+
+/// A `tool_call_response` part that has `result` and no `response` (Pydantic AI)
+/// is renamed to `response` before parsing. Reports whether anything changed.
+fn rename_result_response(json: &mut Json) -> bool {
+    let mut renamed = false;
+    let Some(messages) = json.as_array_mut() else {
+        return false;
+    };
+    for message in messages {
+        let Some(parts) = message
+            .as_object_mut()
+            .and_then(|message| message.get_mut("parts"))
+            .and_then(Json::as_array_mut)
+        else {
+            continue;
+        };
+        for part in parts {
+            let Some(object) = part.as_object_mut() else {
+                continue;
+            };
+            if object.get("type").and_then(Json::as_str) == Some("tool_call_response")
+                && !object.contains_key("response")
+                && let Some(result) = object.shift_remove("result")
+            {
+                object.insert("response".to_owned(), result);
+                renamed = true;
+            }
+        }
+    }
+    renamed
 }
 
 /// Rule 6 on canonical messages: a JSON string in a tool call's `arguments` or
@@ -175,6 +216,39 @@ mod tests {
             }),
             key_strindex: 0,
         }
+    }
+
+    #[test]
+    fn a_tool_call_response_result_is_renamed_to_response() {
+        let messages = r#"[{"role":"user","parts":[{"type":"text","content":"hi"}]},{"role":"tool","parts":[{"type":"tool_call_response","id":"call_1","name":"get_weather","result":"18C sunny in Paris"}]}]"#;
+        let value = AnyValue {
+            value: Some(Value::StringValue(messages.to_owned())),
+        };
+        let mut warnings = Warnings::default();
+        let (payload, failed) = super::messages_from_value(&value, &mut warnings);
+        assert!(!failed);
+        let super::Payload::Messages(converted) = payload else {
+            panic!("expected messages");
+        };
+        assert_eq!(
+            messages_to_json(&converted),
+            r#"[{"role":"user","parts":[{"type":"text","content":"hi"}]},{"role":"tool","parts":[{"type":"tool_call_response","id":"call_1","response":"18C sunny in Paris","name":"get_weather"}]}]"#
+        );
+        // An existing `response` is not replaced; the stray `result` stays as
+        // an unmodelled field.
+        let messages = r#"[{"role":"tool","parts":[{"type":"tool_call_response","id":"call_2","response":"kept","result":"stray"}]}]"#;
+        let value = AnyValue {
+            value: Some(Value::StringValue(messages.to_owned())),
+        };
+        let (payload, failed) = super::messages_from_value(&value, &mut warnings);
+        assert!(!failed);
+        let super::Payload::Messages(converted) = payload else {
+            panic!("expected messages");
+        };
+        assert_eq!(
+            messages_to_json(&converted),
+            r#"[{"role":"tool","parts":[{"type":"tool_call_response","id":"call_2","response":"kept","result":"stray"}]}]"#
+        );
     }
 
     #[test]

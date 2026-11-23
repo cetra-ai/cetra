@@ -9,7 +9,7 @@ use cetra_core::message::Message;
 use opentelemetry_proto::tonic::common::v1::AnyValue;
 use serde_json::{Map, Value as Json};
 
-use crate::convert::{flattened_messages, openai_messages};
+use crate::convert::{flattened_messages, openai_messages, replace_function_messages};
 use crate::payload::{
     Field, Io, KeyPattern, Payload, ReadContext, decode_json_text, parse_tool_arguments,
 };
@@ -60,11 +60,8 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
     {
         io.input = Some(Payload::Json(Json::Array(texts)));
         drop_raw(ctx, INPUT_VALUE, INPUT_MIME);
-    } else if let Some((payload, failed)) = raw_value(ctx, INPUT_VALUE, INPUT_MIME) {
+    } else if let Some(payload) = raw_value(ctx, INPUT_VALUE, INPUT_MIME) {
         io.input = Some(payload);
-        if failed {
-            io.errors.push("messages:openinference:input");
-        }
     } else if ctx.kind == SpanKind::Embedding {
         consume_prefix(ctx, EMBEDDINGS);
     }
@@ -82,11 +79,8 @@ pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
     {
         io.output = Some(Payload::Json(Json::Array(documents)));
         drop_raw(ctx, OUTPUT_VALUE, OUTPUT_MIME);
-    } else if let Some((payload, failed)) = raw_value(ctx, OUTPUT_VALUE, OUTPUT_MIME) {
+    } else if let Some(payload) = raw_value(ctx, OUTPUT_VALUE, OUTPUT_MIME) {
         io.output = Some(payload);
-        if failed {
-            io.errors.push("messages:openinference:output");
-        }
     }
     io.tool_definitions = tool_definitions(ctx);
     io
@@ -99,6 +93,7 @@ fn messages(ctx: &mut ReadContext<'_, '_>, prefix: &str) -> Option<(Payload, boo
     match openai_messages(&value) {
         Ok(mut converted) => {
             lift_finish_reasons(&mut converted, &value);
+            replace_function_messages(ctx.bag, prefix, &mut converted, ctx.warnings);
             Some((Payload::Messages(converted), false))
         }
         Err(_) => Some((Payload::Json(value), true)),
@@ -185,7 +180,7 @@ fn tool_definitions(ctx: &mut ReadContext<'_, '_>) -> Option<Vec<Json>> {
     Some(items)
 }
 
-fn raw_value(ctx: &mut ReadContext<'_, '_>, key: &str, mime_key: &str) -> Option<(Payload, bool)> {
+fn raw_value(ctx: &mut ReadContext<'_, '_>, key: &str, mime_key: &str) -> Option<Payload> {
     match as_str(ctx.bag.get(key)?) {
         Some("") => return None,
         Some(REDACTED) => {
@@ -205,24 +200,23 @@ fn raw_value(ctx: &mut ReadContext<'_, '_>, key: &str, mime_key: &str) -> Option
     Some(mime_payload(&value, mime.as_deref(), ctx))
 }
 
-fn mime_payload(
-    value: &AnyValue,
-    mime: Option<&str>,
-    ctx: &mut ReadContext<'_, '_>,
-) -> (Payload, bool) {
+/// A value labelled `application/json` is json when it parses as JSON, and
+/// text otherwise (Agno labels its plain-text agent output that way); a
+/// non-string value is json of its rule 1 encoding. Any other label is rule 10.
+fn mime_payload(value: &AnyValue, mime: Option<&str>, ctx: &mut ReadContext<'_, '_>) -> Payload {
     if mime == Some("application/json") {
         if let Some(json) = decode_json_text(value, ctx.warnings) {
-            return (Payload::Json(json), false);
+            return Payload::Json(json);
         }
         if let Some(text) = as_str(value) {
-            return (Payload::Json(Json::String(text.to_owned())), true);
+            return Payload::Text(text.to_owned());
         }
-        return (Payload::Json(to_json(value, ctx.warnings)), true);
+        return Payload::Json(to_json(value, ctx.warnings));
     }
     if let Some(text) = as_str(value) {
-        return (Payload::Text(text.to_owned()), false);
+        return Payload::Text(text.to_owned());
     }
-    (Payload::Json(to_json(value, ctx.warnings)), false)
+    Payload::Json(to_json(value, ctx.warnings))
 }
 
 fn drop_raw(ctx: &mut ReadContext<'_, '_>, value_key: &str, mime_key: &str) {
@@ -249,4 +243,95 @@ fn consume_prefix(ctx: &mut ReadContext<'_, '_>, prefix: &str) {
 fn text_at(ctx: &ReadContext<'_, '_>, key: &str) -> Option<String> {
     let text = as_str(ctx.bag.get(key)?)?;
     captured_text(text).then(|| text.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use cetra_core::enums::SpanKind;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use serde_json::json;
+
+    use super::read;
+    use crate::bag::AttrBag;
+    use crate::payload::{Io, Payload, ReadContext};
+    use crate::warn::Warnings;
+
+    fn string_attr(key: &str, text: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(Value::StringValue(text.to_owned())),
+            }),
+            key_strindex: 0,
+        }
+    }
+
+    fn int_attr(key: &str, number: i64) -> KeyValue {
+        KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(Value::IntValue(number)),
+            }),
+            key_strindex: 0,
+        }
+    }
+
+    fn read_span(attrs: &[KeyValue]) -> Io {
+        let mut warnings = Warnings::default();
+        let mut bag = AttrBag::new(attrs, &mut warnings);
+        read(&mut ReadContext {
+            bag: &mut bag,
+            events: &[],
+            kind: SpanKind::Span,
+            scope: "",
+            conventions: &[],
+            warnings: &mut warnings,
+        })
+    }
+
+    #[test]
+    fn a_json_labelled_plain_text_is_text_with_no_error() {
+        let io = read_span(&[
+            string_attr("input.value", "What is the weather?"),
+            string_attr("input.mime_type", "application/json"),
+            string_attr("output.value", "It is sunny in Paris."),
+            string_attr("output.mime_type", "application/json"),
+        ]);
+        assert_eq!(
+            io.input,
+            Some(Payload::Text("What is the weather?".to_owned()))
+        );
+        assert_eq!(
+            io.output,
+            Some(Payload::Text("It is sunny in Paris.".to_owned()))
+        );
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_json_labelled_json_value_stays_json() {
+        let io = read_span(&[
+            string_attr("input.value", r#"{"q":"hi"}"#),
+            string_attr("input.mime_type", "application/json"),
+            string_attr("output.value", "\"quoted\""),
+            string_attr("output.mime_type", "application/json"),
+        ]);
+        assert_eq!(io.input, Some(Payload::Json(json!({"q": "hi"}))));
+        assert_eq!(
+            io.output,
+            Some(Payload::Json(json!("quoted"))) // stored as the literal `"quoted"`
+        );
+        assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_json_labelled_number_is_json_with_no_error() {
+        let io = read_span(&[
+            int_attr("output.value", 3),
+            string_attr("output.mime_type", "application/json"),
+        ]);
+        assert_eq!(io.output, Some(Payload::Json(json!(3))));
+        assert!(io.errors.is_empty());
+    }
 }
