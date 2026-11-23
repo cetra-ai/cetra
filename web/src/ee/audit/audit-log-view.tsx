@@ -344,14 +344,19 @@ function TextFilter({
   );
 }
 
-/** The actor: the name and email of a present user, the kind for a system or CLI actor, else the status. */
+/**
+ * The actor: the name and email of a present user, its email alone when it has no name, the kind
+ * for a system or CLI actor, else the status.
+ */
 function ActorLabel({ actor }: { actor: AuditActor }) {
   let label: ReactNode;
   if (actor.status === "present") {
-    label = actor.name ? (
+    // An invited user has an email before it sets a display name.
+    const first = actor.name || actor.email;
+    label = first ? (
       <>
-        <span>{actor.name}</span>
-        {actor.email ? (
+        <span>{first}</span>
+        {actor.name && actor.email ? (
           <span className="block text-caption text-muted-foreground">{actor.email}</span>
         ) : null}
       </>

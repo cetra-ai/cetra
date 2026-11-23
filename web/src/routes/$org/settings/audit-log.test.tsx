@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { afterEach, expect, it, vi } from "vitest";
+import type { Schema } from "@/api/types";
 import { server } from "@/mocks/node";
 import { ADA_ID, ORG_ID } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
@@ -42,6 +43,37 @@ it("shows admins the records with names and the former-member label", async () =
   expect(within(table).getAllByText("ada@example.com").length).toBeGreaterThan(0);
   expect(within(table).getByText("Former member")).toBeInTheDocument();
   expect(within(table).getByRole("button", { name: "member.role_changed" })).toBeInTheDocument();
+});
+
+it("shows a present actor's email when it has no name", async () => {
+  // An invited user has an email before it sets a display name.
+  const record: Schema<"AuditEvent"> = {
+    id: "01900000-0000-7000-8000-000000001d04",
+    at: "2026-01-04T07:00:00.000000000Z",
+    action: "member.invited",
+    outcome: "success",
+    actor: {
+      kind: "user",
+      id: "01900000-0000-7000-8000-000000000103",
+      email: "noname@example.com",
+      status: "present",
+    },
+    details: {},
+  };
+  server.use(
+    signedInAs("admin"),
+    withFeatures(["audit_log"]),
+    http.get("/api/v1/orgs/:org/audit-events", () =>
+      HttpResponse.json({ data: [record], next_cursor: null }),
+    ),
+  );
+
+  await renderApp("/acme/settings/audit-log");
+
+  const table = await screen.findByRole("table", { name: "Audit records" });
+  // The record has no target, so the Actor column is the only place its email can be shown.
+  expect(within(table).getAllByText("noname@example.com")).toHaveLength(1);
+  expect(within(table).queryByText("user")).toBeNull();
 });
 
 it("sends the filters to the URL and to the query", async () => {
