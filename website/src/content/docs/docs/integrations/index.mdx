@@ -73,22 +73,41 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
+| [Agno](/docs/integrations/agno/) | ✓ | — | `instrument=["agno"]` | captured |
 | [aisuite](/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
+| [BeeAI Framework](/docs/integrations/beeai/) | ✓ | — | `instrument=["beeai"]` | captured |
+| [Claude Agent SDK](/docs/integrations/claude-agent-sdk/) | ✓ | ✓ | Claude Code's OpenTelemetry spans | captured |
 | [CrewAI](/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
+| [Deep Agents](/docs/integrations/deepagents/) | ✓ | — | `instrument=["langchain"]` | captured |
 | [DSPy](/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
 | [Google ADK](/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
-| [LangChain and LangGraph](/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [Guardrails AI](/docs/integrations/guardrails/) | ✓ | — | `instrument=["openai"]` plus Guardrails' own spans | captured |
+| [Haystack](/docs/integrations/haystack/) | ✓ | — | `instrument=["haystack"]` | captured |
+| [Instructor](/docs/integrations/instructor/) | ✓ | — | `instrument=["instructor", "openai"]` | captured |
+| [LangChain](/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [LangGraph](/docs/integrations/langgraph/) | ✓ | ✓ | `instrument=["langchain"]` | captured (Python), SDK test (TypeScript) |
 | [LlamaIndex](/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
 | [OpenAI Agents SDK](/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [smolagents](/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
+| [Temporal](/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | setup only |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 
 <CardGrid>
+  <LinkCard title="Agno" description="Agent runs, model calls and tools." href="/docs/integrations/agno/" />
+  <LinkCard title="BeeAI Framework" description="Agents in Python." href="/docs/integrations/beeai/" />
+  <LinkCard title="Claude Agent SDK" description="Claude Code turns inside your app." href="/docs/integrations/claude-agent-sdk/" />
   <LinkCard title="CrewAI" description="CrewAI from Python." href="/docs/integrations/crewai/" />
+  <LinkCard title="Deep Agents" description="LangChain Deep Agents." href="/docs/integrations/deepagents/" />
   <LinkCard title="DSPy" description="DSPy from Python." href="/docs/integrations/dspy/" />
   <LinkCard title="Google ADK" description="Agent Development Kit runs." href="/docs/integrations/google-adk/" />
-  <LinkCard title="LangChain and LangGraph" description="Chains, agents, models and tools." href="/docs/integrations/langchain/" />
+  <LinkCard title="Guardrails AI" description="Guards, validators and the checked call." href="/docs/integrations/guardrails/" />
+  <LinkCard title="Haystack" description="Pipelines and model calls." href="/docs/integrations/haystack/" />
+  <LinkCard title="Instructor" description="Structured outputs and their model calls." href="/docs/integrations/instructor/" />
+  <LinkCard title="LangChain" description="Chains, agents, models and tools." href="/docs/integrations/langchain/" />
+  <LinkCard title="LangGraph" description="Graphs, nodes and tools." href="/docs/integrations/langgraph/" />
   <LinkCard title="LlamaIndex" description="LlamaIndex from Python." href="/docs/integrations/llama-index/" />
   <LinkCard title="OpenAI Agents SDK" description="Agent runs and function tools." href="/docs/integrations/openai-agents/" />
+  <LinkCard title="smolagents" description="Agent steps, model calls and tools." href="/docs/integrations/smolagents/" />
   <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
 </CardGrid>
 

@@ -34,7 +34,7 @@ test("parses the real page", () => {
 });
 
 test("a per-language test cell is parsed per language", () => {
-  const langchain = loadIntegrations().find((item) => item.title === "LangChain and LangGraph");
+  const langchain = loadIntegrations().find((item) => item.title === "LangChain");
   assert.deepEqual(langchain.tests, [
     { kind: "recorded", lang: "Python" },
     { kind: "sdk", lang: "TypeScript" },

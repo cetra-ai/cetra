@@ -70,21 +70,40 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
+| [Agno](https://cetra.sh/docs/integrations/agno/) | ✓ | — | `instrument=["agno"]` | captured |
 | [aisuite](https://cetra.sh/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
+| [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/) | ✓ | — | `instrument=["beeai"]` | captured |
+| [Claude Agent SDK](https://cetra.sh/docs/integrations/claude-agent-sdk/) | ✓ | ✓ | Claude Code's OpenTelemetry spans | captured |
 | [CrewAI](https://cetra.sh/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
+| [Deep Agents](https://cetra.sh/docs/integrations/deepagents/) | ✓ | — | `instrument=["langchain"]` | captured |
 | [DSPy](https://cetra.sh/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
 | [Google ADK](https://cetra.sh/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
-| [LangChain and LangGraph](https://cetra.sh/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [Guardrails AI](https://cetra.sh/docs/integrations/guardrails/) | ✓ | — | `instrument=["openai"]` plus Guardrails' own spans | captured |
+| [Haystack](https://cetra.sh/docs/integrations/haystack/) | ✓ | — | `instrument=["haystack"]` | captured |
+| [Instructor](https://cetra.sh/docs/integrations/instructor/) | ✓ | — | `instrument=["instructor", "openai"]` | captured |
+| [LangChain](https://cetra.sh/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [LangGraph](https://cetra.sh/docs/integrations/langgraph/) | ✓ | ✓ | `instrument=["langchain"]` | captured (Python), SDK test (TypeScript) |
 | [LlamaIndex](https://cetra.sh/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
 | [OpenAI Agents SDK](https://cetra.sh/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [smolagents](https://cetra.sh/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
+| [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | setup only |
 | [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 
+- [Agno](https://cetra.sh/docs/integrations/agno/): Agent runs, model calls and tools.
+- [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/): Agents in Python.
+- [Claude Agent SDK](https://cetra.sh/docs/integrations/claude-agent-sdk/): Claude Code turns inside your app.
 - [CrewAI](https://cetra.sh/docs/integrations/crewai/): CrewAI from Python.
+- [Deep Agents](https://cetra.sh/docs/integrations/deepagents/): LangChain Deep Agents.
 - [DSPy](https://cetra.sh/docs/integrations/dspy/): DSPy from Python.
 - [Google ADK](https://cetra.sh/docs/integrations/google-adk/): Agent Development Kit runs.
-- [LangChain and LangGraph](https://cetra.sh/docs/integrations/langchain/): Chains, agents, models and tools.
+- [Guardrails AI](https://cetra.sh/docs/integrations/guardrails/): Guards, validators and the checked call.
+- [Haystack](https://cetra.sh/docs/integrations/haystack/): Pipelines and model calls.
+- [Instructor](https://cetra.sh/docs/integrations/instructor/): Structured outputs and their model calls.
+- [LangChain](https://cetra.sh/docs/integrations/langchain/): Chains, agents, models and tools.
+- [LangGraph](https://cetra.sh/docs/integrations/langgraph/): Graphs, nodes and tools.
 - [LlamaIndex](https://cetra.sh/docs/integrations/llama-index/): LlamaIndex from Python.
 - [OpenAI Agents SDK](https://cetra.sh/docs/integrations/openai-agents/): Agent runs and function tools.
+- [smolagents](https://cetra.sh/docs/integrations/smolagents/): Agent steps, model calls and tools.
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
 
 ## Coding agents

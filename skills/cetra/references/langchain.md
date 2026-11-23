@@ -2,7 +2,7 @@
 
 # LangChain
 
-Trace LangChain and LangGraph with cetra: chains, chat models, tools and agent steps, from Python and TypeScript.
+Trace LangChain chains, agents, models and tools with cetra from Python and TypeScript, through the OpenInference LangChain instrumentation.
 
 cetra traces LangChain and LangGraph runs as a tree: the graph, its nodes, each model call and each tool call. For LangGraph graphs and Deep Agents, see [LangGraph](https://cetra.sh/docs/integrations/langgraph/) and [Deep Agents](https://cetra.sh/docs/integrations/deepagents/).
 

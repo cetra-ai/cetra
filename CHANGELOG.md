@@ -11,6 +11,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - Calls through the OpenAI client show the provider read from the endpoint's host when the instrumentation records it: cetra's Python SDK with `instrument=["openai"]` (which now records the client's host), OpenLLMetry, and OpenInference for TypeScript. This covers OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and the other hosts in the host table.
 - Integration pages for 35 model providers and aisuite, with captured spans for Groq, Mistral AI, Cohere, Together AI, Ollama, Azure OpenAI and Vertex AI; `cetra-sdk` extras `groq`, `mistralai`, `cohere`, `ollama` and `together`.
+- Integration pages for Instructor, Agno, smolagents, Haystack, BeeAI Framework, Guardrails AI, Deep Agents, Temporal, LangGraph and the Claude Agent SDK, with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones); `cetra-sdk` extras `instructor`, `agno`, `smolagents`, `haystack` and `beeai`.
 
 ### Changed
 
