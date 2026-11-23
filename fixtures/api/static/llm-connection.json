@@ -9,6 +9,8 @@
   "api_key_hint": "WXYZ",
   "extra_header_names": [],
   "status": "ok",
+  "last_tested_at": "2026-01-01T09:05:00.000000000Z",
+  "last_test_ok": true,
   "created_by": "01900000-0000-7000-8000-000000000100",
   "created_at": "2026-01-01T09:00:00.000000000Z",
   "updated_at": "2026-01-01T09:00:00.000000000Z"

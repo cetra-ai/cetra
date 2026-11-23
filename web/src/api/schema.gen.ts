@@ -7755,6 +7755,15 @@ export interface components {
              * @description When `last_error` was recorded. Omitted when unset.
              */
             last_error_at?: string;
+            /** @description Whether that test succeeded. Omitted with `last_tested_at`. */
+            last_test_ok?: boolean;
+            /**
+             * Format: date-time
+             * @description When the saved values were last tested on the default model or an embedding model.
+             *     Omitted when never tested, and after a change of the adapter, key, base URL, structured
+             *     output or headers. JSON is RFC 3339 (D-I-54).
+             */
+            last_tested_at?: string;
             /**
              * Format: int32
              * @description Provider calls the connection runs at once, 1 to 64.

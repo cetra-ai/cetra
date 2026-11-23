@@ -281,6 +281,7 @@ async fn update_llm_connection(
     let user_id = user.id;
     let now = state.clock.now_ns();
     let key_sent = key.is_some();
+    let headers_sent = headers.is_some();
     let updated = state
         .meta
         .write(move |conn| {
@@ -325,6 +326,15 @@ async fn update_llm_connection(
                     max_concurrency: max_concurrency.unwrap_or(row.max_concurrency),
                     requests_per_minute: requests_per_minute.unwrap_or(row.requests_per_minute),
                 };
+                // The stored test no longer describes what a test would call (D-I-54).
+                let clears_test = key_sent
+                    || headers_sent
+                    || fields.adapter != row.adapter
+                    || fields.base_url != row.base_url
+                    || fields.structured_output != row.structured_output;
+                if clears_test {
+                    connections::clear_connection_test(conn, id).await?;
+                }
                 let Some(row) =
                     connections::update_connection(conn, org_id, id, fields, now).await?
                 else {
@@ -573,6 +583,10 @@ async fn test_connection(
             "could not store the connection status"
         );
     }
+    // Only a test of the default model describes the connection (D-I-54).
+    if explicit.is_none() {
+        record_test(&state, id, row.updated_at, result.ok, now).await;
+    }
     tracing::info!(
         target: "audit",
         connection_id = %row.id,
@@ -721,6 +735,7 @@ async fn test_embedding(
             ),
         }
     }
+    record_test(state, id, row.updated_at, result.ok, now).await;
     tracing::info!(
         target: "audit",
         connection_id = %id,
@@ -787,6 +802,26 @@ async fn set_status(
         .await
 }
 
+/// Stores a saved-values test's outcome (D-I-54). Best effort, as the status write: the provider
+/// was called, so a failed write must not lose the test result.
+async fn record_test(state: &AppState, id: Uuid, tested_updated_at: i64, ok: bool, now: i64) {
+    let written = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                connections::record_connection_test(conn, id, tested_updated_at, ok, now).await
+            })
+        })
+        .await;
+    if let Err(error) = written {
+        tracing::warn!(
+            connection_id = %id,
+            error_kind = meta_error_kind(&error),
+            "could not store the connection test"
+        );
+    }
+}
+
 /// The kind of a [`MetaError`], for logs that carry no error text.
 fn meta_error_kind(error: &MetaError) -> &'static str {
     match error {
@@ -833,6 +868,8 @@ fn connection_json(row: &ConnectionRow) -> Result<LlmConnection, ApiError> {
         status: ConnectionStatus::from_name(&row.status).ok_or_else(|| corrupt("status"))?,
         last_error: row.last_error.clone(),
         last_error_at: row.last_error_at,
+        last_tested_at: row.last_tested_at,
+        last_test_ok: row.last_test_ok,
         created_by: row.created_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -2770,5 +2807,174 @@ mod tests {
         let response = test(&app, &seeded.cookie, id, &json!({})).await;
         crate::http::restore::tests::assert_refused(&response, "connection test");
         assert!(mock.requests().is_empty());
+    }
+
+    /// The last test, as the API returns it: `(last_tested_at, last_test_ok)`.
+    async fn last_test(app: &TestApp, cookie: &str, id: Uuid) -> (Option<Value>, Option<Value>) {
+        let body: Value = get(app, cookie, id).await.json();
+        (
+            body.get("last_tested_at").cloned(),
+            body.get("last_test_ok").cloned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_new_connection_has_no_last_test() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(&app, &seeded.cookie, &body("Fresh")).await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        assert_eq!(last_test(&app, &seeded.cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_test_records_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_saved_test_records_a_failed_last_test() {
+        let mock = MockLlm::start(vec![Reply {
+            status: 401,
+            body: json!({
+                "error": {"message": "bad key", "type": "invalid_request_error"}
+            }),
+        }])
+        .await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_test_on_a_typed_model_records_nothing() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({"model": "other-model"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_embedding_test_records_the_last_test() {
+        let mock = MockLlm::start_with_embeddings(Vec::new(), vec![embedding(&[0.6, 0.8])]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_embedding_refusal_records_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Claude", "adapter": "anthropic", "api_key": "sk-ant-test-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(!response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(last_test(&app, &seeded.cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_key_clears_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let response = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({"api_key": "sk-second-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = response.json();
+        assert_eq!(connection.last_tested_at, None);
+        assert_eq!(connection.last_test_ok, None);
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_structured_output_clears_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let response = patch(&app, &cookie, id, &json!({"structured_output": "tool"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_name_or_the_same_mode_keeps_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let renamed = patch(&app, &cookie, id, &json!({"name": "Renamed"})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
+
+        let same_mode = patch(&app, &cookie, id, &json!({"structured_output": "native"})).await;
+        assert_eq!(same_mode.status, 200, "{}", text(&same_mode));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
     }
 }

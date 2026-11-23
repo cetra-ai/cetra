@@ -158,6 +158,19 @@ pub struct LlmConnection {
     )]
     #[schema(value_type = Option<String>, format = DateTime)]
     pub last_error_at: Option<i64>,
+    /// When the saved values were last tested on the default model or an embedding model.
+    /// Omitted when never tested, and after a change of the adapter, key, base URL, structured
+    /// output or headers. JSON is RFC 3339 (D-I-54).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crate::api::keys::optional_time"
+    )]
+    #[schema(value_type = Option<String>, format = DateTime)]
+    pub last_tested_at: Option<i64>,
+    /// Whether that test succeeded. Omitted with `last_tested_at`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_test_ok: Option<bool>,
     /// User who created the connection. Omitted when that user is unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<Uuid>,

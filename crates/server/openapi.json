@@ -33696,6 +33696,15 @@
             "format": "date-time",
             "description": "When `last_error` was recorded. Omitted when unset."
           },
+          "last_test_ok": {
+            "type": "boolean",
+            "description": "Whether that test succeeded. Omitted with `last_tested_at`."
+          },
+          "last_tested_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the saved values were last tested on the default model or an embedding model.\nOmitted when never tested, and after a change of the adapter, key, base URL, structured\noutput or headers. JSON is RFC 3339 (D-I-54)."
+          },
           "max_concurrency": {
             "type": "integer",
             "format": "int32",
