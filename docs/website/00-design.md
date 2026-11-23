@@ -195,6 +195,15 @@ Answers of 2026-11-22, after main gained the features of D191–D195:
 7. **Sell the full product story:** the hero names the breadth, the "one binary" box lists all of it, six product chapters, a coding-agents section, and the compare table, pricing and FAQ updated (§6).
 8. **One pull request** for the whole site, from `claude/website`, replacing the stack #174–#180.
 
+Answers of 2026-11-23, on a full feature table for `/pricing/` (M9), like the ones on Langfuse, Laminar and Arize:
+
+9. **A feature table on each tab of `/pricing/`.**
+   1. The Cloud table has four columns: Free, Starter, Pro, Enterprise. The Teams add-on's features read "Teams add-on" in the Pro column, as on Langfuse.
+   2. The Self-hosted table has two columns, free and licence. It adds the self-hosted-only rows: install, S3, backup, sign-in providers.
+   3. The Enterprise-only rows (dedicated cell, audit logs and SCIM, SLAs) are shown, backed by D177. Their docs pages come later.
+   4. About 55 rows, with the limits first. The table replaces the "Every plan" bullet list.
+   5. *(Planner's reading, not asked; D-W-21.)* Enterprise has everything that Pro with the Teams add-on has: unlimited seats, projects and rules, retention controls, single sign-on, project roles and the shared channel. Its volume, overage, history and ingest values read "Custom", following D177. Starter and Pro show unlimited projects, as the control plane's catalogue sets them.
+
 ## 10. Milestones
 
 Built in order, each milestone merged to `main` when done (no feature flag). Until M7, the new pages live at their URLs but the holding page stays at `/`, and the new pages carry `noindex` and are not linked from it.
@@ -208,6 +217,7 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M5 Compare** | `/compare/` and nine competitor pages (§9.3), facts in data files with sources and visible "checked on" dates, each fact verified by a Sonnet agent against its source, the staleness check | M1 | Benchmark numbers |
 | **M6 Benchmarks** *(after launch, §9.2)* | `/benchmarks/` from a results file: machines, versions, dates, named competitors, tradeoffs, reproduction script; engine numbers added to the homepage proof strip | The benchmark itself (D23) | — |
 | **M8 Main sync** | The site matches main as of 2026-11-22: rebased onto it, the integrations parser takes the coding-agent rows, the web demo link (§9.6), six chapters and the coding-agents section, new compare rows (annotation queues, issue detection, coding-agent tracing, in-app assistant) with sourced facts, pricing and self-hosting updated | M1–M5, M7; main's D191–D195 | Benchmarks (M6) |
+| **M9 Pricing feature table** | A feature table on both tabs of `/pricing/` (§9.9): limits first, then grouped features. Every row links to its docs page or cites a decision, and a test checks both. On phones, one Cloud plan column shows at a time. It replaces the "Every plan" list | M3, M8; PR #227 (the Cloud / Self-hosted switcher) | Docs for the Enterprise-only rows |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks
