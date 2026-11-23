@@ -4,6 +4,7 @@
 
 pub(crate) mod otlp;
 pub mod panic;
+pub mod subscriber;
 pub(crate) mod buckets;
 pub(crate) mod facts;
 pub(crate) mod instance;
@@ -22,4 +23,16 @@ pub enum ObservabilityError {
     /// `self_monitoring.resource` did not parse.
     #[error("self_monitoring.resource: invalid attribute list")]
     Resource,
+    /// `log.level` is not a valid filter.
+    #[error("log.level: {0}")]
+    LogLevel(tracing_subscriber::filter::ParseError),
+    /// `self_monitoring.level` is not a valid filter.
+    #[error("self_monitoring.level: {0}")]
+    ExportLevel(tracing_subscriber::filter::ParseError),
+    /// [`subscriber::init`] was called outside a tokio runtime.
+    #[error("no tokio runtime to run the export on")]
+    NoRuntime,
+    /// A global subscriber is already installed.
+    #[error("a global tracing subscriber is already installed")]
+    AlreadyInstalled,
 }
