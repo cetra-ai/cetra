@@ -19,7 +19,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
 - `PATCH /api/v1/orgs/{org}/llm-connections/{id}` no longer needs `api_key` with a new `base_url` or `adapter`: the saved key is kept.
-- The LLM connection form offers OpenAI, OpenAI-compatible, Anthropic and Gemini; a saved OpenAI connection with a base URL shows as OpenAI-compatible. The form puts the base URL and structured output under Advanced unless the provider needs them, shows the saved key's last 4 characters, and its fields keep a readable width. The Test dialog is gone.
+- The LLM connection form offers OpenAI, OpenAI-compatible, Anthropic and Gemini; a saved OpenAI connection with a base URL shows as OpenAI-compatible, and `GET /api/v1/projects/{project}/assistant` returns the connection's `base_url`. The form puts the base URL and structured output under Advanced unless the provider needs them, shows the saved key's last 4 characters, and its fields keep a readable width. The Test dialog is gone.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 
 ### Fixed

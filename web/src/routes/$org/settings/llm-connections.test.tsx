@@ -1028,3 +1028,83 @@ it("suggests model ids of the chosen provider", async () => {
   expect(model).not.toHaveAttribute("list");
   expect(document.querySelector("#connection-model-suggestions")).toBeNull();
 });
+
+it("moves focus to the test result when a test ends", async () => {
+  server.use(http.post(TEST_PATH, () => HttpResponse.json(TEST_OK)));
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+
+  const region = (await within(form).findByText(TEST_OK_LINE)).closest("[tabindex]");
+  expect(region).not.toBeNull();
+  await waitFor(() => expect(region).toContainElement(document.activeElement as HTMLElement));
+});
+
+it("lets the user close Advanced after an error opened it", async () => {
+  server.use(
+    http.post("/api/v1/orgs/:org/llm-connections", () =>
+      problemResponse(400, "bad_request", {
+        errors: [
+          {
+            field: "requests_per_minute",
+            message: "requests_per_minute must be between 1 and 10000",
+          },
+        ],
+      }),
+    ),
+  );
+
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
+
+  await within(form).findByText("requests_per_minute must be between 1 and 10000");
+  const details = within(form).getByText("Advanced").closest("details");
+  expect(details).toHaveAttribute("open");
+
+  await user.click(within(form).getByText("Advanced"));
+  expect(details).not.toHaveAttribute("open");
+});
+
+it("clears a base URL server error when the provider changes", async () => {
+  server.use(
+    http.post("/api/v1/orgs/:org/llm-connections", () =>
+      problemResponse(400, "bad_request", {
+        errors: [{ field: "base_url", message: BASE_URL_MESSAGE }],
+      }),
+    ),
+  );
+
+  const { user, form } = await openCreate();
+  await pickProvider(user, form, "OpenAI-compatible");
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.type(within(form).getByLabelText("Base URL"), "https://gw.example.com/v1");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
+  expect(await within(form).findByText(BASE_URL_MESSAGE)).toBeInTheDocument();
+
+  await pickProvider(user, form, "Anthropic");
+  await user.click(within(form).getByText("Advanced"));
+  expect(within(form).queryByText(BASE_URL_MESSAGE)).toBeNull();
+});
+
+it("shows OpenAI-compatible after saving a base URL on an OpenAI connection", async () => {
+  server.use(
+    http.patch("/api/v1/orgs/:org/llm-connections/:id", () =>
+      HttpResponse.json({ ...CONNECTION, base_url: "https://gw.example.com/v1" }),
+    ),
+  );
+
+  const { user, form } = await openConnection();
+  expect(within(form).getByRole("combobox", { name: "Provider" })).toHaveTextContent(/^OpenAI$/);
+  await user.click(within(form).getByText("Advanced"));
+  await user.type(within(form).getByLabelText("Base URL"), "https://gw.example.com/v1");
+  await user.click(within(form).getByRole("button", { name: "Save" }));
+
+  await waitFor(() =>
+    expect(within(form).getByRole("combobox", { name: "Provider" })).toHaveTextContent(
+      /^OpenAI-compatible$/,
+    ),
+  );
+});

@@ -465,7 +465,8 @@ async fn test_connection(
         structured_output,
         extra_headers,
     };
-    // An invalid body spends no test, and is answered before the row is loaded.
+    // Body validation answers before the rate limiter, so an invalid body spends no test. The
+    // unknown id (404) and a missing model (400) come after the limiter, so they do spend one.
     let mut errors = Vec::new();
     draft.check(&mut errors);
     if !errors.is_empty() {

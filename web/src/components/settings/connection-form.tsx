@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { $api } from "@/api/client";
 import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { connectionsKey } from "@/api/queries-settings";
@@ -191,6 +191,8 @@ export function ConnectionForm({
   const [testResult, setTestResult] = useState<Schema<"LlmConnectionTestResult"> | undefined>();
   const [testError, setTestError] = useState<string | undefined>();
   const [embeddingModel, setEmbeddingModel] = useState("");
+  // Focus goes here when a test ends: the form's controls are disabled while it runs.
+  const testRegion = useRef<HTMLDivElement>(null);
   const testing = testSaved.isPending || testUnsaved.isPending;
   // While a test runs the form cannot change, so its result always describes the values shown.
   const busy = pending || testing;
@@ -251,6 +253,8 @@ export function ConnectionForm({
 
   function chooseProvider(next: ProviderChoice) {
     setProvider(next);
+    // The URL error was for the previous provider's URL.
+    setServerErrors(({ base_url: _, ...rest }) => rest);
     // Another provider's URL is wrong for this one; the saved choice gets its saved URL back.
     setBaseUrl(
       connection !== undefined && next === providerChoice(connection)
@@ -377,7 +381,9 @@ export function ConnectionForm({
     patch.mutate(
       { params: { path: { org, id: connection.id } }, body: sent },
       {
-        onSuccess: () => {
+        onSuccess: (updated) => {
+          // The saved provider decides the select, as the header shows it (a base URL makes it compatible).
+          setProvider(providerChoice(updated));
           // The saved key and header values are gone from the form; the names stay.
           setApiKey("");
           setHeadersDirty(false);
@@ -533,6 +539,20 @@ export function ConnectionForm({
     fieldError("headers") !== undefined;
   const headersError = fieldError("headers");
 
+  // An error opens Advanced, where its field is; the user may close it again.
+  useEffect(() => {
+    if (advancedError) {
+      setAdvancedOpen(true);
+    }
+  }, [advancedError]);
+
+  // Focus moves to the test's outcome when a test ends. A cleared result does not move it.
+  useEffect(() => {
+    if (testResult !== undefined || testError !== undefined) {
+      testRegion.current?.focus();
+    }
+  }, [testResult, testError]);
+
   return (
     <SettingsFormCard
       title="Connection"
@@ -652,7 +672,7 @@ export function ConnectionForm({
           </datalist>
         ) : null}
         <details
-          open={advancedOpen || advancedError}
+          open={advancedOpen}
           onToggle={(event) => {
             setAdvancedOpen(event.currentTarget.open);
           }}
@@ -821,8 +841,10 @@ export function ConnectionForm({
           </div>
         </details>
       </div>
-      <div aria-live="polite" className="max-w-xl">
-        {testResult ? <ConnectionTestResult result={testResult} /> : null}
+      <div ref={testRegion} tabIndex={-1} className="max-w-xl focus:outline-none">
+        <div aria-live="polite">
+          {testResult ? <ConnectionTestResult result={testResult} /> : null}
+        </div>
         <FormError message={testError} />
       </div>
     </SettingsFormCard>
