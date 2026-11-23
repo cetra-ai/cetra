@@ -173,6 +173,39 @@ fn samples() -> Vec<Action> {
         .into(),
         ScimAction::UserReactivated { scim_user_id: uuid }.into(),
         ScimAction::UserDeleted { scim_user_id: uuid }.into(),
+        ScimAction::GroupCreated {
+            scim_group_id: uuid,
+            members: 2,
+        }
+        .into(),
+        ScimAction::GroupUpdated {
+            scim_group_id: uuid,
+            fields: vec!["displayName", "externalId"],
+        }
+        .into(),
+        ScimAction::GroupDeleted { scim_group_id: uuid }.into(),
+        ScimAction::GroupMembersChanged {
+            scim_group_id: uuid,
+            added: 1,
+            removed: 0,
+        }
+        .into(),
+        ScimAction::GroupMappingChanged {
+            scim_group_id: uuid,
+            org_role: Some("member"),
+            projects: 1,
+        }
+        .into(),
+        ScimAction::RolesRecomputed {
+            users: 3,
+            changed: 1,
+        }
+        .into(),
+        ScimAction::RoleRaiseRefused {
+            count: 1,
+            scim_user_ids: vec![uuid],
+        }
+        .into(),
         UserAction::Created {
             instance_admin: false,
         }
@@ -544,6 +577,7 @@ fn a_scim_token_is_the_actor_and_the_target_kind() {
     assert_eq!(actor.via(), None);
     assert_eq!(actor.credential_id(), None);
     assert_eq!(TargetKind::ScimToken.as_str(), "scim_token");
+    assert_eq!(TargetKind::ScimGroup.as_str(), "scim_group");
 }
 
 #[test]

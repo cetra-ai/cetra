@@ -253,6 +253,7 @@ pub(crate) enum TargetKind {
     ApiKey,
     Pat,
     ScimToken,
+    ScimGroup,
     Project,
     Org,
     SsoProvider,
@@ -274,10 +275,10 @@ pub(crate) enum TargetKind {
 }
 
 impl TargetKind {
-    /// user | invite | api_key | pat | scim_token | project | org | sso_provider | sso_domain
-    /// | deletion | license | evaluator | online_rule | score_definition | alert_rule
-    /// | alert_channel | llm_connection | model_price | prompt | dataset | issue_source
-    /// | dashboard | annotation_queue
+    /// user | invite | api_key | pat | scim_token | scim_group | project | org | sso_provider
+    /// | sso_domain | deletion | license | evaluator | online_rule | score_definition
+    /// | alert_rule | alert_channel | llm_connection | model_price | prompt | dataset
+    /// | issue_source | dashboard | annotation_queue
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
@@ -285,6 +286,7 @@ impl TargetKind {
             Self::ApiKey => "api_key",
             Self::Pat => "pat",
             Self::ScimToken => "scim_token",
+            Self::ScimGroup => "scim_group",
             Self::Project => "project",
             Self::Org => "org",
             Self::SsoProvider => "sso_provider",

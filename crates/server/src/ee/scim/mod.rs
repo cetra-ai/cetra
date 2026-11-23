@@ -4,11 +4,19 @@
 pub(crate) mod domains;
 pub(crate) mod error;
 pub(crate) mod filter;
+pub(crate) mod groups;
+pub(crate) mod mappings;
 pub(crate) mod patch;
+pub(crate) mod recompute;
 pub(crate) mod schema;
 pub(crate) mod settings;
 pub(crate) mod store;
 pub(crate) mod users;
+
+#[cfg(test)]
+mod replay_tests;
+#[cfg(test)]
+pub(crate) mod test_helpers;
 
 use cetra_core::ids::OrgId;
 
@@ -20,6 +28,8 @@ use crate::meta::MetaError;
 /// The `/scim/v2` routes and the Provisioning API routes.
 pub(crate) fn routes() -> Vec<RouteDef> {
     let mut routes = users::routes();
+    routes.extend(groups::routes());
+    routes.extend(mappings::routes());
     routes.extend(settings::routes());
     routes
 }

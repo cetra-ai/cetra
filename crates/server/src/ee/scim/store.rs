@@ -3,14 +3,17 @@
 //! users (track EA M5, D-EA-12 to D-EA-19). The `scim_users` row is per org; the `users` row
 //! is instance-wide. Names and emails are never logged or recorded from here.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
-use cetra_core::ids::OrgId;
+use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use crate::auth::{OrgRole, org_role_str, parse_org_role};
+use crate::auth::{
+    OrgRole, ProjectOverride, org_role_str, parse_org_role, parse_project_override,
+    project_override_str,
+};
 use crate::meta::{MetaError, unique_or};
 
 /// Max live tokens per org (D-EA-15).
@@ -639,6 +642,505 @@ pub(crate) async fn managed_user_ids(
         .collect()
 }
 
+/// One `scim_groups` row (track EA M6). It holds a display name, so it has no `Debug`.
+#[derive(Clone)]
+pub(crate) struct ScimGroupRow {
+    pub(crate) id: Uuid,
+    pub(crate) display_name: String,
+    pub(crate) external_id: Option<String>,
+    /// Times feed the resource's `meta`.
+    pub(crate) created_at: i64,
+    pub(crate) updated_at: i64,
+}
+
+/// What a group list filter matches. It holds a name or an external id, so it has no `Debug`.
+#[derive(Clone)]
+pub(crate) enum GroupFilter {
+    /// Matches `display_name` with SQLite `=`, which is case-sensitive.
+    DisplayName(String),
+    ExternalId(String),
+}
+
+/// One group's role mapping (D-EA-14). `org_role` is `None` when the group maps no org role.
+/// `projects` holds one entry per project; a project set to `none` hides it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GroupMapping {
+    pub(crate) org_role: Option<OrgRole>,
+    pub(crate) projects: Vec<(ProjectId, ProjectOverride)>,
+}
+
+/// Inserts a group of `org`, with no members yet.
+///
+/// A `display_name` or `external_id` already used in the org is [`MetaError::Conflict`]
+/// `"uniqueness"`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the insert fails.
+pub(crate) async fn insert_group(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    display_name: &str,
+    external_id: Option<&str>,
+    now: i64,
+) -> Result<ScimGroupRow, MetaError> {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO scim_groups (id, org_id, display_name, external_id, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(org.to_string())
+    .bind(display_name)
+    .bind(external_id)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *conn)
+    .await
+    .map_err(|error| unique_or(error, "uniqueness"))?;
+    Ok(ScimGroupRow {
+        id,
+        display_name: display_name.to_owned(),
+        external_id: external_id.map(str::to_owned),
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+/// The group with this id in `org`, inside the caller's transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn group_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    id: Uuid,
+) -> Result<Option<ScimGroupRow>, MetaError> {
+    let sql = format!("SELECT {GROUP_COLUMNS} FROM scim_groups WHERE org_id = ? AND id = ?");
+    let record: Option<GroupRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(org.to_string())
+        .bind(id.to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+    record.map(group_row).transpose()
+}
+
+/// One page of the groups of `org`, oldest first, and the total that matches `filter`.
+///
+/// `start_index` is 1-based; a value of 0 starts at the first row. The caller clamps `count`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value does not decode.
+pub(crate) async fn list_groups(
+    pool: &SqlitePool,
+    org: OrgId,
+    filter: Option<&GroupFilter>,
+    start_index: u32,
+    count: u32,
+) -> Result<(u64, Vec<ScimGroupRow>), MetaError> {
+    let (clause, value) = group_filter_clause(filter);
+
+    let count_sql = format!("SELECT COUNT(*) FROM scim_groups WHERE org_id = ?{clause}");
+    let mut total =
+        sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(count_sql)).bind(org.to_string());
+    if let Some(value) = value {
+        total = total.bind(value);
+    }
+    let total = total.fetch_one(pool).await?;
+
+    let page_sql = format!(
+        "SELECT {GROUP_COLUMNS} FROM scim_groups WHERE org_id = ?{clause} \
+         ORDER BY created_at, id LIMIT ? OFFSET ?"
+    );
+    let mut page =
+        sqlx::query_as::<_, GroupRecord>(sqlx::AssertSqlSafe(page_sql)).bind(org.to_string());
+    if let Some(value) = value {
+        page = page.bind(value);
+    }
+    let records = page
+        .bind(i64::from(count))
+        .bind(i64::from(start_index.saturating_sub(1)))
+        .fetch_all(pool)
+        .await?;
+    let rows = records
+        .into_iter()
+        .map(group_row)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((u64::try_from(total).unwrap_or(0), rows))
+}
+
+/// Every group of `org`, ordered by display name (the settings page).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn all_groups(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<Vec<ScimGroupRow>, MetaError> {
+    let sql = format!(
+        "SELECT {GROUP_COLUMNS} FROM scim_groups WHERE org_id = ? ORDER BY display_name, id"
+    );
+    let records: Vec<GroupRecord> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+        .bind(org.to_string())
+        .fetch_all(pool)
+        .await?;
+    records.into_iter().map(group_row).collect()
+}
+
+/// Replaces the name and external id of a group. The caller has checked that the row exists.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] `"uniqueness"` when another group of the org has the same
+/// `display_name` or `external_id`, and [`MetaError::Db`] when the update fails.
+pub(crate) async fn update_group(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    id: Uuid,
+    display_name: &str,
+    external_id: Option<&str>,
+    now: i64,
+) -> Result<(), MetaError> {
+    sqlx::query(
+        "UPDATE scim_groups SET display_name = ?, external_id = ?, updated_at = ? \
+         WHERE org_id = ? AND id = ?",
+    )
+    .bind(display_name)
+    .bind(external_id)
+    .bind(now)
+    .bind(org.to_string())
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await
+    .map_err(|error| unique_or(error, "uniqueness"))?;
+    Ok(())
+}
+
+/// Deletes a group. Its members and its mapping go with it (cascade). `false` means it was
+/// missing.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when the delete fails.
+pub(crate) async fn delete_group(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    id: Uuid,
+) -> Result<bool, MetaError> {
+    let changed = sqlx::query("DELETE FROM scim_groups WHERE org_id = ? AND id = ?")
+        .bind(org.to_string())
+        .bind(id.to_string())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    Ok(changed == 1)
+}
+
+/// The SCIM user ids that are members of `group`, in the caller's transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id does not parse, and [`MetaError::Db`] when
+/// the query fails.
+pub(crate) async fn group_member_ids_tx(
+    conn: &mut SqliteConnection,
+    group: Uuid,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT scim_user_id FROM scim_group_members WHERE group_id = ? ORDER BY scim_user_id",
+    )
+    .bind(group.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    ids.iter()
+        .map(|id| parse_id::<Uuid>(id, "scim_group_members", "scim_user_id"))
+        .collect()
+}
+
+/// [`group_member_ids_tx`] on a pool connection.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] as [`group_member_ids_tx`] does.
+pub(crate) async fn group_member_ids(
+    pool: &SqlitePool,
+    group: Uuid,
+) -> Result<Vec<Uuid>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    group_member_ids_tx(&mut conn, group).await
+}
+
+/// The member count of every group of `org`. A group with no members counts 0.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id does not parse, and [`MetaError::Db`] when
+/// the query fails.
+pub(crate) async fn member_counts(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<HashMap<Uuid, u32>, MetaError> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT g.id, COUNT(m.scim_user_id) FROM scim_groups g \
+         LEFT JOIN scim_group_members m ON m.group_id = g.id \
+         WHERE g.org_id = ? GROUP BY g.id",
+    )
+    .bind(org.to_string())
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|(id, count)| -> Result<(Uuid, u32), MetaError> {
+            let id = parse_id::<Uuid>(&id, "scim_groups", "id")?;
+            Ok((id, u32::try_from(count).unwrap_or(u32::MAX)))
+        })
+        .collect()
+}
+
+/// Adds the given SCIM users to `group`. Ids that are not SCIM users of `org` are ignored, so
+/// another org's user can never join. The caller has checked that `group` belongs to `org`.
+/// Returns the ids added; a user already in the group is not in the result.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when an insert fails.
+pub(crate) async fn add_group_members_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    group: Uuid,
+    users: &[Uuid],
+) -> Result<Vec<Uuid>, MetaError> {
+    let mut added = Vec::new();
+    for user in users {
+        let changed = sqlx::query(
+            "INSERT OR IGNORE INTO scim_group_members (group_id, scim_user_id) \
+             SELECT ?, id FROM scim_users WHERE org_id = ? AND id = ?",
+        )
+        .bind(group.to_string())
+        .bind(org.to_string())
+        .bind(user.to_string())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            added.push(*user);
+        }
+    }
+    Ok(added)
+}
+
+/// Removes the given SCIM users from `group`. Returns the ids removed; a user not in the group
+/// is not in the result.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when a delete fails.
+pub(crate) async fn remove_group_members_tx(
+    conn: &mut SqliteConnection,
+    group: Uuid,
+    users: &[Uuid],
+) -> Result<Vec<Uuid>, MetaError> {
+    let mut removed = Vec::new();
+    for user in users {
+        let changed = sqlx::query(
+            "DELETE FROM scim_group_members WHERE group_id = ? AND scim_user_id = ?",
+        )
+        .bind(group.to_string())
+        .bind(user.to_string())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if changed == 1 {
+            removed.push(*user);
+        }
+    }
+    Ok(removed)
+}
+
+/// The group ids that the SCIM user `scim_user` belongs to.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id does not parse, and [`MetaError::Db`] when
+/// the query fails.
+pub(crate) async fn groups_of_user_tx(
+    conn: &mut SqliteConnection,
+    scim_user: Uuid,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT group_id FROM scim_group_members WHERE scim_user_id = ? ORDER BY group_id",
+    )
+    .bind(scim_user.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    ids.iter()
+        .map(|id| parse_id::<Uuid>(id, "scim_group_members", "group_id"))
+        .collect()
+}
+
+/// The role mappings of the groups of `org`, keyed by group id. A group with no mapping is
+/// absent.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored value does not decode, and [`MetaError::Db`]
+/// when a query fails.
+pub(crate) async fn mappings(
+    pool: &SqlitePool,
+    org: OrgId,
+) -> Result<HashMap<Uuid, GroupMapping>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    load_mappings(&mut conn, org).await
+}
+
+/// [`mappings`] inside the caller's transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] as [`mappings`] does.
+pub(crate) async fn mappings_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<HashMap<Uuid, GroupMapping>, MetaError> {
+    load_mappings(conn, org).await
+}
+
+/// Replaces the mapping of `group`: its org role and its project rows (D-EA-14). The caller
+/// has validated the roles and checked that the group belongs to the path's org.
+///
+/// A group with neither an org role nor project rows keeps no mapping row.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Conflict`] `"owner is not mappable"` when `org_role` is owner, and
+/// `"duplicate project"` when a project appears twice; both are refused before any write.
+/// Returns [`MetaError::Db`] when a write fails.
+pub(crate) async fn put_mapping(
+    conn: &mut SqliteConnection,
+    group: Uuid,
+    mapping: &GroupMapping,
+    now: i64,
+) -> Result<(), MetaError> {
+    if mapping.org_role == Some(OrgRole::Owner) {
+        return Err(MetaError::Conflict("owner is not mappable"));
+    }
+    let mut seen = HashSet::new();
+    if !mapping
+        .projects
+        .iter()
+        .all(|(project, _)| seen.insert(*project))
+    {
+        return Err(MetaError::Conflict("duplicate project"));
+    }
+
+    sqlx::query("DELETE FROM scim_group_project_roles WHERE group_id = ?")
+        .bind(group.to_string())
+        .execute(&mut *conn)
+        .await?;
+    for (project, role) in &mapping.projects {
+        sqlx::query(
+            "INSERT INTO scim_group_project_roles (group_id, project_id, role) VALUES (?, ?, ?)",
+        )
+        .bind(group.to_string())
+        .bind(project.to_string())
+        .bind(project_override_str(*role))
+        .execute(&mut *conn)
+        .await?;
+    }
+
+    if mapping.org_role.is_none() && mapping.projects.is_empty() {
+        sqlx::query("DELETE FROM scim_group_mappings WHERE group_id = ?")
+            .bind(group.to_string())
+            .execute(&mut *conn)
+            .await?;
+    } else {
+        sqlx::query(
+            "INSERT INTO scim_group_mappings (group_id, org_role, updated_at) VALUES (?, ?, ?) \
+             ON CONFLICT (group_id) DO UPDATE SET org_role = excluded.org_role, \
+             updated_at = excluded.updated_at",
+        )
+        .bind(group.to_string())
+        .bind(mapping.org_role.map(org_role_str))
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Removes the org role and every project row of `group`. `false` means it had neither.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when a delete fails.
+pub(crate) async fn delete_mapping(
+    conn: &mut SqliteConnection,
+    group: Uuid,
+) -> Result<bool, MetaError> {
+    let projects = sqlx::query("DELETE FROM scim_group_project_roles WHERE group_id = ?")
+        .bind(group.to_string())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    let org = sqlx::query("DELETE FROM scim_group_mappings WHERE group_id = ?")
+        .bind(group.to_string())
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+    Ok(projects + org > 0)
+}
+
+/// The ids of the active SCIM users of `org`, oldest first (`created_at, id`).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id does not parse, and [`MetaError::Db`] when
+/// the query fails.
+pub(crate) async fn active_user_ids_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<Vec<Uuid>, MetaError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM scim_users WHERE org_id = ? AND active = 1 ORDER BY created_at, id",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    ids.iter()
+        .map(|id| parse_id::<Uuid>(id, "scim_users", "id"))
+        .collect()
+}
+
+/// Every SCIM user of `org` with its group ids, in one query: the map is keyed by the SCIM
+/// user id. A user in no group has no entry.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id does not parse, and [`MetaError::Db`] when
+/// the query fails.
+pub(crate) async fn groups_by_user_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<HashMap<Uuid, Vec<Uuid>>, MetaError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT m.scim_user_id, m.group_id FROM scim_group_members m \
+         JOIN scim_groups g ON g.id = m.group_id WHERE g.org_id = ? \
+         ORDER BY m.scim_user_id, m.group_id",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_user: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    for (user, group) in rows {
+        let user = parse_id::<Uuid>(&user, "scim_group_members", "scim_user_id")?;
+        let group = parse_id::<Uuid>(&group, "scim_group_members", "group_id")?;
+        by_user.entry(user).or_default().push(group);
+    }
+    Ok(by_user)
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct OrgScimRecord {
     enabled: i64,
@@ -750,6 +1252,101 @@ fn filter_clause(filter: Option<&UserFilter>) -> (&'static str, Option<&str>) {
     }
 }
 
+/// Every column of a SCIM group, in the order [`GroupRecord`] reads them.
+const GROUP_COLUMNS: &str = "id, display_name, external_id, created_at, updated_at";
+
+#[derive(sqlx::FromRow)]
+struct GroupRecord {
+    id: String,
+    display_name: String,
+    external_id: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+fn group_row(record: GroupRecord) -> Result<ScimGroupRow, MetaError> {
+    Ok(ScimGroupRow {
+        id: parse_id(&record.id, "scim_groups", "id")?,
+        display_name: record.display_name,
+        external_id: record.external_id,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    })
+}
+
+/// The SQL condition a group filter adds, and its bound value. The value is never in the SQL
+/// text.
+fn group_filter_clause(filter: Option<&GroupFilter>) -> (&'static str, Option<&str>) {
+    match filter {
+        None => ("", None),
+        Some(GroupFilter::DisplayName(value)) => {
+            (" AND display_name = ?", Some(value.as_str()))
+        }
+        Some(GroupFilter::ExternalId(value)) => (" AND external_id = ?", Some(value.as_str())),
+    }
+}
+
+/// A stored org role of a mapping. Only `admin`, `member` and `viewer` are mappable.
+fn mapped_org_role(value: &str) -> Result<OrgRole, MetaError> {
+    match parse_org_role(value) {
+        Some(role @ (OrgRole::Admin | OrgRole::Member | OrgRole::Viewer)) => Ok(role),
+        _ => Err(MetaError::Corrupt {
+            table: "scim_group_mappings",
+            column: "org_role",
+        }),
+    }
+}
+
+/// [`mappings`] on an open connection.
+async fn load_mappings(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<HashMap<Uuid, GroupMapping>, MetaError> {
+    let org_rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT m.group_id, m.org_role FROM scim_group_mappings m \
+         JOIN scim_groups g ON g.id = m.group_id WHERE g.org_id = ?",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let project_rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT r.group_id, r.project_id, r.role FROM scim_group_project_roles r \
+         JOIN scim_groups g ON g.id = r.group_id WHERE g.org_id = ? \
+         ORDER BY r.group_id, r.project_id",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let empty = || GroupMapping {
+        org_role: None,
+        projects: Vec::new(),
+    };
+    let mut mappings: HashMap<Uuid, GroupMapping> = HashMap::new();
+    for (group, org_role) in org_rows {
+        let group = parse_id::<Uuid>(&group, "scim_group_mappings", "group_id")?;
+        let org_role = org_role.as_deref().map(mapped_org_role).transpose()?;
+        mappings.entry(group).or_insert_with(empty).org_role = org_role;
+    }
+    for (group, project, role) in project_rows {
+        let group = parse_id::<Uuid>(&group, "scim_group_project_roles", "group_id")?;
+        let project = parse_id::<ProjectId>(&project, "scim_group_project_roles", "project_id")?;
+        let role = parse_project_override(&role).ok_or(MetaError::Corrupt {
+            table: "scim_group_project_roles",
+            column: "role",
+        })?;
+        mappings
+            .entry(group)
+            .or_insert_with(empty)
+            .projects
+            .push((project, role));
+    }
+    // A mapping left with neither an org role nor a project (after a project was deleted)
+    // reads as no mapping.
+    mappings.retain(|_, mapping| mapping.org_role.is_some() || !mapping.projects.is_empty());
+    Ok(mappings)
+}
+
 /// Parses a stored id. The error names the column, never the value.
 fn parse_id<T: FromStr>(
     value: &str,
@@ -770,6 +1367,7 @@ mod tests {
     use crate::meta::MetaDb;
     use crate::meta::orgs::{delete_org, insert_org, mark_org_deleting};
     use crate::meta::test_db;
+    use crate::meta::projects::insert_project;
     use crate::meta::users::{NewUser, insert_user as insert_account};
 
     async fn org_named(db: &MetaDb, slug: &'static str) -> OrgId {
@@ -817,6 +1415,288 @@ mod tests {
             department: None,
             employee_number: None,
         }
+    }
+
+    /// A project of `org` with this slug.
+    async fn project_named(db: &MetaDb, org: OrgId, slug: &'static str) -> ProjectId {
+        db.write(move |conn| {
+            Box::pin(async move {
+                let project = insert_project(conn, org, slug, slug, None, 1).await?;
+                Ok(project.id)
+            })
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn group_names_are_unique_per_org() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let other = org_named(&db, "other").await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                insert_group(conn, acme, "Admins", Some("ext-1"), 1).await?;
+                let same_name = insert_group(conn, acme, "Admins", None, 1).await;
+                assert!(matches!(same_name, Err(MetaError::Conflict("uniqueness"))));
+                let same_external = insert_group(conn, acme, "Viewers", Some("ext-1"), 1).await;
+                assert!(matches!(
+                    same_external,
+                    Err(MetaError::Conflict("uniqueness"))
+                ));
+                insert_group(conn, other, "Admins", Some("ext-1"), 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn members_of_another_org_never_join() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let other = org_named(&db, "other").await;
+        let ada = account_named(&db, "ada@acme.test").await;
+        let bob = account_named(&db, "bob@other.test").await;
+        let (group, ada_scim, bob_scim) = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let group = insert_group(conn, acme, "Engineering", None, 1).await?.id;
+                    let ada_scim = insert_user(conn, acme, ada, &fields("ada@acme.test", None), 1)
+                        .await?
+                        .id;
+                    let bob_scim = insert_user(conn, other, bob, &fields("bob@other.test", None), 1)
+                        .await?
+                        .id;
+                    let added =
+                        add_group_members_tx(conn, acme, group, &[ada_scim, bob_scim]).await?;
+                    assert_eq!(added, vec![ada_scim]);
+                    Ok((group, ada_scim, bob_scim))
+                })
+            })
+            .await
+            .unwrap();
+        let members = group_member_ids(db.reader(), group).await.unwrap();
+        assert_eq!(members, vec![ada_scim]);
+        assert!(!members.contains(&bob_scim));
+    }
+
+    #[tokio::test]
+    async fn put_mapping_replaces_project_rows() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let first = project_named(&db, acme, "first").await;
+        let second = project_named(&db, acme, "second").await;
+        let group = db
+            .write(move |conn| {
+                Box::pin(async move { Ok(insert_group(conn, acme, "Engineering", None, 1).await?.id) })
+            })
+            .await
+            .unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let first_mapping = GroupMapping {
+                    org_role: Some(OrgRole::Member),
+                    projects: vec![(first, ProjectOverride::Admin)],
+                };
+                put_mapping(conn, group, &first_mapping, 2).await?;
+
+                let duplicate = GroupMapping {
+                    org_role: Some(OrgRole::Admin),
+                    projects: vec![
+                        (second, ProjectOverride::Viewer),
+                        (second, ProjectOverride::Member),
+                    ],
+                };
+                let refused = put_mapping(conn, group, &duplicate, 3).await;
+                assert!(matches!(refused, Err(MetaError::Conflict("duplicate project"))));
+
+                let owner = GroupMapping {
+                    org_role: Some(OrgRole::Owner),
+                    projects: Vec::new(),
+                };
+                let refused = put_mapping(conn, group, &owner, 3).await;
+                assert!(matches!(
+                    refused,
+                    Err(MetaError::Conflict("owner is not mappable"))
+                ));
+
+                let replacement = GroupMapping {
+                    org_role: Some(OrgRole::Viewer),
+                    projects: vec![(second, ProjectOverride::None)],
+                };
+                put_mapping(conn, group, &replacement, 4).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let loaded = mappings(db.reader(), acme).await.unwrap();
+        assert_eq!(
+            loaded[&group],
+            GroupMapping {
+                org_role: Some(OrgRole::Viewer),
+                projects: vec![(second, ProjectOverride::None)],
+            }
+        );
+
+        db.write(move |conn| {
+            Box::pin(async move {
+                let nothing = GroupMapping {
+                    org_role: None,
+                    projects: Vec::new(),
+                };
+                put_mapping(conn, group, &nothing, 5).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert!(!mappings(db.reader(), acme)
+            .await
+            .unwrap()
+            .contains_key(&group));
+    }
+
+    #[tokio::test]
+    async fn deleting_a_group_cascades_members_and_mappings() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let project = project_named(&db, acme, "web").await;
+        let ada = account_named(&db, "ada@acme.test").await;
+        let group = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let group = insert_group(conn, acme, "Engineering", None, 1).await?.id;
+                    let ada_scim = insert_user(conn, acme, ada, &fields("ada@acme.test", None), 1)
+                        .await?
+                        .id;
+                    add_group_members_tx(conn, acme, group, &[ada_scim]).await?;
+                    let mapping = GroupMapping {
+                        org_role: Some(OrgRole::Member),
+                        projects: vec![(project, ProjectOverride::Admin)],
+                    };
+                    put_mapping(conn, group, &mapping, 1).await?;
+                    Ok(group)
+                })
+            })
+            .await
+            .unwrap();
+
+        db.write(move |conn| {
+            Box::pin(async move {
+                assert!(delete_group(conn, acme, group).await?);
+                assert!(!delete_group(conn, acme, group).await?);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        for table in [
+            "scim_group_members",
+            "scim_group_mappings",
+            "scim_group_project_roles",
+        ] {
+            let count = sqlx::query_scalar::<_, i64>(sqlx::AssertSqlSafe(format!(
+                "SELECT COUNT(*) FROM {table}"
+            )))
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+            assert_eq!(count, 0, "{table} keeps the rows of a deleted group");
+        }
+        let users = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scim_users")
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(users, 1, "deleting a group keeps its members");
+    }
+
+    #[tokio::test]
+    async fn deleting_a_project_drops_its_mapping_rows() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let project = project_named(&db, acme, "web").await;
+        let group = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    let group = insert_group(conn, acme, "Engineering", None, 1).await?.id;
+                    let mapping = GroupMapping {
+                        org_role: Some(OrgRole::Member),
+                        projects: vec![(project, ProjectOverride::Admin)],
+                    };
+                    put_mapping(conn, group, &mapping, 1).await?;
+                    Ok(group)
+                })
+            })
+            .await
+            .unwrap();
+
+        db.write(move |conn| {
+            Box::pin(async move {
+                sqlx::query("DELETE FROM projects WHERE id = ?")
+                    .bind(project.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let loaded = mappings(db.reader(), acme).await.unwrap();
+        assert_eq!(
+            loaded[&group],
+            GroupMapping {
+                org_role: Some(OrgRole::Member),
+                projects: Vec::new(),
+            }
+        );
+        let rows = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scim_group_project_roles")
+            .fetch_one(db.reader())
+            .await
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[tokio::test]
+    async fn groups_of_user_lists_memberships() {
+        let (_dir, db) = test_db().await;
+        let acme = org_named(&db, "acme").await;
+        let ada = account_named(&db, "ada@acme.test").await;
+        let bob = account_named(&db, "bob@acme.test").await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                let engineering = insert_group(conn, acme, "Engineering", None, 1).await?.id;
+                let admins = insert_group(conn, acme, "Admins", None, 1).await?.id;
+                let viewers = insert_group(conn, acme, "Viewers", None, 1).await?.id;
+                let ada_scim = insert_user(conn, acme, ada, &fields("ada@acme.test", None), 1)
+                    .await?
+                    .id;
+                let bob_scim = insert_user(conn, acme, bob, &fields("bob@acme.test", None), 1)
+                    .await?
+                    .id;
+                add_group_members_tx(conn, acme, engineering, &[ada_scim]).await?;
+                add_group_members_tx(conn, acme, admins, &[ada_scim]).await?;
+                add_group_members_tx(conn, acme, viewers, &[bob_scim]).await?;
+
+                let mut groups = groups_of_user_tx(conn, ada_scim).await?;
+                groups.sort();
+                let mut expected = vec![engineering, admins];
+                expected.sort();
+                assert_eq!(groups, expected);
+
+                let by_user = groups_by_user_tx(conn, acme).await?;
+                assert_eq!(by_user[&ada_scim].len(), 2);
+                assert_eq!(by_user[&bob_scim], vec![viewers]);
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
