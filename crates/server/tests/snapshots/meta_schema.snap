@@ -849,6 +849,14 @@ CREATE TABLE org_members (
 index org_members_user
 CREATE INDEX org_members_user ON org_members(user_id)
 
+table org_scim
+CREATE TABLE org_scim (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    default_role TEXT NOT NULL DEFAULT 'viewer',
+    updated_at INTEGER NOT NULL
+)
+
 table org_sso_domains
 CREATE TABLE org_sso_domains (
     id TEXT PRIMARY KEY,
@@ -1054,6 +1062,55 @@ CREATE INDEX saved_views_lookup ON saved_views(project_id, kind)
 index saved_views_owner
 CREATE INDEX saved_views_owner ON saved_views(project_id, owner_user_id)
 
+table scim_disabled_accounts
+CREATE TABLE scim_disabled_accounts (
+    user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    org_id TEXT NOT NULL,
+    disabled_at INTEGER NOT NULL
+)
+
+table scim_tokens
+CREATE TABLE scim_tokens (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+)
+
+index scim_tokens_org
+CREATE INDEX scim_tokens_org ON scim_tokens (org_id)
+
+table scim_users
+CREATE TABLE scim_users (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_name TEXT NOT NULL,
+    external_id TEXT,
+    given_name TEXT,
+    family_name TEXT,
+    display_name TEXT,
+    department TEXT,
+    employee_number TEXT,
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+)
+
+index scim_users_org_external_id
+CREATE UNIQUE INDEX scim_users_org_external_id ON scim_users (org_id, external_id) WHERE external_id IS NOT NULL
+
+index scim_users_org_user
+CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id)
+
+index scim_users_org_user_name
+CREATE UNIQUE INDEX scim_users_org_user_name ON scim_users (org_id, user_name)
+
 table score_definitions
 CREATE TABLE score_definitions (
   id TEXT PRIMARY KEY,
@@ -1186,6 +1243,8 @@ index sqlite_autoindex_org_entitlements_1
 
 index sqlite_autoindex_org_members_1
 
+index sqlite_autoindex_org_scim_1
+
 index sqlite_autoindex_org_sso_domains_1
 
 index sqlite_autoindex_org_sso_domains_2
@@ -1227,6 +1286,14 @@ index sqlite_autoindex_prompts_2
 index sqlite_autoindex_rule_spend_1
 
 index sqlite_autoindex_saved_views_1
+
+index sqlite_autoindex_scim_disabled_accounts_1
+
+index sqlite_autoindex_scim_tokens_1
+
+index sqlite_autoindex_scim_tokens_2
+
+index sqlite_autoindex_scim_users_1
 
 index sqlite_autoindex_score_definitions_1
 

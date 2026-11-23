@@ -1116,7 +1116,9 @@ mod tests {
         assert!(ids.contains(&ada));
 
         let id = row.id;
-        db.write(move |conn| Box::pin(async move { set_user_active(conn, org, id, false, 2).await }))
+        db.write(move |conn| {
+            Box::pin(async move { set_user_active(conn, org, id, false, 2).await })
+        })
         .await
         .unwrap();
         let managed = db

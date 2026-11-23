@@ -1225,10 +1225,10 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
         "INSERT INTO scim_disabled_accounts (user_id, org_id, disabled_at) VALUES (?, ?, ?)",
     )
     .bind(disabled.id.to_string())
-        .bind(org.id.to_string())
-        .bind(now)
-        .execute(&mut *conn)
-        .await?;
+    .bind(org.id.to_string())
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
 
     Ok(())
 }

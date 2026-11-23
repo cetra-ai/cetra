@@ -54,6 +54,16 @@
     "file": "static/deletion-resolving.json"
   },
   {
+    "operation_id": "create_org_scim_token",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/scim-token-created.json"
+  },
+  {
     "operation_id": "delete_org",
     "path_params": {
       "org": "acme"
