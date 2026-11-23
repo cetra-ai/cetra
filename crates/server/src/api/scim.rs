@@ -1,4 +1,3 @@
-// SPDX-License-Identifier: Elastic-2.0
 //! The Provisioning API DTOs: an org's SCIM settings, bearer tokens (track EA M5,
 //! D-EA-12, D-EA-15) and group role mappings (track EA M6, D-EA-14). The `/scim/v2`
 //! resources themselves are in `ee::scim`.
