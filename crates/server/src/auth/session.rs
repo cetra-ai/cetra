@@ -11,6 +11,8 @@ use axum_extra::extract::cookie::Cookie;
 use cetra_core::ids::OrgId;
 
 use super::secret::{hash_token, is_opaque_token, new_opaque_token};
+use crate::audit::catalog::{AuthAction, LoginMethod};
+use crate::audit::{self, Event};
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::web_sessions::{
@@ -56,6 +58,16 @@ pub(crate) async fn start_session(
     let now = state.clock.now_ns();
     let expires_at = now.saturating_add(duration_ns(LIFETIME));
     let hash = token.hash.clone();
+    let ctx = audit::Ctx::for_session_user(user_id, ip, user_agent);
+    let method = match origin {
+        SessionOrigin::Password => LoginMethod::Password,
+        SessionOrigin::Provider => LoginMethod::Provider,
+        SessionOrigin::OrgProvider(_) => LoginMethod::OrgProvider,
+    };
+    let sso_org = match origin {
+        SessionOrigin::OrgProvider(org) => Some(org),
+        SessionOrigin::Password | SessionOrigin::Provider => None,
+    };
     let user_agent = user_agent.map(str::to_owned);
     let ip = ip.map(|addr| addr.to_string());
     state
@@ -69,16 +81,30 @@ pub(crate) async fn start_session(
                         user_id,
                         user_agent,
                         ip,
-                        sso_org_id: match origin {
-                            SessionOrigin::OrgProvider(org) => Some(org),
-                            SessionOrigin::Password | SessionOrigin::Provider => None,
-                        },
+                        sso_org_id: sso_org,
                         via_provider: origin != SessionOrigin::Password,
                     },
                     now,
                     expires_at,
                 )
-                .await
+                .await?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(AuthAction::Login { method }),
+                    now,
+                )
+                .await?;
+                if let Some(org) = sso_org {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(AuthAction::Login { method }).org(org),
+                        now,
+                    )
+                    .await?;
+                }
+                Ok(())
             })
         })
         .await?;
@@ -288,6 +314,58 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.sso_org_id, None);
+    }
+
+    #[tokio::test]
+    async fn an_org_provider_session_writes_two_login_rows() {
+        let app = TestApp::new().await;
+        let user_id = user(&app).await;
+        let org = cetra_core::ids::OrgId::new_v7();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::orgs::insert_org(conn, org, "Acme", "acme", now).await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+
+        start_session(
+            &app.state,
+            user_id,
+            None,
+            None,
+            SessionOrigin::OrgProvider(org),
+        )
+        .await
+        .unwrap();
+        start_session(&app.state, user_id, None, None, SessionOrigin::Password)
+            .await
+            .unwrap();
+
+        let instance_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'auth.login' \
+             AND org_id IS NULL AND target_id IS NULL AND actor_id = ?",
+        )
+        .bind(user_id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(instance_rows, 2);
+        let org_rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT org_id, details FROM audit_events WHERE action = 'auth.login' \
+             AND org_id IS NOT NULL AND actor_id = ?",
+        )
+        .bind(user_id.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(org_rows.len(), 1);
+        assert_eq!(org_rows[0].0, org.to_string());
+        assert_eq!(org_rows[0].1, r#"{"method":"org_provider"}"#);
     }
 
     fn token_of(header: &HeaderValue) -> String {

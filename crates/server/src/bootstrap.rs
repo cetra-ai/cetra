@@ -7,6 +7,8 @@
 use std::sync::Mutex;
 
 use crate::api::account::OrgRole;
+use crate::audit::catalog::{AuthAction, InstanceAction};
+use crate::audit::{self, Event};
 use crate::auth::AuthError;
 use crate::auth::password::{Hasher, PolicyError, check_policy};
 use crate::auth::roles::KeyScope;
@@ -209,6 +211,7 @@ pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
             key,
             read_key,
         },
+        None,
     )
     .await?
     {
@@ -216,17 +219,15 @@ pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
             tracing::info!("init skipped: users exist");
             Ok(())
         }
-        Some(created) => {
-            audit("init applied", &created);
-            Ok(())
-        }
+        Some(_) => Ok(()),
     }
 }
 
 /// Inserts the first admin, org, project, and optional secret key.
 ///
 /// `None` means a user appeared before this transaction. The caller answers
-/// 409 or logs that init was skipped.
+/// 409 or logs that init was skipped. `ctx` is the setup request (`auth.setup_completed`);
+/// `None` is an init from the config (`instance.init_applied`, actor `system`).
 ///
 /// # Errors
 ///
@@ -234,6 +235,7 @@ pub(crate) async fn apply_init(state: &AppState) -> Result<(), BootstrapError> {
 async fn provision(
     state: &AppState,
     input: Provision,
+    ctx: Option<audit::Ctx>,
 ) -> Result<Option<Provisioned>, BootstrapError> {
     let now = state.clock.now_ns();
     let created = state
@@ -243,7 +245,24 @@ async fn provision(
                 if count_users_tx(conn).await? != 0 {
                     return Ok(None);
                 }
-                Ok(Some(insert_first(conn, &input, now).await?))
+                let created = insert_first(conn, &input, now).await?;
+                let (ctx, event) = match ctx {
+                    Some(ctx) => (
+                        ctx.with_actor(audit::Actor::User {
+                            id: created.user.id,
+                            via: audit::Via::Session,
+                            credential_id: None,
+                        }),
+                        Event::new(AuthAction::SetupCompleted),
+                    ),
+                    None => (
+                        audit::Ctx::system(),
+                        Event::new(InstanceAction::InitApplied),
+                    ),
+                };
+                let event = event.org(created.org.id).project(created.project.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(Some(created))
             })
         })
         .await?;
@@ -363,23 +382,6 @@ fn init_error(reason: &str) -> BootstrapError {
     }
 }
 
-fn audit(message: &'static str, created: &Provisioned) {
-    let user_id = created.user.id;
-    let org_id = created.org.id;
-    let project_id = created.project.id;
-    let key_id = created.key.as_ref().map(|key| key.id.to_string());
-    let read_key_id = created.read_key.as_ref().map(|key| key.id.to_string());
-    tracing::info!(
-        target: "audit",
-        %user_id,
-        %org_id,
-        %project_id,
-        key_id = key_id.as_deref(),
-        read_key_id = read_key_id.as_deref(),
-        "{message}"
-    );
-}
-
 /// A completed `POST /api/auth/setup` write. `secret_key` is shown once.
 pub(crate) struct SetupCreated {
     /// The rows that were inserted.
@@ -404,6 +406,7 @@ pub(crate) async fn create_setup(
     password: &str,
     org_name: String,
     project_name: String,
+    ctx: Option<audit::Ctx>,
 ) -> Result<Option<SetupCreated>, BootstrapError> {
     let minted = new_key(KeyKind::Secret)?;
     let secret_key_prefix = minted.prefix.clone();
@@ -423,6 +426,7 @@ pub(crate) async fn create_setup(
             }),
             read_key: None,
         },
+        ctx,
     )
     .await?;
     Ok(created.map(|created| SetupCreated {
@@ -444,6 +448,16 @@ mod tests {
         serde_json::from_value(value).unwrap()
     }
 
+    /// The `instance.init_applied` rows in `audit_events`.
+    async fn init_applied_rows(app: &TestApp) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'instance.init_applied'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn init_creates_the_admin_once() {
         let key = new_key(KeyKind::Secret).unwrap();
@@ -459,7 +473,7 @@ mod tests {
         .await;
         let (prepared, logs) = capture_logs(prepare(&app.state)).await;
         prepared.unwrap();
-        assert!(logs.contains("init applied"), "{logs}");
+        assert_eq!(init_applied_rows(&app).await, 1);
         assert!(!logs.contains("setup required"), "{logs}");
         assert!(!logs.contains(&key.plaintext), "{logs}");
         assert!(app.state.setup.token().unwrap().is_none());
@@ -472,12 +486,13 @@ mod tests {
         assert_eq!(name, "init");
         let (again_result, again) = capture_logs(prepare(&app.state)).await;
         again_result.unwrap();
-        assert!(!again.contains("init applied"), "{again}");
         assert!(!again.contains("setup required"), "{again}");
         assert_eq!(count_users(app.state.meta.reader()).await.unwrap(), 1);
+        assert_eq!(init_applied_rows(&app).await, 1);
         let (skipped_result, skipped) = capture_logs(apply_init(&app.state)).await;
         skipped_result.unwrap();
         assert!(skipped.contains("init skipped: users exist"), "{skipped}");
+        assert_eq!(init_applied_rows(&app).await, 1);
         let orgs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM orgs")
             .fetch_one(app.state.meta.reader())
             .await
@@ -561,8 +576,15 @@ mod tests {
         .await;
         let (prepared, logs) = capture_logs(prepare(&app.state)).await;
         prepared.unwrap();
-        assert!(logs.contains("init applied"), "{logs}");
-        assert!(logs.contains("read_key_id"), "{logs}");
+        assert_eq!(init_applied_rows(&app).await, 1);
+        let project_matches: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'instance.init_applied' \
+             AND project_id = (SELECT id FROM projects)",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(project_matches, 1);
         assert!(!logs.contains(&read.plaintext), "{logs}");
         assert!(!logs.contains(&secret.plaintext), "{logs}");
         let mut rows: Vec<(String, String, String)> =
