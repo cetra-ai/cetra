@@ -5,15 +5,20 @@ use std::time::Duration;
 use cetra_storage::config::ObjectStoreUrl;
 use chrono::DateTime;
 use serde::Serialize;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::config::ServerConfig;
+use crate::http::AppState;
+use crate::meta::instance_settings::{TELEMETRY_LAST_HEARTBEAT_AT, get_setting, put_setting};
 use crate::meta::{MetaDb, MetaError};
 use crate::observability::buckets::{
     CountBucket, InstallAgeBucket, UptimeBucket, VolumeBucket, count_bucket, install_age_bucket,
     uptime_bucket, volume_bucket,
 };
 use crate::observability::facts::{self, Deployment, Profile};
+use crate::observability::instance;
+use crate::observability::switchboard::{Decision, NOTICE_TARGET, Switch};
 
 /// The payload's schema version (TL-Q1: the relay refuses other versions).
 pub(crate) const HEARTBEAT_SCHEMA: u32 = 1;
@@ -217,13 +222,246 @@ pub(crate) async fn collect(
     })
 }
 
+/// The first heartbeat waits this long after start, plus up to [`MAX_JITTER`].
+pub(crate) const FIRST_DELAY: Duration = Duration::from_secs(10 * 60);
+/// The most random delay added to [`FIRST_DELAY`].
+pub(crate) const MAX_JITTER: Duration = Duration::from_secs(10 * 60);
+/// One heartbeat a day.
+pub(crate) const PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+/// Each request gives up after this long.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The page that lists every field, logged in the notice's `docs` field.
+pub(crate) const TELEMETRY_DOCS_URL: &str = "https://cetra.sh/docs/self-hosting/telemetry/";
+
+/// Why a heartbeat was not sent. Logged at `debug` only; no variant carries a URL or a body.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HeartbeatError {
+    /// The HTTP client could not be built.
+    #[error("heartbeat client could not be built")]
+    Client,
+    /// The request failed before a response (connection, TLS, timeout).
+    #[error("heartbeat request failed (timeout: {timeout})")]
+    Request {
+        /// The request hit the client's timeout.
+        timeout: bool,
+    },
+    /// The relay answered something other than 2xx (redirects are not followed).
+    #[error("heartbeat endpoint answered {0}")]
+    Status(u16),
+}
+
+/// The heartbeat's own HTTP client: no redirects, a timeout, and cetra's user agent. Not the
+/// evaluation runner's client nor the identity client.
+pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, HeartbeatError> {
+    let builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .user_agent(format!("cetra/{}", facts::VERSION));
+    // A developer's HTTP(S)_PROXY must not catch the tests' 127.0.0.1 receivers (as M1's export client).
+    #[cfg(test)]
+    let builder = builder.no_proxy();
+    builder.build().map_err(|_| HeartbeatError::Client)
+}
+
+/// The heartbeat URL for the relay at `endpoint`: `<endpoint>/v1/heartbeat`.
+pub(crate) fn heartbeat_url(endpoint: &str) -> String {
+    format!("{}/v1/heartbeat", endpoint.trim_end_matches('/'))
+}
+
+/// How long until the next heartbeat is due, or `None` when it is due now (never sent, or a
+/// full day has passed since `last_sent_ns`).
+fn wait_before_send(last_sent_ns: Option<i64>, now_ns: i64) -> Option<Duration> {
+    let last = i128::from(last_sent_ns?);
+    let now = i128::from(now_ns);
+    let period = i128::from(u64::try_from(PERIOD.as_nanos()).unwrap_or(u64::MAX));
+    if last > now {
+        // The clock went back: wait a whole period rather than send twice in a day.
+        return Some(PERIOD);
+    }
+    let elapsed = now - last;
+    if elapsed >= period {
+        None
+    } else {
+        Some(Duration::from_nanos(
+            u64::try_from(period - elapsed).unwrap_or(0),
+        ))
+    }
+}
+
+/// The stored last-send time. An unparseable row counts as never sent (the next success rewrites it).
+fn parse_last_sent(value: Option<String>) -> Option<i64> {
+    value.and_then(|v| v.trim().parse::<i64>().ok())
+}
+
+/// What the heartbeat loop keeps between ticks.
+#[derive(Debug)]
+pub(crate) struct Sender {
+    client: reqwest::Client,
+    url: String,
+    instance_id: Uuid,
+    deployment: Deployment,
+}
+
+impl Sender {
+    /// A sender that posts to `url` as `instance_id` on `deployment`.
+    pub(crate) fn new(
+        client: reqwest::Client,
+        url: String,
+        instance_id: Uuid,
+        deployment: Deployment,
+    ) -> Self {
+        Self {
+            client,
+            url,
+            instance_id,
+            deployment,
+        }
+    }
+
+    /// Posts `body` as JSON. The response body is never read.
+    async fn send(&self, body: &Heartbeat) -> Result<(), HeartbeatError> {
+        let response = self
+            .client
+            .post(&self.url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|error| HeartbeatError::Request {
+                timeout: error.is_timeout(),
+            })?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(HeartbeatError::Status(status.as_u16()))
+        }
+    }
+
+    /// One pass of the loop: sends when due and records the send time after a 2xx. Returns how
+    /// long to sleep before the next pass. Logs at `debug` only.
+    pub(crate) async fn tick(&self, state: &AppState) -> Duration {
+        let now = state.clock.now_ns();
+        let value = match get_setting(state.meta.reader(), TELEMETRY_LAST_HEARTBEAT_AT).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(error = %error, "telemetry: heartbeat not sent");
+                return PERIOD;
+            }
+        };
+        if let Some(wait) = wait_before_send(parse_last_sent(value), now) {
+            return wait;
+        }
+        let payload = match collect(
+            &state.meta,
+            &state.config,
+            self.instance_id,
+            self.deployment,
+            facts::process_uptime(),
+            now,
+        )
+        .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::debug!(error = %error, "telemetry: heartbeat not sent");
+                return PERIOD;
+            }
+        };
+        if let Err(error) = self.send(&payload).await {
+            tracing::debug!(error = %error, "telemetry: heartbeat not sent");
+            return PERIOD;
+        }
+        let recorded = state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    put_setting(conn, TELEMETRY_LAST_HEARTBEAT_AT, &now.to_string()).await
+                })
+            })
+            .await;
+        if let Err(error) = recorded {
+            tracing::debug!(error = %error, "telemetry: heartbeat time not recorded");
+        }
+        tracing::debug!("telemetry: heartbeat sent");
+        PERIOD
+    }
+}
+
+/// The startup line when the heartbeat runs. Shows on stdout at `log.level = "warn"` too
+/// (`NOTICE_DIRECTIVE`).
+fn notice_on(instance_id: Uuid) {
+    tracing::info!(
+        target: NOTICE_TARGET,
+        instance_id = %instance_id,
+        docs = TELEMETRY_DOCS_URL,
+        "telemetry: cetra sends an anonymous heartbeat once a day (version, platform, bucketed counts, features in use); turn it off with CETRA_TELEMETRY=off"
+    );
+}
+
+/// The startup line when the heartbeat does not run, with why.
+fn notice_off(reason: &'static str) {
+    tracing::info!(target: NOTICE_TARGET, reason, "telemetry: the heartbeat is off");
+}
+
+/// Logs the startup notice and, when the switchboard allows it, spawns the heartbeat loop.
+/// Fails closed: any error here means no heartbeat.
+pub(crate) async fn start(state: &AppState, decision: Decision) -> Option<JoinHandle<()>> {
+    if let Switch::Off(reason) = decision.heartbeat {
+        notice_off(reason.as_str());
+        return None;
+    }
+    let client = match client(REQUEST_TIMEOUT) {
+        Ok(client) => client,
+        Err(_error) => {
+            notice_off("client_unavailable");
+            return None;
+        }
+    };
+    let id = match instance::instance_id(&state.meta).await {
+        Ok(id) => id,
+        Err(error) => {
+            tracing::debug!(error = %error, "telemetry: instance id");
+            notice_off("instance_id_unavailable");
+            return None;
+        }
+    };
+    notice_on(id);
+    let sender = Sender::new(
+        client,
+        heartbeat_url(&state.config.telemetry.endpoint),
+        id,
+        facts::deployment(facts::probe_host()),
+    );
+    let first = FIRST_DELAY + Duration::from_secs(rand::random_range(0..=MAX_JITTER.as_secs()));
+    let state = state.clone();
+    Some(tokio::spawn(async move {
+        tokio::time::sleep(first).await;
+        loop {
+            let wait = sender.tick(&state).await;
+            tokio::time::sleep(wait).await;
+        }
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{
         GithubAuth, GoogleAuth, OidcAuth, Secret, SmtpUrl, Tls, parse_otlp_endpoint,
     };
-    use crate::test_support::TestApp;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, PoisonError};
+
+    use axum::Router;
+    use axum::body::Bytes;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::{IntoResponse, Response};
+    use axum::routing::{get, post};
+
+    use crate::meta::instance_settings::TELEMETRY_INSTANCE_ID;
+    use crate::observability::switchboard::OffReason;
+    use crate::test_support::{TestApp, capture_logs};
 
     /// The fixed instance id of the golden tests (never random: see `no_planted_value`).
     const GOLDEN_ID: &str = "8f14e45f-ceea-4e7a-9d2b-1c3f5a6b7c8d";
@@ -724,5 +962,320 @@ mod tests {
     fn the_payload_is_small() {
         let text = serde_json::to_string(&golden()).expect("serializes");
         assert!(text.len() < 4_096, "the payload is {} bytes", text.len());
+    }
+
+    /// Serves `POST /v1/heartbeat` on `127.0.0.1:0`: waits `delay`, records the request, answers
+    /// `status` (with `Location: /elsewhere` when `status` is a 3xx). `POST` and `GET /elsewhere`
+    /// count hits and answer 200. Aborts its task on drop.
+    struct Receiver {
+        base: String,
+        requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+        elsewhere: Arc<AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    #[derive(Clone)]
+    struct ReceiverState {
+        status: u16,
+        delay: Duration,
+        requests: Arc<Mutex<Vec<(HeaderMap, Bytes)>>>,
+        elsewhere: Arc<AtomicUsize>,
+    }
+
+    impl Receiver {
+        async fn start(status: u16, delay: Duration) -> Self {
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let elsewhere = Arc::new(AtomicUsize::new(0));
+            let state = ReceiverState {
+                status,
+                delay,
+                requests: Arc::clone(&requests),
+                elsewhere: Arc::clone(&elsewhere),
+            };
+            let router = Router::new()
+                .route("/v1/heartbeat", post(heartbeat))
+                .route("/elsewhere", get(other).post(other))
+                .with_state(state);
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let task = tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            });
+            Self {
+                base: format!("http://{addr}"),
+                requests,
+                elsewhere,
+                task,
+            }
+        }
+
+        fn requests(&self) -> Vec<(HeaderMap, Bytes)> {
+            self.requests
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    impl Drop for Receiver {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn heartbeat(
+        State(state): State<ReceiverState>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        tokio::time::sleep(state.delay).await;
+        state
+            .requests
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((headers, body));
+        let status = StatusCode::from_u16(state.status).unwrap();
+        if status.is_redirection() {
+            (status, [(axum::http::header::LOCATION, "/elsewhere")]).into_response()
+        } else {
+            status.into_response()
+        }
+    }
+
+    async fn other(State(state): State<ReceiverState>) -> StatusCode {
+        state.elsewhere.fetch_add(1, Ordering::SeqCst);
+        StatusCode::OK
+    }
+
+    /// A sender for `receiver` with the golden instance id.
+    fn sender_for(receiver: &Receiver) -> Sender {
+        Sender::new(
+            client(REQUEST_TIMEOUT).unwrap(),
+            heartbeat_url(&receiver.base),
+            golden().instance_id,
+            Deployment::Binary,
+        )
+    }
+
+    /// One hour in nanoseconds.
+    const HOUR_NS: i64 = 3_600_000_000_000;
+
+    #[test]
+    fn heartbeat_url_appends_the_path() {
+        assert_eq!(
+            heartbeat_url("https://telemetry.cetra.sh"),
+            "https://telemetry.cetra.sh/v1/heartbeat"
+        );
+        assert_eq!(
+            heartbeat_url("https://telemetry.cetra.sh/"),
+            "https://telemetry.cetra.sh/v1/heartbeat"
+        );
+        assert_eq!(
+            heartbeat_url("https://r.example.com/cetra/"),
+            "https://r.example.com/cetra/v1/heartbeat"
+        );
+    }
+
+    #[test]
+    fn wait_before_send_rules() {
+        let now = 100 * 24 * HOUR_NS;
+        assert_eq!(wait_before_send(None, now), None);
+        assert_eq!(
+            wait_before_send(Some(now - HOUR_NS), now),
+            Some(Duration::from_secs(23 * 3600))
+        );
+        assert_eq!(wait_before_send(Some(now - 24 * HOUR_NS), now), None);
+        assert_eq!(wait_before_send(Some(now - 25 * HOUR_NS), now), None);
+        assert_eq!(wait_before_send(Some(now + HOUR_NS), now), Some(PERIOD));
+        assert_eq!(wait_before_send(Some(i64::MIN), i64::MAX), None);
+        assert_eq!(wait_before_send(Some(i64::MAX), i64::MIN), Some(PERIOD));
+    }
+
+    #[test]
+    fn parse_last_sent_rules() {
+        assert_eq!(parse_last_sent(Some("123".to_owned())), Some(123));
+        assert_eq!(parse_last_sent(Some(" 123 ".to_owned())), Some(123));
+        assert_eq!(parse_last_sent(Some("abc".to_owned())), None);
+        assert_eq!(parse_last_sent(Some(String::new())), None);
+        assert_eq!(parse_last_sent(None), None);
+    }
+
+    #[tokio::test]
+    async fn send_posts_json_with_the_user_agent() {
+        let receiver = Receiver::start(204, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        let payload = golden();
+        sender.send(&payload).await.unwrap();
+        let requests = receiver.requests();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        let content_type = headers.get("content-type").unwrap().to_str().unwrap();
+        assert!(
+            content_type.starts_with("application/json"),
+            "{content_type}"
+        );
+        let user_agent = headers.get("user-agent").unwrap().to_str().unwrap();
+        assert_eq!(user_agent, format!("cetra/{}", facts::VERSION));
+        let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
+        assert_eq!(parsed, serde_json::to_value(&payload).unwrap());
+    }
+
+    #[tokio::test]
+    async fn send_does_not_follow_redirects() {
+        let receiver = Receiver::start(307, Duration::ZERO).await;
+        let result = sender_for(&receiver).send(&golden()).await;
+        assert!(matches!(result, Err(HeartbeatError::Status(307))));
+        assert_eq!(receiver.elsewhere.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn a_4xx_and_a_5xx_are_errors() {
+        let bad = Receiver::start(400, Duration::ZERO).await;
+        assert!(matches!(
+            sender_for(&bad).send(&golden()).await,
+            Err(HeartbeatError::Status(400))
+        ));
+        let unavailable = Receiver::start(503, Duration::ZERO).await;
+        assert!(matches!(
+            sender_for(&unavailable).send(&golden()).await,
+            Err(HeartbeatError::Status(503))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_slow_endpoint_times_out() {
+        let receiver = Receiver::start(204, Duration::from_secs(2)).await;
+        let sender = Sender::new(
+            client(Duration::from_millis(200)).unwrap(),
+            heartbeat_url(&receiver.base),
+            golden().instance_id,
+            Deployment::Binary,
+        );
+        assert!(matches!(
+            sender.send(&golden()).await,
+            Err(HeartbeatError::Request { timeout: true })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_endpoint_is_an_error() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let sender = Sender::new(
+            client(REQUEST_TIMEOUT).unwrap(),
+            heartbeat_url(&format!("http://{addr}")),
+            golden().instance_id,
+            Deployment::Binary,
+        );
+        assert!(matches!(
+            sender.send(&golden()).await,
+            Err(HeartbeatError::Request { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn tick_sends_and_records_the_time() {
+        let app = TestApp::new().await;
+        let receiver = Receiver::start(204, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        let now = app.state.clock.now_ns();
+        assert_eq!(sender.tick(&app.state).await, PERIOD);
+        assert_eq!(receiver.requests().len(), 1);
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_LAST_HEARTBEAT_AT)
+            .await
+            .unwrap();
+        assert_eq!(stored, Some(now.to_string()));
+    }
+
+    #[tokio::test]
+    async fn tick_waits_when_sent_recently() {
+        let app = TestApp::new().await;
+        let receiver = Receiver::start(204, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        let recent = (app.state.clock.now_ns() - HOUR_NS).to_string();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(
+                    async move { put_setting(conn, TELEMETRY_LAST_HEARTBEAT_AT, &recent).await },
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            sender.tick(&app.state).await,
+            Duration::from_secs(23 * 3600)
+        );
+        assert!(receiver.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tick_does_not_record_a_failure() {
+        let app = TestApp::new().await;
+        let receiver = Receiver::start(503, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        assert_eq!(sender.tick(&app.state).await, PERIOD);
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_LAST_HEARTBEAT_AT)
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+    }
+
+    #[tokio::test]
+    async fn failures_are_logged_at_debug_only() {
+        let app = TestApp::new().await;
+        let receiver = Receiver::start(503, Duration::ZERO).await;
+        let sender = sender_for(&receiver);
+        let (wait, logs) = capture_logs(sender.tick(&app.state)).await;
+        assert_eq!(wait, PERIOD);
+        assert!(!logs.contains("WARN"), "{logs}");
+        assert!(!logs.contains("ERROR"), "{logs}");
+        let port = receiver
+            .base
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        for line in logs.lines().filter(|line| line.contains("cetra_server")) {
+            assert!(
+                !line.contains(&port),
+                "a cetra line carries the URL: {line}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn start_when_off_logs_the_reason_and_spawns_nothing() {
+        let app = TestApp::new().await;
+        let decision = Decision {
+            heartbeat: Switch::Off(OffReason::DoNotTrack),
+        };
+        let (handle, logs) = capture_logs(start(&app.state, decision)).await;
+        assert!(handle.is_none());
+        assert!(logs.contains("telemetry: the heartbeat is off"), "{logs}");
+        assert!(logs.contains("DO_NOT_TRACK"), "{logs}");
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_INSTANCE_ID)
+            .await
+            .unwrap();
+        assert_eq!(stored, None);
+    }
+
+    #[tokio::test]
+    async fn start_when_on_logs_the_instance_id_and_spawns() {
+        let app = TestApp::new().await;
+        let decision = Decision {
+            heartbeat: Switch::On,
+        };
+        let (handle, logs) = capture_logs(start(&app.state, decision)).await;
+        let handle = handle.expect("the heartbeat task is spawned");
+        handle.abort();
+        let stored = get_setting(app.state.meta.reader(), TELEMETRY_INSTANCE_ID)
+            .await
+            .unwrap()
+            .expect("the instance id row exists");
+        assert!(logs.contains(&stored), "{logs}");
+        assert!(logs.contains("CETRA_TELEMETRY=off"), "{logs}");
+        assert!(logs.contains(TELEMETRY_DOCS_URL), "{logs}");
     }
 }

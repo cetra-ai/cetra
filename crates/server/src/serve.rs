@@ -286,6 +286,7 @@ pub async fn run(
 /// socket fails. Storage is shut down before a later step's error is returned,
 /// so `LOCK` is not held after `Err`.
 pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Running, ServeError> {
+    crate::observability::facts::mark_process_start();
     let data_dir = config.data_dir.clone();
     let http_addr = config.http_addr;
     let otlp_http_addr = config.otlp_http_addr;
@@ -616,6 +617,11 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         tracing::warn!(
             "restore mode: outbound work is off (alerts, webhooks, judges, email, identity providers)"
         );
+    }
+    // What may go to us (D-TL-11); the notice is logged either way.
+    let decision = crate::observability::switchboard::for_config(&state.config);
+    if let Some(task) = crate::observability::heartbeat::start(&state, decision).await {
+        tasks.push(task);
     }
     let admin_socket = admin_socket::spawn(state.clone(), &data_dir);
     tracing::info!(%local_addr, "listening");
@@ -1221,6 +1227,33 @@ mod tests {
         let text = String::from_utf8_lossy(&body);
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_startup_notice_says_why_the_heartbeat_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(config(dir.path()), None))).await;
+        let running = running.unwrap();
+        assert!(logs.contains("telemetry: the heartbeat is off"), "{logs}");
+        assert!(logs.contains("debug_build"), "{logs}");
+        running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn restore_mode_is_the_telemetry_reason_in_restore_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut restore = config(dir.path());
+        restore.restore_mode = true;
+        let (running, logs) =
+            crate::test_support::capture_logs(Box::pin(bind(restore, None))).await;
+        running.unwrap().shutdown().await.unwrap();
+        let line = logs
+            .lines()
+            .find(|line| line.contains("telemetry: the heartbeat is off"))
+            .unwrap_or_default();
+        assert!(line.contains("restore_mode"), "{logs}");
+        assert!(!logs.contains("debug_build"), "{logs}");
     }
 
     #[tokio::test]
