@@ -33,7 +33,7 @@ export interface paths {
         };
         /**
          * Finish an OAuth or OIDC login
-         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).
+         * @description Clears the login cookie. Success sets the session cookie and redirects to the saved relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`, `saml_invalid`, `saml_unsupported`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).
          */
         get: operations["get_oauth_callback"];
         put?: never;
@@ -308,6 +308,66 @@ export interface paths {
         put?: never;
         /** Set a password from a reset link */
         post: operations["post_password_reset"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/saml/{org_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read an org's SAML service provider metadata
+         * @description The SP metadata document of the org's SAML provider (D-SA-12): the entity ID and the assertion consumer service URL to register at the identity provider. Public, with no session. 404 when the org has no SAML provider.
+         */
+        get: operations["get_saml_metadata"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/saml/{org_id}/acs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Finish an org's SAML login
+         * @description The assertion consumer service (D-SA-10, D-SA-12). The identity provider posts the `SAMLResponse` form here, with the `RelayState` it received. The response is validated as D-SA-9 describes, and each login is single use. A failure redirects to `/login?error=saml_invalid`; a response the server does not accept, such as one with an encrypted assertion, redirects to `/login?error=saml_unsupported`. The route is exempt from the `Origin` check (D141): the pending login and its binder cookie are the check. The form is at most 256 KiB.
+         */
+        post: operations["post_saml_acs"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/auth/saml/{org_id}/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Start an org's SAML login
+         * @description Starts a login through the org's SAML provider (D-SA-5, D-SA-10). The same URL is the identity provider's tile link. A missing or disabled provider redirects to `/login?error=sso_unavailable` with no cookie. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.
+         */
+        get: operations["get_saml_start"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1270,6 +1330,26 @@ export interface paths {
          * @description Turn enforcement off first (409 otherwise). The org's identities for the provider go with it. Owners only, session only (D-P-51).
          */
         delete: operations["delete_org_sso_provider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/orgs/{org}/sso/saml": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Save the org's SAML identity provider
+         * @description Creates or updates the org's one SAML provider (D-SA-17, D-SA-18). Give exactly one source: `metadata_url` (an `https` URL, fetched now and refreshed daily), `metadata_xml` (pasted), or `idp_entity_id`, `sso_url` and `certificates` together. With none of them, only the SAML settings are saved. Changing the IdP entity ID needs `confirm_entity_id_change: true` and deletes the org's identities. The server's public URL must be `https` (D-SA-19). Needs the org SSO and SAML features (D-P-61). Owners only, session only (D-P-51).
+         */
+        put: operations["put_org_saml_provider"];
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -6817,7 +6897,7 @@ export interface components {
          * @description A feature an org may be entitled to. Names are append-only (D-P-12).
          * @enum {string}
          */
-        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso";
+        Feature: "retention_management" | "project_roles" | "sso_enforcement" | "org_sso" | "saml";
         /** @description `POST /api/public/feedback` body (spec 06 § End-user feedback). */
         FeedbackRequest: {
             /** @description Free-text comment. */
@@ -8457,6 +8537,23 @@ export interface components {
             domains: components["schemas"]["OrgSsoDomain"][];
             /** @description The provider, when the org has one. */
             provider?: components["schemas"]["OrgSsoProvider"];
+            /** @description The values for the org's SAML provider (D-SA-12). The same for every protocol. */
+            saml_sp: components["schemas"]["OrgSsoSamlSp"];
+        };
+        /** @description A trusted IdP signing certificate, shown by hash and validity (D-SA-11). */
+        OrgSsoCertificate: {
+            /**
+             * Format: date-time
+             * @description End of validity.
+             */
+            not_after: string;
+            /**
+             * Format: date-time
+             * @description Start of validity.
+             */
+            not_before: string;
+            /** @description The hex SHA-256 of the certificate's DER encoding. */
+            sha256: string;
         };
         /** @description One email domain of the org and how to prove it. */
         OrgSsoDomain: {
@@ -8491,8 +8588,8 @@ export interface components {
         };
         /** @description The org's identity provider. The client secret is write-only. */
         OrgSsoProvider: {
-            /** @description The OAuth client id. */
-            client_id: string;
+            /** @description The OAuth client id. Set for an OIDC provider only. */
+            client_id?: string;
             /**
              * Format: date-time
              * @description Creation time.
@@ -8504,8 +8601,8 @@ export interface components {
             enabled: boolean;
             /** @description Password and other sign-ins are refused for the org's domains (D-P-58). */
             enforced: boolean;
-            /** @description The OIDC issuer URL. */
-            issuer: string;
+            /** @description The OIDC issuer URL. Set for an OIDC provider only. */
+            issuer?: string;
             /** @description Role of people who join through the provider. */
             jit_role: components["schemas"]["JitRole"];
             /**
@@ -8513,11 +8610,49 @@ export interface components {
              * @description The last successful sign-in through the provider. Absent before the first one.
              */
             last_login_at?: string;
+            /** @description OpenID Connect or SAML. The OIDC fields are set for an OIDC provider, `saml` for a SAML one. */
+            protocol: components["schemas"]["SsoProtocol"];
+            /** @description The SAML settings. Set for a SAML provider only. */
+            saml?: components["schemas"]["OrgSsoSaml"];
             /**
              * Format: date-time
              * @description Last change to the settings.
              */
             updated_at: string;
+        };
+        /** @description A SAML provider's settings (D-SA-11, D-SA-18). Never contains the metadata document. */
+        OrgSsoSaml: {
+            /** @description The attribute names the owner set. An absent field uses the default. */
+            attributes: components["schemas"]["SamlAttributeNames"];
+            /** @description The trusted IdP signing certificates. */
+            certificates: components["schemas"]["OrgSsoCertificate"][];
+            /**
+             * Format: date-time
+             * @description When the set of certificates last changed. Omitted before the first change.
+             */
+            certificates_changed_at?: string;
+            /** @description The IdP's entity ID (the `Issuer` of its responses). */
+            idp_entity_id: string;
+            /** @description The metadata URL, when the metadata was fetched from one. */
+            metadata_url?: string;
+            /** @description Why the last scheduled refresh failed. */
+            refresh_error?: components["schemas"]["SamlRefreshError"];
+            /**
+             * Format: date-time
+             * @description When the metadata was last fetched. Omitted for pasted metadata or manual fields.
+             */
+            refreshed_at?: string;
+            /** @description The IdP's HTTP-Redirect sign-on URL. */
+            sso_url: string;
+        };
+        /** @description The values an owner copies into the IdP (D-SA-12). */
+        OrgSsoSamlSp: {
+            /** @description The assertion consumer service URL. */
+            acs_url: string;
+            /** @description The SP entity ID. */
+            entity_id: string;
+            /** @description Starts a login; also the IdP's tile URL. */
+            start_url: string;
         };
         /** @description `GET /api/v1/orgs/{org}/usage`. */
         OrgUsage: {
@@ -9157,6 +9292,31 @@ export interface components {
             /** @description Required when `enabled` is true. 1 to 256 bytes after trimming. */
             model?: string;
         };
+        /**
+         * @description `PUT /api/v1/orgs/{org}/sso/saml` (D-SA-18). Exactly one source: `metadata_url`,
+         *     `metadata_xml`, or `idp_entity_id` + `sso_url` + `certificates`. With none of them, only the
+         *     settings of the org's SAML provider are saved. `Debug` omits the metadata and the fields.
+         */
+        PutOrgSamlProvider: {
+            /** @description Attribute names; an absent field uses the default. */
+            attributes?: components["schemas"]["SamlAttributeNames"];
+            /** @description PEM certificates of the IdP's signing keys, with `idp_entity_id` and `sso_url`. */
+            certificates?: string[];
+            /** @description Needed to change the IdP entity ID, which deletes the linked identities. */
+            confirm_entity_id_change?: boolean;
+            /** @description Shown on the login page; 1 to 100 characters. */
+            display_name: string;
+            /** @description The IdP's entity ID, with `sso_url` and `certificates`. */
+            idp_entity_id?: string;
+            /** @description Role of people who join through the provider. */
+            jit_role: components["schemas"]["JitRole"];
+            /** @description An `https` metadata URL, fetched now and refreshed daily. */
+            metadata_url?: string;
+            /** @description The IdP metadata document, pasted. */
+            metadata_xml?: string;
+            /** @description The IdP's HTTP-Redirect sign-on URL, with `idp_entity_id` and `certificates`. */
+            sso_url?: string;
+        };
         /** @description `PUT /api/v1/orgs/{org}/sso/provider`. `Debug` omits the client secret. */
         PutOrgSsoProvider: {
             /** @description The OAuth client id; 1 to 255 characters. */
@@ -9442,6 +9602,30 @@ export interface components {
                 [key: string]: string;
             };
         };
+        /**
+         * @description The form the identity provider posts to the SAML ACS (D-SA-10). Documentation only: the
+         *     handler reads the form itself. The names are fixed by SAML, so they keep their case.
+         */
+        SamlAcsForm: {
+            RelayState?: string;
+            SAMLResponse: string;
+        };
+        /** @description Attribute names an owner set; an absent field uses the defaults (D-SA-6). */
+        SamlAttributeNames: {
+            /** @description The attribute that carries the display name. */
+            display_name?: string;
+            /** @description The attribute that carries the email address. */
+            email?: string;
+            /** @description The attribute that carries the first name. */
+            first_name?: string;
+            /** @description The attribute that carries the last name. */
+            last_name?: string;
+        };
+        /**
+         * @description Why the last scheduled metadata refresh failed (`org_sso_saml.refresh_error`).
+         * @enum {string}
+         */
+        SamlRefreshError: "fetch_failed" | "status" | "too_large" | "denied" | "unusable" | "entity_id_changed";
         /** @description The body of `PUT /api/v1/projects/{project}/dashboards/overview`. */
         SaveOverview: {
             /** @description The widgets. */
@@ -10516,6 +10700,11 @@ export interface components {
             /** @description True when the domain's org has an enabled provider. */
             sso: boolean;
         };
+        /**
+         * @description The protocol of an org's provider (D-SA-2, D-SA-17).
+         * @enum {string}
+         */
+        SsoProtocol: "oidc" | "saml";
         /** @description The window of the stats: the start of the UTC day six days ago, up to the request time. */
         StatsWindow: {
             /**
@@ -12151,6 +12340,129 @@ export interface operations {
             };
             /** @description Too many requests. */
             429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_saml_metadata: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The SP metadata document. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/samlmetadata+xml": string;
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    post_saml_acs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": components["schemas"]["SamlAcsForm"];
+            };
+        };
+        responses: {
+            /** @description To the saved page, the start URL for an unsolicited response, or /login?error=<code>. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request body is larger than the limit. */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    get_saml_start: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID. */
+                org_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description To the org's identity provider, or to `/login?error=sso_unavailable`. */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The server is busy or a dependency is unavailable. Retry later. */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -16643,6 +16955,87 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description No credentials, or the credentials are invalid. */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The credentials do not allow this operation, or the organization's plan does not include it (code plan_required). */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The resource does not exist. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description The request conflicts with the current state. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+            /** @description Too many requests. */
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    put_org_saml_provider: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Org UUID or slug. */
+                org: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PutOrgSamlProvider"];
+            };
+        };
+        responses: {
+            /** @description The saved SSO settings. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrgSso"];
+                };
+            };
+            /** @description The request is malformed or a filter is invalid. */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
             };
             /** @description No credentials, or the credentials are invalid. */
             401: {
