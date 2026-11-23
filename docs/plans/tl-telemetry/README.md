@@ -227,6 +227,8 @@ Smaller choices the milestone plans needed, within the approved design:
 - **Shutdown.** The 2 s export flush sits outside spec 12's 60 s bound, like the final meta writes. The error exit of `cetra serve` emits an ERROR `cetra serve failed` event (on stdout too) so startup errors are exported.
 - **`cetra init`'s local server** (`node-cli`) runs `cetra serve`, so the heartbeat applies there too; the Telemetry page says so.
 
+- **Crash reports (M5).** The build triple keeps the key `target`; the callsite target is `event_target` (absent for panics, as is `module`). The backtrace drops the leading run of reporter and runtime frames (`std`, `core`, `alloc`, `tokio`, `backtrace`, `tracing*`, C symbols) with no marker, then keeps up to 48 frames. Dedup: the first occurrence of a location in an hour is spooled at once with count 1; repeats and capped occurrences are counted in memory and spooled as one report after the hour (lost if the process exits first); panics and ERROR events share the dedup and the cap. The `message` field name is left out of `fields`. A 1xx or 3xx answer is kept like a 5xx, and a sending pass stops at the first kept answer. Caps: 512 bytes per function name and for `location`, 256 for targets, modules and field names, 32 field names, 63 KiB per spooled body (dropped backtrace, then the report, when larger). `features.crash_reports_on` is the switchboard's decision. ERROR events from dependencies are reported too. The instance id is added when a report is sent, and left out if it cannot be read.
+
 ### The switchboard (D-TL-11)
 
 One function decides, at startup, what may go to us. The first match wins:
