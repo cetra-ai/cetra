@@ -35,6 +35,8 @@ use crate::api::datasets::{
     SkippedTrace, TraceRef, UpdateDatasetRequest, UpdateItemRequest,
 };
 use crate::api::experiments::CLOCK_SKEW_NS;
+use crate::audit::catalog::DatasetAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::Principal;
 use crate::auth::roles::ProjectPerm;
 use crate::datasets::import::{self, FileError};
@@ -512,28 +514,29 @@ async fn list_datasets(
 
 async fn create_dataset(
     State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateDatasetRequest>,
 ) -> Result<(StatusCode, error::Json<Dataset>), ApiError> {
     let fields = create_fields(&body).map_err(bad_request)?;
     let id = Uuid::now_v7();
     let project = access.project.id;
+    let org = access.project.org_id;
     let now = state.clock.now_ns();
     let row = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { store::insert_dataset(conn, id, project, fields, now).await })
+            Box::pin(async move {
+                let row = store::insert_dataset(conn, id, project, fields, now).await?;
+                let event = Event::new(DatasetAction::Created)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Dataset, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
+            })
         })
         .await?;
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        dataset_id = %id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "dataset created"
-    );
     Ok((StatusCode::CREATED, error::Json(dataset_json(&row)?)))
 }
 
@@ -548,19 +551,41 @@ async fn get_dataset(
 
 async fn update_dataset(
     State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
     error::Json(body): error::Json<UpdateDatasetRequest>,
 ) -> Result<error::Json<Dataset>, ApiError> {
+    let changed_fields: Vec<&'static str> = [
+        ("name", body.name.is_some()),
+        ("description", body.description.is_some()),
+        ("input_schema", body.input_schema.is_some()),
+        ("expected_schema", body.expected_schema.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
     let checked = check_update(&body).map_err(bad_request)?;
     let project = access.project.id;
+    let org = access.project.org_id;
     let key = DatasetKey::parse(&dataset);
     let now = state.clock.now_ns();
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { update_tx(conn, project, key, checked, now).await })
+            Box::pin(async move {
+                let written = update_tx(conn, project, key, checked, now).await?;
+                if let Ok(row) = &written {
+                    let event = Event::new(DatasetAction::Updated {
+                        fields: changed_fields,
+                    })
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Dataset, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written)
+            })
         })
         .await?;
     let row = match outcome {
@@ -568,14 +593,6 @@ async fn update_dataset(
         Err(WriteOutcome::NotFound) => return Err(ApiError::NotFound),
         Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
     };
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        dataset_id = %row.id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "dataset updated"
-    );
     Ok(error::Json(dataset_json(&row)?))
 }
 
@@ -691,27 +708,33 @@ async fn check_live_items(
 
 async fn delete_dataset(
     State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
 ) -> Result<StatusCode, ApiError> {
     let project = access.project.id;
+    let org = access.project.org_id;
     let id = find(&state, project, &dataset).await?.id;
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete_dataset(conn, project, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let deleted = store::delete_dataset(conn, project, id).await?;
+                if deleted {
+                    let event = Event::new(DatasetAction::Deleted)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Dataset, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(deleted)
+            })
+        })
         .await?;
     if !deleted {
         return Err(ApiError::NotFound);
     }
-    let actor = created_by(&principal);
-    tracing::info!(
-        target: "audit",
-        dataset_id = %id,
-        project_id = %project,
-        actor = %actor.as_deref().unwrap_or("-"),
-        "dataset deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -951,6 +974,7 @@ struct ExportCursor {
 async fn export_items(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
     error::Query(params): error::Query<ExportParams>,
 ) -> Result<Response, ApiError> {
@@ -968,6 +992,16 @@ async fn export_items(
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(header::CONTENT_DISPOSITION, disposition);
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+
+    // The export is recorded before any item is read (D-EA-6): no record, no stream.
+    let event = Event::new(DatasetAction::ExportStarted {
+        version: u32::try_from(version).unwrap_or(u32::MAX),
+        format: extension,
+    })
+    .org(access.project.org_id)
+    .project(access.project.id)
+    .target(TargetKind::Dataset, row.id);
+    audit::record_alone(&state.meta, &ctx, event, state.clock.now_ns()).await?;
 
     let pool = state.meta.reader().clone();
     let dataset = row.id;
@@ -1125,7 +1159,6 @@ async fn add_items(
         Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
     };
     tracing::info!(
-        target: "audit",
         dataset_id = %dataset_id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -1254,7 +1287,6 @@ async fn update_item(
         Ok((item, version)) => {
             if let Some(version) = version {
                 tracing::info!(
-                    target: "audit",
                     item_id = %item.item_id,
                     dataset_id = %item.dataset_id,
                     project_id = %project,
@@ -1364,7 +1396,6 @@ async fn delete_item(
         return Err(ApiError::NotFound);
     };
     tracing::info!(
-        target: "audit",
         item_id = %item_id,
         dataset_id = %dataset_id,
         project_id = %project,
@@ -1503,7 +1534,6 @@ async fn edit_items(
     };
     if let Some(version) = &response.version {
         tracing::info!(
-            target: "audit",
             dataset_id = %dataset_id,
             project_id = %project,
             actor = %actor.as_deref().unwrap_or("-"),
@@ -1636,7 +1666,6 @@ async fn delete_items(
         Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
     };
     tracing::info!(
-        target: "audit",
         dataset_id = %dataset_id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -1726,7 +1755,6 @@ async fn restore_version(
         Err(WriteOutcome::Invalid(errors)) => return Err(bad_request(errors)),
     };
     tracing::info!(
-        target: "audit",
         dataset_id = %dataset_id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -1994,7 +2022,6 @@ async fn import_items(
     };
     let version = write_checked(&state, project, &used, change, None).await?;
     tracing::info!(
-        target: "audit",
         dataset_id = %used.id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -2257,7 +2284,6 @@ async fn add_from_trace(
     };
     let version = write_checked(&state, project, &used, change, Some((trace_id, users))).await?;
     tracing::info!(
-        target: "audit",
         dataset_id = %used.id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -2686,7 +2712,6 @@ pub(crate) async fn add_trace_refs(
         copied.push(item_json(&row));
     }
     tracing::info!(
-        target: "audit",
         dataset_id = %used.id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -3321,9 +3346,45 @@ mod tests {
         })
         .await;
         assert_eq!(status, 201);
-        assert!(logs.contains("actor=key:"), "{logs}");
-        assert!(logs.contains(&id), "{logs}");
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT action, actor_kind, target_id, details FROM audit_events \
+             WHERE action = 'dataset.created'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (_, actor_kind, target_id, details) = &rows[0];
+        assert_eq!(actor_kind, "api_key");
+        assert_eq!(target_id, &id);
+        assert_eq!(details, "{}");
         assert!(!logs.contains("canary-dataset-name"), "{logs}");
+        assert!(!details.contains("canary-dataset-name"), "{details}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dataset_export_is_recorded_before_streaming() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        create_ok(&app, &seeded, "faq").await;
+        let response = get(&app, &seeded, "faq/export?version=1").await;
+        assert_eq!(response.status, 200);
+
+        // The record exists once the response is back, so before any item was streamed.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT actor_kind, target_kind, details FROM audit_events \
+             WHERE action = 'dataset.export_started'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (actor_kind, target_kind, details) = &rows[0];
+        assert_eq!(actor_kind, "user");
+        assert_eq!(target_kind, "dataset");
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(details["version"], 1);
+        assert_eq!(details["format"], "jsonl");
     }
 
     #[tokio::test(flavor = "multi_thread")]
