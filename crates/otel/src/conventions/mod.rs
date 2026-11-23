@@ -196,6 +196,8 @@ mod tests {
             &mut bag,
             &[],
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             READERS,
             REGISTRIES,

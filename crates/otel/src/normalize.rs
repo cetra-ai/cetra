@@ -252,12 +252,13 @@ fn accept_span(
     let mut truncated = resource.truncated.clone();
     let mut bag = AttrBag::new(&span.attributes, &mut warnings);
     crate::conventions::apply_status(&mut bag, &mut status, &mut status_message);
-    let conventions = detect(&bag, &span.events);
+    let scope = scope_name.as_deref().unwrap_or("");
+    let conventions = detect(&bag, &span.events, scope);
     let span_kind = match agents::kind(agent, &span.name) {
         Some(kind) => kind,
-        None => span_kind(&mut bag),
+        None => span_kind(&mut bag, scope, &conventions),
     };
-    let mut fields = fill(&mut bag, &resource.view, &mut warnings);
+    let mut fields = fill(&mut bag, &resource.view, scope, &conventions, &mut warnings);
     agents::context(agent, &span.attributes, &mut bag, &mut fields, batch.agents);
     fields.provider = crate::context::endpoint_provider(&bag, span_kind, fields.provider.take());
     let counted = match agents::usage(agent, &span.name, span_kind, &mut bag, &mut warnings) {
@@ -266,10 +267,19 @@ fn accept_span(
             &mut bag,
             span_kind,
             fields.provider.as_deref(),
+            scope,
+            &conventions,
             &mut warnings,
         ),
     };
-    let ttft_ns = match ttft(&mut bag, &span.events, start_time, &mut warnings) {
+    let ttft_ns = match ttft(
+        &mut bag,
+        &span.events,
+        start_time,
+        scope,
+        &conventions,
+        &mut warnings,
+    ) {
         Some(nanos) => Some(nanos),
         None => agents::ttft(agent, &mut bag, &mut warnings),
     };
@@ -301,6 +311,8 @@ fn accept_span(
         &mut bag,
         &span.events,
         span_kind,
+        scope,
+        &conventions,
         &mut warnings,
         crate::conventions::READERS,
         crate::conventions::REGISTRIES,

@@ -91,6 +91,13 @@ pub(crate) struct ReadContext<'a, 'b> {
     pub bag: &'a mut AttrBag<'b>,
     pub events: &'a [Event],
     pub kind: SpanKind,
+    /// Instrumentation scope name, `""` when absent. No reader uses it yet.
+    #[allow(dead_code)]
+    pub scope: &'a str,
+    /// Conventions detected on the span, in precedence order. No reader uses
+    /// it yet.
+    #[allow(dead_code)]
+    pub conventions: &'a [Convention],
     pub warnings: &'a mut Warnings,
 }
 
@@ -201,10 +208,17 @@ pub(crate) fn error_attribute(errors: &[&str]) -> Option<String> {
 
 /// First value per field, in the readers' order. Then drop lower-precedence
 /// payload keys for each field that has a winner (rule 2).
+///
+/// `scope` (the span's instrumentation scope name, `""` when absent) and
+/// `conventions` (the conventions detected on it) reach the readers through
+/// [`ReadContext`].
+#[allow(clippy::too_many_arguments)] // the span's bag, events, kind, scope and conventions, the warnings, and the readers with their registries
 pub(crate) fn assemble(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     kind: SpanKind,
+    scope: &str,
+    conventions: &[Convention],
     warnings: &mut Warnings,
     readers: &[ConventionPayload],
     registries: &[PayloadKeys],
@@ -217,6 +231,8 @@ pub(crate) fn assemble(
             bag,
             events,
             kind,
+            scope,
+            conventions,
             warnings,
         });
         keep(&mut io.input, &mut winners[0], got.input, reader.convention);
@@ -823,6 +839,8 @@ mod tests {
             &mut bag,
             &events,
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,
@@ -929,6 +947,8 @@ mod tests {
             &mut bag,
             &[],
             SpanKind::Llm,
+            "",
+            &[],
             &mut warnings,
             &readers,
             &registries,

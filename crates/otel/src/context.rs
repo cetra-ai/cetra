@@ -238,9 +238,14 @@ pub(crate) struct ContextFields {
 }
 
 /// Fill the scalar and context columns. Rule 3: these columns are filled for every kind.
+///
+/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
+/// and `_conventions` the conventions detected on it. No rule reads them yet.
 pub(crate) fn fill(
     bag: &mut AttrBag<'_>,
     resource: &ResourceView<'_>,
+    _scope_name: &str,
+    _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> ContextFields {
     let request_model = string_field(bag, resource, REQUEST_MODEL);
@@ -790,7 +795,7 @@ mod tests {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let view = ResourceView::new(resource_attrs);
-        let fields = fill(&mut bag, &view, &mut warnings);
+        let fields = fill(&mut bag, &view, "", &[], &mut warnings);
         (fields, bag)
     }
 
@@ -798,7 +803,7 @@ mod tests {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let view = ResourceView::new(&[]);
-        let fields = fill(&mut bag, &view, &mut warnings);
+        let fields = fill(&mut bag, &view, "", &[], &mut warnings);
         (fields, bag, warnings)
     }
 

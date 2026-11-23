@@ -312,10 +312,15 @@ pub(crate) struct Usage {
 }
 
 /// Resolve token columns. On any other kind the usage attributes stay unread.
+///
+/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
+/// and `_conventions` the conventions detected on it. No row reads them yet.
 pub(crate) fn usage(
     bag: &mut AttrBag<'_>,
     kind: SpanKind,
     provider: Option<&str>,
+    _scope_name: &str,
+    _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Usage {
     if !matches!(kind, SpanKind::Llm | SpanKind::Embedding) {
@@ -490,10 +495,15 @@ fn gemini_usage(bag: &AttrBag<'_>, warnings: &mut Warnings) -> Option<GeminiUsag
 ///
 /// `warnings` is not in the plan's sketch; a non-numeric candidate records
 /// `invalid_number` and is skipped, matching rule 20.
+///
+/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
+/// and `_conventions` the conventions detected on it. No row reads them yet.
 pub(crate) fn ttft(
     bag: &mut AttrBag<'_>,
     events: &[Event],
     start_time: i64,
+    _scope_name: &str,
+    _conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> Option<i64> {
     if let Some(nanos) = take(bag, attr::TTFT_NS, warnings, read_nanos) {
@@ -971,7 +981,7 @@ mod tests {
     ) -> (Usage, Warnings, AttrBag<'a>) {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
-        let usage = usage(&mut bag, kind, provider, &mut warnings);
+        let usage = usage(&mut bag, kind, provider, "", &[], &mut warnings);
         (usage, warnings, bag)
     }
 
@@ -1266,7 +1276,10 @@ mod tests {
         let attrs = [double_attr("gen_ai.response.time_to_first_chunk", 0.25)];
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(250_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
         assert_eq!(
             bag.state("gen_ai.response.time_to_first_chunk"),
             Some(Use::Consumed)
@@ -1278,32 +1291,41 @@ mod tests {
         ];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
         assert_eq!(
-            ttft(&mut bag, &[], start, &mut warnings),
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
             Some(1_500_000_000)
         );
         assert_eq!(bag.state(attr::TTFT_NS), Some(Use::Unread));
 
         let attrs = [int_attr("ai.response.msToFirstChunk", 2)];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(2_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(2_000_000)
+        );
 
         let attrs = [double_attr("ai.stream.msToFirstChunk", 0.5)];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(500_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(500_000)
+        );
 
         let attrs = [string_attr(
             "langfuse.observation.completion_start_time",
             "2026-01-01T00:00:00.250000000Z",
         )];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), Some(250_000_000));
+        assert_eq!(
+            ttft(&mut bag, &[], start, "", &[], &mut warnings),
+            Some(250_000_000)
+        );
 
         let attrs = [int_attr(
             "langfuse.observation.completion_start_time",
             start - 1,
         )];
         let mut bag = AttrBag::new(&attrs, &mut warnings);
-        assert_eq!(ttft(&mut bag, &[], start, &mut warnings), None);
+        assert_eq!(ttft(&mut bag, &[], start, "", &[], &mut warnings), None);
         assert_eq!(
             bag.state("langfuse.observation.completion_start_time"),
             Some(Use::Unread)

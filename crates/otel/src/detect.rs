@@ -20,7 +20,10 @@ const PRECEDENCE: [Convention; 8] = [
 ];
 
 /// Conventions present on this span, in precedence order, without duplicates.
-pub(crate) fn detect(bag: &AttrBag<'_>, events: &[Event]) -> Vec<Convention> {
+///
+/// `_scope_name` is the span's instrumentation scope name, `""` when absent.
+/// No rule reads it yet.
+pub(crate) fn detect(bag: &AttrBag<'_>, events: &[Event], _scope_name: &str) -> Vec<Convention> {
     let mut present = [false; PRECEDENCE.len()];
     for key in bag.keys() {
         if key.starts_with("cetra.") {
@@ -125,7 +128,7 @@ mod tests {
             })
             .collect();
         let bag = AttrBag::new(&attrs, &mut Warnings::default());
-        detect(&bag, &[])
+        detect(&bag, &[], "")
     }
 
     fn detect_event(name: &str) -> Vec<Convention> {
@@ -134,7 +137,7 @@ mod tests {
             name: name.to_owned(),
             ..Event::default()
         }];
-        detect(&bag, &events)
+        detect(&bag, &events, "")
     }
 
     #[test]

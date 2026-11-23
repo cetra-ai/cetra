@@ -4,13 +4,20 @@
 //! attribute is consumed. Fallback keys are peeked and left unread for later
 //! phases.
 
-use cetra_core::enums::SpanKind;
+use cetra_core::enums::{Convention, SpanKind};
 
 use crate::bag::AttrBag;
 use crate::value::as_str;
 
 /// Kind of one span. Missing and unrecognized values fall through to `span`.
-pub(crate) fn span_kind(bag: &mut AttrBag<'_>) -> SpanKind {
+///
+/// `_scope_name` is the span's instrumentation scope name (`""` when absent)
+/// and `_conventions` the conventions detected on it. No row reads them yet.
+pub(crate) fn span_kind(
+    bag: &mut AttrBag<'_>,
+    _scope_name: &str,
+    _conventions: &[Convention],
+) -> SpanKind {
     if let Some(kind) = decide(bag, "cetra.span.kind", |text| SpanKind::parse(text).ok()) {
         return kind;
     }
@@ -191,7 +198,7 @@ mod tests {
 
     fn kind_of(attrs: &[KeyValue]) -> SpanKind {
         let mut bag = AttrBag::new(attrs, &mut Warnings::default());
-        span_kind(&mut bag)
+        span_kind(&mut bag, "", &[])
     }
 
     #[test]
@@ -213,7 +220,7 @@ mod tests {
                 string_attr("gen_ai.operation.name", "chat"),
             ];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag), kind, "{text}");
+            assert_eq!(span_kind(&mut bag, "", &[]), kind, "{text}");
             assert_eq!(bag.state("cetra.span.kind"), Some(Use::Consumed));
             assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
         }
@@ -230,7 +237,7 @@ mod tests {
             string_attr("gen_ai.operation.name", "chat"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm);
         assert_eq!(bag.state("cetra.span.kind"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Consumed));
     }
@@ -263,7 +270,7 @@ mod tests {
             string_attr("openinference.span.kind", "TOOL"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag), SpanKind::Tool);
+        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Tool);
         assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
         assert_eq!(bag.state("openinference.span.kind"), Some(Use::Consumed));
     }
@@ -409,12 +416,12 @@ mod tests {
         ] {
             let attrs = [string_attr("lmnr.span.type", text)];
             let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-            assert_eq!(span_kind(&mut bag), kind, "{text}");
+            assert_eq!(span_kind(&mut bag, "", &[]), kind, "{text}");
             assert_eq!(bag.state("lmnr.span.type"), Some(Use::Consumed));
         }
         let attrs = [string_attr("lmnr.span.type", "")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag), SpanKind::Span);
+        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Span);
         assert_eq!(bag.state("lmnr.span.type"), Some(Use::Unread));
         assert_eq!(kind_of(&[bool_attr("lmnr.span.type")]), SpanKind::Span);
     }
@@ -426,7 +433,7 @@ mod tests {
             string_attr("gen_ai.request.model", "gpt"),
         ];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag), SpanKind::Tool);
+        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Tool);
         assert_eq!(bag.state("gen_ai.tool.name"), Some(Use::Unread));
         assert_eq!(bag.state("gen_ai.request.model"), Some(Use::Unread));
 
@@ -435,7 +442,7 @@ mod tests {
 
         let attrs = [string_attr("llm.model_name", "gpt")];
         let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
-        assert_eq!(span_kind(&mut bag), SpanKind::Llm);
+        assert_eq!(span_kind(&mut bag, "", &[]), SpanKind::Llm);
         assert_eq!(bag.state("llm.model_name"), Some(Use::Unread));
 
         assert_eq!(kind_of(&[]), SpanKind::Span);
