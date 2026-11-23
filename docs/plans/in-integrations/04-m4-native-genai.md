@@ -21,6 +21,91 @@ Implementer: the GLM 5.3 agent (the user, 2026-11-23), one agent per phase. Conv
 - `crates/otel/src/{normalize,detect,kind,context,usage,payload,fields}.rs` and `crates/otel/src/conventions/{mod,genai,openinference,laminar,vercel}.rs`.
 - `fixtures/otlp/README.md` § Workflows.
 
+## Amendments from the cold review (override the phase text below)
+
+**A. Order.** `captured_llm_spans_are_priced_by_the_builtin_snapshot` loads every captured case, blessed or not. So the captures come after the rules, and each capture phase blesses its own cases. The phases run in this order:
+
+1. IN4.3, the registry row.
+2. IN4.4, plumbing.
+3. IN4.5, kind and field rules.
+4. IN4.6, payload rules. It blesses `openinference/agno-agent-tool` in its own commit.
+5. IN4.7, VoltAgent.
+6. IN4.1, Python captures, with `just fixtures-bless` for its cases in the same phase.
+7. IN4.2, TypeScript captures, with blessing in the same phase.
+8. IN4.8, the OpenHands hand-written case, and a review of every M4 `expected.json` against IN4.8's checklist.
+9. IN4.9, pages.
+10. IN4.10, the index and records.
+
+Every phase must end green. The "golden fails on agno until IN4.8" exception is withdrawn.
+
+**B. IN4.4 also passes the detected conventions.**
+- `accept_span` already computes `conventions = detect(...)`. Pass both `scope_name` and `&conventions` down to:
+  - `span_kind`;
+  - `fill`;
+  - `usage`;
+  - `ttft`, a separate call in `normalize.rs`;
+  - `ReadContext` (fields `scope: &'a str` and `conventions: &'a [Convention]`, or whatever type `detect` returns).
+- `accept_span` holds `scope_name: Option<String>`, so use `let scope = scope_name.as_deref().unwrap_or("");`.
+- The IN4.4, IN4.5 and IN4.7 Edit lists include `crates/otel/src/normalize.rs` and every `crates/otel/src/conventions/*.rs` file whose code or tests build `ReadContext` or call `assemble`.
+- "Read only on `voltagent` spans" means: check `conventions.contains(&Convention::Voltagent)` at the read site.
+
+**C. Laminar kind row (IN4.5 step 1).** `LLM`/`CACHED` → `llm` only when one of these keys is present with a non-zero integer or a non-empty string:
+- the model keys `gen_ai.request.model`, `gen_ai.response.model`, `llm.model_name`;
+- the token keys `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.prompt_tokens`, `gen_ai.usage.completion_tokens`, `llm.token_count.prompt`, `llm.token_count.completion`.
+
+Otherwise `chain`. Write a bag-aware helper next to the row; the existing `decide` takes text only.
+
+**D. Converters (IN4.6).**
+- **R8** goes in `convert/openinference.rs`, where flattened messages are parsed. The `function.M` keys are `llm.input_messages.N.function.M` (not under `.message.`).
+- **R11** is a new canonical-`Message` converter, `convert/converse.rs`, in the style of `convert/vercel.rs` (read it and mirror its signature and error type). Register it in `convert/mod.rs`.
+- **R6** runs in `conventions/mod.rs` `messages_from_value`, before `parse_messages`.
+- The IN4.6 Edit list includes `crates/otel/src/conventions/mod.rs`, `crates/otel/src/convert/{mod,openinference,converse}.rs`, and `fixtures/otlp/openinference/agno-agent-tool/expected.json` (blessed).
+
+**E. Strands legacy event shapes (R11).** These are the shapes the spike's § Strands (a) shows:
+- `gen_ai.user.message`, `gen_ai.assistant.message` and `gen_ai.system.message` carry `content`, a JSON string of a Converse block array.
+- `gen_ai.tool.message` carries `content` (blocks, or a JSON value) and `id`. It becomes a `tool` message with one `tool_call_response` part whose id is `id`.
+- `gen_ai.choice` carries `message`, a JSON block array or a plain string, plus `finish_reason` and on tool spans `tool.result`. It becomes the output: one assistant message from the blocks, or a text part for a plain string, with the finish reason.
+
+The legacy-event reader uses the Converse converter when `content` or `message` parses as a JSON array whose elements have a `text`, `toolUse` or `toolResult` key. The expected result per span:
+- `chat` spans: input messages and an output message;
+- `execute_tool` spans: input from `gen_ai.tool.call.arguments` if present (it is not in the legacy mode), output from `tool.result`, else empty;
+- `execute_event_loop_cycle` and `invoke_agent`: whatever the events give.
+
+The spike dumped the events in `/tmp/claude-1000/-home-sebastien-travaux-llm-observer/8e518996-ebba-4428-93c2-4baf3ee35424/scratchpad/m4py/` (Strands dump). Read the real event attributes there before writing the converter. If they differ from this list, stop and report.
+
+**F. VoltAgent (IN4.7).** Which rules are gated:
+- V2 kind, V5 plain `input`/`output`, V6 `conversation.id` and V3 `ai.model.name`: gated on `voltagent` (`conventions.contains`).
+- V3 `llm.model` and V4 `llm.usage.*`: gated on `voltagent` too, even though the keys are specific, because OpenInference and OpenLLMetry use the `llm.` namespace.
+- M4 implements the plain `input`/`output` rule for `voltagent` only. The Pipecat branch is written in M6, with its capture.
+
+The IN4.7 Edit list adds:
+- `crates/core/tests/snapshots/enums.snap`, an insta snapshot: update it with `INSTA_UPDATE=always cargo test -p cetra-core` or `cargo insta accept`, and check that the diff is only the new variant;
+- `crates/otel/tests/proptest.rs`: its own `PRECEDENCE` array (length 8 becomes 9) and its `PREFIXES` gain `Voltagent` and `voltagent.`.
+
+The openapi check is `just openapi`, then `cargo nextest run -p cetra-server --test openapi`.
+
+**G. Captures (IN4.1, IN4.2).**
+- **The spike programs are the source.** Copy each program from `/tmp/claude-1000/-home-sebastien-travaux-llm-observer/8e518996-ebba-4428-93c2-4baf3ee35424/scratchpad/m4py/` or `m4ts/` into the scenario module, and adapt it to the harness. Use the program's exact setup:
+  - **Semantic Kernel:** both diagnostics switches the program sets, plus `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`.
+  - **Mirascope:** `register_provider("openai:completions", …)` and model `openai:completions/gpt-4o-mini-2024-07-18`.
+  - **Extras:** `ag2[openai,tracing]`, and `mirascope[openai,ops]`.
+- **Determinism.**
+  - Strands' `gen_ai.server.time_to_first_token` goes in `timing_attributes`, and `gen_ai.event.start_time`/`gen_ai.event.end_time` go in `timestamp_attributes`.
+  - AutoGen's agent-span `input.value` holds a UUID, a timestamp and a memory address that a program pin may not reach. If they still differ between two captures after pinning `uuid.uuid4` and the clock in the program, drop that span with `span_names`, and report it.
+- **TypeScript.** IN4.2's Edit list adds `tools/capture/ts/pnpm-workspace.yaml`, where `minimumReleaseAge` lives. Add `ai` as a plain dependency; `@ai-sdk/openai` comes in as VoltAgent's or Mastra's dependency, so add it only if the import fails without it.
+- **Counts.** IN4.1 has nine cases.
+
+**H. OpenHands (IN4.8).**
+1. Write `case.json` and `input.json`, plus a placeholder `expected.json` (`{"spans":[],"media":[],"rejected_spans":0}`).
+2. Run `just fixtures-bless`, then `just fixtures-fmt` and `just fixtures-check`.
+3. Hand-written `case.json` has no `source` key.
+
+**I. Docs.** IN4.10 also updates the convention list of `website/src/content/docs/docs/concepts/conventions.mdx` and `reference/attributes.md` (VoltAgent's keys), then regenerates the skill references. It also records in D-IN-5's amendment:
+- `execute_structured_output`, `decision` and `gen_ai.usage.thinking_tokens` are not read, because no capture shows them;
+- the `check-backing` group-regex widening is not needed (D-IN-23 item 10).
+
+**J. Mirascope prefix strip (IN4.5 step 4).** It compares the raw lowercased `gen_ai.provider.name`, read with `bag.get` before rule 12 aliases it, against the model's prefix. New `Source` rows carry the `Convention` value of the family they belong to: `Genai` for `gen_ai.*`, `mirascope.*`, `mastra.*` and `pydantic_ai.*`; `Voltagent` for VoltAgent keys.
+
 ## What it is, and what it is not
 
 When it is done:
