@@ -110,6 +110,7 @@ export const SELF_HOSTED = {
     features: [
       "Single sign-on per org, with verified domains",
       "Enforce single sign-on for your domains",
+      "SAML 2.0 single sign-on",
       "Project-level roles",
     ],
     /** A service, not a gated feature (D197). */
