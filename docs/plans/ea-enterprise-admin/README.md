@@ -144,7 +144,7 @@ The plans for M1 and M2 turn this list into the exact enum, with each variant's 
 
 - `audit.retention_days` (default 365, minimum 30, `0` keeps records forever) applies to the instance log and to every org without a limit.
 - The org limit `audit_retention_days` (D-P-13), from the org token, replaces it for that org: on the cloud, 365 for Enterprise and more by contract.
-- Cloud cells set `audit.retention_days = 90`, so orgs on the other plans keep 90 days, and an upgrade to Enterprise shows the last 90 days (open question 4).
+- Cloud cells set `audit.retention_days = 90`, so orgs on the other plans keep 90 days, and an upgrade to Enterprise shows the last 90 days.
 - An hourly task deletes records older than the retention, in batches.
 - An org drop deletes the org's records when the drop is applied (track M's drop path), together with its SCIM tokens, users, groups and mappings. The drop itself is an instance record.
 - A user's erasure leaves their records with ids only (above).
@@ -239,7 +239,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
   - The SCIM row stays (`active = 0`), with its group memberships.
 - **`active: true`** re-adds the membership with the groups' roles, and re-enables the account if SCIM disabled it (`scim_users.disabled_account`).
 - **`DELETE`** does what `active: false` does, then deletes the SCIM row and its group memberships. The user account and what it authored (scores, annotations) stay.
-- **Owners.** Deactivating or deleting an owner removes their membership, unless they are the org's last active owner: that is refused (`409`, "an org needs an owner"), using the same check as `remove_org_member`. The IdP is the authority once an owner enabled SCIM (open question 3).
+- **Owners.** Deactivating or deleting an owner removes their membership, unless they are the org's last active owner: that is refused (`409`, "an org needs an owner"), using the same check as `remove_org_member`. The IdP is the authority once an owner enabled SCIM (user).
 - Project API keys are project credentials, not the user's, and stay. The audit records name who created them, so an admin can review them.
 - All of this reuses the existing code: the member removal (`members::remove_org_member` with its owner check), the revocation of `routes/internal_users.rs`'s `revoke_access`, and `users::set_disabled`. There is no second implementation.
 - `revoke_access` opens its own write today. It is split into a function on a connection, which deletes sessions and revokes PATs and returns the revoked token hashes, and the PAT-cache eviction, which runs after commit. The control-plane route and SCIM both call it. Membership removal, revocation, the account disable and the audit record then commit in one transaction.
@@ -295,7 +295,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | D-EA-4 | **A typed catalog.** One enum variant per action, with a dotted append-only name and typed details. It covers access, configuration, deletions and data leaving the product, not edits of the data itself. Every `target: "audit"` call site is replaced, or moved to its module's target. | Free-form strings (both competitors): unfilterable and unreviewable. Logging every mutation generically (LangWatch): it records args, which leak secrets. |
 | D-EA-5 | **Allow-listed details, no snapshots.** Changes record field names, plus old and new values only for roles, scopes, flags and limits. A test refuses secret- or email-like field names. | Whole before/after objects: leaked a private key at LangWatch (H2). |
 | D-EA-6 | **Data leaving the product is recorded (user).** SQL runs (a hash of the text), exports and MCP tool calls, recorded before they run; no page or trace views. | Writes only: misses exfiltration. Opt-in read events (Langfuse): high volume for little value. |
-| D-EA-7 | **1 year, configurable (user).** `audit.retention_days` (default 365, min 30, 0 = forever). The cloud takes the `audit_retention_days` limit from the org token. Hourly purge; an org drop deletes the org's records. | Forever (LangWatch, Langfuse ClickHouse): unbounded `meta.db`. 90 days: short for compliance reviews. |
+| D-EA-7 | **1 year, configurable (user).** `audit.retention_days` (default 365, min 30, 0 = forever). The cloud takes the `audit_retention_days` limit from the org token. Cloud cells keep 90 days for orgs without the limit (user). Hourly purge; an org drop deletes the org's records. | Forever (LangWatch, Langfuse ClickHouse): unbounded `meta.db`. 90 days: short for compliance reviews. |
 | D-EA-8 | **Org log and instance log (user).** Records with no org form the instance log, read by instance admins on `/admin`. Instance admins never read org logs. | Org logs only: setup, licence and admin actions stay unrecorded. Admins read every org: breaks "no implicit org access". |
 | D-EA-9 | **Sign-ins are instance records**, and an org-provider sign-in or JIT join is also recorded in that org's log. | Copying every login to every org of the user: discloses one org's members' activity to another. |
 | D-EA-10 | **Owners and admins read (user).** New `OrgPerm::ViewAudit`, with a session or a PAT; no API key. | Owners only: admins run day-to-day membership and need the log. |
@@ -304,7 +304,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | D-EA-13 | **Verified domains only (user).** SCIM provisions only emails of the org's verified domains, links existing accounts with D-P-66's rule, and creates new ones with `email_verified_via = 'idp'` (no format change). Email changes need both emails in the org's domains and no other org membership. | Any email: an IdP admin could add other companies' users without consent, and revoke their sessions. Others as invitations: two lifecycles for one SCIM user. |
 | D-EA-14 | **Group mappings (user).** Groups map to an org role and optional project roles. The highest role wins (`none` < `viewer` < `member` < `admin`), with `scim_default_role` for unmapped users. Mappings never grant or lower `owner`. Seat limits refuse single raises without failing the sync. Roles are written to `org_members` and `project_members`. | Org roles only: per-project access is a common enterprise ask. A `roles` attribute (Langfuse): non-standard, and Entra pushes groups. Evaluating groups in RBAC at request time: changes the hot path for no gain. |
 | D-EA-15 | **Per-org hashed `scim-cetra-…` tokens**, two active at most, owners with a session only; `Principal::Scim`; a per-token rate limit. | An org API key over Basic (Langfuse): mixes credentials. A token per SSO provider (LangWatch): we have one provider per org. |
-| D-EA-16 | **Remove and revoke (user).** Deactivation removes the membership and overrides, revokes sessions and PATs, and disables the account when no membership is left. Reactivation restores both. An owner can be removed, but not the last one (pending open question 3). Existing functions are reused. | Membership only (Langfuse): a fired employee keeps working sessions. Always disable (LangWatch): locks users out of other orgs. |
+| D-EA-16 | **Remove and revoke (user).** Deactivation removes the membership and overrides, revokes sessions and PATs, and disables the account when no membership is left. Reactivation restores both. An owner can be removed, but not the last one (user). Existing functions are reused. | Membership only (Langfuse): a fired employee keeps working sessions. Always disable (LangWatch): locks users out of other orgs. |
 | D-EA-17 | **Cloud SCIM on the cell, domains from Q (user).** The org token carries `sso_domains`, used by the cell for SCIM only. A request to track Q. | Self-hosted only at first: Enterprise cloud orgs wait. SCIM on the control plane: much new Q work, and the cell still has to apply it. |
 | D-EA-18 | **SCIM only while enabled (user).** A member is managed while an active SCIM row links to them. JIT is off, invitations to verified-domain emails are refused, and manual role changes, override changes and removals of managed members are refused (`scim_managed`). Disabling SCIM or a lapse of `scim` lifts the locks and keeps every role. | Keep both (the IdP overwrites manual changes on the next push): roles flip silently. |
 | D-EA-19 | **Lapses never widen access (user, D-P-8).** Recording continues; reads, exports and the stream stop; SCIM accepts removals and lowering changes, and refuses creates, reactivations and raises. Features `audit_log` and `scim` (`ee`; Enterprise, licence). | SCIM fully off when lapsed: IdP deprovisions would not reach cetra. |
@@ -411,10 +411,7 @@ M3 and M5 both add a feature, routes in OpenAPI and an org settings page. Each p
 
 ## Open questions for the user
 
-1. **SQL run records.** Is a SHA-256 of the SQL text enough? An admin can match it against a query they have, but cannot read what was run. The alternative is storing the text, which can quote payload values and so breaks the privacy rule.
-2. **SCIM default role.** For a provisioned user with no mapped group, `viewer` (the default, and free per D176), or should such users not get access at all until a group is mapped?
-3. **Non-last owners.** May SCIM remove an owner who is not the last one? The design allows it, because the IdP is the authority once an owner turned SCIM on.
-4. **Cloud history for non-Enterprise orgs.** Cloud cells keep 90 days of audit records for orgs on the other plans, so an upgrade shows the last 90 days. Is 90 days right, or should it be 30 or the full 365?
+None. The last four were answered on 2026-11-23 (below).
 
 ## Settled by the user (2026-11-23)
 
@@ -432,3 +429,7 @@ M3 and M5 both add a feature, routes in OpenAPI and an org settings page. Each p
 - SCIM only while enabled: no JIT, no invitations or manual role changes for verified-domain members (D-EA-18).
 - Cloud SCIM on the cell with domains in the org token (D-EA-17).
 - Lapses: removals keep working, creates and raises are refused (D-EA-19).
+- SQL runs are recorded as a SHA-256 of the text, never the text (D-EA-6).
+- A provisioned user with no mapped group gets `scim_default_role`, `viewer` by default (D-EA-14).
+- SCIM may remove an owner who is not the last one (D-EA-16).
+- Cloud cells keep 90 days of audit records for non-Enterprise orgs (D-EA-7).
