@@ -210,7 +210,7 @@ No new dependency.
 
       A `fields.metadata` error renders as a `<p role="alert">` under the tabs.
    3. The JIT role select: copy the OIDC section's Select, its labels and its help text exactly, with `id="saml-jit-role"`.
-   4. A sub-heading `<h3>` `"Attribute names"` with the help `"Leave blank to use the usual names of Okta, Microsoft Entra ID, Google and Keycloak."`. Then four `TextField`s:
+   4. A sub-heading `<h3>` `"Attribute names"`. Each attribute field's error is its own key (`fields["attributes.email"]`, `fields["attributes.display_name"]`, `fields["attributes.first_name"]`, `fields["attributes.last_name"]`). The form-level error shows also when `fields` names a key the form does not render, so no error is ever lost with the help `"Leave blank to use the usual names of Okta, Microsoft Entra ID, Google and Keycloak."`. Then four `TextField`s:
       - `saml-attr-email` `"Email attribute"`, placeholder `"email"`, error `fields["attributes.email"]`;
       - `saml-attr-display-name` `"Display name attribute"`, placeholder `"displayName"`;
       - `saml-attr-first-name` `"First name attribute"`, placeholder `"firstName"`;
@@ -222,10 +222,12 @@ No new dependency.
    - `"xml"` → XML non-blank (`"Paste the metadata XML."`);
    - `"manual"` → all three non-blank (`"Enter the IdP entity ID."`, `"Enter the sign-on URL."`, `"Paste at least one certificate."`).
 
-   `dirty` is true when any of these hold:
+   `dirty` is false while `locked`. Otherwise it is true when any of these hold:
    - the display name, JIT role or any attribute differs from the saved values;
    - `source` is not `"current"` (choosing a source tab is an explicit re-import, D-SA-11; Save then also re-fetches an unchanged metadata URL, which is how an owner accepts a refresh failure);
-   - no SAML provider is saved yet (the form always saves).
+   - no SAML provider is saved yet (the form always saves; an unlocked, unsaved SAML form therefore arms the unsaved-changes guard, as intended).
+
+   A re-import may change the provider's `created_at` (M2 writes a new row id only on insert, but treat it as possible), so "Saved" is guaranteed only for settings-only saves.
 
    Every input, tab trigger and the Select are `disabled={locked || save.isPending}`.
 
@@ -239,16 +241,17 @@ No new dependency.
 
    Mutation: `$api.useMutation("put", "/api/v1/orgs/{org}/sso/saml")`.
    - On success: clear the XML, manual and certificate inputs, set `source` to `"current"`, `setSaved(true)`, `storeOrgSso(queryClient, org, answer)`.
-   - On error: if `problemOf(save.error)` (from `@/api/problem`; read it for the exact name and shape) has status 409 and detail equal to `ENTITY_ID_CHANGE_DETAIL`, open a `ConfirmDialog` instead of showing the error. For that error, `saveError` is `undefined`, so nothing shows behind the dialog. The dialog:
+   - The body is built once per submit and kept in state (`pendingBody`), so the retry sends exactly the same body.
+   - On error, in the first mutation's `onError`: if `problemOf(error)` (from `@/api/problem`) has status 409 and detail equal to `ENTITY_ID_CHANGE_DETAIL`, set `confirmOpen` to true instead of showing the error. While `confirmOpen` is true, `saveError` is `undefined`, so nothing shows behind the dialog. The retry runs through a second mutation, `const confirm = $api.useMutation("put", "/api/v1/orgs/{org}/sso/saml")`. The dialog:
      - `destructive`;
      - title `"Change the identity provider?"`;
      - description `"The new metadata names another entity ID. Saving it deletes the identities linked to the current one; members link again at their next sign-in."`;
      - confirm label `"Save and relink"`.
 
      - `details`: `` `Current IdP entity ID: ${saml?.idp_entity_id}` `` when a SAML provider is saved;
-     - `pending={save.isPending}`, and `error` = the retry's error message, if any.
+     - `pending={confirm.isPending}`, and `error={confirm.error ? problemMessage(confirm.error, "Could not save the identity provider.") : undefined}`.
 
-     Confirming re-sends the same body with `confirm_entity_id_change: true`; success closes it (`setConfirmOpen(false)`). Cancel closes it and calls `save.reset()`.
+     Confirming calls `confirm.mutate` with `{ ...pendingBody, confirm_entity_id_change: true }`. Its success runs the same success steps as a save and closes the dialog (`setConfirmOpen(false)`). Cancel closes it and calls `save.reset()` and `confirm.reset()`.
    - Any other non-field error shows through `SettingsFormCard`'s `error` (`problemMessage(save.error, "Could not save the identity provider.")`).
 5. `provider-section.tsx`:
    - A protocol choice above the forms. A `RadioGroup` labelled `"Protocol"` (`aria-label="Protocol"`) with items `oidc` → `"OpenID Connect"` and `saml` → `"SAML 2.0"`, following the `create-token-dialog.tsx` pattern. Its state `protocol` starts at `sso.provider?.protocol ?? "oidc"`.
@@ -257,7 +260,8 @@ No new dependency.
      - and when `sso.provider.enforced`, instead: `"Turn off enforcement before switching the protocol."`.
    - `protocol === "oidc"` renders the existing OIDC form card and the "Callback URL" card, unchanged.
    - `protocol === "saml"` renders `<SamlProviderForm org={org} sso={sso} locked={samlLocked} />` and `<SamlSpCard sp={sso.saml_sp} />`.
-   - The section takes a new prop `samlLocked: boolean`. When `protocol === "saml" && samlLocked`, render `<LockedFeature feature="saml" upgradeUrl={upgradeUrl} />` above the SAML form (the section takes `upgradeUrl` too), whatever the saved provider is.
+   - The section takes a new prop `samlLocked: boolean`. When `protocol === "saml" && samlLocked && !locked` (with `org_sso` locked the page already shows its lock), render `<LockedFeature feature="saml" upgradeUrl={upgradeUrl} />` above the SAML form (the section takes `upgradeUrl` too), whatever the saved provider is.
+   - Switching the radio unmounts the form being left; its unsaved edits are dropped, which the switch note's warning covers.
    - The radio items are `id="sso-protocol-oidc"` and `id="sso-protocol-saml"`; `onValueChange` narrows the string with `value === "saml" ? "saml" : "oidc"`.
    - The OIDC form's client secret is required, and its placeholder "Stored; leave blank to keep it" is shown, only when `provider?.protocol === "oidc"`. Today the check is `provider === undefined`. A switch from SAML needs a secret (M2 SA2.4).
    - The existing OIDC form's title and description stay as they are; the radio sits above it.
@@ -271,14 +275,14 @@ No new dependency.
    - Pass `upgradeUrl={entitlements.upgradeUrl}` to `ProviderSection`, which shows the SAML lock (step 5).
 7. `sso.test.tsx`: no behaviour change. Update only what the protocol radio breaks: the first test also asserts the radio `OpenID Connect` is checked. Keep every other assertion.
 8. `sso.saml.test.tsx` (new, same helpers as `sso.test.tsx`; copy `meAs` and an `openPage({ features })` that sets the entitlements features to the given list):
-   - Constants: a typed `const samlSso: Schema<"OrgSso">` built from the fixture with `provider: { protocol: "saml", display_name: "Acme SAML", enabled: false, enforced: false, jit_role: "viewer", created_at: <fixture's>, updated_at: <fixture's>, saml: { idp_entity_id: "https://idp.acme.test/metadata", sso_url: "https://idp.acme.test/sso", metadata_url: "https://idp.acme.test/metadata", certificates: [{ sha256: "a".repeat(64), not_before: "2025-01-01T00:00:00Z", not_after: "2099-01-01T00:00:00Z" }], attributes: {}, refreshed_at: "2026-01-01T00:00:00Z" } }`.
+   - Constants: a typed `const samlSso: Schema<"OrgSso">` built from the fixture with `provider: { protocol: "saml", display_name: "Acme SAML", enabled: false, enforced: false, jit_role: "viewer", created_at: <fixture's>, updated_at: <fixture's>, saml: { idp_entity_id: "https://idp.acme.test/metadata", sso_url: "https://idp.acme.test/sso", metadata_url: "https://idp.acme.test/metadata", certificates: [{ sha256: "a".repeat(64), not_before: "2025-01-01T00:00:00Z", not_after: "2099-01-01T00:00:00Z" }], attributes: {}, refreshed_at: "2026-01-01T00:00:00Z", refresh_error: null, certificates_changed_at: null } }` (adjust `null` versus omitted to the generated types).
    - Tests:
      1. `"sets up a SAML provider from a metadata URL"`: OIDC fixture, features `org_sso` and `saml`. Choose `SAML 2.0`, clear and type the display name, type the URL, save. The handler records the body → `toEqual({ display_name: "Acme SAML", jit_role: "viewer", metadata_url: "https://idp.acme.test/metadata" })`; answer `samlSso`. The protocol change remounts the forms, so assert the "Identity provider metadata" card and the "Trusted certificates" list, not "Saved".
      2. `"warns before switching protocol"`: OIDC fixture; choosing `SAML 2.0` shows the switch note. With `enforced: true`, it shows the enforcement note.
      3. `"shows the service provider details"`: the values by their `<code>` ids (`#saml-entity-id`, `#saml-acs-url`, `#saml-metadata-url`, `#saml-start-url`; the entity ID and SP metadata URL share a value, so do not use `getByText`) and their copy buttons (`Copy acs url`, etc.).
-     4. `"sends pasted XML and manual fields"`: XML pasted with `user.paste` → `metadata_xml`. Manual, with two PEM blocks pasted into the textarea (`getByLabelText("Signing certificates")`) → `certificates` has 2 entries, plus `idp_entity_id` and `sso_url`.
-     5. `"keeps the current metadata when only the name changes"`: `samlSso`, change the display name → body `{ display_name, jit_role }`, with no source keys; then "Saved" (same protocol, no remount).
-     5b. `"re-imports an unchanged metadata URL"`: `samlSso` with `refresh_error: "entity_id_changed"`; open the "Metadata URL" tab without editing; Save is enabled and sends `metadata_url` equal to the stored one.
+     4. `"sends pasted XML and manual fields"`: XML pasted with `user.click` on the textarea then `user.paste` → `metadata_xml`. Manual, with two PEM blocks pasted into the textarea (`getByLabelText("Signing certificates")`) → `certificates` has 2 entries, plus `idp_entity_id` and `sso_url`.
+     5. `"keeps the current metadata when only the name changes"`: `samlSso`, change the display name → body `{ display_name, jit_role }`, with no source keys. The handler answers `samlSso` with the new `display_name` (same `created_at`), then "Saved" shows.
+     5b. `"re-imports an unchanged metadata URL"`: `samlSso` with `refresh_error: "entity_id_changed"`; open the tab `getByRole("tab", { name: "Metadata URL" })` without editing; Save is enabled and sends `metadata_url` equal to the stored one.
      5c. `"switching from SAML to OIDC asks for a client secret"`: `samlSso`; choose `OpenID Connect`, fill the issuer and client ID, save without a secret → the client message "Enter a client secret." and no request.
      6. `"sends only the attribute names that are set"`: email attribute `mail` → `attributes: { email: "mail" }`.
      7. `"confirms an entity ID change"`: the first PUT answers `problemResponse(409, "conflict", { detail: ENTITY_ID_CHANGE_DETAIL })`. The dialog shows; confirming sends the second body with `confirm_entity_id_change: true`. A second run that presses Cancel shows no error in the form afterwards.
@@ -288,7 +292,7 @@ No new dependency.
      11. `"locks SAML without the saml feature and keeps turning it off"`: features `org_sso` only, `samlSso` with `enabled: true`. The inputs are disabled; the "Locked feature" note for SAML shown; the Enabled switch can still be turned off (the PATCH handler receives `{ enabled: false }`).
      11b. `"shows the SAML lock when choosing SAML over OIDC"`: OIDC fixture, features `org_sso` only; choosing `SAML 2.0` shows the SAML "Locked feature" note.
      12. `"removal asks for the IdP entity ID"`: the remove dialog's input label is `Type "https://idp.acme.test/metadata" to confirm` (query the dialog's input by that label, not by text, since the metadata card shows the same value).
-     13. `"asks before leaving with unsaved SAML changes"`.
+     13. `"asks before leaving with unsaved SAML changes"`: copy `asks before leaving the provider form with unsaved changes` from `sso.test.tsx`, with `samlSso` and typing in `Display name`.
 
    Every `server.use` that overrides `GET /api/v1/orgs/:org/sso` runs before `openPage`, so the first render already sees it.
 
@@ -346,7 +350,7 @@ No new dependency.
    - the SAML form's fields and the metadata source tabs;
    - the Service provider details card, the Identity provider metadata card (certificates, refresh status) and the entity-ID confirmation;
    - the SAML lock (D-SA-4).
-5. `CHANGELOG.md` § `[Unreleased]` (this is the track's only CHANGELOG line; M4 does not add another): add `### Added` before `### Changed`, with the line `- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the \`saml\` licence feature).`
+5. `CHANGELOG.md` § `[Unreleased]` (this is the track's only CHANGELOG line; M4 does not add another): append to the existing `### Added` list (create it before `### Changed` only if it is missing) the line `- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the \`saml\` licence feature).`
 
 **Done when:** written and committed.
 

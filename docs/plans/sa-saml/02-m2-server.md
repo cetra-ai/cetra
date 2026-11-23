@@ -257,7 +257,8 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
        Failed(&'static str),
    }
 
-   /// The stored failure classes (`refresh_error`), snake_case.
+   /// The stored failure classes (`refresh_error`), snake_case. `record_refresh` starts with
+   /// `debug_assert!(REFRESH_ERRORS.contains(&class))` for `Failed(class)`.
    pub(crate) const REFRESH_ERRORS: [&str; 6] = ["fetch_failed", "status", "too_large", "denied", "unusable", "entity_id_changed"];
    ```
    `SamlWrite` gets a manual `Debug` with counts only. `RefreshOutcome` derives `Debug`; its URL and certificates make that acceptable only because it is never logged. Add a doc line saying so, and never pass it to a `tracing` macro.
@@ -318,7 +319,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    - `settings.rs`, `open_stored`: `row.oidc.as_ref().and_then(|o| state.secrets.open(&o.client_secret_enc, store::secret_aad(&row.id)).ok()).and_then(|bytes| String::from_utf8(bytes).ok()).ok_or_else(|| field_error("client_secret", "required"))`.
    - `settings.rs`, `provider_view`: until SA2.4 changes the response type, `issuer` and `client_id` read `row.oidc.as_ref().map(|o| o.issuer.clone()).unwrap_or_default()` (and the same for `client_id`). SA2.4 replaces this.
    - `settings.rs` tests that read `row.client_secret_enc`, `row.issuer` or `row.client_id` read them through `row.oidc.as_ref().unwrap()`. A `ProviderRow { .. }` literal gets `protocol: SsoProtocol::Oidc, oidc: Some(OidcColumns { .. })`.
-   - `mod.rs`, `reload`: at the top of the provider loop, `let Some(oidc) = row.oidc.as_ref() else { unreadable += 1; tracing::warn!(org_id = %row.org_id, "org identity provider skipped"); continue; };`, and the OIDC code reads `oidc.issuer`, `oidc.client_id`, `oidc.client_secret_enc`. SA2.3 replaces this with the protocol match. `mod.rs` tests adapt the same way.
+   - `mod.rs`, `reload`: right after the loop's existing first statement `flags.insert(..)` (which stays first, so an unreadable provider keeps its flags), `let Some(oidc) = row.oidc.as_ref() else { unreadable += 1; tracing::warn!(org_id = %row.org_id, "org identity provider skipped"); continue; };`, and the OIDC code reads `oidc.issuer`, `oidc.client_id`, `oidc.client_secret_enc`. SA2.3 replaces this with the protocol match. `mod.rs` tests adapt the same way.
    - `golden_tests/dump.rs`, `sso_section`: add `"protocol": row.protocol.as_str()` as the first key. `"issuer"` and `"client_id"` become `row.oidc.as_ref().map(|o| o.issuer.clone())` and the same for `client_id` (JSON `null` for SAML). `"has_secret"` becomes `row.oidc.as_ref().is_some_and(|o| !o.client_secret_enc.is_empty())`.
    - Grep `crates/server/src` for `.client_secret_enc`, `.issuer` and `.client_id` on a `ProviderRow` (not on `ProviderWrite` or OIDC config types) and adapt any other hit the same way.
 10. `store.rs` tests (in its `#[cfg(test)] mod tests`, using `crate::meta::test_db()` as the existing ones do; existing tests adapt as in step 9):
@@ -406,9 +407,20 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
    pub(crate) enum TakeError { Unknown, Binder }
 
-   /// A manual `Debug` prints the entry count only.
+   /// A manual `Debug` prints the entry count only. Every index is kept in step with `entries`
+   /// (eager removal), so no operation scans the whole table under the lock.
    #[derive(Default)]
-   pub(crate) struct PendingTable { entries: HashMap<String, Pending>, order: VecDeque<String> }
+   pub(crate) struct PendingTable {
+       entries: HashMap<String, Pending>,
+       /// Insertion (= expiry) order; may hold ids already removed (skipped lazily).
+       order: VecDeque<String>,
+       /// Ids per network, oldest first (at most `MAX_PER_IP` each).
+       by_network: HashMap<IpAddr, VecDeque<String>>,
+       /// Ids per org and network, oldest first.
+       by_org: HashMap<OrgId, HashMap<IpAddr, VecDeque<String>>>,
+       /// Live entries per org.
+       org_counts: HashMap<OrgId, usize>,
+   }
 
    impl PendingTable {
        /// Records `request_id`, evicting expired entries, then the oldest entry of the same
@@ -419,22 +431,28 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
        /// `binder`'s SHA-256 matches (constant-time). It is removed only on success; a wrong
        /// binder leaves it in place (D-SA-10). An expired entry is removed and is `Unknown`.
        pub(crate) fn take(&mut self, request_id: &str, org: OrgId, binder: Option<&str>, now: i64) -> Result<Pending, TakeError>;
-       /// Number of live entries (tests).
+       /// Number of live entries.
+       #[cfg(test)]
        pub(crate) fn len(&self) -> usize;
    }
    ```
+   A private `fn remove(&mut self, id: &str) -> Option<Pending>`:
+   - removes the id from `entries`;
+   - removes it from its `by_network` queue and its `by_org[org][network]` queue (a position search in a queue of at most 50, then `remove`), deleting queues and maps that become empty;
+   - decrements `org_counts` (removing the key at 0).
+
    `insert` steps:
-   1. Pop from the front of `order` while the front id is absent from `entries` or its entry is expired (`expires_ns <= now`), removing it from `entries`.
-   2. While the count of entries with `network == entry.network` is `>= MAX_PER_IP`, remove the first id in `order` whose entry has that network.
-   3. While the count of entries with `org == entry.org` is `>= MAX_PER_ORG`: find the network with the most entries for that org (ties: the network of the oldest such entry), and remove the first id in `order` whose entry has that org and that network. An attacker who fills an org's table from a few networks therefore evicts their own entries first.
-   4. While `entries.len() >= MAX_TOTAL`, pop and remove the front.
-   5. Insert, and push the id to the back.
+   1. While the front of `order` is absent from `entries` (pop it) or expired (`expires_ns <= now`: pop it and `remove` it), continue.
+   2. If `by_network[entry.network].len() >= MAX_PER_IP`, `remove` that queue's front.
+   3. If `org_counts[entry.org] >= MAX_PER_ORG`, pick the network whose `by_org[entry.org]` queue is longest (ties: the first found), and `remove` that queue's front. An attacker who fills an org's table from a few networks evicts their own entries first. The scan is over the org's networks only (at most `MAX_PER_ORG`).
+   4. While `entries.len() >= MAX_TOTAL`, pop the front of `order` and `remove` it if present.
+   5. Insert into `entries`, push the id to the back of `order`, `by_network[network]` and `by_org[org][network]`, and increment `org_counts[org]`.
 
    `take` steps:
    - Missing or expired → `Unknown` (remove if expired).
    - `entry.org != org` → `Unknown`, leave it.
    - `binder` is `None`, or `!crate::auth::secret::constant_time_eq(&hex::encode(Sha256::digest(binder)), &entry.binder_sha256)` → `Binder`, leave it.
-   - Otherwise remove it from `entries` and return it. `order` is cleaned lazily by `insert`.
+   - Otherwise `remove` it and return it. `order` is cleaned lazily by `insert`.
 
    Tests: `an_entry_is_taken_once`, `a_wrong_binder_keeps_the_entry`, `a_missing_binder_keeps_the_entry`, `another_org_cannot_take_it`, `an_expired_entry_is_unknown_and_removed`, `the_51st_entry_of_a_network_evicts_its_oldest`, `a_full_org_evicts_from_its_largest_network`, `other_networks_keep_their_entries` (one network fills 50, another holds 1, a full org evicts from the first), `debug_hides_the_binder_hash_and_redirect`.
 2. `mod.rs`:
@@ -479,7 +497,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
      ```
    - `reload`:
      - Read `store::active_saml(meta.reader())` once, before the provider loop.
-     - In the loop, match `row.protocol`:
+     - In the loop, `flags.insert(..)` stays the first statement (an unreadable provider keeps its flags); then match `row.protocol`:
        - `Oidc`: as today, reading `row.oidc` (a `None` here is impossible by the `CHECK`, but treat it as `unreadable += 1` with the same warn line).
        - `Saml`: take the `SamlRow` for `row.id` (missing → `unreadable`).
      - Build `ProviderConfig::Saml { .. }` from it. If the current index has an `Arc` with an equal config, keep it. Otherwise build `IdpMetadata::from_fields(&saml.idp_entity_id, &saml.sso_url, certs)`, where `certs` is `saml.certificates` mapped through `IdpCertificate::from_der` and collected. An error there is `unreadable` with the same warn line.
@@ -562,7 +580,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
      4. the first occurrence of ` ID="_`; the ID is `_` plus the next 32 characters.
 
      The binder cookie is the `Set-Cookie` header starting with `cetra_saml=`, cut at the first `;`.
-   - `saml_options` sets `audiences = vec![sp.entity_id]`, `recipient = sp.acs_url`, `destination = Some(sp.acs_url)`, both `InResponseTo` fields `Some(request_id)`, `name_id = "ada@acme.test"` and `attributes = vec![("email", vec!["ada@acme.test"]), ("displayName", vec!["Ada Lovelace"])]`, with `sp = sp_urls(&app.state.config.public_url, org)`.
+   - `saml_options` shifts the four times by `delta = app.state.clock.now_ns() - test_idp::NOW_NS` (`issue_instant_ns`, `not_before_ns`, `not_on_or_after_ns`, `confirmation_not_on_or_after_ns`, each `+ delta`), so it stays valid after a test advances the clock, and sets `audiences = vec![sp.entity_id]`, `recipient = sp.acs_url`, `destination = Some(sp.acs_url)`, both `InResponseTo` fields `Some(request_id)`, `name_id = "ada@acme.test"` and `attributes = vec![("email", vec!["ada@acme.test"]), ("displayName", vec!["Ada Lovelace"])]`, with `sp = sp_urls(&app.state.config.public_url, org)`.
    - `configure_org_saml` parses `cetra_saml::test_idp::metadata_xml(keys)` with `cetra_saml::parse_metadata`. It writes `store::put_saml_provider` with `display_name: "Acme SAML"`, `JitRole::Viewer`, `metadata_url: None`, the entity ID, SSO URL and DER certificates, default attributes and `refreshed_at: None`. Then `set_flags`, `set_last_login`, the domain insert and verification, and `reload_org_sso`, all as `configure_org_sso` does.
    - `saml_app` is `org_sso_app_with(|config| { config.public_url = serde_json::from_str("\"https://cetra.example\"").expect("url"); config.license_key = Some(crate::config::Secret::new(license_key(&["org_sso", "saml"]))); })`.
 
@@ -646,12 +664,12 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 3. `settings.rs`, new route in `routes()`: `PUT /api/v1/orgs/{org}/sso/saml` → `put_org_saml_provider`, with the same `Access` (`OrgPerm::ManageSso`, session only) and `documented: true` as the PUT provider route.
 4. `put_org_saml_provider` steps, in order:
    1. `require(&state, org, Feature::OrgSso)?` then `require(&state, org, Feature::Saml)?`.
-   2. `!state.config.public_url.is_https()` → `ApiError::Conflict { detail: "SAML needs an https public URL (public_url).".to_owned() }`.
+   2. `!state.config.public_url.is_https()` → `ApiError::Conflict { detail: "SAML needs an https public URL (public_url)." }` (`detail` is `&'static str`; never `.to_owned()`).
    3. `validate_saml(&body)`:
       - `display_name` is 1..=100 characters after trim (field `display_name`, the same message as OIDC's `validate`).
       - Each attribute name, when set, is 1..=256 characters with no control character (field `attributes.email` and so on, message `"invalid attribute name"`).
       - Sources: let `url = metadata_url.is_some()`, `xml = metadata_xml.is_some()`, `manual = any of idp_entity_id / sso_url / certificates is Some`. At most one of the three may hold, and `manual` needs all three fields. Otherwise field `metadata`, message `"give a metadata URL, the metadata XML, or the entity ID, SSO URL and certificates"`.
-      - **No source** is a settings-only save (D-SA-18). It is allowed only when the org's provider is already SAML. Skip steps 4 and 5, and in the write transaction call `store::update_saml_settings(conn, org, &display_name, jit_role, &attributes, now)`. On `false` (no SAML provider) answer the same field error `metadata`. Then continue at step 7.
+      - **No source** is a settings-only save (D-SA-18), allowed only when the org's provider is already SAML. It skips steps 4, 5 and 6 entirely. It uses its own write closure that calls only `store::update_saml_settings(conn, org, &display_name, jit_role, &attributes, now)`: no enforcement check, no entity-ID check and no identity deletion. On `false` (no SAML provider) it answers the same field error `metadata`. Then it runs step 7 (refresh, audit line, `view()`).
    4. Resolve the metadata:
       - URL:
         1. `refuse_outbound(&state, "identity provider check")?`.
@@ -673,7 +691,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
       - The handler maps `ApiError`s out of the closure the way `put_org_sso_provider` does with its `unchanged` 409. Read that code and use the same pattern.
    7. `super::refresh(&state).await`. Then `tracing::info!(target: "audit", org_id = %org, user_id = %caller, protocol = "saml", "org sso provider saved")`. Return `view()`.
 5. `put_org_sso_provider` (OIDC):
-   - `existing.protocol == Saml && existing.enforced` → the same 409 as step 6.
+   - `existing.protocol == Saml && existing.enforced` → the same 409 as step 6. The check runs **inside** the write closure on `current` (after the existing `unchanged` check), not only on the earlier read. Otherwise enforcement turned on in between would be silently reset by the switch. Map the 409 out of the closure as the `Save::Changed` outcome is mapped (a new `Save::Enforced` variant).
    - A switch from SAML needs a `client_secret` (field `client_secret`, `"required"`, the existing message) and deletes the identities. The existing `changes_identity` handling covers it: treat a switch as `changes_identity = true`.
    - The audit line gains `protocol = "oidc"`.
 6. `patch_org_sso`: when the stored provider is SAML and the request turns `enabled` or `enforced` on:
@@ -735,7 +753,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 1. `flow.rs`: add `LoginError::SamlInvalid` (doc: `/// A SAML response failed validation, or did not match a pending request (D-SA-9, D-SA-10).`) and `LoginError::SamlUnsupported` (doc: `/// A SAML response used a feature cetra refuses, such as an encrypted assertion (D-SA-8).`). Their codes are `"saml_invalid"` and `"saml_unsupported"`.
 2. `limits.rs`: add `pub(crate) saml_acs: KeyedLimiter<IpAddr>` with the doc comment `/// 60 per minute per client IP for the SAML ACS (D-SA-10).`. Build it in `Limits::new` as `KeyedLimiter::new(Bucket { capacity: 60, per: Duration::from_secs(60) }, MAX_KEYS)`, and prune it in `Limits::prune` like `sso_discover`.
-3. `csrf.rs`, in `must_check`, as the first check (before `session` is computed): `if request.extensions().get::<axum::extract::MatchedPath>().is_some_and(|path| path.as_str() == "/api/auth/saml/{org_id}/acs") { return false; }`, with the comment `// The IdP's cross-site POST carries the IdP's Origin; the binder cookie and the signature protect the ACS (D-SA-10, D-SA-12).`. `MatchedPath` is set there: `finish()` adds the layers with `Router::layer`, which runs after routing, and `log_request` already reads `MatchedPath` in the same stack. There is no raw-path fallback. Tests in `http/csrf.rs`'s module, or next to the existing Origin tests in `http/mod.rs`; use whichever file holds them:
+3. `csrf.rs`, in `must_check`, as the first check (before `session` is computed): `if request.extensions().get::<axum::extract::MatchedPath>().is_some_and(|path| path.as_str() == "/api/auth/saml/{org_id}/acs") { return false; }`, with the comment `// The IdP's cross-site POST carries the IdP's Origin; the binder cookie and the signature protect the ACS (D-SA-10, D-SA-12).`. `MatchedPath` is set there: `finish()` adds the layers with `Router::layer`, which runs after routing, and `log_request` already reads `MatchedPath` in the same stack. There is no raw-path fallback. Tests go in a new `#[cfg(test)] mod tests` at the end of `csrf.rs`, using `saml_app()` and `app.request(Method::POST, path).origin(Some("https://evil.test"))`:
    - `the_saml_acs_skips_the_origin_check`: a POST to a real org's ACS with `Origin: https://evil.test` and a session cookie → not 403 (404, since there is no SAML provider);
    - `other_saml_paths_keep_the_origin_check`: a POST to `/api/auth/saml/<id>/start` and to `/api/auth/saml/<id>/acs/x` with a foreign Origin → 403 (or 405/404 from routing, never accepted past CSRF). Assert the status is not 2xx or 3xx.
 4. `saml.rs` (new, `ee` header). The 413 for an oversized body comes from axum's `Bytes` rejection as plain text, not a problem document; that is accepted (tests assert the status only). Constants from § Conventions, plus:
@@ -869,7 +887,7 @@ Cases:
    /// Refreshes up to `BATCH` SAML providers whose metadata URL was last tried a day ago or more.
    pub(crate) async fn refresh_once(state: &AppState, now: i64) -> Result<Refresh, MetaError>;
    ```
-   For each `(org, row)` from `store::due_saml_refreshes(reader, now - DAY_NS, BATCH)`:
+   For each `(org, row)` from `store::due_saml_refreshes(reader, now - DAY_NS, BATCH)` (a row whose `metadata_url` is `None` is skipped; never unwrap it):
    1. `state.org_sso.fetch_metadata(url).await`:
       - `Err(Denied)` → `Failed("denied")`;
       - `Err(TooLarge)` → `Failed("too_large")`;
@@ -878,7 +896,7 @@ Cases:
    2. `cetra_saml::parse_metadata(&bytes)`: `Err` → `Failed("unusable")`.
    3. `metadata.entity_id() != row.idp_entity_id` → `Failed("entity_id_changed")`.
    4. Otherwise `Fetched { sso_url, certificates: metadata.certificates().iter().map(|c| c.der().to_vec()).collect() }`.
-   5. Write `store::record_refresh(conn, row.provider_id, outcome, now)`.
+   5. In the write closure, re-read `store::saml_tx(conn, row.provider_id)`. If it is `None`, or its `idp_entity_id` or `metadata_url` differ from the values this fetch used, the owner changed the provider meanwhile: drop the outcome, count nothing, write nothing. Otherwise write `store::record_refresh(conn, row.provider_id, outcome, now)`.
       - On `Ok(true)`: `tracing::warn!(target: "audit", org_id = %org, "org sso saml certificates changed")` and `rotated += 1`.
       - `Fetched` → `refreshed += 1`; `Failed` → `failed += 1` and `tracing::info!(org_id = %org, reason = class, "org sso saml metadata refresh failed")`.
 
@@ -921,7 +939,7 @@ Cases:
      - `get_saml_metadata` on `GET /api/auth/saml/{org_id}`: a path parameter `org_id` (string, "Org UUID"). Success `200` with content type `application/samlmetadata+xml` (a `ResponseBuilder` with `.content("application/samlmetadata+xml", Content::new(Some(string_schema())))`, mirroring `json_named`). Errors `&[404]`.
      - `get_saml_start` on `GET /api/auth/saml/{org_id}/start`: `responses("302", redirect_to("To the org's IdP, or to /login?error=sso_unavailable."), &[429, 503])`.
      - `post_saml_acs` on `POST /api/auth/saml/{org_id}/acs`:
-       - A component schema named `SamlAcsForm`, built with `ObjectBuilder` (properties `SAMLResponse`: string, required; `RelayState`: string). Register it in the components map under that name wherever the document's schema set is assembled (read how `set.insert::<T>()` ends up in `components.schemas`, and insert this one by name the same way).
+       - In `openapi.rs`, define `#[derive(utoipa::ToSchema)] #[allow(dead_code)] struct SamlAcsForm { #[serde(rename = "SAMLResponse")] #[schema(rename = "SAMLResponse")] saml_response: String, #[serde(rename = "RelayState")] #[schema(rename = "RelayState")] relay_state: Option<String> }`, documentation only (read how utoipa renames fields in this workspace's version, `#[schema(rename = ..)]` or the serde attribute, and use the one that works), and register it with `set.insert::<SamlAcsForm>()` next to the other org SSO inserts.
        - A new helper `fn form_body(name: &str) -> RequestBody`, a copy of `json_body` with content type `application/x-www-form-urlencoded`. The request body is `form_body("SamlAcsForm")`, so it is a `$ref` to the component.
        - Responses: `responses("302", redirect_to("To the saved page, the start URL for an unsolicited response, or /login?error=<code>."), &[404, 413, 429])`.
 
@@ -1000,7 +1018,7 @@ Cases:
 ## SA2.9 — Generate, check, review (coordinating session)
 
 **Steps:**
-1. `just openapi` (regenerates `crates/server/openapi.json` and `web/src/api/schema.gen.ts`), `just api-examples` (manifest), then regenerate the `meta_schema` insta snapshot (`INSTA_UPDATE=always cargo test -p cetra-server meta::tests` or `cargo insta accept`, whichever the repo uses; check `just` recipes first). Commit `Regenerate the API contract and schema snapshot for SAML`.
+1. The first build updates `Cargo.lock` (the server's new `cetra-saml` dependency); it is committed with the regenerated files. `just openapi` (regenerates `crates/server/openapi.json` and `web/src/api/schema.gen.ts`), `just api-examples` (manifest), then regenerate the `meta_schema` insta snapshot (`INSTA_UPDATE=always cargo test -p cetra-server meta::tests` or `cargo insta accept`, whichever the repo uses; check `just` recipes first). Commit `Regenerate the API contract and schema snapshot for SAML`.
 2. `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH` (check `ls ~/.local/share/nvm/`), then `just check`. Fix failures through Haiku fix phases with exact briefs, one commit each.
 3. A Sonnet code review of M2's diff against this plan, D-SA-2…D-SA-19 and D-P-51…D-P-65, with special attention to D-SA-10 (binder, consume order), the CSRF exemption's exactness, and privacy in logs. Fix its findings, then check the fixes.
 4. `docs/roadmap.md`: the SA row's status says M2 implemented. Update the PR #240 body (`gh api -X PATCH repos/cetra-ai/cetra/pulls/240 -f body=…`).
