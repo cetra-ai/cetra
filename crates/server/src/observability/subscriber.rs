@@ -27,8 +27,9 @@ const RMCP_DIRECTIVE: &str = "rmcp=warn";
 /// Target prefixes the export never carries: the crates of the exporter's own stack that log
 /// per request (an export they log would be exported, and so on) and the export's failure
 /// lines. A prefix covers longer names: `hyper` covers `hyper_util`, `tower` covers
-/// `tower_http`, `http_body` covers `http_body_util`.
-const EXPORT_DROPPED_TARGETS: &[&str] = &[
+/// `tower_http`, `http_body` covers `http_body_util`. The crash layer skips the same targets
+/// (track TL M5).
+pub(crate) const EXPORT_DROPPED_TARGETS: &[&str] = &[
     "opentelemetry",
     "hyper",
     "reqwest",
