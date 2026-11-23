@@ -337,13 +337,14 @@ In order: each depends on the previous one. Q's federation can start after M1.
 
 **Leaves out:** the web UI and the docs.
 
-### M3 — Settings page and docs draft
+### M3 — Settings page and docs
 
 **Delivers:**
 - The org SSO page with the protocol choice and the SAML form: metadata URL, XML or manual fields, attribute names.
 - The values to copy into the IdP, the trusted certificates with their expiry, the refresh status, and the locked state without `saml`.
 - The login error messages.
-- A draft of the docs, on the branch but not yet published as true: `platform/sso.mdx` (SAML setup, Okta and Keycloak walk-throughs, the tile URL) and `plans-and-licence.mdx`. "SAML is not supported" stays until M4.
+- The docs: `platform/sso.mdx` (SAML setup, Okta and Keycloak walk-throughs, the tile URL), `plans-and-licence.mdx` and `self-hosting/authentication.mdx`, written as final. The track has one PR, merged only after M4, so nothing is published before the review and interop.
+- The `CHANGELOG.md` line.
 
 **Depends on:** M2.
 
@@ -354,7 +355,7 @@ In order: each depends on the previous one. Q's federation can start after M1.
 **Delivers:**
 - The internal security review (D-SA-15) over `cetra-saml` and the server's SAML paths, with every finding fixed or recorded with a decision.
 - Interop by hand against an Okta developer org and Keycloak, following the docs page as written. These are the user's hands-on steps.
-- The docs corrected from the interop runs, "SAML is not supported" removed, the licence's feature list on `plans-and-licence.mdx`, and the `CHANGELOG.md` line. Then the marketing site may add SAML (D197's rule).
+- The docs corrected from the interop runs. After the PR merges, the marketing site may add SAML (D197's rule).
 
 **Depends on:** M3.
 

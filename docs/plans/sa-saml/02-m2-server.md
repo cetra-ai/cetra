@@ -710,7 +710,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 - `saml_needs_an_https_public_url`: `org_sso_app_with` licence `["org_sso", "saml"]`, default http URL → 409.
 - `switching_from_oidc_deletes_identities_and_resets_flags`: `configure_org_sso` (OIDC, enabled), an identity row present → PUT saml → identities 0, `enabled == false`.
 - `switching_is_refused_while_enforced`: OIDC enforced → 409; SAML enforced, then PUT OIDC → 409.
-- `an_entity_id_change_needs_confirmation`: 409 without; with `confirm_entity_id_change: true` → 200, identities deleted, `last_login_at == None`.
+- `an_entity_id_change_needs_confirmation`: 409 without, with the detail exactly `"Changing the IdP entity ID deletes the linked identities; confirm the change."` (the web UI matches it, M3 `ENTITY_ID_CHANGE_DETAIL`); with `confirm_entity_id_change: true` → 200, identities deleted, `last_login_at == None`.
 - `the_same_entity_id_keeps_identities`.
 - `switching_back_to_oidc_needs_a_secret`.
 - `enabling_saml_needs_the_feature_and_turning_off_does_not`: licence lapsed (the `license_key_until` pattern of `lapse_allows_only_turning_off`).

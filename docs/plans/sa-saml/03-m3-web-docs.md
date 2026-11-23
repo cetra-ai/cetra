@@ -60,7 +60,7 @@ No new dependency.
 | Phase | Edits | Depends on | Parallel with |
 |---|---|---|---|
 | SA3.1 Login messages | `web/src/lib/search/auth.ts`, `web/src/components/auth/messages.ts`, `web/src/routes/login.test.tsx` | M2 | SA3.2, SA3.3 |
-| SA3.2 SAML settings UI | `web/src/ee/org-sso/{org-sso-settings,provider-section,saml-provider-form,saml-metadata-card,saml-sp-card}.tsx`, `web/src/ee/org-sso/saml.ts`, `web/src/routes/$org/settings/sso.test.tsx`, `web/src/routes/$org/settings/sso.saml.test.tsx` | M2 | SA3.1, SA3.3 |
+| SA3.2 SAML settings UI | `web/src/ee/org-sso/{org-sso-settings,provider-section,saml-provider-form,saml-metadata-card,saml-sp-card}.tsx`, `web/src/ee/org-sso/saml.ts`, `web/src/ee/org-sso/saml.test.ts`, `web/src/routes/$org/settings/sso.test.tsx`, `web/src/routes/$org/settings/sso.saml.test.tsx` | M2 | SA3.1, SA3.3 |
 | SA3.3 Docs and spec | `website/src/content/docs/docs/platform/sso.mdx`, `…/platform/plans-and-licence.mdx`, `…/self-hosting/authentication.mdx`, `docs/spec/11-ui.md`, `CHANGELOG.md` | M2 | SA3.1, SA3.2 |
 | SA3.4 Checks and review (coordinating session) | fixes | all | — |
 
@@ -99,7 +99,9 @@ No new dependency.
 
 **Goal:** owners set up and maintain a SAML provider on the Single sign-on page.
 
-**Edit:** `web/src/ee/org-sso/org-sso-settings.tsx`, `web/src/ee/org-sso/provider-section.tsx`, `web/src/ee/org-sso/saml-provider-form.tsx` (new), `web/src/ee/org-sso/saml-metadata-card.tsx` (new), `web/src/ee/org-sso/saml-sp-card.tsx` (new), `web/src/ee/org-sso/saml.ts` (new), `web/src/routes/$org/settings/sso.test.tsx`, `web/src/routes/$org/settings/sso.saml.test.tsx` (new).
+**Edit:** `web/src/ee/org-sso/org-sso-settings.tsx`, `web/src/ee/org-sso/provider-section.tsx`, `web/src/ee/org-sso/saml-provider-form.tsx` (new), `web/src/ee/org-sso/saml-metadata-card.tsx` (new), `web/src/ee/org-sso/saml-sp-card.tsx` (new), `web/src/ee/org-sso/saml.ts` (new), `web/src/ee/org-sso/saml.test.ts` (new), `web/src/routes/$org/settings/sso.test.tsx`, `web/src/routes/$org/settings/sso.saml.test.tsx` (new).
+
+**Generated types.** Follow `web/src/api/schema.gen.ts` exactly: where a field is `T | null` rather than optional, typed literals use `null`. Read the generated `OrgSsoSaml`, `OrgSsoProvider` and `PutOrgSamlProvider` before writing.
 
 **Steps:**
 
@@ -138,7 +140,7 @@ No new dependency.
      - `days = Math.ceil((Date.parse(not_after) - nowMs) / 86_400_000)`; `days <= EXPIRY_WARNING_DAYS` → `expiring`;
      - otherwise `valid`.
    - `splitCertificates`:
-     - Trim the text. If it contains `-----BEGIN CERTIFICATE-----`, split it with `/(?=-----BEGIN CERTIFICATE-----)/`, trim each piece and keep the non-empty ones.
+     - Trim the text. If it contains `-----BEGIN CERTIFICATE-----`, split it with `/(?=-----BEGIN CERTIFICATE-----)/`, trim each piece, and keep only the pieces that start with `-----BEGIN CERTIFICATE-----` (text before the first block is dropped).
      - Else, a non-empty text is one entry.
    - `refreshErrorMessage`:
      - `fetch_failed` → "The metadata URL could not be reached."
@@ -160,7 +162,7 @@ No new dependency.
      - with `refresh_error`: `<StatusPill tone="warn">Refresh failed</StatusPill>` followed by `refreshErrorMessage(refresh_error)`;
      - else, when `refreshed_at`: `"Refreshed "` + `<RelativeTime value={refreshed_at} />` + `". It is checked once a day."`.
    - When `certificates_changed_at`: `<p role="note">Certificates changed on <TimeText value={…} style="datetime" />.</p>`.
-   - A list (`<ul aria-label="Signing certificates">`), one `<li>` per certificate with:
+   - A list (`<ul aria-label="Trusted certificates">`), one `<li>` per certificate with:
      - `SHA-256 ` plus the first 16 hex characters and `…` in a `<code>` with the full hash as `title`;
      - a `StatusPill` from `certificateState(c, Date.now())`:
        - `unreadable` → tone `error`, "Unreadable";
@@ -196,13 +198,13 @@ No new dependency.
 
    Fields, in order:
    1. `TextField id="saml-display-name" label="Display name"`, required (the client message `"Enter a display name."`), error `fields.display_name`.
-   2. A labelled `Tabs` (`aria-label="Metadata source"`, value `source`). Triggers:
+   2. A `Tabs` with value `source`, whose `TabsList` carries `aria-label="Metadata source"`. Triggers:
       - `"Current metadata"` (only when `saml` is defined);
       - `"Metadata URL"`, `"Metadata XML"`, `"Enter manually"`.
 
       Contents:
       - **current:** the text `"The stored metadata is kept. Choose another tab to replace it."`.
-      - **url:** `TextField id="saml-metadata-url-input" label="Metadata URL" type="url" placeholder="https://idp.example.com/app/…/sso/saml/metadata"`, description `"cetra loads it now and checks it again once a day for new certificates."`, error `fields.metadata_url`.
+      - **url:** `TextField id="saml-metadata-url-input" label="Metadata URL" placeholder="https://idp.example.com/app/…/sso/saml/metadata"`, description `"cetra loads it now and checks it again once a day for new certificates."`, error `fields.metadata_url`.
       - **xml:** `Label htmlFor="saml-metadata-xml"` `"Metadata XML"` + `Textarea id="saml-metadata-xml"`, `aria-invalid` when `fields.metadata_xml`, error paragraph `id="saml-metadata-xml-error"` as in `text-field.tsx`. Description: `"Paste the XML your identity provider shows for this app. It is not refreshed."`.
       - **manual:** `TextField id="saml-idp-entity-id-input" label="IdP entity ID"` (error `fields.idp_entity_id`); `TextField id="saml-sso-url-input" label="Sign-on URL"`, description `"The identity provider's SSO URL for the HTTP-Redirect binding."` (error `fields.sso_url`); `Label` + `Textarea id="saml-certificates"` `"Signing certificates"`, description `"PEM, one or more. Up to 4."` (error `fields.certificates`).
 
@@ -222,9 +224,10 @@ No new dependency.
 
    `dirty` is true when any of these hold:
    - the display name, JIT role or any attribute differs from the saved values;
-   - `source` is `url` and the URL differs from `saml?.metadata_url ?? ""`;
-   - `source` is `xml` or `manual` with any non-blank input;
+   - `source` is not `"current"` (choosing a source tab is an explicit re-import, D-SA-11; Save then also re-fetches an unchanged metadata URL, which is how an owner accepts a refresh failure);
    - no SAML provider is saved yet (the form always saves).
+
+   Every input, tab trigger and the Select are `disabled={locked || save.isPending}`.
 
    The body built on submit (`Schema<"PutOrgSamlProvider">`):
    - `{ display_name: displayName.trim(), jit_role: jitRole }`;
@@ -236,13 +239,16 @@ No new dependency.
 
    Mutation: `$api.useMutation("put", "/api/v1/orgs/{org}/sso/saml")`.
    - On success: clear the XML, manual and certificate inputs, set `source` to `"current"`, `setSaved(true)`, `storeOrgSso(queryClient, org, answer)`.
-   - On error: if it is a 409 whose `problemMessage` equals `ENTITY_ID_CHANGE_DETAIL`, open a `ConfirmDialog` instead of showing the error:
+   - On error: if `problemOf(save.error)` (from `@/api/problem`; read it for the exact name and shape) has status 409 and detail equal to `ENTITY_ID_CHANGE_DETAIL`, open a `ConfirmDialog` instead of showing the error. For that error, `saveError` is `undefined`, so nothing shows behind the dialog. The dialog:
      - `destructive`;
      - title `"Change the identity provider?"`;
      - description `"The new metadata names another entity ID. Saving it deletes the identities linked to the current one; members link again at their next sign-in."`;
      - confirm label `"Save and relink"`.
 
-     Confirming re-sends the same body with `confirm_entity_id_change: true`.
+     - `details`: `` `Current IdP entity ID: ${saml?.idp_entity_id}` `` when a SAML provider is saved;
+     - `pending={save.isPending}`, and `error` = the retry's error message, if any.
+
+     Confirming re-sends the same body with `confirm_entity_id_change: true`; success closes it (`setConfirmOpen(false)`). Cancel closes it and calls `save.reset()`.
    - Any other non-field error shows through `SettingsFormCard`'s `error` (`problemMessage(save.error, "Could not save the identity provider.")`).
 5. `provider-section.tsx`:
    - A protocol choice above the forms. A `RadioGroup` labelled `"Protocol"` (`aria-label="Protocol"`) with items `oidc` → `"OpenID Connect"` and `saml` → `"SAML 2.0"`, following the `create-token-dialog.tsx` pattern. Its state `protocol` starts at `sso.provider?.protocol ?? "oidc"`.
@@ -251,7 +257,9 @@ No new dependency.
      - and when `sso.provider.enforced`, instead: `"Turn off enforcement before switching the protocol."`.
    - `protocol === "oidc"` renders the existing OIDC form card and the "Callback URL" card, unchanged.
    - `protocol === "saml"` renders `<SamlProviderForm org={org} sso={sso} locked={samlLocked} />` and `<SamlSpCard sp={sso.saml_sp} />`.
-   - The section takes a new prop `samlLocked: boolean`.
+   - The section takes a new prop `samlLocked: boolean`. When `protocol === "saml" && samlLocked`, render `<LockedFeature feature="saml" upgradeUrl={upgradeUrl} />` above the SAML form (the section takes `upgradeUrl` too), whatever the saved provider is.
+   - The radio items are `id="sso-protocol-oidc"` and `id="sso-protocol-saml"`; `onValueChange` narrows the string with `value === "saml" ? "saml" : "oidc"`.
+   - The OIDC form's client secret is required, and its placeholder "Stored; leave blank to keep it" is shown, only when `provider?.protocol === "oidc"`. Today the check is `provider === undefined`. A switch from SAML needs a secret (M2 SA2.4).
    - The existing OIDC form's title and description stay as they are; the radio sits above it.
    - `ProviderRemoval` takes `confirmText: string` instead of `issuer` (the type-to-confirm text and label use it).
 6. `org-sso-settings.tsx`:
@@ -260,26 +268,37 @@ No new dependency.
    - When `sso.provider?.protocol === "saml" && sso.provider.saml`, render `<SamlMetadataCard saml={sso.provider.saml} />` between the provider section and the domains section.
    - `StatusSection`'s `locked` becomes `locked || (sso.provider?.protocol === "saml" && entitlements.locked("saml"))`.
    - `ProviderRemoval` gets `confirmText={sso.provider.issuer ?? sso.provider.saml?.idp_entity_id ?? sso.provider.display_name}`. This replaces M2's temporary `issuer ?? display_name`.
-   - When `locked` is false but `samlLocked` is true and the saved provider is SAML, also render `<LockedFeature feature="saml" upgradeUrl={entitlements.upgradeUrl} />` above the sections.
+   - Pass `upgradeUrl={entitlements.upgradeUrl}` to `ProviderSection`, which shows the SAML lock (step 5).
 7. `sso.test.tsx`: no behaviour change. Update only what the protocol radio breaks: the first test also asserts the radio `OpenID Connect` is checked. Keep every other assertion.
 8. `sso.saml.test.tsx` (new, same helpers as `sso.test.tsx`; copy `meAs` and an `openPage({ features })` that sets the entitlements features to the given list):
    - Constants: a typed `const samlSso: Schema<"OrgSso">` built from the fixture with `provider: { protocol: "saml", display_name: "Acme SAML", enabled: false, enforced: false, jit_role: "viewer", created_at: <fixture's>, updated_at: <fixture's>, saml: { idp_entity_id: "https://idp.acme.test/metadata", sso_url: "https://idp.acme.test/sso", metadata_url: "https://idp.acme.test/metadata", certificates: [{ sha256: "a".repeat(64), not_before: "2025-01-01T00:00:00Z", not_after: "2099-01-01T00:00:00Z" }], attributes: {}, refreshed_at: "2026-01-01T00:00:00Z" } }`.
    - Tests:
-     1. `"sets up a SAML provider from a metadata URL"`: OIDC fixture, features `org_sso` and `saml`. Choose `SAML 2.0`, type the display name and URL, save. The handler records the body → `toEqual({ display_name: "Acme SAML", jit_role: "viewer", metadata_url: "https://idp.acme.test/metadata" })`; answer `samlSso`; then "Saved", the certificate list, and "Identity provider metadata".
+     1. `"sets up a SAML provider from a metadata URL"`: OIDC fixture, features `org_sso` and `saml`. Choose `SAML 2.0`, clear and type the display name, type the URL, save. The handler records the body → `toEqual({ display_name: "Acme SAML", jit_role: "viewer", metadata_url: "https://idp.acme.test/metadata" })`; answer `samlSso`. The protocol change remounts the forms, so assert the "Identity provider metadata" card and the "Trusted certificates" list, not "Saved".
      2. `"warns before switching protocol"`: OIDC fixture; choosing `SAML 2.0` shows the switch note. With `enforced: true`, it shows the enforcement note.
-     3. `"shows the service provider details"`: the four values and their copy buttons (`Copy acs url`, etc.).
-     4. `"sends pasted XML and manual fields"`: XML → `metadata_xml`. Manual, with two PEM blocks in the textarea → `certificates` has 2 entries, plus `idp_entity_id` and `sso_url`.
-     5. `"keeps the current metadata when only the name changes"`: `samlSso`, change the display name → body `{ display_name, jit_role }`, with no source keys.
+     3. `"shows the service provider details"`: the values by their `<code>` ids (`#saml-entity-id`, `#saml-acs-url`, `#saml-metadata-url`, `#saml-start-url`; the entity ID and SP metadata URL share a value, so do not use `getByText`) and their copy buttons (`Copy acs url`, etc.).
+     4. `"sends pasted XML and manual fields"`: XML pasted with `user.paste` → `metadata_xml`. Manual, with two PEM blocks pasted into the textarea (`getByLabelText("Signing certificates")`) → `certificates` has 2 entries, plus `idp_entity_id` and `sso_url`.
+     5. `"keeps the current metadata when only the name changes"`: `samlSso`, change the display name → body `{ display_name, jit_role }`, with no source keys; then "Saved" (same protocol, no remount).
+     5b. `"re-imports an unchanged metadata URL"`: `samlSso` with `refresh_error: "entity_id_changed"`; open the "Metadata URL" tab without editing; Save is enabled and sends `metadata_url` equal to the stored one.
+     5c. `"switching from SAML to OIDC asks for a client secret"`: `samlSso`; choose `OpenID Connect`, fill the issuer and client ID, save without a secret → the client message "Enter a client secret." and no request.
      6. `"sends only the attribute names that are set"`: email attribute `mail` → `attributes: { email: "mail" }`.
-     7. `"confirms an entity ID change"`: the first PUT answers `problemResponse(409, "conflict", { detail: ENTITY_ID_CHANGE_DETAIL })`. The dialog shows; confirming sends the second body with `confirm_entity_id_change: true`.
+     7. `"confirms an entity ID change"`: the first PUT answers `problemResponse(409, "conflict", { detail: ENTITY_ID_CHANGE_DETAIL })`. The dialog shows; confirming sends the second body with `confirm_entity_id_change: true`. A second run that presses Cancel shows no error in the form afterwards.
      8. `"shows field errors under their fields"`: a 400 with `metadata_url` and `attributes.email` errors → the texts and `aria-invalid`.
      9. `"shows a metadata source error under the tabs"`: a 400 with field `metadata` → the `alert`.
      10. `"shows certificate expiry and refresh failures"`: certificates expiring in 10 days (computed from `Date.now()`), expired, and epoch-unreadable, plus `refresh_error: "entity_id_changed"` and `certificates_changed_at` → the three pills, the message and the note.
-     11. `"locks SAML without the saml feature and keeps turning it off"`: features `org_sso` only, `samlSso` with `enabled: true`. Save disabled; the "Locked feature" note for SAML shown; the Enabled switch can still be turned off (the PATCH handler receives `{ enabled: false }`).
-     12. `"removal asks for the IdP entity ID"`: the remove dialog's input label is `Type "https://idp.acme.test/metadata" to confirm`.
+     11. `"locks SAML without the saml feature and keeps turning it off"`: features `org_sso` only, `samlSso` with `enabled: true`. The inputs are disabled; the "Locked feature" note for SAML shown; the Enabled switch can still be turned off (the PATCH handler receives `{ enabled: false }`).
+     11b. `"shows the SAML lock when choosing SAML over OIDC"`: OIDC fixture, features `org_sso` only; choosing `SAML 2.0` shows the SAML "Locked feature" note.
+     12. `"removal asks for the IdP entity ID"`: the remove dialog's input label is `Type "https://idp.acme.test/metadata" to confirm` (query the dialog's input by that label, not by text, since the metadata card shows the same value).
      13. `"asks before leaving with unsaved SAML changes"`.
 
+   Every `server.use` that overrides `GET /api/v1/orgs/:org/sso` runs before `openPage`, so the first render already sees it.
+
    Time-dependent assertions use `vi.useFakeTimers({ toFake: ["Date"] })` with `vi.setSystemTime(new Date("2026-01-01T00:00:00Z"))`, or compute from `Date.now()`. Pick the approach `sso.test.tsx` or nearby tests already use; if none, compute from `Date.now()`.
+
+9. `saml.test.ts` (new, vitest, no rendering):
+   - `certificateState` at exactly 30 and 31 days before expiry (`expiring` with 30 days, then `valid`), expired, and the epoch case (`unreadable`);
+   - `splitCertificates` with two blocks, text before the first block (dropped), no BEGIN marker (one entry), and blank input (`[]`);
+   - `refreshErrorMessage` for all six values;
+   - `attributesBody` dropping blanks and trimming.
 
 **Done when:** written and committed.
 
@@ -297,35 +316,37 @@ No new dependency.
 1. `sso.mdx`:
    - Frontmatter description: `The ways members sign in to cetra, and how an org can require OIDC or SAML single sign-on for its own email domains.` (under 160 characters).
    - Intro first sentence becomes: `cetra supports password sign-in, GitHub, Google and any OpenID Connect (OIDC) provider for the whole instance, and OIDC or SAML 2.0 for an org's own provider.`
-   - In "What members see", the error-code sentence lists `saml_invalid` too.
+   - In "What members see", the error-code sentence lists `saml_invalid` and `saml_unsupported` too.
+   - In "Instance providers", add at its end: `Instance providers use OIDC. SAML is available only for an org's own provider.`
    - "Per-org SSO" first paragraph: `An org owner registers one identity provider for the org, using OIDC or SAML 2.0, and proves ownership of the org's email domains with a DNS TXT record:`. Remove the "part of the Teams add-on" sentence and add, after the steps: `Per-org SSO needs a licence or plan that includes it. SAML needs an enterprise licence that includes SAML, and the instance's public URL must use https.`
-   - A new section `## Set up SAML`, after "Per-org SSO" and before the break-glass paragraph's section end (keep the break-glass paragraph in "Per-org SSO"). It contains:
+   - A new section `## Set up SAML`, placed after the whole "Per-org SSO" section (which keeps its break-glass paragraph). It contains:
      1. A one-sentence lead: `To use SAML, create a SAML app at your identity provider for cetra, then give cetra the app's metadata.`
      2. Numbered steps:
         1. `On the Single sign-on page, choose **SAML 2.0**. The **Service provider details** card shows the values your identity provider asks for.`
-        2. `In your identity provider, create a SAML 2.0 app. Set the ACS URL (also called the single sign-on URL or reply URL) and the entity ID (also called the audience) to the values cetra shows. Use the email address as the NameID, or send it in an attribute named email.`
+        2. `In your identity provider, create a SAML 2.0 app and assign the people or groups who should sign in. Set the ACS URL (also called the single sign-on URL or reply URL) and the entity ID (also called the audience) to the values cetra shows. Send the email address in an attribute named email, or use it as the NameID with the email address format.`
         3. `Copy the app's metadata URL into **Metadata URL**, or paste the metadata XML. You can also enter the entity ID, sign-on URL and signing certificate yourself.`
-        4. `Save, then test the sign-in and enable the provider as for OIDC.`
-     3. A subsection `### Okta` with steps: create the app integration with sign-in method **SAML 2.0**; single sign-on URL = the ACS URL; audience URI = the entity ID; name ID format **EmailAddress**, application username **Email**; then copy the **Metadata URL** from the app's **Sign On** tab into cetra.
-     4. A subsection `### Keycloak` with steps: create a client with client type **SAML** and client ID = the entity ID; valid redirect URIs and **Assertion Consumer Service POST Binding URL** = the ACS URL; name ID format **email**; leave **Encrypt assertions** off; the metadata URL is `https://<KEYCLOAK_HOST>/realms/<REALM>/protocol/saml/descriptor`.
+        4. `Save, then test the sign-in and enable the provider as for OIDC. To show cetra as a tile in your identity provider, use the **Start URL** as the app's sign-on URL.`
+     2b. A paragraph: `Switching an org's provider between OIDC and SAML deletes the links between members and the old provider, turns the provider off until you test it again, and is refused while single sign-on is enforced.`
+     3. A subsection `### Okta` with steps: create the app integration with sign-in method **SAML 2.0**; single sign-on URL = the ACS URL; audience URI = the entity ID; name ID format **EmailAddress**, application username **Email**; assign the people or groups on the **Assignments** tab; then copy the **Metadata URL** from the app's **Sign On** tab into cetra.
+     4. A subsection `### Keycloak` with steps: create a client with client type **SAML** and client ID = the entity ID; valid redirect URIs and **Assertion Consumer Service POST Binding URL** = the ACS URL; name ID format **email** with **Force name ID format** on; turn **Client signature required** off (cetra does not sign its requests); leave **Encrypt assertions** off; the metadata URL is `https://<KEYCLOAK_HOST>/realms/<REALM>/protocol/saml/descriptor` (it must use https).
      5. A subsection `### What cetra accepts`, a short list:
         - signed responses or assertions with SHA-256 or stronger;
         - one assertion per response;
         - no encrypted assertions;
         - sign-in started from cetra; a click on the app tile in the identity provider starts a new sign-in from cetra;
         - no single logout;
-        - attributes `email`, `displayName`, `firstName` and `lastName` and their Microsoft Entra ID, Google and LDAP equivalents, or the names the owner sets.
+        - the email and name attributes Okta, Microsoft Entra ID, Google and Keycloak send by default, or the names the owner sets.
      6. A subsection `### Certificates and metadata`:
-        - `When you give a metadata URL, cetra checks it once a day and trusts every signing certificate it lists, so your identity provider can add the next certificate before it switches. Pasted metadata is not refreshed; paste it again when the certificate changes. The page warns 30 days before a certificate expires. Changing the identity provider's entity ID deletes the links between members and the old provider; members link again at their next sign-in.`
-   - The final sentence `SAML is not supported.` becomes `SAML is not supported for instance providers.` It is true (D-SA-7) and stays true after M4.
+        - `When you give a metadata URL, cetra checks it once a day and trusts every signing certificate it lists, up to four, so your identity provider can add the next certificate before it switches. Pasted metadata is not refreshed; paste it again when the certificate changes. The page warns 30 days before a certificate expires. If the metadata at the URL names another entity ID, cetra keeps the old metadata and shows the error until you save it again. Changing the entity ID deletes the links between members and the old provider; members link again at their next sign-in.`
+   - The final sentence of "Per-org SSO", `SAML is not supported.`, is removed (the new "Instance providers" sentence covers instance providers).
 2. `plans-and-licence.mdx`: after the `org_sso` row, add `| \`saml\` | SAML 2.0 for an org's own provider. See [Single sign-on](/docs/platform/sso/#set-up-saml). |`.
-3. `authentication.mdx` line 91: replace `SAML is not supported.` with `Instance providers use OIDC; an org can use SAML for its own provider ([Single sign-on](/docs/platform/sso/#set-up-saml)).`
-4. `docs/spec/11-ui.md`: replace SA2.8's sentence at the Single sign-on settings bullet (line 243) with:
+3. `authentication.mdx`: check that line 126 (the "Teams add-on" mention) is still accurate, and leave it if so. Line 91: replace `SAML is not supported.` with `Instance providers use OIDC; an org can use SAML for its own provider ([Single sign-on](/docs/platform/sso/#set-up-saml)).`
+4. `docs/spec/11-ui.md`: replace the sentence SA2.8 added to the Single sign-on settings bullet ("SAML providers are configured on the same page (M3 of track SA).") with:
    - a description of the protocol radio;
    - the SAML form's fields and the metadata source tabs;
    - the Service provider details card, the Identity provider metadata card (certificates, refresh status) and the entity-ID confirmation;
    - the SAML lock (D-SA-4).
-5. `CHANGELOG.md` § `[Unreleased]`: add `### Added` before `### Changed`, with the line `- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the \`saml\` licence feature).`
+5. `CHANGELOG.md` § `[Unreleased]` (this is the track's only CHANGELOG line; M4 does not add another): add `### Added` before `### Changed`, with the line `- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the \`saml\` licence feature).`
 
 **Done when:** written and committed.
 
