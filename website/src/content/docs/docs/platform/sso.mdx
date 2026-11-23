@@ -1,9 +1,9 @@
 ---
 title: Single sign-on
-description: The ways members sign in to cetra, and how an org can require single sign-on for its own email domains.
+description: The ways members sign in to cetra, and how an org can require OIDC or SAML single sign-on for its own email domains.
 ---
 
-cetra supports password sign-in, GitHub, Google and any OpenID Connect (OIDC) provider. The operator of the instance chooses which ones to enable.
+cetra supports password sign-in, GitHub, Google and any OpenID Connect (OIDC) provider for the whole instance, and OIDC or SAML 2.0 for an org's own provider. The operator of the instance chooses which ones to enable.
 
 ## What members see
 
@@ -11,7 +11,7 @@ The login page shows a password form when password login is on, and one button p
 
 When password login is off, no org has its own provider and exactly one instance provider is configured, the login page skips the button and sends you straight to that provider. It does not do this right after you sign out, after a failed sign-in, or on `/login?password=1`.
 
-When a sign-in fails, the page shows an error code, such as `domain_not_allowed`, `email_not_verified`, `signup_closed` or `sso_required`.
+When a sign-in fails, the page shows an error code, such as `domain_not_allowed`, `email_not_verified`, `signup_closed`, `sso_required`, `saml_invalid` or `saml_unsupported`.
 
 ## Instance providers
 
@@ -19,13 +19,17 @@ The operator of a self-hosted instance configures GitHub, Google and OIDC provid
 
 A provider sign-in links to an existing account with the same email only when the provider is set to link by email and asserts that the email is verified. Linking signs the account out of its other sessions and revokes its personal access tokens.
 
+Instance providers use OIDC. SAML is available only for an org's own provider.
+
 ## Per-org SSO
 
-Per-org SSO is part of the Teams add-on. An org owner registers one OIDC provider for the org and proves ownership of the org's email domains with a DNS TXT record:
+An org owner registers one identity provider for the org, using OIDC or SAML 2.0, and proves ownership of the org's email domains with a DNS TXT record:
 
 1. Add the domain. cetra shows a value to publish.
 2. Create a TXT record named `_cetra-verify.<domain>` with the value `cetra-verify=<token>`.
 3. Verify the domain. cetra looks the record up, and checks it again once a day. If the record disappears, the domain stops routing and enforcing.
+
+Per-org SSO needs a licence or plan that includes it. SAML needs an enterprise licence that includes SAML, and the instance's public URL must use https.
 
 A domain can be verified by one org at a time.
 
@@ -37,4 +41,43 @@ A member who signs in through the org's provider for the first time joins with t
 
 If the provider breaks, an operator on the server can run `cetra admin org-sso disable <org>`. It works while the server is stopped, and a running server applies it within a minute.
 
-SAML is not supported.
+## Set up SAML
+
+To use SAML, create a SAML app at your identity provider for cetra, then give cetra the app's metadata.
+
+1. On the Single sign-on page, choose **SAML 2.0**. The **Service provider details** card shows the values your identity provider asks for.
+2. In your identity provider, create a SAML 2.0 app and assign the people or groups who should sign in. Set the ACS URL (also called the single sign-on URL or reply URL) and the entity ID (also called the audience) to the values cetra shows. Send the email address in an attribute named `email`, or use it as the NameID with the email address format.
+3. Copy the app's metadata URL into **Metadata URL**, or paste the metadata XML. You can also enter the entity ID, sign-on URL and signing certificate yourself.
+4. Save, then test the sign-in and enable the provider as for OIDC. To show cetra as a tile in your identity provider, use the **Start URL** as the app's sign-on URL.
+
+Switching an org's provider between OIDC and SAML deletes the links between members and the old provider, turns the provider off until you test it again, and is refused while single sign-on is enforced.
+
+### Okta
+
+1. Create an app integration with the sign-in method **SAML 2.0**.
+2. Set **Single sign-on URL** to the ACS URL, and **Audience URI** to the entity ID, that cetra shows.
+3. Set the name ID format to **EmailAddress** and the application username to **Email**.
+4. Assign the people or groups on the **Assignments** tab.
+5. Copy the **Metadata URL** from the app's **Sign On** tab into cetra.
+
+### Keycloak
+
+1. Create a client with the client type **SAML**, and set the client ID to the entity ID.
+2. Set **Valid redirect URIs** and **Assertion Consumer Service POST Binding URL** to the ACS URL.
+3. Set the name ID format to **email**, and turn **Force name ID format** on.
+4. Turn **Client signature required** off. cetra does not sign its requests.
+5. Leave **Encrypt assertions** off.
+6. In cetra, use the metadata URL `https://<KEYCLOAK_HOST>/realms/<REALM>/protocol/saml/descriptor`. It must use https.
+
+### What cetra accepts
+
+- Signed responses or assertions, with SHA-256 or stronger.
+- One assertion per response.
+- No encrypted assertions.
+- Sign-ins that start in cetra. A click on the app tile in your identity provider starts a new sign-in from cetra.
+- No single logout. Signing out of cetra ends only the cetra session.
+- The email and name attributes that Okta, Microsoft Entra ID, Google and Keycloak send by default, or the attribute names you set.
+
+### Certificates and metadata
+
+When you give a metadata URL, cetra checks it once a day and trusts every signing certificate it lists, up to four, so your identity provider can add the next certificate before it switches. Pasted metadata is not refreshed; paste it again when the certificate changes. The page warns 30 days before a certificate expires. If the metadata at the URL names another entity ID, cetra keeps the old metadata and shows the error until you save it again. Changing the entity ID deletes the links between members and the old provider; members link again at their next sign-in.
