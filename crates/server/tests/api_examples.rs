@@ -71,7 +71,7 @@ use cetra_server::api::prompts::{
 };
 use cetra_server::api::saved_views::SavedView;
 use cetra_server::api::schema::SchemaResponse;
-use cetra_server::api::scim::{CreatedScimToken, ScimSettings};
+use cetra_server::api::scim::{CreatedScimToken, ScimGroup, ScimGroupList, ScimSettings};
 use cetra_server::api::score_definitions::{CreateScoreDefinitionRequest, ScoreDefinition};
 use cetra_server::api::scores::{FeedbackRequest, ScoreBatch};
 use cetra_server::api::sessions::{SessionDetail, SessionSummary};
@@ -411,6 +411,7 @@ fn static_files_match_their_types() {
     roundtrip::<OrgUsage>("static/org-usage.json");
     roundtrip::<Page<OrgMember>>("static/org-members.json");
     roundtrip::<CreatedScimToken>("static/scim-token-created.json");
+    roundtrip::<ScimGroup>("static/scim-group.json");
     roundtrip::<Page<Invite>>("static/invites.json");
     roundtrip::<Page<AdminUser>>("static/admin-users.json");
     roundtrip::<CreatedAdminUser>("static/admin-user-created.json");
@@ -798,6 +799,7 @@ fn generated_files_roundtrip() {
             "get_org_sso" => roundtrip::<OrgSso>(&example.file),
             "get_org_scim" => roundtrip::<ScimSettings>(&example.file),
             "create_org_scim_token" => roundtrip::<CreatedScimToken>(&example.file),
+            "list_org_scim_groups" => roundtrip::<ScimGroupList>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);

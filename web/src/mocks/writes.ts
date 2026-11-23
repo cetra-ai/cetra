@@ -51,6 +51,7 @@ import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
+import scimGroupDocument from "../../../fixtures/api/static/scim-group.json";
 import scimTokenCreatedDocument from "../../../fixtures/api/static/scim-token-created.json";
 import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
 import setupResponseDocument from "../../../fixtures/api/static/setup-response.json";
@@ -131,6 +132,16 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     operationId: "revoke_org_scim_token",
     method: "delete",
     path: "/api/v1/orgs/{org}/scim/tokens/{id}",
+  },
+  {
+    operationId: "put_org_scim_group_mapping",
+    method: "put",
+    path: "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+  },
+  {
+    operationId: "delete_org_scim_group_mapping",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
   },
   {
     operationId: "post_llm_connection",
@@ -646,6 +657,8 @@ const RESPONSES: Record<string, Respond> = {
   update_org_scim: () => HttpResponse.json(orgScimDocument),
   create_org_scim_token: () => HttpResponse.json(scimTokenCreatedDocument, { status: 201 }),
   revoke_org_scim_token: () => noContent(),
+  put_org_scim_group_mapping: () => HttpResponse.json(scimGroupDocument),
+  delete_org_scim_group_mapping: () => noContent(),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {

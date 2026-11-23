@@ -99,6 +99,17 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/scim/tokens/{id}",
         "revoke_org_scim_token",
     ),
+    ("get", "/api/v1/orgs/{org}/scim/groups", "list_org_scim_groups"),
+    (
+        "put",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "put_org_scim_group_mapping",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
+        "delete_org_scim_group_mapping",
+    ),
     ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
     (
         "put",
@@ -1304,6 +1315,9 @@ fn document_lint() {
                 | "update_org_scim"
                 | "create_org_scim_token"
                 | "revoke_org_scim_token"
+                | "list_org_scim_groups"
+                | "put_org_scim_group_mapping"
+                | "delete_org_scim_group_mapping"
                 | "delete_org"
                 | "delete_project"
                 | "patch_issue"
@@ -1460,6 +1474,8 @@ fn document_lint() {
             || *id == "create_org_scim_token"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
+        } else if *id == "put_org_scim_group_mapping" {
+            expected_errors.extend(["400", "401", "403", "404", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {
             expected_errors.extend(["401", "403", "404", "409", "429"]);
         } else if *id == "run_sql" || *id == "query_widget" || *id == "post_facets" {

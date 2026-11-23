@@ -823,6 +823,13 @@ async fn generate() -> (BTreeMap<String, String>, Vec<Example>) {
             "static/scim-token-created.json",
         ),
         example(
+            "list_org_scim_groups",
+            params(&[("org", "acme")]),
+            BTreeMap::new(),
+            "static/org-scim-groups.json",
+            "application/json",
+        ),
+        example(
             "get_org_usage",
             params(&[("org", "acme")]),
             BTreeMap::new(),

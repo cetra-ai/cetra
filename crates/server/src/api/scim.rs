@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
-//! The Provisioning API DTOs: an org's SCIM settings and bearer tokens (track EA M5,
-//! D-EA-12, D-EA-15). The `/scim/v2` resources themselves are in `ee::scim`.
+//! The Provisioning API DTOs: an org's SCIM settings, bearer tokens (track EA M5,
+//! D-EA-12, D-EA-15) and group role mappings (track EA M6, D-EA-14). The `/scim/v2`
+//! resources themselves are in `ee::scim`.
 
 use cetra_core::time_serde;
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 use super::account::OrgRole;
 use super::keys::optional_time;
+use super::members::ProjectRoleOverride;
 
 /// `GET` and `PATCH /api/v1/orgs/{org}/scim`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -78,4 +80,59 @@ pub struct CreatedScimToken {
     pub token: ScimToken,
     /// The bearer value (`scim-cetra-…`). Shown only in this response.
     pub secret: String,
+}
+
+/// One SCIM group of the org, with its role mapping (D-EA-14). The display name is shown to
+/// owners on their settings page only; it is never logged or recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScimGroup {
+    /// Group id.
+    pub id: Uuid,
+    /// The name the identity provider gave the group.
+    pub display_name: String,
+    /// The identity provider's external id, when it sent one.
+    pub external_id: Option<String>,
+    /// How many SCIM users are in the group.
+    pub member_count: u32,
+    /// The group's role mapping. `null` when the group maps nothing.
+    pub mapping: Option<ScimGroupMapping>,
+}
+
+/// A group's role mapping: an org role and one project role per project. Members get the
+/// highest of their groups' roles (D-EA-14).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScimGroupMapping {
+    /// The org role the group gives: `admin`, `member` or `viewer`. `null` when it gives none.
+    pub org_role: Option<OrgRole>,
+    /// One project role per project. Empty when the group maps no project.
+    pub projects: Vec<ScimProjectRole>,
+}
+
+/// A project role of a group mapping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScimProjectRole {
+    /// Project id.
+    pub project_id: Uuid,
+    /// The project role: `admin`, `member`, `viewer` or `none` (hidden).
+    pub role: ProjectRoleOverride,
+}
+
+/// `GET /api/v1/orgs/{org}/scim/groups`: every SCIM group of the org, ordered by display name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ScimGroupList {
+    /// The groups.
+    pub groups: Vec<ScimGroup>,
+}
+
+/// `PUT /api/v1/orgs/{org}/scim/groups/{id}/mapping` body. The new mapping replaces the old
+/// one; a mapping with neither an org role nor a project is refused (use DELETE).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PutScimGroupMapping {
+    /// The org role the group gives: `admin`, `member` or `viewer`. Omit it to give none.
+    #[serde(default)]
+    pub org_role: Option<OrgRole>,
+    /// One project role per project, at most 200. Omit the list to map no project.
+    #[serde(default)]
+    pub projects: Vec<ScimProjectRole>,
 }

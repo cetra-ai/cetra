@@ -148,7 +148,8 @@ use super::prompts::{
 use super::saved_views::{CreateSavedView, SavedView, SavedViewListParams, UpdateSavedView};
 use super::schema::SchemaResponse;
 use super::scim::{
-    CreateScimTokenRequest, CreatedScimToken, ScimSettings, ScimToken, UpdateScimSettings,
+    CreateScimTokenRequest, CreatedScimToken, PutScimGroupMapping, ScimGroup, ScimGroupList,
+    ScimGroupMapping, ScimProjectRole, ScimSettings, ScimToken, UpdateScimSettings,
 };
 use super::score_definitions::{
     CreateScoreDefinitionRequest, ScoreDefinition, ScoreDefinitionCategory,
@@ -266,6 +267,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<UpdateScimSettings>();
     set.insert::<CreateScimTokenRequest>();
     set.insert::<CreatedScimToken>();
+    set.insert::<ScimGroup>();
+    set.insert::<ScimGroupMapping>();
+    set.insert::<ScimProjectRole>();
+    set.insert::<ScimGroupList>();
+    set.insert::<PutScimGroupMapping>();
     set.insert::<SsoDiscoverRequest>();
     set.insert::<SsoDiscovery>();
     set.insert::<DevicePurpose>();
@@ -1823,8 +1829,67 @@ fn scim_paths(paths: PathsBuilder) -> PathsBuilder {
         AUTH_ERRORS,
     ))
     .build();
+    let list_groups = operation(
+        "list_org_scim_groups",
+        "orgs",
+        "List the SCIM groups and their role mappings",
+    )
+    .description(Some(
+        "Every SCIM group of the org, by display name, with its member count and its role mapping (D-EA-14). Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .responses(responses(
+        "200",
+        json_of::<ScimGroupList>("The org's SCIM groups."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let put_group_mapping = operation(
+        "put_org_scim_group_mapping",
+        "orgs",
+        "Set a SCIM group's role mapping",
+    )
+    .description(Some(
+        "Replaces the group's org role and project roles (D-EA-14). A member gets the highest of their groups' roles, else the default role; owners are never changed. The org role is `admin`, `member` or `viewer`; `owner` is a 400. Raising a role needs the `scim` feature, and writing a project role needs `project_roles`; lowering works without them (D-EA-19). A mapping with neither an org role nor a project is a 400: delete it instead. While SCIM is on, the group's members are recomputed. Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Group id."),
+    ]))
+    .request_body(Some(json_body("PutScimGroupMapping")))
+    .responses(responses(
+        "200",
+        json_of::<ScimGroup>("The group, with its new mapping."),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
+    let delete_group_mapping = operation(
+        "delete_org_scim_group_mapping",
+        "orgs",
+        "Remove a SCIM group's role mapping",
+    )
+    .description(Some(
+        "The group's members get the roles of their other groups, else the default role. Always works, so a lapsed org can take roles away. A group with no mapping also answers 204. Owners only, session only.",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Group id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The mapping is removed.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
     let mut settings = PathItem::new(HttpMethod::Get, get);
     settings.patch = Some(patch);
+    let mut group_mapping = PathItem::new(HttpMethod::Put, put_group_mapping);
+    group_mapping.delete = Some(delete_group_mapping);
     paths
         .path("/api/v1/orgs/{org}/scim", settings)
         .path(
@@ -1835,6 +1900,11 @@ fn scim_paths(paths: PathsBuilder) -> PathsBuilder {
             "/api/v1/orgs/{org}/scim/tokens/{id}",
             PathItem::new(HttpMethod::Delete, revoke_token),
         )
+        .path(
+            "/api/v1/orgs/{org}/scim/groups",
+            PathItem::new(HttpMethod::Get, list_groups),
+        )
+        .path("/api/v1/orgs/{org}/scim/groups/{id}/mapping", group_mapping)
 }
 
 fn invite_paths(paths: PathsBuilder) -> PathsBuilder {

@@ -1,0 +1,26 @@
+{
+  "groups": [
+    {
+      "id": "01900000-0000-7000-8000-000000000a01",
+      "display_name": "Engineering",
+      "external_id": "okta-grp-eng",
+      "member_count": 12,
+      "mapping": {
+        "org_role": "member",
+        "projects": [
+          {
+            "project_id": "01900000-0000-7000-8000-000000000001",
+            "role": "admin"
+          }
+        ]
+      }
+    },
+    {
+      "id": "01900000-0000-7000-8000-000000000a02",
+      "display_name": "Auditors",
+      "external_id": null,
+      "member_count": 0,
+      "mapping": null
+    }
+  ]
+}
