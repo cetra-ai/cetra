@@ -438,6 +438,11 @@ export const FEATURE_GROUPS = [
     rows: [
       { label: "GitHub issues and email", doc: "help/support", cloud: ALL, selfHosted: BOTH },
       {
+        label: "Email support, reply within 2 business days",
+        doc: "platform/plans-and-licence",
+        selfHosted: [false, true],
+      },
+      {
         label: "Priority support",
         doc: null,
         source: "D177",

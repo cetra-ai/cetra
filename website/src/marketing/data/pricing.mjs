@@ -112,6 +112,8 @@ export const SELF_HOSTED = {
       "Enforce single sign-on for your domains",
       "Project-level roles",
     ],
+    /** A service, not a gated feature (D197). */
+    support: "Email support from the cetra team, with a reply within 2 business days",
   },
 };
 
