@@ -259,11 +259,15 @@ it("keeps Save disabled for an empty key and shows the error once the field is t
   await user.type(within(form).getByLabelText("Name"), "Prod");
   const save = within(form).getByRole("button", { name: "Add connection" });
   expect(save).toBeDisabled();
-  expect(within(form).queryByText("Enter the API key.")).toBeNull();
+  expect(
+    within(form).queryByText("Enter the API key.", { ignore: "script, style, [hidden]" }),
+  ).toBeNull();
 
   await user.type(within(form).getByLabelText("API key"), "x");
   await user.clear(within(form).getByLabelText("API key"));
-  expect(await within(form).findByText("Enter the API key.")).toBeInTheDocument();
+  expect(
+    await within(form).findByText("Enter the API key.", { ignore: "script, style, [hidden]" }),
+  ).toBeInTheDocument();
   expect(save).toBeDisabled();
   expect(calls).toBe(0);
 });
@@ -407,72 +411,124 @@ it("shows a 409 detail above the submit button", async () => {
   expect(detail.compareDocumentPosition(submit)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
-it("tests a connection from its panel", async () => {
+const TEST_OK = { ok: true, model: "gpt-5-mini", latency_ms: 420 };
+const TEST_OK_LINE = "Connection works (420 ms, model gpt-5-mini)";
+const TEST_PATH = "/api/v1/orgs/:org/llm-connections/:id/test";
+const UNSAVED_TEST_PATH = "/api/v1/orgs/:org/llm-connections/test";
+
+it("tests the saved values from the panel", async () => {
   let body: unknown;
   server.use(
-    http.post("/api/v1/orgs/:org/llm-connections/:id/test", async ({ request }) => {
+    http.post(TEST_PATH, async ({ request }) => {
       body = await request.json();
-      return HttpResponse.json({ ok: true, model: "gpt-5-mini", latency_ms: 420 });
+      return HttpResponse.json(TEST_OK);
     }),
   );
 
-  const { user } = await openConnection();
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
-  const dialog = await screen.findByRole("dialog");
-  await user.click(within(dialog).getByRole("button", { name: "Run test" }));
-
-  expect(
-    await within(dialog).findByText("Connection works (420 ms, model gpt-5-mini)"),
-  ).toBeInTheDocument();
-  await waitFor(() => expect(body).toEqual({ model: "gpt-5-mini" }));
-});
-
-it("tests with an empty model sends an empty body", async () => {
-  let body: unknown;
-  server.use(
-    http.post("/api/v1/orgs/:org/llm-connections/:id/test", async ({ request }) => {
-      body = await request.json();
-      return HttpResponse.json({ ok: true, model: "gpt-5-mini", latency_ms: 10 });
-    }),
-  );
-
-  const { user } = await openConnection();
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
-  const dialog = await screen.findByRole("dialog");
-  await user.clear(within(dialog).getByLabelText("Model"));
-  await user.click(within(dialog).getByRole("button", { name: "Run test" }));
-
-  await waitFor(() => expect(body).toEqual({}));
-});
-
-it("blocks Test while the connection has unsaved edits", async () => {
   const { user, form } = await openConnection();
-  await user.type(within(form).getByLabelText("Name"), " edited");
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
 
-  expect(screen.getByRole("button", { name: "Test connection" })).toBeDisabled();
-  expect(
-    screen.getByRole("button", { name: "Test connection" }).parentElement,
-  ).toHaveAccessibleDescription("Save your changes before testing.");
+  expect(await within(form).findByText(TEST_OK_LINE)).toBeInTheDocument();
+  expect(body).toEqual({});
 });
 
-it("shows the rate limit message in the test dialog", async () => {
+it("tests unsaved edits with draft fields and shows the result inline", async () => {
+  let body: unknown;
   server.use(
-    http.post("/api/v1/orgs/:org/llm-connections/:id/test", () =>
-      problemResponse(429, "too_many_requests", { detail: "slow down" }),
-    ),
+    http.post(TEST_PATH, async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ok: true, model: "gpt-5", latency_ms: 300 });
+    }),
   );
 
-  const { user } = await openConnection();
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
-  const dialog = await screen.findByRole("dialog");
-  await user.click(within(dialog).getByRole("button", { name: "Run test" }));
+  const { user, form } = await openConnection();
+  await user.type(within(form).getByLabelText("API key"), "sk-new-key-0123456789");
+  await user.clear(within(form).getByLabelText("Default model"));
+  await user.type(within(form).getByLabelText("Default model"), "gpt-5");
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
 
-  expect(await within(dialog).findByText("Too many tests. Wait a minute.")).toBeInTheDocument();
+  expect(
+    await within(form).findByText("Connection works (300 ms, model gpt-5)"),
+  ).toBeInTheDocument();
+  expect(body).toEqual({ api_key: "sk-new-key-0123456789", model: "gpt-5" });
+  expect(screen.queryByRole("dialog")).toBeNull();
 });
 
-it("shows a failed test with its hint", async () => {
+it("tests a new connection before it is saved", async () => {
+  let body: unknown;
+  let saves = 0;
   server.use(
-    http.post("/api/v1/orgs/:org/llm-connections/:id/test", () =>
+    http.post(UNSAVED_TEST_PATH, async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ok: true, model: "gpt-5-mini", latency_ms: 88 });
+    }),
+    http.post("/api/v1/orgs/:org/llm-connections", () => {
+      saves += 1;
+      return HttpResponse.json(CONNECTION, { status: 201 });
+    }),
+  );
+
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.type(within(form).getByLabelText("Default model"), "gpt-5-mini");
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+
+  expect(
+    await within(form).findByText("Connection works (88 ms, model gpt-5-mini)"),
+  ).toBeInTheDocument();
+  expect(body).toEqual({ adapter: "openai", api_key: "sk-secret", model: "gpt-5-mini" });
+  expect(saves).toBe(0);
+});
+
+it("disables Test until the key and a default model are set, and says why", async () => {
+  const { user, form } = await openCreate();
+  const reasonOf = () =>
+    within(form).getByRole("button", { name: "Test connection" }).parentElement;
+
+  expect(within(form).getByRole("button", { name: "Test connection" })).toBeDisabled();
+  expect(reasonOf()).toHaveAccessibleDescription("Enter the API key.");
+
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  expect(within(form).getByRole("button", { name: "Test connection" })).toBeDisabled();
+  expect(reasonOf()).toHaveAccessibleDescription("Enter a default model to test.");
+
+  await user.type(within(form).getByLabelText("Default model"), "gpt-5-mini");
+  expect(within(form).getByRole("button", { name: "Test connection" })).toBeEnabled();
+});
+
+it("tests embeddings from Advanced", async () => {
+  let body: unknown;
+  server.use(
+    http.post(TEST_PATH, async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ok: true, model: "text-embedding-3-small", latency_ms: 50 });
+    }),
+  );
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByText("Advanced"));
+  await user.type(within(form).getByLabelText("Embedding model"), "text-embedding-3-small");
+  await user.click(within(form).getByRole("button", { name: "Test embeddings" }));
+
+  expect(
+    await within(form).findByText("Connection works (50 ms, model text-embedding-3-small)"),
+  ).toBeInTheDocument();
+  expect(body).toEqual({ embedding_model: "text-embedding-3-small" });
+});
+
+it("refuses the embedding test for Anthropic", async () => {
+  const { user, form } = await openCreate();
+  await user.click(within(form).getByText("Advanced"));
+  await pickProvider(user, form, "Anthropic");
+
+  const embeddings = within(form).getByRole("button", { name: "Test embeddings" });
+  expect(embeddings).toBeDisabled();
+  expect(embeddings.parentElement).toHaveAccessibleDescription("Anthropic has no embeddings API");
+});
+
+it("shows a failed test with its hint under the form", async () => {
+  server.use(
+    http.post(TEST_PATH, () =>
       HttpResponse.json({
         ok: false,
         model: "m",
@@ -482,18 +538,161 @@ it("shows a failed test with its hint", async () => {
     ),
   );
 
-  const { user } = await openConnection();
-  await user.click(screen.getByRole("button", { name: "Test connection" }));
-  const dialog = await screen.findByRole("dialog");
-  await user.click(within(dialog).getByRole("button", { name: "Run test" }));
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
 
-  expect(await within(dialog).findByText("Test failed")).toBeInTheDocument();
-  expect(within(dialog).getByText("provider status 401")).toBeInTheDocument();
+  expect(await within(form).findByText("Test failed")).toBeInTheDocument();
+  expect(within(form).getByText("provider status 401")).toBeInTheDocument();
   expect(
-    within(dialog).getByText(
+    within(form).getByText(
       "The key, quota or model access was refused. Rules that use this connection pause until a test of the default model passes.",
     ),
   ).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+it("shows the rate limit message under the form", async () => {
+  server.use(
+    http.post(TEST_PATH, () => problemResponse(429, "too_many_requests", { detail: "slow down" })),
+  );
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+
+  expect(await within(form).findByText("Too many tests. Wait a minute.")).toBeInTheDocument();
+});
+
+it("clears the result when a field changes", async () => {
+  server.use(http.post(TEST_PATH, () => HttpResponse.json(TEST_OK)));
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+  expect(await within(form).findByText(TEST_OK_LINE)).toBeInTheDocument();
+
+  await user.type(within(form).getByLabelText("Name"), "!");
+  expect(within(form).queryByText(TEST_OK_LINE)).toBeNull();
+});
+
+it("clears the result after a save", async () => {
+  server.use(
+    http.post(TEST_PATH, () => HttpResponse.json(TEST_OK)),
+    http.patch("/api/v1/orgs/:org/llm-connections/:id", () =>
+      HttpResponse.json({ ...CONNECTION, name: "OpenAI 2" }),
+    ),
+  );
+
+  const { user, form } = await openConnection();
+  await user.type(within(form).getByLabelText("Name"), " 2");
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+  expect(await within(form).findByText(TEST_OK_LINE)).toBeInTheDocument();
+
+  await user.click(within(form).getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(within(form).queryByText(TEST_OK_LINE)).toBeNull());
+});
+
+it("locks the form while a test runs", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  server.use(
+    http.post(TEST_PATH, async () => {
+      await gate;
+      return HttpResponse.json(TEST_OK);
+    }),
+  );
+
+  const { user, form } = await openConnection();
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+
+  expect(await within(form).findByRole("button", { name: "Testing…" })).toBeDisabled();
+  expect(within(form).getByLabelText("Name")).toBeDisabled();
+  expect(within(form).getByLabelText("API key")).toBeDisabled();
+  expect(within(form).getByLabelText("Default model")).toBeDisabled();
+
+  release();
+  expect(await within(form).findByText(TEST_OK_LINE)).toBeInTheDocument();
+  expect(within(form).getByLabelText("Name")).toBeEnabled();
+});
+
+it("shows a test's field error under the form, not as a failed save", async () => {
+  server.use(
+    http.post(UNSAVED_TEST_PATH, () =>
+      problemResponse(400, "bad_request", {
+        errors: [{ field: "model", message: "model is required to test an unsaved connection" }],
+      }),
+    ),
+  );
+
+  const { user, form } = await openCreate();
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.type(within(form).getByLabelText("Default model"), "m");
+  await user.click(within(form).getByRole("button", { name: "Test connection" }));
+
+  expect(
+    await within(form).findByText("model is required to test an unsaved connection"),
+  ).toBeInTheDocument();
+  expect(within(form).queryByText("Could not save the connection.")).toBeNull();
+});
+
+it("shows when the saved values were last tested", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...CONNECTION,
+            last_tested_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+            last_test_ok: true,
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  await openConnection();
+
+  expect(screen.getByText(/^Tested/)).toHaveTextContent("Tested 5m ago");
+});
+
+it("shows a failed last test", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [
+          {
+            ...CONNECTION,
+            last_tested_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+            last_test_ok: false,
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  await openConnection();
+
+  expect(screen.getByText(/^Last test failed/)).toHaveTextContent("Last test failed 5m ago");
+});
+
+it("shows no last test when the connection was never tested", async () => {
+  const untested = Object.fromEntries(
+    Object.entries(CONNECTION ?? {}).filter(
+      ([key]) => key !== "last_tested_at" && key !== "last_test_ok",
+    ),
+  );
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({ data: [untested], next_cursor: null }),
+    ),
+  );
+
+  await openConnection();
+
+  expect(screen.queryByText(/^Tested/)).toBeNull();
+  expect(screen.queryByText(/^Last test failed/)).toBeNull();
 });
 
 it("shows a failing connection's status with its error as the title", async () => {
@@ -540,7 +739,11 @@ it("refuses a header without a value", async () => {
   await user.click(within(form).getByRole("button", { name: "Add header" }));
   await user.type(within(form).getByLabelText("Header name 1"), "x-a");
 
-  expect(await within(form).findByText("Enter a value for each header.")).toBeInTheDocument();
+  expect(
+    await within(form).findByText("Enter a value for each header.", {
+      ignore: "script, style, [hidden]",
+    }),
+  ).toBeInTheDocument();
   expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
   expect(calls).toBe(0);
 });
@@ -563,7 +766,9 @@ it("refuses duplicate header names without calling the server", async () => {
   await user.type(within(form).getByLabelText("Header name 2"), "X-A");
   await user.type(within(form).getByLabelText("Header value 2"), "2");
 
-  expect(await within(form).findByText("Duplicate header name.")).toBeInTheDocument();
+  expect(
+    await within(form).findByText("Duplicate header name.", { ignore: "script, style, [hidden]" }),
+  ).toBeInTheDocument();
   expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
   expect(calls).toBe(0);
 });
@@ -693,7 +898,11 @@ it("requires a base URL for OpenAI-compatible", async () => {
   const baseUrl = within(form).getByLabelText("Base URL");
   await user.type(baseUrl, "x");
   await user.clear(baseUrl);
-  expect(await within(form).findByText("Enter the server's base URL.")).toBeInTheDocument();
+  expect(
+    await within(form).findByText("Enter the server's base URL.", {
+      ignore: "script, style, [hidden]",
+    }),
+  ).toBeInTheDocument();
 
   await user.type(baseUrl, "https://gw.example.com/v1");
   await user.click(within(form).getByRole("button", { name: "Add connection" }));

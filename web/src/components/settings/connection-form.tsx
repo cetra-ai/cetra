@@ -2,11 +2,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { X } from "lucide-react";
 import { useState } from "react";
 import { $api } from "@/api/client";
-import { fieldErrors, problemMessage } from "@/api/problem";
+import { fieldErrors, problemMessage, problemOf } from "@/api/problem";
 import { connectionsKey } from "@/api/queries-settings";
 import type { Schema } from "@/api/types";
 import { DisabledReason } from "@/components/disabled-reason";
+import { FormError } from "@/components/form/form-error";
 import { TextField } from "@/components/form/text-field";
+import { ConnectionTestResult } from "@/components/settings/connection-test";
 import { SettingsFormCard } from "@/components/settings/settings-card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -29,6 +31,7 @@ import { MODEL_SUGGESTIONS } from "@/lib/llm-models";
 
 type Connection = Schema<"LlmConnection">;
 type StructuredMode = Schema<"StructuredOutputMode">;
+type TestKind = "chat" | "embedding";
 
 const STRUCTURED_OUTPUT_MODES: { value: StructuredMode; label: string }[] = [
   { value: "native", label: "Native (default)" },
@@ -135,22 +138,28 @@ function useConnectionMutations(org: string) {
 
 /**
  * The create or edit form of a connection, shown in the list's row panel. Save is enabled only
- * while the values differ and are valid. A create form calls `onCreated` once saved.
+ * while the values differ and are valid. A create form calls `onCreated` once saved. Test checks
+ * the form's current values, saved or not, and shows the result under the form (D-I-53).
  */
 export function ConnectionForm({
   org,
   connection,
   onCreated,
-  onTest,
 }: {
   org: string;
   /** Undefined for a new connection. */
   connection: Connection | undefined;
   onCreated: () => void;
-  /** Shows a Test button, which is disabled while the values are unsaved. */
-  onTest?: () => void;
 }) {
   const { create, patch } = useConnectionMutations(org);
+  const queryClient = useQueryClient();
+  // gcTime 0: a test request holds the key, so it leaves the cache once settled.
+  const testSaved = $api.useMutation("post", "/api/v1/orgs/{org}/llm-connections/{id}/test", {
+    gcTime: 0,
+  });
+  const testUnsaved = $api.useMutation("post", "/api/v1/orgs/{org}/llm-connections/test", {
+    gcTime: 0,
+  });
   const pending = connection === undefined ? create.isPending : patch.isPending;
   const [name, setName] = useState(connection?.name ?? "");
   const [provider, setProvider] = useState<ProviderChoice>(
@@ -179,6 +188,12 @@ export function ConnectionForm({
   const [serverErrors, setServerErrors] = useState<Partial<Record<FieldKey, string>>>({});
   const [serverError, setServerError] = useState<string | undefined>();
   const [saved, setSaved] = useState(false);
+  const [testResult, setTestResult] = useState<Schema<"LlmConnectionTestResult"> | undefined>();
+  const [testError, setTestError] = useState<string | undefined>();
+  const [embeddingModel, setEmbeddingModel] = useState("");
+  const testing = testSaved.isPending || testUnsaved.isPending;
+  // While a test runs the form cannot change, so its result always describes the values shown.
+  const busy = pending || testing;
 
   const trimmedName = name.trim();
   // Header values are hidden on an edit, so the rows only count once the user changes them.
@@ -217,6 +232,9 @@ export function ConnectionForm({
   function touch(field: string) {
     setTouched((current) => (current[field] === true ? current : { ...current, [field]: true }));
     setSaved(false);
+    // A result describes the values it tested.
+    setTestResult(undefined);
+    setTestError(undefined);
   }
 
   function headerValues(): Record<string, string> {
@@ -364,12 +382,128 @@ export function ConnectionForm({
           setApiKey("");
           setHeadersDirty(false);
           setTouched({});
+          // The saved values changed, so the last result no longer describes them.
+          setTestResult(undefined);
+          setTestError(undefined);
           if (sent.extra_headers !== undefined) {
             setRows(Object.keys(sent.extra_headers).map((headerName) => newHeaderRow(headerName)));
           }
           setSaved(true);
         },
         onError: handleError,
+      },
+    );
+  }
+
+  /** A saved connection's test: the fields that differ from it, and the model only when it changed. */
+  function savedTestBody(current: Connection, kind: TestKind): Schema<"TestLlmConnectionRequest"> {
+    const edits = editBody(current);
+    const body: Schema<"TestLlmConnectionRequest"> = {};
+    if (edits.adapter !== undefined) {
+      body.adapter = edits.adapter;
+    }
+    if (edits.api_key !== undefined) {
+      body.api_key = edits.api_key;
+    }
+    if (edits.base_url !== undefined) {
+      body.base_url = edits.base_url;
+    }
+    if (edits.structured_output !== undefined) {
+      body.structured_output = edits.structured_output;
+    }
+    if (edits.extra_headers !== undefined) {
+      body.extra_headers = edits.extra_headers;
+    }
+    if (kind === "embedding") {
+      body.embedding_model = embeddingModel.trim();
+    } else if (defaultModel.trim() !== (current.default_model ?? "").trim()) {
+      // An unchanged default model is left out, so the server counts the test as one of the
+      // default model (D-I-53).
+      body.model = defaultModel.trim();
+    }
+    return body;
+  }
+
+  /** An unsaved connection's test: every value set in the form. */
+  function unsavedTestBody(kind: TestKind): Schema<"TestUnsavedLlmConnectionRequest"> {
+    const body: Schema<"TestUnsavedLlmConnectionRequest"> = { adapter, api_key: apiKey };
+    if (baseUrl.trim()) {
+      body.base_url = baseUrl.trim();
+    }
+    if (structured !== "") {
+      body.structured_output = structured;
+    }
+    if (headersDirty) {
+      body.extra_headers = headerValues();
+    }
+    if (kind === "embedding") {
+      body.embedding_model = embeddingModel.trim();
+    } else {
+      body.model = defaultModel.trim();
+    }
+    return body;
+  }
+
+  // Only what a test sends can stop it: the name and the limits are not sent.
+  const testProblem = clientErrors.api_key ?? clientErrors.base_url ?? clientErrors.headers;
+  const chatTestReason =
+    testProblem ?? (defaultModel.trim() === "" ? "Enter a default model to test." : undefined);
+  const embeddingTestReason =
+    adapter === "anthropic"
+      ? "Anthropic has no embeddings API"
+      : (testProblem ??
+        (embeddingModel.trim() === "" ? "Enter an embedding model to test." : undefined));
+
+  /** A test's errors: a field the form renders goes under it, the rest under the form's result. */
+  function handleTestError(caught: unknown) {
+    if (problemOf(caught)?.status === 429) {
+      setTestError("Too many tests. Wait a minute.");
+      return;
+    }
+    const placed: Partial<Record<FieldKey, string>> = {};
+    const unplaced: string[] = [];
+    for (const [field, message] of Object.entries(fieldErrors(caught))) {
+      if (field.startsWith("extra_headers")) {
+        placed.headers ??= message;
+      } else if (isPlacedField(field)) {
+        placed[field] = message;
+      } else {
+        // `model`, `embedding_model`: the test's own fields, shown under the form.
+        unplaced.push(message);
+      }
+    }
+    setServerErrors(placed);
+    if (unplaced.length > 0) {
+      setTestError(unplaced.join(" "));
+    } else if (Object.keys(placed).length === 0) {
+      setTestError(problemMessage(caught, "Could not run the test."));
+    }
+  }
+
+  function runTest(kind: TestKind) {
+    setTestResult(undefined);
+    setTestError(undefined);
+    setServerErrors({});
+    setServerError(undefined);
+    const options = {
+      onSuccess: (result: Schema<"LlmConnectionTestResult">) => {
+        setTestResult(result);
+      },
+      onError: handleTestError,
+    };
+    if (connection === undefined) {
+      testUnsaved.mutate({ params: { path: { org } }, body: unsavedTestBody(kind) }, options);
+      return;
+    }
+    testSaved.mutate(
+      { params: { path: { org, id: connection.id } }, body: savedTestBody(connection, kind) },
+      {
+        ...options,
+        onSuccess: (result) => {
+          setTestResult(result);
+          // The status and the last test may have changed.
+          void queryClient.invalidateQueries({ queryKey: connectionsKey(org) });
+        },
       },
     );
   }
@@ -409,15 +543,19 @@ export function ConnectionForm({
       saved={saved}
       error={serverError}
       saveLabel={connection === undefined ? "Add connection" : "Save"}
+      disabledReason={testing ? "Wait for the test to finish." : undefined}
       onSubmit={submit}
       footerExtra={
-        onTest === undefined ? undefined : (
-          <DisabledReason reason={dirty ? "Save your changes before testing." : undefined}>
-            <Button type="button" variant="outline" disabled={dirty} onClick={onTest}>
-              Test connection
-            </Button>
-          </DisabledReason>
-        )
+        <DisabledReason reason={chatTestReason}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={chatTestReason !== undefined || testing || pending}
+            onClick={() => runTest("chat")}
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </Button>
+        </DisabledReason>
       }
     >
       <div className="flex max-w-xl flex-col gap-4">
@@ -428,7 +566,7 @@ export function ConnectionForm({
             onValueChange={(value) => {
               chooseProvider(providerValue(value));
             }}
-            disabled={pending}
+            disabled={busy}
           >
             <SelectTrigger id="connection-provider" className="w-fit">
               <SelectValue />
@@ -448,7 +586,7 @@ export function ConnectionForm({
           value={name}
           maxLength={100}
           error={fieldError("name")}
-          disabled={pending}
+          disabled={busy}
           onChange={(next) => {
             setName(next);
             touch("name");
@@ -468,7 +606,7 @@ export function ConnectionForm({
                 : "••••••••"
           }
           error={fieldError("api_key")}
-          disabled={pending}
+          disabled={busy}
           description={
             connection === undefined
               ? "Stored encrypted, never shown again."
@@ -486,7 +624,7 @@ export function ConnectionForm({
             placeholder="https://my-gateway.example.com/v1"
             value={baseUrl}
             error={fieldError("base_url")}
-            disabled={pending}
+            disabled={busy}
             onChange={(next) => {
               setBaseUrl(next);
               touch("base_url");
@@ -500,7 +638,7 @@ export function ConnectionForm({
           value={defaultModel}
           list={suggestions.length > 0 ? "connection-model-suggestions" : undefined}
           error={fieldError("default_model")}
-          disabled={pending}
+          disabled={busy}
           onChange={(next) => {
             setDefaultModel(next);
             touch("default_model");
@@ -528,7 +666,7 @@ export function ConnectionForm({
                 placeholder={DEFAULT_BASE_URLS[adapter]}
                 value={baseUrl}
                 error={fieldError("base_url")}
-                disabled={pending}
+                disabled={busy}
                 onChange={(next) => {
                   setBaseUrl(next);
                   touch("base_url");
@@ -544,7 +682,7 @@ export function ConnectionForm({
                   setStructured(structuredValue(value));
                   touch("structured_output");
                 }}
-                disabled={pending}
+                disabled={busy}
               >
                 <SelectTrigger
                   id="connection-structured-output"
@@ -580,7 +718,7 @@ export function ConnectionForm({
                 min={1}
                 max={64}
                 error={fieldError("max_concurrency")}
-                disabled={pending}
+                disabled={busy}
                 onChange={(next) => {
                   setMaxConcurrency(next);
                   touch("max_concurrency");
@@ -597,7 +735,7 @@ export function ConnectionForm({
                 min={1}
                 max={10000}
                 error={fieldError("requests_per_minute")}
-                disabled={pending}
+                disabled={busy}
                 onChange={(next) => {
                   setRequestsPerMinute(next);
                   touch("requests_per_minute");
@@ -616,7 +754,7 @@ export function ConnectionForm({
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={pending}
+                  disabled={busy}
                   onClick={addHeaderRow}
                 >
                   Add header
@@ -628,7 +766,7 @@ export function ConnectionForm({
                     aria-label={`Header name ${index + 1}`}
                     aria-invalid={headersError ? true : undefined}
                     value={row.name}
-                    disabled={pending}
+                    disabled={busy}
                     onChange={(event) => updateHeaderRow(row.id, { name: event.target.value })}
                   />
                   <Input
@@ -637,7 +775,7 @@ export function ConnectionForm({
                     type="password"
                     autoComplete="off"
                     value={row.value}
-                    disabled={pending}
+                    disabled={busy}
                     onChange={(event) => updateHeaderRow(row.id, { value: event.target.value })}
                   />
                   <Button
@@ -645,7 +783,7 @@ export function ConnectionForm({
                     variant="ghost"
                     size="icon-xs"
                     aria-label={`Remove header ${index + 1}`}
-                    disabled={pending}
+                    disabled={busy}
                     onClick={() => removeHeaderRow(row.id)}
                   >
                     <X />
@@ -658,8 +796,34 @@ export function ConnectionForm({
                 </p>
               ) : null}
             </fieldset>
+            <TextField
+              id="connection-embedding-model"
+              label="Embedding model"
+              value={embeddingModel}
+              disabled={busy || adapter === "anthropic"}
+              description="Optional. Checks a model that issue sources embed with."
+              onChange={(next) => {
+                setEmbeddingModel(next);
+                touch("embedding_model");
+              }}
+            />
+            <DisabledReason reason={embeddingTestReason}>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={embeddingTestReason !== undefined || testing || pending}
+                onClick={() => runTest("embedding")}
+              >
+                Test embeddings
+              </Button>
+            </DisabledReason>
           </div>
         </details>
+      </div>
+      <div aria-live="polite" className="max-w-xl">
+        {testResult ? <ConnectionTestResult result={testResult} /> : null}
+        <FormError message={testError} />
       </div>
     </SettingsFormCard>
   );
