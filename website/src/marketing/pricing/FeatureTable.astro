@@ -1,0 +1,235 @@
+---
+import type { Cell, Column } from "../data/features.mjs";
+
+interface Props {
+  /** The table's id prefix, unique on the page. */
+  id: string;
+  /** The visually hidden caption. */
+  caption: string;
+  columns: Column[];
+  groups: {
+    id: string;
+    title: string;
+    rows: { label: string; href: string | null; cells: Cell[] }[];
+  }[];
+  /** Show one column at a time at 720 px and below, picked with buttons. */
+  picker?: boolean;
+}
+
+const { id, caption, columns, groups, picker = false } = Astro.props;
+---
+
+<div class="matrix" id={id} data-matrix data-picker={picker ? "" : undefined}>
+  {
+    picker && (
+      <div class="picker" role="group" aria-label="Plan to show">
+        {columns.map((column, i) => (
+          <button type="button" data-col={i} aria-pressed={i === 0 ? "true" : "false"}>
+            {column.name}
+          </button>
+        ))}
+      </div>
+    )
+  }
+  <table class="fact-table feature-table">
+    <caption class="visually-hidden">{caption}</caption>
+    <thead>
+      <tr>
+        <th scope="col"><span class="visually-hidden">Feature</span></th>
+        {
+          columns.map((column, i) => (
+            <th scope="col" data-col={i}>
+              <span class="plan">{column.name}</span>
+              <span class="price">{column.price}</span>
+            </th>
+          ))
+        }
+      </tr>
+    </thead>
+    {
+      groups.map((group) => (
+        <tbody>
+          <tr class="group">
+            <th scope="rowgroup">{group.title}</th>
+            {columns.map((_, i) => (
+              <td data-col={i} />
+            ))}
+          </tr>
+          {group.rows.map((row) => (
+            <tr>
+              <th scope="row">
+                {row.href ? <a href={row.href}>{row.label}</a> : row.label}
+              </th>
+              {row.cells.map((cell, i) => (
+                <td data-col={i}>
+                  {cell === true && (
+                    <>
+                      <svg class="check" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+                        <path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+                      </svg>
+                      <span class="visually-hidden">Included</span>
+                    </>
+                  )}
+                  {cell === false && (
+                    <>
+                      <span class="none" aria-hidden="true">—</span>
+                      <span class="visually-hidden">Not included</span>
+                    </>
+                  )}
+                  {typeof cell === "string" && cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      ))
+    }
+  </table>
+</div>
+
+<script>
+  for (const root of document.querySelectorAll<HTMLElement>("[data-matrix][data-picker]")) {
+    const buttons = [...root.querySelectorAll<HTMLButtonElement>(".picker button")];
+    const cells = [...root.querySelectorAll<HTMLElement>("table [data-col]")];
+    const select = (i: number) => {
+      for (const button of buttons) {
+        button.setAttribute("aria-pressed", String(Number(button.dataset.col) === i));
+      }
+      for (const el of cells) {
+        el.classList.toggle("off", Number(el.dataset.col) !== i);
+      }
+    };
+    for (const button of buttons) {
+      button.addEventListener("click", () => select(Number(button.dataset.col)));
+    }
+    select(0);
+  }
+</script>
+
+<style>
+  .matrix {
+    margin-top: var(--space-7);
+  }
+  :global(.section:has(.matrix)) {
+    overflow: visible;
+  }
+  .feature-table {
+    table-layout: fixed;
+  }
+  .feature-table thead th:first-child {
+    width: 34%;
+  }
+  .feature-table thead th {
+    position: sticky;
+    top: 65px;
+    background: var(--band-bg);
+    z-index: 2;
+    vertical-align: bottom;
+  }
+  .feature-table thead th[data-col],
+  .feature-table td {
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+  .plan {
+    display: block;
+    color: var(--fg);
+    font-family: var(--font-display);
+    font-size: var(--text-base);
+    text-transform: none;
+    letter-spacing: normal;
+  }
+  .price {
+    display: block;
+    margin-top: var(--space-1);
+    text-transform: none;
+    letter-spacing: normal;
+    color: var(--fg-muted);
+  }
+  .feature-table tr.group th {
+    padding-top: var(--space-6);
+    font-family: var(--font-mono);
+    font-size: var(--text-xs);
+    text-transform: uppercase;
+    letter-spacing: var(--tracking-label);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .feature-table tr.group th,
+  .feature-table tr.group td {
+    border-bottom: 1px solid var(--line-strong);
+  }
+  .feature-table tbody th[scope="row"] {
+    font-weight: 400;
+  }
+  .feature-table tbody th[scope="row"] a {
+    color: var(--fg);
+    text-decoration: underline;
+    text-decoration-color: var(--line-strong);
+    text-underline-offset: 3px;
+  }
+  .feature-table tbody th[scope="row"] a:hover {
+    text-decoration-color: var(--accent);
+  }
+  .check {
+    display: inline-block;
+    color: var(--accent);
+    vertical-align: middle;
+  }
+  .none {
+    color: var(--fg-muted);
+  }
+  .picker {
+    display: none;
+  }
+  @media (max-width: 900px) {
+    .feature-table td,
+    .feature-table thead th[data-col] {
+      font-size: var(--text-xs);
+      padding-inline: var(--space-2);
+    }
+  }
+  @media (max-width: 720px) {
+    .picker {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--space-1);
+      margin-bottom: var(--space-4);
+      padding: var(--space-1);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      width: fit-content;
+    }
+    .picker button {
+      border-radius: 999px;
+      padding: var(--space-2) var(--space-3);
+      font-size: var(--text-xs);
+      background: transparent;
+      color: var(--fg-muted);
+      border: 0;
+      cursor: pointer;
+    }
+    .picker button[aria-pressed="true"] {
+      background: var(--accent);
+      color: var(--accent-fg);
+    }
+    .picker button:focus-visible {
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .off {
+      display: none;
+    }
+    .matrix[data-picker] .feature-table thead th:first-child {
+      width: 60%;
+    }
+    /* Two value columns without a picker: half for the labels, a quarter for each value. */
+    .matrix:not([data-picker]) .feature-table thead th:first-child {
+      width: 50%;
+    }
+    .feature-table tbody th {
+      position: static;
+    }
+  }
+</style>

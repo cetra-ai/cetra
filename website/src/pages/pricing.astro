@@ -4,9 +4,11 @@ import Card from "../marketing/components/Card.astro";
 import Section from "../marketing/components/Section.astro";
 import SectionHeading from "../marketing/components/SectionHeading.astro";
 import Tabs from "../marketing/components/Tabs.astro";
-import { EVERY_PLAN, formatMoney, SELF_HOSTED } from "../marketing/data/pricing.mjs";
+import { CLOUD_COLUMNS, groupsFor, SELF_HOSTED_COLUMNS } from "../marketing/data/features.mjs";
+import { formatMoney, SELF_HOSTED, TEAMS_ADDON } from "../marketing/data/pricing.mjs";
 import MarketingLayout from "../marketing/layouts/MarketingLayout.astro";
 import Calculator from "../marketing/pricing/Calculator.astro";
+import FeatureTable from "../marketing/pricing/FeatureTable.astro";
 import PlanCards from "../marketing/pricing/PlanCards.astro";
 import Price from "../marketing/pricing/Price.astro";
 import PricingFaq from "../marketing/pricing/PricingFaq.astro";
@@ -37,63 +39,71 @@ import { CONTACT_EMAIL } from "../marketing/site";
     hashes={["cloud", "self-hosted"]}
   >
     <div data-tab-panel>
-  <Section tone="ink" pad="md" labelledby="plans-title">
-    <PlanCards />
-  </Section>
+      <Section tone="ink" pad="md" labelledby="plans-title">
+        <PlanCards />
+      </Section>
 
-  <Section tone="teal" divider labelledby="every-title">
-    <SectionHeading
-      eyebrow="Every plan"
-      title="The whole product, on every plan."
-      id="every-title"
-      lede="Free included. Plans differ in volume, history, seats and how many rules you set up. Retention controls come with Pro, and single sign-on and project roles with the Teams add-on."
-    />
-    <ul class="every bullets">
-      {EVERY_PLAN.map((item) => <li>{item}</li>)}
-    </ul>
-  </Section>
+      <Section tone="ink" divider labelledby="every-title">
+        <SectionHeading
+          eyebrow="Every plan"
+          title="The whole product, on every plan."
+          id="every-title"
+          lede="Free included. Plans differ in volume, history, seats and how many rules you set up. Retention controls come with Pro, and single sign-on and project roles with the Teams add-on."
+        />
+        <FeatureTable id="cloud-features" caption="cetra Cloud plans compared" columns={CLOUD_COLUMNS} groups={groupsFor("cloud")} picker />
+        <p class="muted table-note">{`Teams add-on: ${formatMoney(TEAMS_ADDON.priceMonthly)} a month on top of Pro. Prices in USD, excluding tax.`}</p>
+      </Section>
 
-  <Section tone="raised" divider labelledby="calc-title">
-    <SectionHeading
-      eyebrow="Estimate"
-      title="What will it cost?"
-      id="calc-title"
-      lede="Enter your monthly spans and scores. The estimate is the list price; volume lowers it."
-    />
-    <Calculator />
-  </Section>
+      <Section tone="raised" divider labelledby="calc-title">
+        <SectionHeading
+          eyebrow="Estimate"
+          title="What will it cost?"
+          id="calc-title"
+          lede="Enter your monthly spans and scores. The estimate is the list price; volume lowers it."
+        />
+        <Calculator />
+      </Section>
     </div>
     <div data-tab-panel>
+      <Section tone="ink" pad="md" labelledby="self-title">
+        <SectionHeading
+          eyebrow="Self-hosted"
+          title="Run it yourself, free."
+          id="self-title"
+          lede="The same software on your own server: every core feature, no usage limits, and your data stays with you."
+        />
+        <div class="cards">
+          <Card title={SELF_HOSTED.name}>
+            <Price amount={formatMoney(SELF_HOSTED.priceYearly)} />
+            <ul class="points bullets">
+              {SELF_HOSTED.features.map((feature) => <li>{feature}</li>)}
+            </ul>
+            <div class="actions">
+              <Button href="/self-hosting/">How to self-host</Button>
+            </div>
+          </Card>
+          <Card title={SELF_HOSTED.licence.name}>
+            <Price amount={formatMoney(SELF_HOSTED.licence.priceYearly)} suffix="/ year" />
+            <ul class="points bullets">
+              {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
+            </ul>
+            <p class="muted licence-note">Billed yearly, per licence. A 30-day trial is available from sales.</p>
+            <div class="actions">
+              <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
+            </div>
+          </Card>
+        </div>
+      </Section>
 
-  <Section tone="ink" pad="md" labelledby="self-title">
-    <SectionHeading
-      eyebrow="Self-hosted"
-      title="Run it yourself, free."
-      id="self-title"
-      lede="The same software on your own server: every core feature, no usage limits, and your data stays with you."
-    />
-    <div class="cards">
-      <Card title={SELF_HOSTED.name}>
-        <Price amount={formatMoney(SELF_HOSTED.priceYearly)} />
-        <ul class="points bullets">
-          {SELF_HOSTED.features.map((feature) => <li>{feature}</li>)}
-        </ul>
-        <div class="actions">
-          <Button href="/self-hosting/">How to self-host</Button>
-        </div>
-      </Card>
-      <Card title={SELF_HOSTED.licence.name}>
-        <Price amount={formatMoney(SELF_HOSTED.licence.priceYearly)} suffix="/ year" />
-        <ul class="points bullets">
-          {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
-        </ul>
-        <p class="muted licence-note">Billed yearly, per licence. A 30-day trial is available from sales.</p>
-        <div class="actions">
-          <Button href={`mailto:${CONTACT_EMAIL}`} variant="secondary">Talk to us</Button>
-        </div>
-      </Card>
-    </div>
-  </Section>
+      <Section tone="ink" divider labelledby="self-features-title">
+        <SectionHeading
+          eyebrow="Self-hosted"
+          title="Everything, on your own server."
+          id="self-features-title"
+          lede="Every core feature with no limits, for free. The licence adds single sign-on and project roles."
+        />
+        <FeatureTable id="self-features" caption="Self-hosted cetra compared" columns={SELF_HOSTED_COLUMNS} groups={groupsFor("selfHosted")} />
+      </Section>
     </div>
   </Tabs>
 
@@ -101,8 +111,9 @@ import { CONTACT_EMAIL } from "../marketing/site";
 </MarketingLayout>
 
 <style>
-  /* The switcher: one centred pill under the page title, like a segmented control. */
-  .hosting :global(> .tablist) {
+  /* The switcher: one centred pill under the page title, like a segmented control. Global,
+     because Tabs.astro renders the tab list, outside this page's style scope. */
+  :global(.hosting > .tablist) {
     width: fit-content;
     max-width: calc(100% - 2 * var(--gutter));
     margin: 0 auto var(--space-5);
@@ -111,12 +122,12 @@ import { CONTACT_EMAIL } from "../marketing/site";
     border-radius: 999px;
     background: var(--surface);
   }
-  .hosting :global(> .tablist [role="tab"]) {
+  :global(.hosting > .tablist [role="tab"]) {
     border-radius: 999px;
     padding: var(--space-2) var(--space-4);
   }
   @media (max-width: 480px) {
-    .hosting :global(> .tablist [role="tab"]) {
+    :global(.hosting > .tablist [role="tab"]) {
       font-size: var(--text-xs);
       padding: var(--space-2) var(--space-3);
     }
@@ -130,15 +141,6 @@ import { CONTACT_EMAIL } from "../marketing/site";
   .points {
     margin: var(--space-5) 0 0;
   }
-  .every {
-    margin-top: var(--space-7);
-  }
-  @media (min-width: 860px) {
-    .every {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      column-gap: var(--space-7);
-    }
-  }
   .licence-note {
     margin-top: var(--space-4);
     font-size: var(--text-sm);
@@ -148,6 +150,10 @@ import { CONTACT_EMAIL } from "../marketing/site";
     flex-wrap: wrap;
     gap: var(--space-3);
     margin-top: var(--space-5);
+  }
+  .table-note {
+    margin-top: var(--space-5);
+    font-size: var(--text-sm);
   }
   @media (max-width: 860px) {
     .cards {

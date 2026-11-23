@@ -53,7 +53,7 @@ export const PLANS = [
     dataAccess: "120 days",
     seats: "Unlimited seats",
     projects: null,
-    rules: "Unlimited rules",
+    rules: "20 alert rules, 10 online evaluation rules, 3 annotation queues and 3 issue sources",
     support: null,
     cta: "Start free",
     blurb: "For a team shipping its first LLM features.",
@@ -62,7 +62,7 @@ export const PLANS = [
     id: "pro",
     name: "Pro",
     priceMonthly: 150,
-    includedUnits: 200_000,
+    includedUnits: 400_000,
     overage: true,
     dataAccess: "5 years",
     seats: "Unlimited seats",
@@ -72,20 +72,6 @@ export const PLANS = [
     cta: "Start free",
     blurb: "For production apps: long history, retention controls, higher ingest limits.",
   },
-];
-
-/** What every cloud plan includes, Free too (D191–D194; limits per plan in PLANS[].rules). */
-export const EVERY_PLAN = [
-  "Tracing, sessions and users",
-  "Full-text search and a SQL console",
-  "MCP server for your agents",
-  "LLM judges and checks on live traffic",
-  "Annotation queues",
-  "Datasets and experiments",
-  "Prompts and a playground",
-  "Issue detection",
-  "Alerts to Slack, email and webhooks",
-  "The AI assistant, on your own LLM connection",
 ];
 
 export const TEAMS_ADDON = {
