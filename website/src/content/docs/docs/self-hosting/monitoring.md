@@ -1,10 +1,10 @@
 ---
 title: "Monitoring"
-description: "Check cetra's health, scrape its Prometheus metrics, export its logs over OTLP and set up alerts."
+description: "Check cetra's health, scrape its Prometheus metrics, export its logs and traces over OTLP and set up alerts."
 ---
 
 cetra has two health endpoints on the HTTP port (8080), and an optional Prometheus endpoint on its
-own port. cetra can also export its own logs to an OTLP endpoint when you configure one. All three are
+own port. cetra can also export its own logs and traces to an OTLP endpoint when you configure one. All three are
 described here.
 
 ## Health endpoints
@@ -206,10 +206,71 @@ service:
     logs:
       receivers: [otlp]
       exporters: [debug]
+    traces:
+      receivers: [otlp]
+      exporters: [debug]
 ```
 
 Replace the `debug` exporter with your backend's. The endpoint may be a private address:
 self-monitoring is operator configuration and skips the private-network egress guard.
+
+## Export traces over OTLP
+
+With `self_monitoring.otlp_endpoint` set, cetra also sends spans of its own work to
+`<otlp_endpoint>/v1/traces`: HTTP requests, OTLP ingest, SQL console and MCP queries, and
+background work. A traces backend then shows where time goes and which requests fail. The
+request is the same as for logs: protobuf, gzip-compressed, the headers of `otlp_headers`,
+batched every second.
+
+```toml
+[self_monitoring]
+otlp_endpoint = "https://otlp.example.com/otlp"
+traces = true              # the default
+trace_sample_ratio = 0.1   # the default: about one trace in ten
+```
+
+- **Sampling.** Each root span (an HTTP request, a gRPC export, a background job) is kept
+  with the probability `trace_sample_ratio`, and its child spans follow it, so a kept trace
+  is whole. `1.0` keeps every trace; `0.0` keeps none.
+- **Errors.** A span is marked failed when an error event is logged inside it, and an HTTP
+  request span also when the response is a 5xx. The events inside a span that pass
+  `self_monitoring.level` are recorded on it with their fields, as in the log records.
+- **What a span carries.** Ids, counts and fixed values only: never a URL, a query string, a
+  request body, SQL text, a name or an email address. The route is the route template, such as
+  `/api/v1/projects/{project}/traces`. Spans of the libraries cetra uses are not exported.
+- **Incoming `traceparent` headers are ignored.** A request always starts a new trace: a
+  caller cannot attach cetra's spans to its own trace.
+- **The health probes** `/healthz` and `/readyz`, and the UI's usage beacon `POST /api/v1/analytics/events`, get no span.
+- **No `OTEL_*` variable is read**, as for logs.
+- **Another cetra instance** can receive these traces: it stores OTLP traces (not logs).
+  Point it at a different instance. An instance that receives its own export creates one
+  more trace for each export batch it receives, at the same ratio.
+
+### The spans
+
+| Span | Covers | Attributes |
+|---|---|---|
+| `http.request` | One HTTP request, up to the response head | `http.request.method`, `http.route` (template), `http.response.status_code` |
+| `otlp.export` | One OTLP **trace** export, over HTTP (inside `http.request`) or gRPC. OTLP logs and metrics, which cetra drops, get no `otlp.export` span (over HTTP, only their `http.request`) | `protocol`, `project_id`, `spans`, `rejected`, `bytes`, `outcome` |
+| `query` | One SQL console query (`kind` `sql` or `sql_export`) or MCP tool call (`kind` `mcp`) | `kind`, `project_id`, `tool`, `rows`, `outcome` |
+| `eval.job` | One evaluation job | `job_id`, `project_id`, `evaluator_id`, `kind`, `outcome` |
+| `alerts.evaluate` | One alert rule's evaluation | `rule_id`, `project_id`, `outcome` |
+| `alerts.deliver` | One alert delivery attempt | `delivery_id`, `channel_id`, `kind`, `attempt`, `outcome` |
+| `deletion.apply` | One step of one deletion request | `deletion_id`, `kind`, `outcome` |
+| `retention.pass` | The hourly retention pass | `projects`, `files`, `failures`, `outcome` |
+| `issues.candidate` | One issue-detection candidate | `candidate_id`, `source_id`, `outcome` |
+| `backup` | One online backup | `mode`, `objects`, `bytes`, `outcome` |
+| `storage.flush` | One flush of the write-ahead log to Parquet files | `table`, `partitions`, `files`, `bytes`, `outcome` |
+| `storage.compaction` | One compaction job | `table`, `project_id`, `kind`, `files`, `bytes`, `outcome` |
+| `storage.gc` | One garbage collection pass, every 10 minutes | `files`, `bytes`, `outcome` |
+
+`outcome` is `ok` or a fixed word for what went wrong, such as `invalid`, `timeout` or
+`write_failed`. For `eval.job` and `issues.candidate` it says whether the run's result
+was saved: `recorded` (the job or candidate finished, as done, failed or skipped, and its
+result is in the database), `record_failed` (the result could not be saved; the job is
+retried later) or `panicked`. The evaluation's own result is in the UI, not on the span.
+With `self_monitoring.level = "info"`, each `http.request` span also carries the request
+line as an event.
 
 ## Alert examples
 

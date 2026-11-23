@@ -22,6 +22,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
   platform, bucketed counts and which features are in use, never names, emails, hosts or exact
   counts. `CETRA_TELEMETRY=off`, `DO_NOT_TRACK=1` or `telemetry.heartbeat = false` turn it off; it
   is off in restore mode, in CI and in debug builds. A startup line says whether it is on.
+- `cetra serve` can export its own traces (HTTP requests, OTLP ingest, SQL console and MCP queries, background work) to the same OTLP/HTTP endpoint as its logs: `self_monitoring.traces` (on once `self_monitoring.otlp_endpoint` is set) and `self_monitoring.trace_sample_ratio` (default `0.1`). Spans carry ids, counts and fixed values only, and incoming `traceparent` headers are ignored.
 
 ### Changed
 

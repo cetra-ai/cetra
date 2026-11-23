@@ -70,6 +70,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `log.format` / `log.level` | `CETRA_LOG` | `pretty` on TTY else `json` / `info` |
 | `self_monitoring.otlp_endpoint` / `self_monitoring.otlp_headers` | | unset (off) / unset. Base `http(s)` URL without user info, query or fragment, `/v1/logs` appended; headers `name=value,…` (secret, percent-decoded, ≤ 32 and 8192 bytes) (D-TL-1) |
 | `self_monitoring.logs` / `self_monitoring.level` / `self_monitoring.resource` | | `true` / `"warn"` / `""` (`key=value,…` resource attributes) |
+| `self_monitoring.traces` / `self_monitoring.trace_sample_ratio` | | `true` / `0.1` (0.0–1.0 of root spans, children follow; `/v1/traces` appended) (D-TL-3) |
 | `telemetry.heartbeat` | | `true`. The anonymous daily heartbeat (D-TL-8); the switchboard below can turn it off |
 | `telemetry.endpoint` | | `"https://telemetry.cetra.sh"` (D-TL-10). `https`, or `http` to a loopback IP; no user info, query or fragment; the heartbeat goes to `<endpoint>/v1/heartbeat` |
 
@@ -127,8 +128,6 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 > - Prometheus `/metrics` on `metrics_addr`, a separate listener, off by default, with no authentication. The metrics are listed in `website/src/content/docs/docs/self-hosting/monitoring.md`. Labels come from fixed sets only, never a tenant, user, key, model or URL (D-N-29).
 > - `/readyz` as § Process lifecycle describes it.
 > - Restore mode (`restore_mode`, D-N-25) for restore drills: no outbound work, so assistant turns and the assistant's setting test are refused with `503` (D-AS-16).
->
-> Server spans over OTLP: track TL M2 (D-TL-4).
 
 > **Built in TL M1 (D-TL-1 to D-TL-3):**
 > - `[self_monitoring]` exports `tracing` events that pass `self_monitoring.level` (default `warn`, `rmcp` capped at `warn`) as OTLP log records, protobuf and gzip over HTTP, to `<otlp_endpoint>/v1/logs`, with the operator's `otlp_headers`. Redirects off, 10 s timeout, batches of up to 512 records every second, queue of 2048. No `OTEL_*` variable is read (the resource starts empty; every batch setting is explicit).
@@ -136,6 +135,15 @@ The design is `docs/plans/p-entitlements/00-design.md` (D169–D179, D-P-1–D-P
 > - The export drops the exporter's own stack (`opentelemetry*`, `hyper*`, `reqwest`, `h2`, `tower*`, `rustls*`) and its failure lines (target `cetra_self_monitoring`, logged on stdout at most once a minute).
 > - The panic hook of `cetra serve` chains the default hook and emits an ERROR event `panic` with the location only, never the message.
 > - The export runs in restore mode too: it goes to the operator's own endpoint (D-N-25 covers outbound work for tenants and to us).
+
+> **Built in TL M2 (D-TL-2 to D-TL-4, D-TL-7):**
+> - `self_monitoring.traces` exports cetra's spans to `<otlp_endpoint>/v1/traces` through `tracing-opentelemetry` and cetra's own exporter (same request path as the logs). `BatchSpanProcessor` with the logs' batch values, sampler `ParentBased(TraceIdRatioBased(trace_sample_ratio))`, span limits and resource set explicitly: no `OTEL_*` variable is read. At ratio 0 no span layer is built.
+> - The spans and their attribute keys are constants of two catalogs (`crates/server/src/observability/spans.rs`, `crates/storage/src/spans.rs`), listed on the Monitoring page. Values are ids, counts, fixed words and durations (D-TL-4). Only spans with a `cetra_` target are exported.
+> - Events that pass the log export's filter are recorded on their span; an ERROR event, or a 5xx on `http.request`, sets the span's status to error. No thread, code-location or target attributes.
+> - The stdout layer sees events only, so spans never change stdout lines.
+> - No propagator: an incoming `traceparent` is ignored (D-TL-7). `/healthz`, `/readyz` and `POST /api/v1/analytics/events` get no span.
+> - `otlp.export` covers trace exports only (HTTP and gRPC), without a `signal` attribute: OTLP logs and metrics are dropped (D-G-40).
+> - At exit, logs and spans flush in parallel within the same 2 s.
 
 ### Telemetry to us (track TL M4)
 

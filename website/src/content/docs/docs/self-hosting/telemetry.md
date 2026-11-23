@@ -66,7 +66,7 @@ The request is `POST https://telemetry.cetra.sh/v1/heartbeat` with a JSON body a
 | `features.email` | `true`, `false` | Email (SMTP) is configured. |
 | `features.github_sign_in`, `features.google_sign_in`, `features.oidc_sign_in` | `true`, `false` | Sign-in with GitHub, Google or an OIDC provider is configured. |
 | `features.alert_rules`, `features.online_rules`, `features.datasets`, `features.prompts`, `features.annotation_queues` | `true`, `false` | At least one alert rule, online rule, dataset, prompt or annotation queue exists. |
-| `features.self_monitoring` | `true`, `false` | cetra exports its own logs to an OTLP endpoint of yours. |
+| `features.self_monitoring` | `true`, `false` | cetra exports its own logs or traces to an OTLP endpoint of yours. |
 
 An example:
 
