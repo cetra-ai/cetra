@@ -50,6 +50,13 @@ export function projectListOptions(org: string) {
   };
 }
 
+/** The last 24 hours of up to 50 projects of `org` (D-C-27). */
+export function projectActivityQuery(org: string, ids: readonly string[]) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/projects/activity", {
+    params: { path: { org }, query: { ids: ids.join(",") } },
+  });
+}
+
 export function projectInit(org: string, project: string) {
   return {
     params: {

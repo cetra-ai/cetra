@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use cetra_core::ids::OrgId;
+use uuid::Uuid;
 
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
@@ -70,6 +71,29 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     ]
 }
 
+/// The org's active projects the caller can see, in `projects_of_org` order, each with the
+/// caller's effective project role (OH-5). `GET /orgs/{org}/projects` and the activity endpoint
+/// share it, so they see the same projects.
+pub(crate) async fn visible_projects(
+    state: &AppState,
+    access: &OrgAccess,
+    user_id: Uuid,
+) -> Result<Vec<(ProjectRow, Role)>, ApiError> {
+    let projects = projects::projects_of_org(state.meta.reader(), access.org.id).await?;
+    let mut visible = Vec::new();
+    for project in projects {
+        if project.state != "active" {
+            continue;
+        }
+        let ov = project_override(state.meta.reader(), project.id, user_id).await?;
+        let Some(role) = roles::effective_project_role(access.role, ov) else {
+            continue;
+        };
+        visible.push((project, role));
+    }
+    Ok(visible)
+}
+
 async fn list_projects(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -77,22 +101,17 @@ async fn list_projects(
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<Project>>, ApiError> {
     let user = principal::session_user(&principal)?;
-    let projects = projects::projects_of_org(state.meta.reader(), access.org.id).await?;
-    let mut visible = Vec::new();
-    for project in projects {
-        if project.state != "active" {
-            continue;
-        }
-        let ov = project_override(state.meta.reader(), project.id, user.id).await?;
-        let Some(role) = roles::effective_project_role(access.role, ov) else {
-            continue;
-        };
-        visible.push((
-            project.name.clone(),
-            project.id.to_string(),
-            project_json(&project, Some(role)),
-        ));
-    }
+    let visible: Vec<_> = visible_projects(&state, &access, user.id)
+        .await?
+        .into_iter()
+        .map(|(project, role)| {
+            (
+                project.name.clone(),
+                project.id.to_string(),
+                project_json(&project, Some(role)),
+            )
+        })
+        .collect();
     Ok(error::Json(page_named(
         visible,
         params.cursor.as_deref(),

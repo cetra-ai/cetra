@@ -6010,6 +6010,98 @@
         }
       }
     },
+    "/api/v1/orgs/{org}/projects/activity": {
+      "get": {
+        "tags": [
+          "projects"
+        ],
+        "summary": "Read the projects' last 24 hours",
+        "description": "The org home's activity of the requested projects (D-C-27): traces, error traces and the sum of `cost_total` (USD) with the default exclusions, 24 hourly buckets from `from` (the epoch-aligned hours whose last one holds the request time; `to` is one nanosecond after it), and `last_ingest_at` when the server has received spans for the project since it started. `ids` is 1 to 50 distinct project ids, comma-separated; the answer follows their order. Unknown ids, ids of another org and projects hidden from the caller are left out. A project whose query fails or runs out of time is listed in `unavailable`. Any org member, through a session or a personal access token.",
+        "operationId": "get_projects_activity",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "Org UUID or slug.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "ids",
+            "in": "query",
+            "description": "One to 50 distinct project ids, comma-separated, in the order of the answer.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The activity of the requested projects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectsActivity"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The request is malformed or a filter is invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No credentials, or the credentials are invalid.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials do not allow this operation, or the organization's plan does not include it (code plan_required).",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The resource does not exist.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/orgs/{org}/sso": {
       "get": {
         "tags": [
@@ -26214,6 +26306,28 @@
   },
   "components": {
     "schemas": {
+      "ActivityBucket": {
+        "type": "object",
+        "description": "One hour of a project's traces.",
+        "required": [
+          "traces",
+          "errors"
+        ],
+        "properties": {
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, the traces whose status is `error`.",
+            "minimum": 0
+          },
+          "traces": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Traces that started in the hour.",
+            "minimum": 0
+          }
+        }
+      },
       "AddItemsRequest": {
         "type": "object",
         "description": "`POST …/datasets/{dataset}/items` body: 1 to 1 000 items, one new version.",
@@ -35533,7 +35647,7 @@
           "last_ingest_at": {
             "type": "string",
             "format": "date-time",
-            "description": "When the server last committed spans sent over OTLP to this project (D-C-20). Kept in\nmemory: absent until the first batch after the server starts. Present only when one\nproject is read."
+            "description": "When the server last committed spans sent over OTLP to this project (D-C-20). Kept in\nmemory: absent until the first batch after the server starts. Present when one project\nis read; lists omit it. `GET /orgs/{org}/projects/activity` also returns it per project\n(D-C-27)."
           },
           "name": {
             "type": "string",
@@ -35561,6 +35675,52 @@
             "type": "integer",
             "format": "int32",
             "description": "Seconds without a new span after which a trace counts as complete for online rules (D-I-7).\n10 to 3600; 60 unless set.",
+            "minimum": 0
+          }
+        }
+      },
+      "ProjectActivity": {
+        "type": "object",
+        "description": "One project's traces over the activity window.",
+        "required": [
+          "project_id",
+          "traces",
+          "errors",
+          "cost_usd",
+          "buckets"
+        ],
+        "properties": {
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActivityBucket"
+            },
+            "description": "24 hourly buckets, oldest first. Bucket `i` starts `i` hours after `from`."
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "description": "Sum of the traces' `cost_total`, USD."
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Of those, the traces whose status is `error`.",
+            "minimum": 0
+          },
+          "last_ingest_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the server last committed spans sent over OTLP to this project (D-C-20). Kept in\nmemory: absent until the first batch after the server starts."
+          },
+          "project_id": {
+            "$ref": "#/components/schemas/ProjectId",
+            "description": "The project."
+          },
+          "traces": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Traces that started in the window, with the default exclusions (spec 05).",
             "minimum": 0
           }
         }
@@ -35653,6 +35813,42 @@
           "viewer",
           "none"
         ]
+      },
+      "ProjectsActivity": {
+        "type": "object",
+        "description": "`GET /api/v1/orgs/{org}/projects/activity`: the requested projects' last 24 hours (D-C-27).",
+        "required": [
+          "from",
+          "to",
+          "data",
+          "unavailable"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectActivity"
+            },
+            "description": "One entry per requested project the caller can see, in request order."
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window start: the start of the hour 23 hours before the current one. JSON is RFC 3339."
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Window end, exclusive: one nanosecond after the request time. JSON is RFC 3339."
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProjectId"
+            },
+            "description": "Requested projects whose query failed or ran out of time, in request order."
+          }
+        }
       },
       "Prompt": {
         "type": "object",
