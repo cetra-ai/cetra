@@ -5,3 +5,4 @@
 
 pub(crate) mod actor;
 pub(crate) mod catalog;
+pub(crate) mod counters;
