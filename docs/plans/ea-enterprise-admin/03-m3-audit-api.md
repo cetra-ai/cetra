@@ -280,6 +280,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
    - `GET /api/v1/orgs/{org}/audit-events`: `Access::Org { perm: OrgPerm::ViewAudit, session_only: false }`, documented. Handler `list_org`: `require(&state, org, Feature::AuditLog)?`, then `filters`, `decode_cursor`, `page(limit + 1)`, `resolve`, and `Page { data, next_cursor }` (the next cursor is the last kept row's seq when more rows exist).
    - `GET /api/v1/orgs/{org}/audit-events/export`: same access, documented; operation id `get_org_audit_export`; handler `export::export_org` (step 6).
    - `GET /api/v1/admin/audit-events`: `Access::InstanceAdmin`, documented. Handler `list_instance`: the P-5 gate (else `ApiError::PlanRequired { detail: Feature::AuditLog.locked_detail() }`), then the same steps with `Scope::Instance`.
+   - The P-5 gate is one function in `ee/audit/mod.rs`, used by the list, the export and M4's stream: `pub(crate) fn instance_gate(state: &AppState, now: i64) -> bool { state.config.entitlements.control_plane || state.entitlements.license().state.active_features(now).contains(Feature::AuditLog) }` (adapt to the real method names of the licence state and `FeatureSet`).
    - `GET /api/v1/admin/audit-events/export`: `Access::InstanceAdmin`, documented; operation id `get_admin_audit_export`; handler `export::export_instance` (step 6).
 
    The list operation ids are `list_org_audit_events` and `list_admin_audit_events`.

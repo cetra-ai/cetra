@@ -50,7 +50,9 @@
 - **P-2. One optional header** (name and value). The name is validated like alert channel headers (`HeaderName::from_bytes`, not reserved). The value is at most 1,024 bytes, sealed, and never returned. The URL must be `https`, at most 2,048 bytes, and is never returned; responses show `url_host` only.
 - **P-3. The instance destination's failure email goes to the active instance admins** (`users WHERE is_instance_admin = 1 AND disabled_at IS NULL`).
 - **P-4. Batch:** at most 500 records or 1 MiB (whichever comes first, always at least one record). The stream line format is fixed below.
-- **P-5. Lost records.** When the oldest record of the scope has a `seq` above `cursor + 1`, records were purged before delivery. The task sets `lost_before_seq` on the destination and moves on, and the status shows it until the next update of the destination.
+- **P-5. Lost records.** `seq` is one sequence for every scope, so a scope's records are never contiguous and the task cannot infer loss from gaps. The retention purge flags it instead: when `purge_scope` deletes records of a scope whose destination's `cursor_seq` is below the highest deleted `seq`, it sets that destination's `lost_before_seq` to that `seq` in the same transaction. The status shows it until the destination is updated.
+- **P-6. Races.** `update_config` bumps `updated_at`. `mark_sent`, `mark_failed` and `mark_alerted` take the `updated_at` the task read, and update only `WHERE id = ? AND updated_at = ?`. A destination edited or deleted during a delivery is then left as the edit made it.
+- **P-7. The test route reveals reachability only:** `{ "reached": bool, "status": Option<u16> }`. Connection errors and timeouts both read as not reached, so an owner cannot tell them apart to probe the network (alert channel tests have the same property; the docs note it).
 
 ## Versions
 
@@ -63,7 +65,7 @@ E1 (table, store, sealing, catalog, perm) ── E2 (delivery task, email) ─�
 E1 ───────────────────────────────────────── E3 (API, OpenAPI, mocks) ───┼── E4 (web) ── E5 (docs)
 ```
 
-E2 and E3 run in parallel after E1: their files are disjoint.
+E2 and E3 run in parallel after E1: their files are disjoint. E1 writes every `mod` line and the `routes()` change in `ee/audit/mod.rs`, so E2 and E3 never edit it.
 
 **Shared rules:** M1's shared rules and M5's P-8. `ee/` files carry the SPDX header. Never log or record a URL, a header value or a secret: log the destination id and `url_host`.
 
@@ -72,8 +74,9 @@ E2 and E3 run in parallel after E1: their files are disjoint.
 ### E1 — Table, store, sealing, catalog and permission
 
 **Edit:**
-- `crates/server/migrations/meta/00NN_audit_stream.sql` (new);
-- `crates/server/src/ee/audit/stream_store.rs` (new) and the `mod` line in `crates/server/src/ee/audit/mod.rs`;
+- `crates/server/migrations/meta/00NN_audit_stream.sql` (new; NN = the next free number, `0033` if M5's `0032_scim.sql` is the latest);
+- `crates/server/src/ee/audit/stream_store.rs` (new);
+- `crates/server/src/ee/audit/mod.rs`: `pub(crate) mod stream;`, `pub(crate) mod stream_api;`, `pub(crate) mod stream_store;`, and `routes()` extended with `stream_api::routes()` (E2 and E3 create those files);
 - `crates/server/src/crypto.rs` (`ENCRYPTED_COLUMNS`);
 - `crates/server/src/golden_tests/dump.rs` (`natural_key`) and `crates/server/src/golden_tests/build.rs` (one sealed row);
 - `crates/server/src/audit/catalog/audit.rs`, `crates/server/src/audit/mod.rs` (`TargetKind::AuditStream`), `crates/server/src/audit/tests.rs`;
@@ -117,6 +120,7 @@ E2 and E3 run in parallel after E1: their files are disjoint.
    #[serde(deny_unknown_fields)]
    pub(crate) struct StreamConfig { pub(crate) url: String, pub(crate) secret: String, pub(crate) header: Option<(String, String)> }
 
+   #[derive(Debug)] // holds only the sealed blob
    pub(crate) struct DestinationRow { pub(crate) id: Uuid, pub(crate) org_id: Option<OrgId>, pub(crate) url_host: String, pub(crate) config_enc: Vec<u8>, pub(crate) enabled: bool, pub(crate) cursor_seq: i64, pub(crate) attempts: i64, pub(crate) next_attempt_at: i64, pub(crate) last_success_at: Option<i64>, pub(crate) last_error: Option<String>, pub(crate) failing_since: Option<i64>, pub(crate) alerted_at: Option<i64>, pub(crate) lost_before_seq: Option<i64>, pub(crate) created_at: i64, pub(crate) updated_at: i64 }
 
    pub(crate) fn seal(secrets: &SecretBox, id: &Uuid, config: &StreamConfig) -> Result<Vec<u8>, CryptoError>;  // JSON then seal with Aad { table: TABLE, column: COLUMN, row_id: id }
@@ -127,15 +131,19 @@ E2 and E3 run in parallel after E1: their files are disjoint.
    pub(crate) async fn update_config(conn, id: Uuid, url_host: &str, sealed: &[u8], enabled: bool, now) -> Result<(), MetaError>; // also clears last_error, attempts, next_attempt_at, failing_since, alerted_at, lost_before_seq
    pub(crate) async fn delete(conn, org: Option<OrgId>) -> Result<bool, MetaError>;
    pub(crate) async fn due(pool, now) -> Result<Vec<DestinationRow>, MetaError>; // enabled = 1 AND next_attempt_at <= now
-   pub(crate) async fn mark_sent(conn, id, cursor_seq: i64, lost_before_seq: Option<i64>, now) -> Result<(), MetaError>; // attempts 0, next 0, last_success_at now, last_error NULL, failing_since NULL, alerted_at NULL
-   pub(crate) async fn mark_failed(conn, id, attempts: i64, next_attempt_at: i64, error: &str, now) -> Result<Option<i64> /* failing_since */, MetaError>; // failing_since = coalesce(failing_since, now)
-   pub(crate) async fn mark_alerted(conn, id, now) -> Result<(), MetaError>;
+   // P-6: each `mark_*` updates only `WHERE id = ? AND updated_at = ?` (the value the task read); `false` = the row changed meanwhile.
+   pub(crate) async fn mark_sent(conn, id, read_updated_at: i64, cursor_seq: i64, now) -> Result<bool, MetaError>; // attempts 0, next 0, last_success_at now, last_error NULL, failing_since NULL, alerted_at NULL
+   pub(crate) async fn mark_failed(conn, id, read_updated_at: i64, attempts: i64, next_attempt_at: i64, error: &str, now) -> Result<Option<i64> /* failing_since, None when the row changed */, MetaError>; // failing_since = coalesce(failing_since, now)
+   pub(crate) async fn mark_alerted(conn, id, read_updated_at: i64, now) -> Result<bool, MetaError>;
+   pub(crate) async fn flag_lost(conn, org: Option<OrgId>, max_deleted_seq: i64) -> Result<(), MetaError>; // UPDATE … SET lost_before_seq = max(coalesce(lost_before_seq, 0), ?) WHERE <scope> AND cursor_seq < ?
    ```
 
    - Write `Debug` for `StreamConfig` by hand: `StreamConfig { url: "<host>", .. }`, printing only the host.
    - The org scope is `org_id = ?`; the instance scope is `org_id IS NULL`.
-3. `crypto.rs`: append `("audit_stream_destinations", "config_enc")` to `ENCRYPTED_COLUMNS`. `golden_tests/dump.rs` `natural_key` gets `("audit_stream_destinations", _) => "url_host"`. `golden_tests/build.rs`, after the audit record M1 added, inserts one org destination through `stream_store::insert`, sealed with its `seal` helper (url `https://siem.example.com/ingest`, a fixed secret, no header).
-4. **Catalog**, added to `AuditAction`:
+   - `insert` maps the unique violation to `MetaError::Conflict` with the existing `unique_or` helper, as `meta/personal_tokens.rs` does.
+   - Foreign keys are on (`meta/mod.rs:~168`); a NULL `org_id` skips the FK.
+3. `crypto.rs`: append `("audit_stream_destinations", "config_enc")` to `ENCRYPTED_COLUMNS`. `golden_tests/dump.rs` `natural_key` gets `("audit_stream_destinations", _) => "url_host"`. `golden_tests/build.rs`, after the audit record M1 added, inserts one destination for the scenario's org through `stream_store::insert`, sealed with `stream_store::seal` (url `https://siem.example.com/ingest`, a fixed secret, no header). `admin.rs`'s key rotation reseals every `ENCRYPTED_COLUMNS` row by UUID `id`, so the table needs no other change.
+4. **Catalog**, extending M3's `AuditAction` in `audit/catalog/audit.rs`:
    - `#[serde(rename = "audit.stream_set")] StreamSet { url_host: String, header: bool, enabled: bool }`;
    - `#[serde(rename = "audit.stream_removed")] StreamRemoved`;
    - `#[serde(rename = "audit.stream_secret_rotated")] StreamSecretRotated`.
@@ -144,7 +152,7 @@ E2 and E3 run in parallel after E1: their files are disjoint.
 5. `OrgPerm::ManageAuditStream`, minimum role `Owner`, with its test assert.
 
 **Tests:**
-- `stream_store`: `seal_and_open_round_trip`, `debug_hides_the_url_path_and_secrets`, `one_destination_per_scope` (a second insert for the same org, or a second instance row, is a `Conflict`), `insert_starts_at_the_current_max_seq`, `mark_failed_keeps_the_first_failing_since`, `mark_sent_clears_the_failure_state`, `org_delete_cascades`.
+- `stream_store`: `insert_into_an_empty_scope_starts_at_the_global_max`, `marks_are_ignored_after_an_edit` (P-6), `flag_lost_only_when_undelivered_records_were_deleted`, `seal_and_open_round_trip`, `debug_hides_the_url_path_and_secrets`, `one_destination_per_scope` (a second insert for the same org, or a second instance row, is a `Conflict`), `insert_starts_at_the_current_max_seq`, `mark_failed_keeps_the_first_failing_since`, `mark_sent_clears_the_failure_state`, `org_delete_cascades`.
 - `crypto.rs` `encrypted_columns_cover_the_schema` passes unchanged.
 
 **Commit:** `Add audit stream destinations`
@@ -154,11 +162,11 @@ E2 and E3 run in parallel after E1: their files are disjoint.
 ### E2 — Delivery task and failure email
 
 **Edit:**
-- `crates/server/src/ee/audit/stream.rs` (new) and its `mod` line in `ee/audit/mod.rs`;
+- `crates/server/src/ee/audit/stream.rs` (new);
 - `crates/server/src/serve.rs`;
+- `crates/server/src/audit/retention.rs` (`purge_scope` calls `stream_store::flag_lost`, P-5);
+- `crates/server/src/alerts/deliver.rs` (make `egress_error` and `post` `pub(crate)` so the stream reuses them; no other change);
 - `crates/server/src/email/mod.rs` and `crates/server/src/email/templates/audit_stream_failing.txt` and `.html` (new).
-
-E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds only its `routes()` lines. If the two edits collide at commit, the second agent re-applies its line on top.
 
 **Steps:**
 
@@ -171,39 +179,41 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
    ```
 
    - Absent values are JSON `null`. `target` is `null` when there is none, and `details` is the stored JSON parsed.
-   - It is built from `ee::audit::read::Row`, using a `read::page`-like query with an ascending order: add `read::after(pool, scope, after_seq, limit) -> Vec<Row>` (`seq > ? ORDER BY seq ASC LIMIT ?`) in E2's own file `stream.rs`, as a private query, rather than editing `read.rs`.
+   - `stream.rs` has its own private `StreamRow` (every `audit_events` column) and query: `SELECT … FROM audit_events WHERE <scope> AND seq > ? ORDER BY seq ASC LIMIT ?`. It does not reuse M3's `read` module, which resolves names; the stream sends ids only.
+   - Mapping: `at` (ns) → RFC 3339 with milliseconds, UTC (chrono, as `backup.rs:~549`); `actor` = `{kind: actor_kind, id: actor_id, via, credential_id}`; `target` = `{kind: target_kind, id: target_id}` when `target_kind` is set.
 2. **`deliver_once(state: &AppState, now: i64) -> Result<Report, MetaError>`:**
    1. **Due destinations:** `stream_store::due`.
-   2. **Gate:** skip a destination whose scope lacks the feature: `of(state, org).allows(Feature::AuditLog)`, or the instance gate of M3's P-5. Skipping leaves the row unchanged.
+   2. **Gate:** skip a destination whose scope lacks the feature: `entitlements::of(state, org).allows(Feature::AuditLog)`, or `ee::audit::instance_gate(state, now)` (M3) for the instance. Skipping leaves the row unchanged.
    3. **Per destination**, at most 4 at a time (`buffer_unordered(4)`, as alerts):
       1. Open the config. Failure: `mark_failed(.., "the destination's settings cannot be read")` and continue.
       2. Read records after `cursor_seq`, up to 500.
-      3. Lost records (P-5): compute the scope's `MIN(seq)`. When it is above `cursor_seq + 1`, `lost_before_seq = Some(min)`.
-      4. No records: `mark_sent(cursor unchanged, lost)` only when `lost` changed. Otherwise do nothing.
+      3. No records: do nothing.
       5. Build the body: lines until 500 records or 1 MiB, always at least one.
       6. Headers:
          - `content-type: application/x-ndjson`;
-         - `X-Cetra-Signature`: `sign_payload(&Secret::new(config.secret), now / 1_000_000_000, &body)`;
+         - `X-Cetra-Signature`: `cetra_eval::sign_payload(&cetra_eval::Secret::new(config.secret.clone()), now / 1_000_000_000, &body)` (import as `cetra_eval::{Secret as EvalSecret, …}` if `crate::config::Secret` is in scope). `None` (an unusable key) is a permanent failure: `mark_failed` with "the signing secret is unusable", never a panic;
          - `x-cetra-delivery`: `<destination id>:<first seq>-<last seq>`;
          - the optional header.
-      7. POST through `state.eval_runner.egress()` with timeout 10 s and max response 1 MiB, as `alerts/deliver.rs` `post` does.
-   4. **On a 2xx:** `mark_sent(last seq of the batch, lost)`.
+      7. POST with `alerts::deliver::post` (made `pub(crate)` in this phase).
+   4. **On a 2xx:** `mark_sent(read updated_at, last seq of the batch)`.
    5. **Otherwise:**
       - `attempts + 1`, `next_attempt_at = now + alerts::deliver::backoff_ns(attempts + 1)`, and an error class message:
         - "the endpoint answered <code>";
-        - or the egress error's message. `alerts/deliver.rs` `egress_error` is private and not in this phase's list, so copy its mapping into `stream.rs` as a private function, with the same messages.
+        - or `alerts::deliver::egress_error`'s message (made `pub(crate)` in this phase).
       - Then, when `failing_since <= now − 24 h` and `alerted_at` is null, email (step 3) and `mark_alerted`.
    6. **Logs** carry the destination id and `url_host` only.
 3. **Email** `Email::AuditStreamFailing { scope_name: String, url_host: String, since_hours: u64, url: String }`:
    - `scope_name`: the org's display name, or "this cetra instance";
    - `url`: `<public_url>/<org slug>/settings/audit-log` or `<public_url>/admin/audit-log`.
    - Add it to `TEMPLATES`, `render`, `subject()` ("Audit stream failing for <scope_name>"), `template_name()` (`audit_stream_failing`) and the render tests, as `UsageNotice` is added.
-   - Recipients: the org's active owners (as `entitlements/notices.rs` selects them), or the instance admins (P-3), via `mailer.send_in_background`. No mailer: nothing is sent, and `alerted_at` is still set.
+   - Recipients: the org's active owners (as `entitlements/notices.rs` selects them, with `meta::members::org_members`), or the instance admins (P-3, a private query in `stream.rs`), via `mailer.send_in_background`. No mailer: nothing is sent, and `alerted_at` is still set, so a mailer configured later does not alert for that episode (as usage notices behave).
+   - If the email tests count or list templates, extend them.
 4. **`serve.rs`:**
    - `const AUDIT_STREAM_EVERY: Duration = Duration::from_secs(10);`
    - `spawn_audit_stream(state)`, shaped like `spawn_audit_purge` (interval, skip the first tick, log errors);
    - spawned inside the `if !state.config.restore_mode` block;
-   - `restore_mode_skips_the_sending_and_dns_loops` changes from 5 to 6, with its doc list.
+   - `restore_mode_skips_the_sending_and_dns_loops` gains one task (re-read its current count: other milestones may have changed it), with its doc list.
+5. **`audit/retention.rs` `purge_scope`:** before each batch's DELETE, read `MAX(seq)` of the rows it will delete (same `WHERE`), and after it, in the same transaction, call `stream_store::flag_lost(conn, org, max_seq)` (P-5).
 
 **Tests** (`ee/audit/stream.rs`, `test_support::hook_receiver::HookReceiver`, `TestApp::with_config(|c| c.security.allow_private_network_egress = true)` and a manual clock, as `alerts/deliver/tests.rs` does):
 - `new_records_are_sent_in_order_and_signed` (verify the signature with `sign_payload`);
@@ -212,7 +222,7 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
 - `batches_stop_at_500_records`;
 - `a_lapsed_org_is_not_streamed`;
 - `restore_mode_sends_nothing` (an egress client in restore mode refuses; the task is not spawned);
-- `purged_records_set_lost_before_seq`;
+- `purging_undelivered_records_flags_the_destination` and `purging_delivered_records_does_not`;
 - `owners_are_emailed_once_after_24_hours` (a mailer double, as the notices tests use);
 - `the_instance_destination_streams_the_instance_log_only`;
 - `no_url_or_secret_in_logs` (`capture_logs`).
@@ -224,7 +234,7 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
 ### E3 — Stream API
 
 **Edit:**
-- `crates/server/src/ee/audit/stream_api.rs` (new) and its `mod` and `routes()` lines in `ee/audit/mod.rs`;
+- `crates/server/src/ee/audit/stream_api.rs` (new, with `pub(crate) fn routes()`);
 - `crates/server/src/api/audit.rs`, `crates/server/src/api/openapi.rs`;
 - `crates/server/tests/openapi.rs`, `crates/server/src/api_examples.rs`, `crates/server/tests/api_examples.rs`;
 - `web/src/mocks/writes.ts`, `fixtures/api/static/org-audit-stream.json` and `admin-audit-stream.json` (new), plus the static JSON for write responses that `writes.ts` needs.
@@ -241,7 +251,7 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
    pub struct RotatedAuditStreamSecret { pub secret: String }
    ```
 
-   - `lag` = the scope's `MAX(seq)` − `cursor_seq`, floored at 0.
+   - `lag` = `SELECT COUNT(*) FROM audit_events WHERE <scope> AND seq > cursor_seq`, as `u64` (`u64::try_from(n).unwrap_or(0)`).
    - `lost_records` = `lost_before_seq.is_some()`.
 2. **Routes:**
    - org routes: `Access::Org { perm: OrgPerm::ManageAuditStream, session_only: true }`;
@@ -254,25 +264,31 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
    | `PUT /api/v1/orgs/{org}/audit-stream` | create (201 + `CreatedAuditStream`) or update (200 + `AuditStream`) | `put_org_audit_stream` |
    | `DELETE /api/v1/orgs/{org}/audit-stream` | 204, or 404 | `delete_org_audit_stream` |
    | `POST /api/v1/orgs/{org}/audit-stream/secret` | rotate the secret (200 + `RotatedAuditStreamSecret`) | `rotate_org_audit_stream_secret` |
-   | `POST /api/v1/orgs/{org}/audit-stream/test` | send one test line (`{"test":true,"at":…}`) now: 204 on 2xx, `502` with the error class otherwise; `refuse_outbound` first (restore mode) | `test_org_audit_stream` |
+   | `POST /api/v1/orgs/{org}/audit-stream/test` | send one signed test line (`{"test":true,"at":…}`) now, without touching the cursor: 200 with `AuditStreamTest { reached: bool, status: Option<u16> }` (P-7); `refuse_outbound` first (restore mode) | `test_org_audit_stream` |
 
    The same five operations exist under `/api/v1/admin/audit-stream…`, named `…_admin_…`.
 3. **Writes:**
    - `PUT`, `POST …/secret` and `POST …/test` need the feature (`require`, or the instance gate). `GET` needs it too. `DELETE` always works (D-EA-19: removals are allowed when lapsed).
-   - `PUT` validation (P-2): `url` parses, is `https`, at most 2,048 bytes; the header name is valid and not reserved (copy `alerts/channel.rs`'s `RESERVED_HEADERS` list and its check into `stream_api.rs`); a value of at most 1,024 bytes; `header_value` without `header_name` is a 400.
-   - On update, a missing `header_value` with the same `header_name` keeps the stored value.
+   - `PUT` validation (P-2), each a 400 `field_error`:
+     - `url` parses, is `https`, at most 2,048 bytes, and has no userinfo (`user:pw@`);
+     - the header name is non-empty, a valid `HeaderName`, and not in `alerts::channel::RESERVED_HEADERS` (`pub(crate)`) nor `authorization`-like duplicates of it (compare lowercase);
+     - the value is non-empty, at most 1,024 bytes, and passes `HeaderValue::from_str` (rejects CR and LF);
+     - `header_value` without `header_name` is refused.
+   - **On update**, the handler opens the stored config first (to keep the secret, and the header value when `header_value` is missing and the name is unchanged). If it cannot be opened: `409 conflict` "The stored settings cannot be read; remove the destination and create it again.".
    - A new secret is 32 bytes from `crate::auth::secret::random_bytes`, base64url without padding.
    - Every write runs in one `meta.write` with its record: `StreamSet { url_host, header, enabled }`, `StreamRemoved` or `StreamSecretRotated`, target `(AuditStream, id)`, with `.org(org)` for org routes.
 4. **OpenAPI:** the ten operations under the `audit` tag, security `session`. `tests/openapi.rs`: the ten ids in `OPERATIONS`, the session-security list, and `expected_errors` as their org SSO counterparts (with `502` for the test routes). `tests/api_examples.rs`: round-trip arms for the two GET examples. `api_examples.rs`: the two GET examples with their static files.
-5. **`web/src/mocks/writes.ts`:** the eight write operations in `WRITE_OPERATIONS`, with handlers returning static JSON, as `writes.test.ts` requires.
+5. **`web/src/mocks/writes.ts`:** the eight write operations in both `WRITE_OPERATIONS` and its response map (`writes.test.ts` checks them against the OpenAPI contract), with handlers returning static JSON. M5 also added entries there; keep them. PUT's two responses (201 `CreatedAuditStream`, 200 `AuditStream`) are both in the OpenAPI operation and its `expected_errors`.
 
 **Tests:**
 - `owner_creates_a_destination_and_sees_the_secret_once`;
 - `admins_cannot_manage_the_stream` (403);
 - `http_urls_and_reserved_headers_are_refused`;
+- `a_newline_in_the_header_value_is_refused`;
+- `userinfo_in_the_url_is_refused`;
 - `the_header_value_is_never_returned`;
 - `rotating_the_secret_records_it`;
-- `test_send_reports_the_endpoint_status`;
+- `test_send_reports_reachability_only`;
 - `delete_works_when_lapsed`;
 - `put_needs_the_feature`;
 - `instance_routes_need_an_instance_admin_and_the_licence`;
@@ -292,12 +308,12 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
 
 1. **`AuditStreamCard`** (`{ scope: { org: string } | "instance" }`), shown to org owners (role `owner`) and to instance admins:
    - **No destination:** a form with URL, an optional header name and value, and Save.
-   - **On create:** `SecretDialog` with the secret and "Use it to verify the X-Cetra-Signature header. You won't see it again.".
+   - **On create:** `SecretDialog` (`open`, `title: "Signing secret"`, `secret`, `description: "Use it to verify the X-Cetra-Signature header. You won't see it again."`, `onDone`; `showSnippets` unset).
    - **With a destination:**
      - `url_host`, the header name, an enabled switch;
      - status lines: "Last delivered <time>" or "Never delivered"; "N records behind"; the last error in red with "failing since <time>"; "Some records were deleted by retention before they were sent." when `lost_records`;
      - Edit, which re-enters the URL and keeps the header value when left blank, with the placeholder "Stored; leave blank to keep it";
-     - Send test, Rotate secret (with `SecretDialog`), and Remove (`TypeToConfirmDialog` "remove").
+     - Send test (shows "Reached, status N" or "Not reached"), Rotate secret (`SecretDialog` with the new secret from `RotatedAuditStreamSecret`), and Remove (`TypeToConfirmDialog` with `expected: "remove"`).
    - The mutations use `gcTime: 0`, as the alert channel form does.
 2. Admins who are not owners see the stream card hidden; the log view stays.
 
@@ -335,7 +351,8 @@ E3 also edits `ee/audit/mod.rs`, so E2 adds only its one `mod` line, and E3 adds
 
 ## After the phases (coordinating session)
 
-1. Run `just openapi` and `just api-examples` after E3, and commit.
-2. Review, then `just check` once.
-3. Fix phase; a Sonnet code review of M3 and M4.
-4. Roadmap: "M4 implemented".
+1. After E1, update `crates/server/tests/snapshots/meta_schema.snap` (rerun `meta::tests::schema_matches_the_snapshot` with `INSTA_UPDATE=always`), and check that only the new table and index were added.
+2. Run `just openapi` and `just api-examples` after E3, and commit (`openapi.json`, `schema.gen.ts`, the manifest).
+3. Review, then `just check` once.
+4. Fix phase; a Sonnet code review of M3 and M4.
+5. Roadmap: "M4 implemented".
