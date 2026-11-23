@@ -135,7 +135,7 @@ The initial table. M1 checks every host against the provider's documentation, an
 | `api.studio.nebius.com`, `api.tokenfactory.nebius.com` | `nebius` |
 | `api.mistral.ai` | `mistral_ai` |
 | `*.openai.azure.com` | `azure.ai.openai` |
-| `*.services.ai.azure.com` | `azure.ai.openai` |
+| `*.services.ai.azure.com` | `azure.ai.inference` |
 | `*.cognitiveservices.azure.com` | `azure.ai.openai` |
 | `api.deepinfra.com` | `deepinfra` |
 | `inference.baseten.co` | `baseten` |
