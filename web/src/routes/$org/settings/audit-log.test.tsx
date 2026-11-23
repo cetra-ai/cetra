@@ -5,6 +5,7 @@ import { server } from "@/mocks/node";
 import { ADA_ID, ORG_ID } from "@/test/fixtures";
 import { renderApp } from "@/test/render";
 import auditFixture from "../../../../../fixtures/api/static/org-audit-events.json";
+import auditStreamFixture from "../../../../../fixtures/api/static/org-audit-stream.json";
 import entitlementsFixture from "../../../../../fixtures/api/static/org-entitlements.json";
 
 const originalCreate = URL.createObjectURL;
@@ -95,6 +96,39 @@ it("shows the lock without the audit_log feature", async () => {
   const lock = await screen.findByRole("note", { name: "Locked feature" });
   expect(lock).toHaveTextContent("Available with Enterprise or an enterprise licence.");
   expect(screen.queryByRole("table", { name: "Audit records" })).toBeNull();
+});
+
+it("admins who are not owners do not see the stream card, and the log stays", async () => {
+  // The fixture mocks answer every GET, so "no card" is not proof that the page skipped the
+  // request: the handler counts.
+  let streamGets = 0;
+  server.use(
+    signedInAs("admin"),
+    withFeatures(["audit_log"]),
+    http.get("/api/v1/orgs/:org/audit-stream", () => {
+      streamGets += 1;
+      return HttpResponse.json(auditStreamFixture);
+    }),
+  );
+
+  await renderApp("/acme/settings/audit-log");
+
+  expect(await screen.findByRole("table", { name: "Audit records" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Streaming" })).toBeNull();
+  expect(screen.queryByLabelText("URL")).toBeNull();
+  expect(streamGets).toBe(0);
+});
+
+it("shows owners the stream card above the records", async () => {
+  server.use(signedInAs("owner"), withFeatures(["audit_log"]));
+
+  await renderApp("/acme/settings/audit-log");
+
+  const card = await screen.findByRole("region", { name: "Streaming" });
+  expect(card).toHaveTextContent("siem.example.com");
+  // Above the filters, so the card comes first in reading order.
+  const table = await screen.findByRole("table", { name: "Audit records" });
+  expect(card.compareDocumentPosition(table)).toEqual(Node.DOCUMENT_POSITION_FOLLOWING);
 });
 
 it("exports the filtered records as CSV", async () => {

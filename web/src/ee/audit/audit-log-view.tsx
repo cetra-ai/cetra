@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import { AuditExportMenu } from "@/ee/audit/audit-export-menu";
 import { AuditRecordSheet } from "@/ee/audit/audit-record-sheet";
+import { AuditStreamCard } from "@/ee/audit/audit-stream-card";
 import {
   type AuditQuery,
   type AuditRange,
@@ -130,6 +131,14 @@ export function AuditLogView({
   const query = useMemo(() => auditQuery(search, floorToMinute(new Date())), [search]);
   const pages = useAuditPages(scope, query);
   const update = onUpdate;
+  // The stream destination is written by the org's owners, or by the instance admin (the admin
+  // page is behind the instance-admin gate); admins who are not owners only read the log.
+  const me = $api.useQuery("get", "/api/auth/me");
+  const role =
+    scope === "instance"
+      ? "owner"
+      : me.data?.orgs.find((candidate) => candidate.slug === scope.org)?.role;
+  const managesStream = role === "owner";
 
   const records: AuditEvent[] = (pages.data?.pages ?? []).flatMap((page) => page.data);
   const open = search.open === undefined ? undefined : records.find((r) => r.id === search.open);
@@ -137,6 +146,7 @@ export function AuditLogView({
 
   return (
     <div className="flex flex-col gap-4">
+      {managesStream ? <AuditStreamCard scope={scope} /> : null}
       <AuditFilters search={search} onUpdate={update} />
       <div className="flex justify-end">
         <AuditExportMenu scope={scope} query={query} />
