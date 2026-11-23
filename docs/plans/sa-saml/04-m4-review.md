@@ -26,7 +26,7 @@ Milestone 4 of track SA ([`README.md`](README.md)): the internal security review
 
 | # | Finding | Disposition |
 |---|---|---|
-| 1 | The pricing pages list SAML before interop (`website/src/marketing/data`). | **Kept, user's call:** the docs-coupled pricing test forces the licence list to match `plans-and-licence.mdx`. They go live only when PR #240 merges, which waits for the interop below. |
+| 1 | The pricing pages list SAML before interop (`website/src/marketing/data`). | **Kept (the user, 2026-11-23):** the docs-coupled pricing test forces the licence list to match `plans-and-licence.mdx`. They go live only when PR #240 merges, which waits for the interop below. |
 | 2 | `patch_org_sso`'s write-time check ignores `protocol`, so a concurrent switch to SAML skips the `saml` and https checks. | **Fixed (SA4.1).** |
 | 3 | Missing test `sp_metadata_of_an_oidc_org_is_404`. | **Fixed (SA4.1).** |
 | 4 | CSRF test asserts 404 only. | Covered by `the_acs_ignores_a_foreign_origin`; no change. |
