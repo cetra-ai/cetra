@@ -13,6 +13,9 @@ use sha2::{Digest, Sha256};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode, TimeParam};
 use crate::api::prompts::{
     CreatePromptRequest, CreateVersionRequest, Prompt, PromptKind, PromptLabel, PromptLabelEvent,
@@ -499,6 +502,7 @@ async fn create_prompt(
     Extension(access): Extension<ProjectAccess>,
     error::Json(body): error::Json<CreatePromptRequest>,
 ) -> Result<(StatusCode, error::Json<PromptVersion>), ApiError> {
+    let kind = body.kind;
     let prompt_type = prompt_type_of(body.kind);
     let mut errors = Vec::new();
     if let Err(error) = check_name(&body.name) {
@@ -563,6 +567,11 @@ async fn create_prompt(
         version = version.version,
         actor = %actor.as_deref().unwrap_or("-"),
         "prompt created"
+    );
+    record(
+        &state,
+        &Event::PromptCreated { kind },
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,
@@ -860,6 +869,11 @@ async fn create_version(
         version = version.version,
         actor = %actor.as_deref().unwrap_or("-"),
         "prompt version created"
+    );
+    record(
+        &state,
+        &Event::PromptVersionCreated,
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,
@@ -1361,6 +1375,10 @@ mod tests {
             page_len(&app, auth, &format!("{list}?label=latest")).await,
             1
         );
+        assert!(
+            app.state.analytics.counters.get("prompt.created") >= 1,
+            "prompt.created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1458,6 +1476,10 @@ mod tests {
 
         let one = call(&app, Method::GET, &format!("{path}/versions/2"), auth, None).await;
         assert_eq!(one.json::<PromptVersion>().version, 2);
+        assert!(
+            app.state.analytics.counters.get("prompt.version_created") >= 1,
+            "prompt.version_created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

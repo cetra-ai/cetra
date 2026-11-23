@@ -20,8 +20,12 @@ use serde_json::{Map, Value};
 use tokio::sync::oneshot;
 use tracing::Instrument as _;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
+use crate::auth::principal::Principal;
 use crate::auth::roles::{ProjectPerm, Role};
 use crate::config::DemoConfig;
 use crate::demo::DemoVisitor;
@@ -209,6 +213,7 @@ impl SqlFormat {
 
 async fn run_sql(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     visitor: Option<Extension<DemoVisitor>>,
     headers: HeaderMap,
@@ -237,6 +242,13 @@ async fn run_sql(
             }
         }
         log_end(access.project.id, "json", query_len, started, &result);
+        if result.is_ok() {
+            record(
+                &state,
+                &Event::SqlConsoleRun,
+                &Actor::project(&principal, &access),
+            );
+        }
         return result.map(|result| error::Json(result).into_response());
     };
     let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL_EXPORT);
@@ -250,6 +262,11 @@ async fn run_sql(
     {
         Ok(response) => {
             span.record(spans::OUTCOME, "ok");
+            record(
+                &state,
+                &Event::SqlConsoleRun,
+                &Actor::project(&principal, &access),
+            );
             Ok(response)
         }
         Err(error) => {
@@ -799,6 +816,10 @@ mod tests {
                 {"span_kind": "llm", "spans": 5, "first_start": "2026-01-01T10:00:00.100000000Z"},
                 {"span_kind": "tool", "spans": 1, "first_start": "2026-01-01T10:00:01.950000000Z"}
             ])
+        );
+        assert!(
+            app.state.analytics.counters.get("sql_console.run") >= 1,
+            "sql_console.run not counted"
         );
     }
 

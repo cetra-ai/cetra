@@ -23,6 +23,9 @@ use sqlx::{SqliteConnection, SqlitePool};
 use tokio::sync::{Semaphore, SemaphorePermit};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::datasets::{
     AddItemsRequest, AddItemsResponse, CreateDatasetRequest, Dataset, DatasetItem,
@@ -534,6 +537,11 @@ async fn create_dataset(
         actor = %actor.as_deref().unwrap_or("-"),
         "dataset created"
     );
+    record(
+        &state,
+        &Event::DatasetCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(dataset_json(&row)?)))
 }
 
@@ -950,6 +958,7 @@ struct ExportCursor {
 /// cannot change under the reader.
 async fn export_items(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
     error::Path(DatasetPath { dataset }): error::Path<DatasetPath>,
     error::Query(params): error::Query<ExportParams>,
@@ -980,6 +989,11 @@ async fn export_items(
     let pages = futures::stream::try_unfold(cursor, move |cursor| {
         export_page(pool.clone(), dataset, project, version, format, cursor)
     });
+    record(
+        &state,
+        &Event::DatasetExported { format },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::OK, headers, Body::from_stream(pages)).into_response())
 }
 
@@ -1132,6 +1146,13 @@ async fn add_items(
         count = response.item_ids.len(),
         version = response.version,
         "dataset items added"
+    );
+    record(
+        &state,
+        &Event::DatasetItemsAdded {
+            source: ItemSource::Manual,
+        },
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(response)))
 }
@@ -2005,6 +2026,11 @@ async fn import_items(
         "dataset items imported"
     );
     let listed = errors.into_iter().take(import::MAX_LISTED_ERRORS).collect();
+    record(
+        &state,
+        &Event::DatasetImported { format },
+        &Actor::project(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(ImportResult {
@@ -2268,6 +2294,13 @@ async fn add_from_trace(
     let row = store::get_item(state.meta.reader(), used.id, item_id, version)
         .await?
         .ok_or(ApiError::NotFound)?;
+    record(
+        &state,
+        &Event::DatasetItemsAdded {
+            source: ItemSource::Trace,
+        },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(item_json(&row))))
 }
 
@@ -2468,6 +2501,13 @@ async fn add_from_traces(
         &Map::new(),
     )
     .await?;
+    record(
+        &state,
+        &Event::DatasetItemsAdded {
+            source: ItemSource::Traces,
+        },
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(result)))
 }
 
@@ -3062,6 +3102,10 @@ mod tests {
             .await;
         assert_eq!(deleted.status, 204);
         assert_eq!(get(&app, &seeded, &id).await.status, 404);
+        assert!(
+            app.state.analytics.counters.get("dataset.created") >= 1,
+            "dataset.created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -3518,6 +3562,10 @@ mod tests {
             json!({ "t": "x" })
         );
         assert_eq!(records[1..].iter().filter(|r| r[2].is_empty()).count(), 1);
+        assert!(
+            app.state.analytics.counters.get("dataset.exported") >= 1,
+            "dataset.exported not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4816,6 +4864,10 @@ mod tests {
             .send()
             .await;
         assert_eq!(refused.status, 403);
+        assert!(
+            app.state.analytics.counters.get("dataset.items_added") >= 1,
+            "dataset.items_added not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5339,6 +5391,10 @@ mod tests {
             versions["data"][0]["description"],
             "import data.csv (2 items)"
         );
+        assert!(
+            app.state.analytics.counters.get("dataset.imported") >= 1,
+            "dataset.imported not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -5785,6 +5841,10 @@ mod tests {
             versions["data"][0]["description"],
             "add from trace a1000000000000000000000000000001"
         );
+        assert!(
+            app.state.analytics.counters.get("dataset.items_added") >= 1,
+            "dataset.items_added not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -6119,6 +6179,10 @@ mod tests {
         let dataset: Value = get(&app, &seeded, "faq").await.json();
         assert_eq!(dataset["current_version"], 1);
         assert_eq!(dataset["item_count"], 2);
+        assert!(
+            app.state.analytics.counters.get("dataset.items_added") >= 1,
+            "dataset.items_added not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

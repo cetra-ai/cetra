@@ -13,6 +13,9 @@ use serde_json::{Map, Value};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use cetra_storage::{
     MAX_EXPERIMENT_SCORES, MAX_EXPERIMENT_TRACES, QueryContext, RunError, experiment_scores,
@@ -393,6 +396,11 @@ async fn create_experiment(
         item_count = row.item_count,
         repetitions = row.repetitions,
         "experiment created"
+    );
+    record(
+        &state,
+        &Event::ExperimentCreated,
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,
@@ -1268,6 +1276,10 @@ mod tests {
         let latest = create_ok(&app, &seeded, json!({ "name": "latest", "dataset": "faq" })).await;
         assert_eq!(latest.experiment.dataset_version, 2);
         assert_eq!(latest.experiment.item_count, 4);
+        assert!(
+            app.state.analytics.counters.get("experiment.created") >= 1,
+            "experiment.created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
