@@ -479,7 +479,13 @@ it("asks for an email before checking it", async () => {
   expect(bodies).toEqual([]);
 });
 
-it.each(["seat_limit", "sso_required", "sso_unavailable"] as const)(
+it.each([
+  "seat_limit",
+  "sso_required",
+  "sso_unavailable",
+  "saml_invalid",
+  "saml_unsupported",
+] as const)(
   "explains the %s error from the URL",
   async (code) => {
     signedOut();
