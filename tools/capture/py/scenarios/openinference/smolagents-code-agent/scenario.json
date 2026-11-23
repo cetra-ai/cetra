@@ -1,0 +1,35 @@
+{
+  "description": "smolagents CodeAgent run with one tool call and a final answer, traced by OpenInference.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "Only SmolagentsInstrumentor is enabled. The openai instrumentor would add a second llm span for each call, and the call would count twice; the page says not to enable it. The agent is a CodeAgent: the model answers in plain text with a <code> block, and the local Python executor runs it, so the request carries no tools. OpenAIServerModel is pointed at the mock. The tree is weather_agent.run [agent], with Step 1 [chain] over OpenAIModel.generate [llm] and SimpleTool [tool], then Step 2 [chain] over OpenAIModel.generate [llm] and FinalAnswerTool [tool]. The agent span carries the run's total token counts; cetra counts tokens on llm spans only, so nothing counts twice. The tool span is named after the tool class (SimpleTool, FinalAnswerTool); tool.name stays an attribute. Step start times land inside the Step spans' input.value repr, where volatile_attributes cannot reach them, so the program replaces smolagents' wall clock with a stepping counter; no timing value is a separate attribute, so the case lists no timing_attributes.",
+  "instrumentation": "openinference-instrumentation-smolagents",
+  "libraries": [
+    "smolagents",
+    "openinference-instrumentation-smolagents",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "Thought: I will look up the weather.\n<code>\nw = get_weather(city=\"Paris\")\nprint(w)\n</code>"
+      },
+      "finish": "stop",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "Thought: I have it.\n<code>\nfinal_answer(\"Sunny in Paris\")\n</code>"
+      },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    }
+  ]
+}

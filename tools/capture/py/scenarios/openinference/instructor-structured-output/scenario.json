@@ -1,0 +1,33 @@
+{
+  "description": "Instructor extracting one typed model through a tool call, traced by OpenInference.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "InstructorInstrumentor and OpenInference's OpenAIInstrumentor are both attached to the capture tracer provider. Instructor's own span is a chain that carries no token counts, so the openai instrumentor supplies the llm span with tokens; the page tells readers to enable both. instructor.from_openai wraps an OpenAI client pointed at the mock, in the default tools mode. The tree is instructor.create [chain] with a child ChatCompletion [llm].",
+  "instrumentation": "openinference-instrumentation-instructor",
+  "libraries": [
+    "instructor",
+    "openinference-instrumentation-instructor",
+    "openinference-instrumentation-openai",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_user_1",
+            "name": "User",
+            "arguments": { "name": "Ada", "age": 36 }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 30, "output": 9 }
+    }
+  ]
+}

@@ -1,0 +1,444 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "7fc6d47c84e0662f",
+      "name": "LangGraph",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.097000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "{\"messages\":[{\"type\":\"human\",\"data\":{\"content\":\"What's the weather in Paris?\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"human\",\"name\":null,\"id\":\"00000000-0000-0000-0000-000000000005\"}},{\"type\":\"ai\",\"data\":{\"content\":\"\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}},\"model_provider\":\"openai\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"system_fingerprint\":\"fp_capture\",\"id\":\"chatcmpl-capture-1\",\"finish_reason\":\"tool_calls\",\"logprobs\":null},\"type\":\"ai\",\"name\":null,\"id\":\"lc_run--00000000-0000-0000-0000-00000000000a-0\",\"tool_calls\":[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}],\"invalid_tool_calls\":[],\"usage_metadata\":{\"input_tokens\":82,\"output_tokens\":17,\"total_tokens\":99,\"input_token_details\":{\"audio\":0,\"cache_read\":0},\"output_token_details\":{\"audio\":0,\"reasoning\":0}}}},{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":\"00000000-0000-0000-0000-00000000000f\",\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}},{\"type\":\"ai\",\"data\":{\"content\":\"It is 18 °C and sunny in Paris.\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":12,\"prompt_tokens\":131,\"total_tokens\":143,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}},\"model_provider\":\"openai\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"system_fingerprint\":\"fp_capture\",\"id\":\"chatcmpl-capture-2\",\"finish_reason\":\"stop\",\"logprobs\":null},\"type\":\"ai\",\"name\":null,\"id\":\"lc_run--00000000-0000-0000-0000-000000000012-0\",\"tool_calls\":[],\"invalid_tool_calls\":[],\"usage_metadata\":{\"input_tokens\":131,\"output_tokens\":12,\"total_tokens\":143,\"input_token_details\":{\"audio\":0,\"cache_read\":0},\"output_token_details\":{\"audio\":0,\"reasoning\":0}}}}],\"files\":{}}",
+      "output_format": "json",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "{\"messages\":[{\"type\":\"human\",\"data\":{\"content\":\"What's the weather in Paris?\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"human\",\"name\":null,\"id\":\"00000000-0000-0000-0000-000000000005\"}},{\"type\":\"ai\",\"data\":{\"content\":\"\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "metadata": "{\"ls_integration\": \"deepagents\", \"lc_versions\": {\"deepagents\": \"0.7.32\"}, \"lc_agent_name\": null}",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "bf8f03c6a474b726",
+      "parent_span_id": "7fc6d47c84e0662f",
+      "name": "PatchToolCallsMiddleware.before_agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.001000000Z",
+      "end_time": "2025-12-31T23:59:50.001000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "PatchToolCallsMiddleware.before_agent:1574667a-a1d6-5d7e-4e8b-635f89ccda36",
+        "langgraph_node": "PatchToolCallsMiddleware.before_agent",
+        "langgraph_path": "[\"__pregel_pull\",\"PatchToolCallsMiddleware.before_agent\"]",
+        "langgraph_step": "1",
+        "langgraph_triggers": "[\"branch:to:PatchToolCallsMiddleware.before_agent\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "output": "null",
+      "output_format": "text",
+      "output_preview": "null",
+      "attributes": {
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "ab5e60ee1b814e2e",
+      "parent_span_id": "7fc6d47c84e0662f",
+      "name": "model",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.003000000Z",
+      "end_time": "2025-12-31T23:59:50.053000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "model:85767a36-178c-3923-2f07-33b01b00adb7",
+        "langgraph_node": "model",
+        "langgraph_path": "[\"__pregel_pull\",\"model\"]",
+        "langgraph_step": "2",
+        "langgraph_triggers": "[\"branch:to:model\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"graph\":null,\"update\":{\"messages\":[{\"type\":\"ai\",\"data\":{\"content\":\"\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}},\"model_provider\":\"openai\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"system_fingerprint\":\"fp_capture\",\"id\":\"chatcmpl-capture-1\",\"finish_reason\":\"tool_calls\",\"logprobs\":null},\"type\":\"ai\",\"name\":null,\"id\":\"lc_run--00000000-0000-0000-0000-00000000000a-0\",\"tool_calls\":[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}],\"invalid_tool_calls\":[],\"usage_metadata\":{\"input_tokens\":82,\"output_tokens\":17,\"total_tokens\":99,\"input_token_details\":{\"audio\":0,\"cache_read\":0},\"output_token_details\":{\"audio\":0,\"reasoning\":0}}}}]},\"resume\":null,\"goto\":[]}]",
+      "output_format": "json",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "[{\"graph\":null,\"update\":{\"messages\":[{\"type\":\"ai\",\"data\":{\"content\":\"\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}},\"model_provider\":\"openai\",\"model",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "5b9ebffc3681d26d",
+      "parent_span_id": "ab5e60ee1b814e2e",
+      "name": "ChatOpenAI",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.010000000Z",
+      "end_time": "2025-12-31T23:59:50.051000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "checkpoint_ns": "model:85767a36-178c-3923-2f07-33b01b00adb7",
+        "langgraph_checkpoint_ns": "model:85767a36-178c-3923-2f07-33b01b00adb7",
+        "langgraph_node": "model",
+        "langgraph_path": "[\"__pregel_pull\",\"model\"]",
+        "langgraph_step": "2",
+        "langgraph_triggers": "[\"branch:to:model\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\",\"langchain-core\":\"1.8.1\",\"langchain\":\"1.4.8\",\"langchain-openai\":\"1.7.3\"}",
+        "ls_integration": "langchain_chat_model",
+        "ls_model_name": "gpt-4o-mini-2024-07-18",
+        "ls_model_type": "chat",
+        "ls_provider": "openai"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"_type\":\"openai-chat\",\"model\":\"gpt-4o-mini-2024-07-18\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"stop\":null,\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"ls\",\"description\":\"Lists all files in a directory.\\n\\nThis is useful for exploring the filesystem and finding the right file to read or edit.\\nYou should almost ALWAYS use this tool before using the read_file or edit_file tools.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"Absolute path to the directory to list. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Reads a file from the filesystem. Assume any path the user provides is valid; reading a missing file returns an error.\\n\\nUsage:\\n- By default, it reads up to 100 lines starting from the beginning of the file. Use `offset`/`limit` to page through large files instead of reading them whole.\\n- A status header, `@@ field | field | ... @@`, sits above the file content, and every line after it is verbatim file content. When content is truncated, there may be an explanation before the header. Never include the header when editing.\\n- Speculatively batch multiple `read_file` calls in one response when several files may be useful.\\n- An empty file returns a system-reminder warning in place of contents.\\n- Large tool results may be offloaded to a file; the tool message gives the path. Read that path here, paging with `offset`/`limit`.\\n- Images (`.png`, `.jpg`, etc.), audio, video, and PDFs return multimodal content blocks (https://docs.langchain.com/oss/python/langchain/messages#multimodal).\\n- For images and PDFs, pagination via `offset`/`limit` is text-only - supply `file_path` only\\n- Always read a file before editing it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to read. Must be absolute, not relative.\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line number to start reading from (0-indexed). Use for pagination of large files.\",\"type\":\"integer\"},\"limit\":{\"default\":100,\"description\":\"Maximum number of lines to read. Use for pagination of large files.\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Writes content to a file. Creates the file if it does not exist; replaces it entirely if it does.\\n\\nUsage:\\n- Use this tool when you intend to create a new file or replace the whole file. You do not need to read the file first.\\n- Prefer to edit existing files (with the edit_file tool) over creating new ones when possible.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path where the file should be written. Must be absolute, not relative.\",\"type\":\"string\"},\"content\":{\"description\":\"The text content to write to the file. This parameter is required.\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Performs exact string replacements in files.\\n\\nUsage:\\n- You must read the file before editing; this tool errors otherwise.\\n- Preserve the exact source indentation from the read output, and never include the read status header in old_string or new_string.\\n- Prefer editing an existing file over creating a new one.\\n- Only use emojis if the user explicitly requests it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to edit. Must be absolute, not relative.\",\"type\":\"string\"},\"old_string\":{\"description\":\"The exact text to find and replace. Must be unique in the file unless replace_all is True.\",\"type\":\"string\"},\"new_string\":{\"description\":\"The text to replace old_string with. Must be different from old_string.\",\"type\":\"string\"},\"replace_all\":{\"default\":false,\"description\":\"If True, replace all occurrences of old_string. If False (default), old_string must be unique.\",\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"delete\",\"description\":\"Deletes a file or directory from the filesystem.\\n\\nUsage:\\n- Permanently removes the file or directory at the given absolute path.\\n- Deleting a directory removes it and everything inside it, recursively. Prefer\\n  deleting a directory in one call over deleting each file individually.\\n- This cannot be undone, so only delete paths you are sure are no longer needed.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to delete. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"glob\",\"description\":\"Find files matching a glob pattern, returning absolute paths.\\n\\nSupports `*` (any characters within a path segment), `**` (any directories), `?` (single character), `[abc]` (one character from a set), and `{a,b}` (alternatives), e.g. `*.py`, `src/**/*.py`, `*.{yml,yaml}`.\\n\\nA pattern without `/` matches the file name at any depth under the search root (`*.py` matches `src/app/main.py`). A pattern containing `/` matches the search-root-relative path (`src/**/*.py`). A leading `/` anchors to the search root (`/*.py` matches only top-level Python files).\\n\\nLeading-dot names are only matched when the pattern segment itself starts with `.` (use `.env`, or `.github/**/*.yml`). Because `**` will not descend into dot-directories, the bare form `*.yml` is *broader* than `**/*.yml` and is usually what you want.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Glob pattern to match files (e.g., '*.py', '**/*.py', '/subdir/**/*.md'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path; a leading '/' anchors to the search root ('/*.py' matches only top-level files). Leading-dot names are excluded unless the pattern segment starts with '.', so prefer the bare form '*.py' over '**/*.py' -- '**' will not descend into dot-directories like '.github'.\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Base directory to search from. Defaults to the backend's default root.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"grep\",\"description\":\"Search for a LITERAL text pattern across files (NOT regex).\\n\\nThe pattern is matched verbatim: regex metacharacters are ordinary characters, not operators. To match any of several strings, run a separate grep for each; `grep(pattern=\\\"foo|bar\\\")` searches for the literal text \\\"foo|bar\\\", and `.*` or `\\\\.` match those characters literally.\\n\\nReturns matching files or content per `output_mode`. Offloaded large tool results live under the artifacts root (`/large_tool_results/` by default); grep that directory to search them when you do not know the exact path.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Text pattern to search for (literal string, not regex).\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Directory to search in. Defaults to current working directory.\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob pattern (NOT regex) limiting which files are searched (e.g. '*.py', '*.ts'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path (e.g. 'src/**/*.py'). This is an in-tool file filter, not a call to the separate glob tool. Brace expansion (e.g. '*.{ts,tsx}') is not supported on all backends; run a separate search per extension for reliable results.\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Shape of the returned text. 'files_with_matches' (default): newline-separated matching file paths. 'content': matching lines grouped by file under a '<path>:' header, each line indented and formatted '<line_number>: <line text>' (only the matched line, no surrounding context). 'count': one '<path>: <match_count>' line per file.\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"type\":\"string\"},\"max_count\":{\"anyOf\":[{\"exclusiveMinimum\":0,\"type\":\"integer\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional cap on the total number of matches returned across all files. Leave unset to use the configured default. When the cap is hit, results are truncated and a note says so; narrow the pattern or path to see the rest.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"task\",\"description\":\"Launch an ephemeral subagent to handle a complex, multi-step task.\\n\\nAvailable agent types and the tools they have access to:\\n- general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.\\n\\nSpecify subagent_type to select the agent. Usage notes:\\n- Launch multiple agents concurrently when their tasks are independent, using a single message with multiple tool calls.\\n- Each invocation is stateless by default: the agent sees only the prompt you give it and returns a single final report. Put full detail in the prompt and state exactly what it should return — unless an agent type below says it inherits your conversation instead.\\n- The agent's report is not shown to the user; relay a summary yourself.\\n- Tell the agent whether to create content, analyze, or only research, since it can't necessarily see the user's intent unless it inherits your conversation, as noted per agent type below.\\n- If an agent's description says to use it proactively, do so without waiting to be asked.\\n- When only general-purpose is available, use it for any complex, context-heavy task; it has the same capabilities as the main agent.\",\"parameters\":{\"properties\":{\"description\":{\"description\":\"A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.\",\"type\":\"string\"},\"subagent_type\":{\"description\":\"The type of subagent to use. Must be one of the available agent types listed in the tool description.\",\"type\":\"string\"}},\"required\":[\"description\",\"subagent_type\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}}}]}",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"ls\",\"description\":\"Lists all files in a directory.\\n\\nThis is useful for exploring the filesystem and finding the right file to read or edit.\\nYou should almost ALWAYS use this tool before using the read_file or edit_file tools.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"Absolute path to the directory to list. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Reads a file from the filesystem. Assume any path the user provides is valid; reading a missing file returns an error.\\n\\nUsage:\\n- By default, it reads up to 100 lines starting from the beginning of the file. Use `offset`/`limit` to page through large files instead of reading them whole.\\n- A status header, `@@ field | field | ... @@`, sits above the file content, and every line after it is verbatim file content. When content is truncated, there may be an explanation before the header. Never include the header when editing.\\n- Speculatively batch multiple `read_file` calls in one response when several files may be useful.\\n- An empty file returns a system-reminder warning in place of contents.\\n- Large tool results may be offloaded to a file; the tool message gives the path. Read that path here, paging with `offset`/`limit`.\\n- Images (`.png`, `.jpg`, etc.), audio, video, and PDFs return multimodal content blocks (https://docs.langchain.com/oss/python/langchain/messages#multimodal).\\n- For images and PDFs, pagination via `offset`/`limit` is text-only - supply `file_path` only\\n- Always read a file before editing it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to read. Must be absolute, not relative.\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line number to start reading from (0-indexed). Use for pagination of large files.\",\"type\":\"integer\"},\"limit\":{\"default\":100,\"description\":\"Maximum number of lines to read. Use for pagination of large files.\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Writes content to a file. Creates the file if it does not exist; replaces it entirely if it does.\\n\\nUsage:\\n- Use this tool when you intend to create a new file or replace the whole file. You do not need to read the file first.\\n- Prefer to edit existing files (with the edit_file tool) over creating new ones when possible.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path where the file should be written. Must be absolute, not relative.\",\"type\":\"string\"},\"content\":{\"description\":\"The text content to write to the file. This parameter is required.\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Performs exact string replacements in files.\\n\\nUsage:\\n- You must read the file before editing; this tool errors otherwise.\\n- Preserve the exact source indentation from the read output, and never include the read status header in old_string or new_string.\\n- Prefer editing an existing file over creating a new one.\\n- Only use emojis if the user explicitly requests it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to edit. Must be absolute, not relative.\",\"type\":\"string\"},\"old_string\":{\"description\":\"The exact text to find and replace. Must be unique in the file unless replace_all is True.\",\"type\":\"string\"},\"new_string\":{\"description\":\"The text to replace old_string with. Must be different from old_string.\",\"type\":\"string\"},\"replace_all\":{\"default\":false,\"description\":\"If True, replace all occurrences of old_string. If False (default), old_string must be unique.\",\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"delete\",\"description\":\"Deletes a file or directory from the filesystem.\\n\\nUsage:\\n- Permanently removes the file or directory at the given absolute path.\\n- Deleting a directory removes it and everything inside it, recursively. Prefer\\n  deleting a directory in one call over deleting each file individually.\\n- This cannot be undone, so only delete paths you are sure are no longer needed.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to delete. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"glob\",\"description\":\"Find files matching a glob pattern, returning absolute paths.\\n\\nSupports `*` (any characters within a path segment), `**` (any directories), `?` (single character), `[abc]` (one character from a set), and `{a,b}` (alternatives), e.g. `*.py`, `src/**/*.py`, `*.{yml,yaml}`.\\n\\nA pattern without `/` matches the file name at any depth under the search root (`*.py` matches `src/app/main.py`). A pattern containing `/` matches the search-root-relative path (`src/**/*.py`). A leading `/` anchors to the search root (`/*.py` matches only top-level Python files).\\n\\nLeading-dot names are only matched when the pattern segment itself starts with `.` (use `.env`, or `.github/**/*.yml`). Because `**` will not descend into dot-directories, the bare form `*.yml` is *broader* than `**/*.yml` and is usually what you want.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Glob pattern to match files (e.g., '*.py', '**/*.py', '/subdir/**/*.md'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path; a leading '/' anchors to the search root ('/*.py' matches only top-level files). Leading-dot names are excluded unless the pattern segment starts with '.', so prefer the bare form '*.py' over '**/*.py' -- '**' will not descend into dot-directories like '.github'.\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Base directory to search from. Defaults to the backend's default root.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"grep\",\"description\":\"Search for a LITERAL text pattern across files (NOT regex).\\n\\nThe pattern is matched verbatim: regex metacharacters are ordinary characters, not operators. To match any of several strings, run a separate grep for each; `grep(pattern=\\\"foo|bar\\\")` searches for the literal text \\\"foo|bar\\\", and `.*` or `\\\\.` match those characters literally.\\n\\nReturns matching files or content per `output_mode`. Offloaded large tool results live under the artifacts root (`/large_tool_results/` by default); grep that directory to search them when you do not know the exact path.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Text pattern to search for (literal string, not regex).\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Directory to search in. Defaults to current working directory.\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob pattern (NOT regex) limiting which files are searched (e.g. '*.py', '*.ts'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path (e.g. 'src/**/*.py'). This is an in-tool file filter, not a call to the separate glob tool. Brace expansion (e.g. '*.{ts,tsx}') is not supported on all backends; run a separate search per extension for reliable results.\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Shape of the returned text. 'files_with_matches' (default): newline-separated matching file paths. 'content': matching lines grouped by file under a '<path>:' header, each line indented and formatted '<line_number>: <line text>' (only the matched line, no surrounding context). 'count': one '<path>: <match_count>' line per file.\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"type\":\"string\"},\"max_count\":{\"anyOf\":[{\"exclusiveMinimum\":0,\"type\":\"integer\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional cap on the total number of matches returned across all files. Leave unset to use the configured default. When the cap is hit, results are truncated and a note says so; narrow the pattern or path to see the rest.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"task\",\"description\":\"Launch an ephemeral subagent to handle a complex, multi-step task.\\n\\nAvailable agent types and the tools they have access to:\\n- general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.\\n\\nSpecify subagent_type to select the agent. Usage notes:\\n- Launch multiple agents concurrently when their tasks are independent, using a single message with multiple tool calls.\\n- Each invocation is stateless by default: the agent sees only the prompt you give it and returns a single final report. Put full detail in the prompt and state exactly what it should return — unless an agent type below says it inherits your conversation instead.\\n- The agent's report is not shown to the user; relay a summary yourself.\\n- Tell the agent whether to create content, analyze, or only research, since it can't necessarily see the user's intent unless it inherits your conversation, as noted per agent type below.\\n- If an agent's description says to use it proactively, do so without waiting to be asked.\\n- When only general-purpose is available, use it for any complex, context-heavy task; it has the same capabilities as the main agent.\",\"parameters\":{\"properties\":{\"description\":{\"description\":\"A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.\",\"type\":\"string\"},\"subagent_type\":{\"description\":\"The type of subagent to use. Must be one of the available agent types listed in the tool description.\",\"type\":\"string\"}},\"required\":[\"description\",\"subagent_type\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "tool_calls",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "llm.token_count.completion": "17",
+        "llm.token_count.completion_details.audio": "0",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "82",
+        "llm.token_count.prompt_details.audio": "0",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.total": "99",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "19b3fc1f1e07b610",
+      "parent_span_id": "71758bcdead9b6be",
+      "name": "get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.054000000Z",
+      "end_time": "2025-12-31T23:59:50.055000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "checkpoint_ns": "tools:176f4188-b0c8-aa01-f409-ac4c014f7cdb",
+        "langgraph_checkpoint_ns": "tools:176f4188-b0c8-aa01-f409-ac4c014f7cdb",
+        "langgraph_node": "tools",
+        "langgraph_path": "[\"__pregel_push\",0,false]",
+        "langgraph_step": "3",
+        "langgraph_triggers": "[\"__pregel_push\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "input": "Paris",
+      "input_format": "text",
+      "output": "{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":null,\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}",
+      "output_format": "json",
+      "input_preview": "Paris",
+      "output_preview": "{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":null,\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}",
+      "attributes": {
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "application/json",
+        "tool.description": "Look up the weather for a city.",
+        "tool.name": "get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "71758bcdead9b6be",
+      "parent_span_id": "7fc6d47c84e0662f",
+      "name": "tools",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.054000000Z",
+      "end_time": "2025-12-31T23:59:50.056000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "tools:176f4188-b0c8-aa01-f409-ac4c014f7cdb",
+        "langgraph_node": "tools",
+        "langgraph_path": "[\"__pregel_push\",0,false]",
+        "langgraph_step": "3",
+        "langgraph_triggers": "[\"__pregel_push\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "input": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
+      "input_format": "json",
+      "output": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":null,\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
+      "output_format": "json",
+      "input_preview": "[{\"name\":\"get_weather\",\"args\":{\"city\":\"Paris\"},\"id\":\"call_weather_1\",\"type\":\"tool_call\"}]",
+      "output_preview": "{\"messages\":[{\"type\":\"tool\",\"data\":{\"content\":\"{\\\"temperature_c\\\": 18, \\\"conditions\\\": \\\"sunny\\\", \\\"city\\\": \\\"Paris\\\"}\",\"additional_kwargs\":{},\"response_metadata\":{},\"type\":\"tool\",\"name\":\"get_weather\",\"id\":null,\"tool_call_id\":\"call_weather_1\",\"artifact\":null,\"status\":\"success\"}}]}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "e3dd3ff429f56abf",
+      "parent_span_id": "7fc6d47c84e0662f",
+      "name": "model",
+      "span_kind": "chain",
+      "start_time": "2025-12-31T23:59:50.057000000Z",
+      "end_time": "2025-12-31T23:59:50.095000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "model:f1591878-1481-15e7-e78f-693f739b8076",
+        "langgraph_node": "model",
+        "langgraph_path": "[\"__pregel_pull\",\"model\"]",
+        "langgraph_step": "4",
+        "langgraph_triggers": "[\"branch:to:model\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"graph\":null,\"update\":{\"messages\":[{\"type\":\"ai\",\"data\":{\"content\":\"It is 18 °C and sunny in Paris.\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":12,\"prompt_tokens\":131,\"total_tokens\":143,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}},\"model_provider\":\"openai\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"system_fingerprint\":\"fp_capture\",\"id\":\"chatcmpl-capture-2\",\"finish_reason\":\"stop\",\"logprobs\":null},\"type\":\"ai\",\"name\":null,\"id\":\"lc_run--00000000-0000-0000-0000-000000000012-0\",\"tool_calls\":[],\"invalid_tool_calls\":[],\"usage_metadata\":{\"input_tokens\":131,\"output_tokens\":12,\"total_tokens\":143,\"input_token_details\":{\"audio\":0,\"cache_read\":0},\"output_token_details\":{\"audio\":0,\"reasoning\":0}}}}]},\"resume\":null,\"goto\":[]}]",
+      "output_format": "json",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "[{\"graph\":null,\"update\":{\"messages\":[{\"type\":\"ai\",\"data\":{\"content\":\"It is 18 °C and sunny in Paris.\",\"additional_kwargs\":{\"refusal\":null},\"response_metadata\":{\"token_usage\":{\"completion_tokens\":12,\"prompt_tokens\":131,\"total_tokens\":143,\"completion_tokens_details\":{\"accepted_prediction_tokens\":0,\"audio_tokens\":0,\"reasoning_tokens\":0,\"rejected_prediction_tokens\":0,\"text_tokens\":null},\"prompt_tokens_details\":{\"audio_tokens\":0,\"cache_write_tokens\":null,\"cached_tokens\":0,\"image_tokens\":null,\"text_tokens\":null}}",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "openinference.span.kind": "CHAIN",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "6193594a42145577",
+      "parent_span_id": "e3dd3ff429f56abf",
+      "name": "ChatOpenAI",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.059000000Z",
+      "end_time": "2025-12-31T23:59:50.094000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "checkpoint_ns": "model:f1591878-1481-15e7-e78f-693f739b8076",
+        "langgraph_checkpoint_ns": "model:f1591878-1481-15e7-e78f-693f739b8076",
+        "langgraph_node": "model",
+        "langgraph_path": "[\"__pregel_pull\",\"model\"]",
+        "langgraph_step": "4",
+        "langgraph_triggers": "[\"branch:to:model\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\",\"langchain-core\":\"1.8.1\",\"langchain\":\"1.4.8\",\"langchain-openai\":\"1.7.3\"}",
+        "ls_integration": "langchain_chat_model",
+        "ls_model_name": "gpt-4o-mini-2024-07-18",
+        "ls_model_type": "chat",
+        "ls_provider": "openai"
+      },
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "reasoning_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "request_params": "{\"_type\":\"openai-chat\",\"model\":\"gpt-4o-mini-2024-07-18\",\"model_name\":\"gpt-4o-mini-2024-07-18\",\"stop\":null,\"stream\":false,\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"ls\",\"description\":\"Lists all files in a directory.\\n\\nThis is useful for exploring the filesystem and finding the right file to read or edit.\\nYou should almost ALWAYS use this tool before using the read_file or edit_file tools.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"Absolute path to the directory to list. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Reads a file from the filesystem. Assume any path the user provides is valid; reading a missing file returns an error.\\n\\nUsage:\\n- By default, it reads up to 100 lines starting from the beginning of the file. Use `offset`/`limit` to page through large files instead of reading them whole.\\n- A status header, `@@ field | field | ... @@`, sits above the file content, and every line after it is verbatim file content. When content is truncated, there may be an explanation before the header. Never include the header when editing.\\n- Speculatively batch multiple `read_file` calls in one response when several files may be useful.\\n- An empty file returns a system-reminder warning in place of contents.\\n- Large tool results may be offloaded to a file; the tool message gives the path. Read that path here, paging with `offset`/`limit`.\\n- Images (`.png`, `.jpg`, etc.), audio, video, and PDFs return multimodal content blocks (https://docs.langchain.com/oss/python/langchain/messages#multimodal).\\n- For images and PDFs, pagination via `offset`/`limit` is text-only - supply `file_path` only\\n- Always read a file before editing it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to read. Must be absolute, not relative.\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line number to start reading from (0-indexed). Use for pagination of large files.\",\"type\":\"integer\"},\"limit\":{\"default\":100,\"description\":\"Maximum number of lines to read. Use for pagination of large files.\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Writes content to a file. Creates the file if it does not exist; replaces it entirely if it does.\\n\\nUsage:\\n- Use this tool when you intend to create a new file or replace the whole file. You do not need to read the file first.\\n- Prefer to edit existing files (with the edit_file tool) over creating new ones when possible.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path where the file should be written. Must be absolute, not relative.\",\"type\":\"string\"},\"content\":{\"description\":\"The text content to write to the file. This parameter is required.\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Performs exact string replacements in files.\\n\\nUsage:\\n- You must read the file before editing; this tool errors otherwise.\\n- Preserve the exact source indentation from the read output, and never include the read status header in old_string or new_string.\\n- Prefer editing an existing file over creating a new one.\\n- Only use emojis if the user explicitly requests it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to edit. Must be absolute, not relative.\",\"type\":\"string\"},\"old_string\":{\"description\":\"The exact text to find and replace. Must be unique in the file unless replace_all is True.\",\"type\":\"string\"},\"new_string\":{\"description\":\"The text to replace old_string with. Must be different from old_string.\",\"type\":\"string\"},\"replace_all\":{\"default\":false,\"description\":\"If True, replace all occurrences of old_string. If False (default), old_string must be unique.\",\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"delete\",\"description\":\"Deletes a file or directory from the filesystem.\\n\\nUsage:\\n- Permanently removes the file or directory at the given absolute path.\\n- Deleting a directory removes it and everything inside it, recursively. Prefer\\n  deleting a directory in one call over deleting each file individually.\\n- This cannot be undone, so only delete paths you are sure are no longer needed.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to delete. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"glob\",\"description\":\"Find files matching a glob pattern, returning absolute paths.\\n\\nSupports `*` (any characters within a path segment), `**` (any directories), `?` (single character), `[abc]` (one character from a set), and `{a,b}` (alternatives), e.g. `*.py`, `src/**/*.py`, `*.{yml,yaml}`.\\n\\nA pattern without `/` matches the file name at any depth under the search root (`*.py` matches `src/app/main.py`). A pattern containing `/` matches the search-root-relative path (`src/**/*.py`). A leading `/` anchors to the search root (`/*.py` matches only top-level Python files).\\n\\nLeading-dot names are only matched when the pattern segment itself starts with `.` (use `.env`, or `.github/**/*.yml`). Because `**` will not descend into dot-directories, the bare form `*.yml` is *broader* than `**/*.yml` and is usually what you want.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Glob pattern to match files (e.g., '*.py', '**/*.py', '/subdir/**/*.md'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path; a leading '/' anchors to the search root ('/*.py' matches only top-level files). Leading-dot names are excluded unless the pattern segment starts with '.', so prefer the bare form '*.py' over '**/*.py' -- '**' will not descend into dot-directories like '.github'.\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Base directory to search from. Defaults to the backend's default root.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"grep\",\"description\":\"Search for a LITERAL text pattern across files (NOT regex).\\n\\nThe pattern is matched verbatim: regex metacharacters are ordinary characters, not operators. To match any of several strings, run a separate grep for each; `grep(pattern=\\\"foo|bar\\\")` searches for the literal text \\\"foo|bar\\\", and `.*` or `\\\\.` match those characters literally.\\n\\nReturns matching files or content per `output_mode`. Offloaded large tool results live under the artifacts root (`/large_tool_results/` by default); grep that directory to search them when you do not know the exact path.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Text pattern to search for (literal string, not regex).\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Directory to search in. Defaults to current working directory.\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob pattern (NOT regex) limiting which files are searched (e.g. '*.py', '*.ts'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path (e.g. 'src/**/*.py'). This is an in-tool file filter, not a call to the separate glob tool. Brace expansion (e.g. '*.{ts,tsx}') is not supported on all backends; run a separate search per extension for reliable results.\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Shape of the returned text. 'files_with_matches' (default): newline-separated matching file paths. 'content': matching lines grouped by file under a '<path>:' header, each line indented and formatted '<line_number>: <line text>' (only the matched line, no surrounding context). 'count': one '<path>: <match_count>' line per file.\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"type\":\"string\"},\"max_count\":{\"anyOf\":[{\"exclusiveMinimum\":0,\"type\":\"integer\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional cap on the total number of matches returned across all files. Leave unset to use the configured default. When the cap is hit, results are truncated and a note says so; narrow the pattern or path to see the rest.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"task\",\"description\":\"Launch an ephemeral subagent to handle a complex, multi-step task.\\n\\nAvailable agent types and the tools they have access to:\\n- general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.\\n\\nSpecify subagent_type to select the agent. Usage notes:\\n- Launch multiple agents concurrently when their tasks are independent, using a single message with multiple tool calls.\\n- Each invocation is stateless by default: the agent sees only the prompt you give it and returns a single final report. Put full detail in the prompt and state exactly what it should return — unless an agent type below says it inherits your conversation instead.\\n- The agent's report is not shown to the user; relay a summary yourself.\\n- Tell the agent whether to create content, analyze, or only research, since it can't necessarily see the user's intent unless it inherits your conversation, as noted per agent type below.\\n- If an agent's description says to use it proactively, do so without waiting to be asked.\\n- When only general-purpose is available, use it for any complex, context-heavy task; it has the same capabilities as the main agent.\",\"parameters\":{\"properties\":{\"description\":{\"description\":\"A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.\",\"type\":\"string\"},\"subagent_type\":{\"description\":\"The type of subagent to use. Must be one of the available agent types listed in the tool description.\",\"type\":\"string\"}},\"required\":[\"description\",\"subagent_type\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}}}]}",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"You are a weather assistant.\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What's the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_weather_1\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"name\":\"get_weather\",\"parts\":[{\"type\":\"tool_call_response\",\"id\":\"call_weather_1\",\"response\":{\"temperature_c\":18,\"conditions\":\"sunny\",\"city\":\"Paris\"}}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"It is 18 °C and sunny in Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What's the weather in Paris?",
+      "output_preview": "It is 18 °C and sunny in Paris.",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"ls\",\"description\":\"Lists all files in a directory.\\n\\nThis is useful for exploring the filesystem and finding the right file to read or edit.\\nYou should almost ALWAYS use this tool before using the read_file or edit_file tools.\",\"parameters\":{\"properties\":{\"path\":{\"description\":\"Absolute path to the directory to list. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"description\":\"Reads a file from the filesystem. Assume any path the user provides is valid; reading a missing file returns an error.\\n\\nUsage:\\n- By default, it reads up to 100 lines starting from the beginning of the file. Use `offset`/`limit` to page through large files instead of reading them whole.\\n- A status header, `@@ field | field | ... @@`, sits above the file content, and every line after it is verbatim file content. When content is truncated, there may be an explanation before the header. Never include the header when editing.\\n- Speculatively batch multiple `read_file` calls in one response when several files may be useful.\\n- An empty file returns a system-reminder warning in place of contents.\\n- Large tool results may be offloaded to a file; the tool message gives the path. Read that path here, paging with `offset`/`limit`.\\n- Images (`.png`, `.jpg`, etc.), audio, video, and PDFs return multimodal content blocks (https://docs.langchain.com/oss/python/langchain/messages#multimodal).\\n- For images and PDFs, pagination via `offset`/`limit` is text-only - supply `file_path` only\\n- Always read a file before editing it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to read. Must be absolute, not relative.\",\"type\":\"string\"},\"offset\":{\"default\":0,\"description\":\"Line number to start reading from (0-indexed). Use for pagination of large files.\",\"type\":\"integer\"},\"limit\":{\"default\":100,\"description\":\"Maximum number of lines to read. Use for pagination of large files.\",\"type\":\"integer\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"write_file\",\"description\":\"Writes content to a file. Creates the file if it does not exist; replaces it entirely if it does.\\n\\nUsage:\\n- Use this tool when you intend to create a new file or replace the whole file. You do not need to read the file first.\\n- Prefer to edit existing files (with the edit_file tool) over creating new ones when possible.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path where the file should be written. Must be absolute, not relative.\",\"type\":\"string\"},\"content\":{\"description\":\"The text content to write to the file. This parameter is required.\",\"type\":\"string\"}},\"required\":[\"file_path\",\"content\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"edit_file\",\"description\":\"Performs exact string replacements in files.\\n\\nUsage:\\n- You must read the file before editing; this tool errors otherwise.\\n- Preserve the exact source indentation from the read output, and never include the read status header in old_string or new_string.\\n- Prefer editing an existing file over creating a new one.\\n- Only use emojis if the user explicitly requests it.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to edit. Must be absolute, not relative.\",\"type\":\"string\"},\"old_string\":{\"description\":\"The exact text to find and replace. Must be unique in the file unless replace_all is True.\",\"type\":\"string\"},\"new_string\":{\"description\":\"The text to replace old_string with. Must be different from old_string.\",\"type\":\"string\"},\"replace_all\":{\"default\":false,\"description\":\"If True, replace all occurrences of old_string. If False (default), old_string must be unique.\",\"type\":\"boolean\"}},\"required\":[\"file_path\",\"old_string\",\"new_string\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"delete\",\"description\":\"Deletes a file or directory from the filesystem.\\n\\nUsage:\\n- Permanently removes the file or directory at the given absolute path.\\n- Deleting a directory removes it and everything inside it, recursively. Prefer\\n  deleting a directory in one call over deleting each file individually.\\n- This cannot be undone, so only delete paths you are sure are no longer needed.\",\"parameters\":{\"properties\":{\"file_path\":{\"description\":\"Absolute path to the file to delete. Must be absolute, not relative.\",\"type\":\"string\"}},\"required\":[\"file_path\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"glob\",\"description\":\"Find files matching a glob pattern, returning absolute paths.\\n\\nSupports `*` (any characters within a path segment), `**` (any directories), `?` (single character), `[abc]` (one character from a set), and `{a,b}` (alternatives), e.g. `*.py`, `src/**/*.py`, `*.{yml,yaml}`.\\n\\nA pattern without `/` matches the file name at any depth under the search root (`*.py` matches `src/app/main.py`). A pattern containing `/` matches the search-root-relative path (`src/**/*.py`). A leading `/` anchors to the search root (`/*.py` matches only top-level Python files).\\n\\nLeading-dot names are only matched when the pattern segment itself starts with `.` (use `.env`, or `.github/**/*.yml`). Because `**` will not descend into dot-directories, the bare form `*.yml` is *broader* than `**/*.yml` and is usually what you want.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Glob pattern to match files (e.g., '*.py', '**/*.py', '/subdir/**/*.md'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path; a leading '/' anchors to the search root ('/*.py' matches only top-level files). Leading-dot names are excluded unless the pattern segment starts with '.', so prefer the bare form '*.py' over '**/*.py' -- '**' will not descend into dot-directories like '.github'.\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Base directory to search from. Defaults to the backend's default root.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"grep\",\"description\":\"Search for a LITERAL text pattern across files (NOT regex).\\n\\nThe pattern is matched verbatim: regex metacharacters are ordinary characters, not operators. To match any of several strings, run a separate grep for each; `grep(pattern=\\\"foo|bar\\\")` searches for the literal text \\\"foo|bar\\\", and `.*` or `\\\\.` match those characters literally.\\n\\nReturns matching files or content per `output_mode`. Offloaded large tool results live under the artifacts root (`/large_tool_results/` by default); grep that directory to search them when you do not know the exact path.\",\"parameters\":{\"properties\":{\"pattern\":{\"description\":\"Text pattern to search for (literal string, not regex).\",\"type\":\"string\"},\"path\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Directory to search in. Defaults to current working directory.\"},\"glob\":{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Glob pattern (NOT regex) limiting which files are searched (e.g. '*.py', '*.ts'). A pattern without '/' matches the file name at any depth; a pattern containing '/' matches the search-root-relative path (e.g. 'src/**/*.py'). This is an in-tool file filter, not a call to the separate glob tool. Brace expansion (e.g. '*.{ts,tsx}') is not supported on all backends; run a separate search per extension for reliable results.\"},\"output_mode\":{\"default\":\"files_with_matches\",\"description\":\"Shape of the returned text. 'files_with_matches' (default): newline-separated matching file paths. 'content': matching lines grouped by file under a '<path>:' header, each line indented and formatted '<line_number>: <line text>' (only the matched line, no surrounding context). 'count': one '<path>: <match_count>' line per file.\",\"enum\":[\"files_with_matches\",\"content\",\"count\"],\"type\":\"string\"},\"max_count\":{\"anyOf\":[{\"exclusiveMinimum\":0,\"type\":\"integer\"},{\"type\":\"null\"}],\"default\":null,\"description\":\"Optional cap on the total number of matches returned across all files. Leave unset to use the configured default. When the cap is hit, results are truncated and a note says so; narrow the pattern or path to see the rest.\"}},\"required\":[\"pattern\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"task\",\"description\":\"Launch an ephemeral subagent to handle a complex, multi-step task.\\n\\nAvailable agent types and the tools they have access to:\\n- general-purpose: General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.\\n\\nSpecify subagent_type to select the agent. Usage notes:\\n- Launch multiple agents concurrently when their tasks are independent, using a single message with multiple tool calls.\\n- Each invocation is stateless by default: the agent sees only the prompt you give it and returns a single final report. Put full detail in the prompt and state exactly what it should return — unless an agent type below says it inherits your conversation instead.\\n- The agent's report is not shown to the user; relay a summary yourself.\\n- Tell the agent whether to create content, analyze, or only research, since it can't necessarily see the user's intent unless it inherits your conversation, as noted per agent type below.\\n- If an agent's description says to use it proactively, do so without waiting to be asked.\\n- When only general-purpose is available, use it for any complex, context-heavy task; it has the same capabilities as the main agent.\",\"parameters\":{\"properties\":{\"description\":{\"description\":\"A detailed description of the task for the subagent to perform autonomously. Include all necessary context and specify the expected output format.\",\"type\":\"string\"},\"subagent_type\":{\"description\":\"The type of subagent to use. Must be one of the available agent types listed in the tool description.\",\"type\":\"string\"}},\"required\":[\"description\",\"subagent_type\"],\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"type\":\"string\"}},\"required\":[\"city\"],\"type\":\"object\"}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.system": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.completion_details.audio": "0",
+        "llm.token_count.completion_details.reasoning": "0",
+        "llm.token_count.prompt": "131",
+        "llm.token_count.prompt_details.audio": "0",
+        "llm.token_count.prompt_details.cache_read": "0",
+        "llm.token_count.total": "143",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "df5b8e7bcb4278c9c8578a858c16a66a",
+      "span_id": "7ede5c00809130cf",
+      "parent_span_id": "7fc6d47c84e0662f",
+      "name": "_ParentNotifierMiddleware.after_agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.096000000Z",
+      "end_time": "2025-12-31T23:59:50.097000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "metadata": {
+        "langgraph_checkpoint_ns": "_ParentNotifierMiddleware.after_agent:c59999c3-eca3-51f8-370f-5f0aa27401cd",
+        "langgraph_node": "_ParentNotifierMiddleware.after_agent",
+        "langgraph_path": "[\"__pregel_pull\",\"_ParentNotifierMiddleware.after_agent\"]",
+        "langgraph_step": "5",
+        "langgraph_triggers": "[\"branch:to:_ParentNotifierMiddleware.after_agent\"]",
+        "lc_versions": "{\"deepagents\":\"0.7.32\"}",
+        "ls_integration": "deepagents"
+      },
+      "output": "null",
+      "output_format": "text",
+      "output_preview": "null",
+      "attributes": {
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.langchain",
+      "scope_version": "0.1.81",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

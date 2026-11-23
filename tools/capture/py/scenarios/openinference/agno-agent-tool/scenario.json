@@ -1,0 +1,40 @@
+{
+  "description": "Agno agent run with one tool call, traced by OpenInference.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "Only AgnoInstrumentor is enabled. The openai instrumentor would add a second llm span for each call, and the call would count twice; the page says not to enable it. AGNO_TELEMETRY is false, set in main.py before agno is imported, so no telemetry leaves the process. OpenAIChat is pointed at the mock. The tree is weather_agent.run [agent], with OpenAIChat.invoke [llm], get_weather [tool], then OpenAIChat.invoke [llm]. The agent span carries no token counts. agno.agent.id, agno.run.id, graph.node.id and session.id are random per run and are listed as volatile. Agno's message ids and creation times and the first call's measured duration also vary; they land inside the llm spans' input.value JSON, where volatile_attributes cannot reach them, so the program pins them to a counter and a stepping clock.",
+  "instrumentation": "openinference-instrumentation-agno",
+  "libraries": [
+    "agno",
+    "openinference-instrumentation-agno",
+    "opentelemetry-sdk"
+  ],
+  "volatile_attributes": ["agno.agent.id", "agno.run.id", "graph.node.id", "session.id"],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": { "city": "Paris" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "It is sunny in Paris." },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    }
+  ]
+}

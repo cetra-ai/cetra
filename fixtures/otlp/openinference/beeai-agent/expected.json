@@ -1,0 +1,383 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "5a3f4fa075ee196f",
+      "name": "weather-agent",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.240000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"input\":\"What is the weather in Paris?\"}",
+      "input_format": "json",
+      "output": "Sunny in Paris",
+      "output_format": "text",
+      "input_preview": "{\"input\":\"What is the weather in Paris?\"}",
+      "output_preview": "Sunny in Paris",
+      "attributes": {
+        "agent.name": "weather-agent",
+        "input.mime_type": "application/json",
+        "metadata.agent_description": "",
+        "metadata.class_name": "RequirementAgent",
+        "metadata.memory.name": "UnconstrainedMemory",
+        "metadata.result.response": "Sunny in Paris",
+        "metadata.steps.0.id": "capture-volatile-1",
+        "metadata.steps.0.input.city": "Paris",
+        "metadata.steps.0.iteration": "1",
+        "metadata.steps.0.output": "sunny in Paris",
+        "metadata.steps.0.tool.description": "Look up the weather for a city.",
+        "metadata.steps.0.tool.input_schema.properties.city.title": "City",
+        "metadata.steps.0.tool.input_schema.properties.city.type": "string",
+        "metadata.steps.0.tool.input_schema.required.0": "city",
+        "metadata.steps.0.tool.input_schema.title": "get_weather",
+        "metadata.steps.0.tool.input_schema.type": "object",
+        "metadata.steps.0.tool.name": "get_weather",
+        "metadata.steps.1.id": "capture-volatile-2",
+        "metadata.steps.1.input.response": "Sunny in Paris",
+        "metadata.steps.1.iteration": "2",
+        "metadata.steps.1.output": "Message has been sent",
+        "metadata.steps.1.tool.description": "Sends the final answer to the user",
+        "metadata.steps.1.tool.input_schema.properties.response.description": "The final answer to the user",
+        "metadata.steps.1.tool.input_schema.properties.response.title": "Response",
+        "metadata.steps.1.tool.input_schema.properties.response.type": "string",
+        "metadata.steps.1.tool.input_schema.required.0": "response",
+        "metadata.steps.1.tool.input_schema.title": "FinalAnswerToolSchema",
+        "metadata.steps.1.tool.input_schema.type": "object",
+        "metadata.steps.1.tool.name": "final_answer",
+        "openinference.span.kind": "AGENT",
+        "output.mime_type": "text/plain"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.024000000Z",
+          "name": "start (agent.requirement.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.194000000Z",
+          "name": "success (agent.requirement.success)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.194000000Z",
+          "name": "start (agent.requirement.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.237000000Z",
+          "name": "final_answer (agent.requirement.final_answer)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.239000000Z",
+          "name": "success (agent.requirement.success)"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "21f43c26607a4563",
+      "parent_span_id": "5a3f4fa075ee196f",
+      "name": "OpenAIChatModel",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.025000000Z",
+      "end_time": "2025-12-31T23:59:50.193000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "total_tokens": 99,
+      "cost_input": 0.0000123,
+      "cost_output": 0.0000102,
+      "cost_total": 0.0000225,
+      "cost_source": "reported",
+      "request_params": "{\"cache_control_injection_points\":[{\"location\":\"message\",\"index\":0},{\"location\":\"message\",\"index\":1}],\"fallback_tool\":{\"name\":\"final_answer\",\"description\":\"Sends the final answer to the user\",\"input_schema\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\"}},\"max_retries\":3,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"ToolCall\",\"schema\":{\"properties\":{\"item\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"name\":{\"const\":\"get_weather\",\"description\":\"Tool Name\",\"title\":\"Name\",\"type\":\"string\"},\"parameters\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\",\"description\":\"Tool Parameters\"}},\"required\":[\"name\",\"parameters\"],\"title\":\"get_weather\",\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"name\":{\"const\":\"final_answer\",\"description\":\"Tool Name\",\"title\":\"Name\",\"type\":\"string\"},\"parameters\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\",\"description\":\"Tool Parameters\"}},\"required\":[\"name\",\"parameters\"],\"title\":\"final_answer\",\"type\":\"object\"}],\"title\":\"Item\"}},\"required\":[\"item\"],\"title\":\"AvailableTools\",\"type\":\"object\"}}},\"stream_partial_tool_calls\":true,\"temperature\":0.0,\"tool_choice\":\"required\",\"validate_response_format\":true}",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"# Role\\nAssume the role of a helpful AI assistant.\\n\\n# Instructions\\nYou are a weather assistant.\\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\\n\\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\\n\\n# Tools\\nYou must use a tool to retrieve factual or historical information.\\nNever use the tool twice with the same input if not stated otherwise.\\n\\nName: get_weather\\nDescription: Look up the weather for a city.\\nAllowed: True\\n\\nName: final_answer\\nDescription: Sends the final answer to the user\\nAllowed: True\\n\\n\\n# Notes\\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\\n- If the provided task is unclear, ask the user for clarification.\\n- Do not refer to tools or tool outputs by name when responding.\\n- Always take it one step at a time. Don't try to do multiple things at once.\\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\\n- You should always try a few different approaches before declaring the problem unsolvable.\\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\\n- You cannot do complex calculations, computations, or data manipulations without using tools.\\n- The current date and time is: 2026-11-23\\n\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Your task: What is the weather in Paris?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_00000001\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "Your task: What is the weather in Paris?",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"final_answer\",\"description\":\"Sends the final answer to the user\",\"parameters\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\"}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.cost.completion": "0.0000102",
+        "llm.cost.prompt": "0.0000123",
+        "llm.cost.total": "0.0000225",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.token_count.completion": "17",
+        "llm.token_count.prompt": "82",
+        "llm.token_count.total": "99",
+        "metadata.chunks_count": "1",
+        "metadata.class_name": "OpenAIChatModel",
+        "metadata.usage.cached_creation_tokens": "0",
+        "metadata.usage.cached_prompt_tokens": "0",
+        "metadata.usage.completion_tokens": "17",
+        "metadata.usage.prompt_tokens": "82",
+        "metadata.usage.total_tokens": "99",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "text/plain"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.029000000Z",
+          "name": "start (backend.openai.chat.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.190000000Z",
+          "name": "success (backend.openai.chat.success)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.192000000Z",
+          "name": "finish (backend.openai.chat.finish)"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "2cc1649ddbd18e64",
+      "parent_span_id": "5a3f4fa075ee196f",
+      "name": "get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.193000000Z",
+      "end_time": "2025-12-31T23:59:50.194000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"input\":{\"city\":\"Paris\"},\"options\":null}",
+      "input_format": "json",
+      "output": "sunny in Paris",
+      "output_format": "text",
+      "input_preview": "{\"input\":{\"city\":\"Paris\"},\"options\":null}",
+      "output_preview": "sunny in Paris",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "metadata.class_name": "FunctionTool",
+        "metadata.is_empty": "false",
+        "metadata.output_class": "StringToolOutput",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "text/plain",
+        "tool.description": "Look up the weather for a city.",
+        "tool.json_schema": "{\"properties\": {\"city\": {\"title\": \"City\", \"type\": \"string\"}}, \"required\": [\"city\"], \"title\": \"get_weather\", \"type\": \"object\"}",
+        "tool.name": "get_weather"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.193000000Z",
+          "name": "start (tool.custom.get_weather.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.193000000Z",
+          "name": "success (tool.custom.get_weather.success)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.194000000Z",
+          "name": "finish (tool.custom.get_weather.finish)"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "9e23cec79dc8109d",
+      "parent_span_id": "5a3f4fa075ee196f",
+      "name": "OpenAIChatModel",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.195000000Z",
+      "end_time": "2025-12-31T23:59:50.238000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini-2024-07-18",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "total_tokens": 143,
+      "cost_input": 0.00001965,
+      "cost_output": 7.2e-6,
+      "cost_total": 0.00002685,
+      "cost_source": "reported",
+      "request_params": "{\"cache_control_injection_points\":[{\"location\":\"message\",\"index\":0},{\"location\":\"message\",\"index\":3}],\"fallback_tool\":{\"name\":\"final_answer\",\"description\":\"Sends the final answer to the user\",\"input_schema\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\"}},\"max_retries\":3,\"response_format\":{\"type\":\"json_schema\",\"json_schema\":{\"name\":\"ToolCall\",\"schema\":{\"properties\":{\"item\":{\"anyOf\":[{\"additionalProperties\":false,\"properties\":{\"name\":{\"const\":\"get_weather\",\"description\":\"Tool Name\",\"title\":\"Name\",\"type\":\"string\"},\"parameters\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\",\"description\":\"Tool Parameters\"}},\"required\":[\"name\",\"parameters\"],\"title\":\"get_weather\",\"type\":\"object\"},{\"additionalProperties\":false,\"properties\":{\"name\":{\"const\":\"final_answer\",\"description\":\"Tool Name\",\"title\":\"Name\",\"type\":\"string\"},\"parameters\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\",\"description\":\"Tool Parameters\"}},\"required\":[\"name\",\"parameters\"],\"title\":\"final_answer\",\"type\":\"object\"}],\"title\":\"Item\"}},\"required\":[\"item\"],\"title\":\"AvailableTools\",\"type\":\"object\"}}},\"stream_partial_tool_calls\":true,\"temperature\":0.0,\"tool_choice\":\"required\",\"validate_response_format\":true}",
+      "input": "[{\"role\":\"system\",\"parts\":[{\"type\":\"text\",\"content\":\"# Role\\nAssume the role of a helpful AI assistant.\\n\\n# Instructions\\nYou are a weather assistant.\\nWhen the user sends a message, figure out a solution and provide a final answer to the user by calling the 'final_answer' tool.\\n\\nIMPORTANT: The facts mentioned in the final answer must be backed by evidence provided by relevant tool outputs.\\n\\n# Tools\\nYou must use a tool to retrieve factual or historical information.\\nNever use the tool twice with the same input if not stated otherwise.\\n\\nName: get_weather\\nDescription: Look up the weather for a city.\\nAllowed: True\\n\\nName: final_answer\\nDescription: Sends the final answer to the user\\nAllowed: True\\n\\n\\n# Notes\\n- Use markdown syntax to format code snippets, links, JSON, tables, images, and files.\\n- If the provided task is unclear, ask the user for clarification.\\n- Do not refer to tools or tool outputs by name when responding.\\n- Always take it one step at a time. Don't try to do multiple things at once.\\n- When the tool doesn't give you what you were asking for, you must either use another tool or a different tool input.\\n- You should always try a few different approaches before declaring the problem unsolvable.\\n- If you can't fully answer the user's question, answer partially and describe what you couldn't achieve.\\n- You cannot do complex calculations, computations, or data manipulations without using tools.\\n- The current date and time is: 2026-11-23\\n\"}]},{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"Your task: What is the weather in Paris?\"}]},{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_00000001\",\"name\":\"get_weather\",\"arguments\":{\"city\":\"Paris\"}}]},{\"role\":\"tool\",\"parts\":[{\"type\":\"text\",\"content\":\"sunny in Paris\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"tool_call\",\"id\":\"call_00000002\",\"name\":\"final_answer\",\"arguments\":{\"response\":\"Sunny in Paris\"}}]}]",
+      "output_format": "messages",
+      "input_preview": "Your task: What is the weather in Paris?",
+      "tool_definitions": "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"description\":\"Look up the weather for a city.\",\"parameters\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\"}}},{\"type\":\"function\",\"function\":{\"name\":\"final_answer\",\"description\":\"Sends the final answer to the user\",\"parameters\":{\"properties\":{\"response\":{\"description\":\"The final answer to the user\",\"title\":\"Response\",\"type\":\"string\"}},\"required\":[\"response\"],\"title\":\"FinalAnswerToolSchema\",\"type\":\"object\"}}}]",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.cost.completion": "7.2e-6",
+        "llm.cost.prompt": "0.00001965",
+        "llm.cost.total": "0.00002685",
+        "llm.model_name": "gpt-4o-mini-2024-07-18",
+        "llm.provider": "openai",
+        "llm.token_count.completion": "12",
+        "llm.token_count.prompt": "131",
+        "llm.token_count.total": "143",
+        "metadata.chunks_count": "1",
+        "metadata.class_name": "OpenAIChatModel",
+        "metadata.usage.cached_creation_tokens": "0",
+        "metadata.usage.cached_prompt_tokens": "0",
+        "metadata.usage.completion_tokens": "12",
+        "metadata.usage.prompt_tokens": "131",
+        "metadata.usage.total_tokens": "143",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "text/plain"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.199000000Z",
+          "name": "start (backend.openai.chat.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.237000000Z",
+          "name": "success (backend.openai.chat.success)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.238000000Z",
+          "name": "finish (backend.openai.chat.finish)"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "a4a984cbcbf2f55c",
+      "parent_span_id": "5a3f4fa075ee196f",
+      "name": "final_answer",
+      "span_kind": "agent",
+      "start_time": "2025-12-31T23:59:50.237000000Z",
+      "end_time": "2025-12-31T23:59:50.237000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"delta\":\"Sunny in Paris\",\"output\":\"Sunny in Paris\",\"output_structured\":null,\"state\":{\"answer\":null,\"cost\":{\"completion_tokens_cost_usd\":0.000010199999999999999,\"prompt_tokens_usd\":0.000012299999999999999,\"total_cost_usd\":0.000022499999999999998},\"iteration\":2,\"memory\":{\"messages\":[{\"content\":[{\"text\":\"Your task: What is the weather in Paris?\",\"type\":\"text\"}],\"role\":\"user\"},{\"content\":[{\"args\":\"{\\\"city\\\": \\\"Paris\\\"}\",\"id\":\"call_00000001\",\"tool_name\":\"get_weather\",\"type\":\"tool-call\"}],\"role\":\"assistant\"},{\"content\":[{\"result\":\"sunny in Paris\",\"tool_call_id\":\"call_00000001\",\"tool_name\":\"get_weather\",\"type\":\"tool-result\"}],\"role\":\"tool\"}],\"name\":\"UnconstrainedMemory\"},\"result\":null,\"steps\":[{\"error\":null,\"id\":\"capture-volatile-1\",\"input\":{\"city\":\"Paris\"},\"iteration\":1,\"output\":\"sunny in Paris\",\"tool\":{\"description\":\"Look up the weather for a city.\",\"input_schema\":{\"properties\":{\"city\":{\"title\":\"City\",\"type\":\"string\"}},\"required\":[\"city\"],\"title\":\"get_weather\",\"type\":\"object\"},\"name\":\"get_weather\"}}],\"usage\":{\"cached_creation_tokens\":0,\"cached_prompt_tokens\":0,\"completion_tokens\":17,\"prompt_tokens\":82,\"total_tokens\":99}}}",
+      "input_format": "json",
+      "input_preview": "{\"delta\":\"Sunny in Paris\",\"output\":\"Sunny in Paris\",\"output_structured\":null,\"state\":{\"answer\":null,\"cost\":{\"completion_tokens_cost_usd\":0.000010199999999999999,\"prompt_tokens_usd\":0.000012299999999999999,\"total_cost_usd\":0.000022499999999999998},\"iteration\":2,\"memory\":{\"messages\":[{\"content\":[{\"text\":\"Your task: What is the weather in Paris?\",\"type\":\"text\"}],\"role\":\"user\"},{\"content\":[{\"args\":\"{\\\"city\\\": \\\"Paris\\\"}\",\"id\":\"call_00000001\",\"tool_name\":\"get_weather\",\"type\":\"tool-call\"}],\"role\":\"assistant\"},{\"c",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "metadata.id": "capture-volatile-3",
+        "metadata.path": "agent.requirement.final_answer",
+        "metadata.trace.id": "capture-volatile-4",
+        "metadata.trace.run_id": "capture-volatile-5",
+        "openinference.span.kind": "AGENT"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "2c033fcebdf10ec5eecd67b6b33cf061",
+      "span_id": "993f5d933e610975",
+      "parent_span_id": "5a3f4fa075ee196f",
+      "name": "final_answer",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.239000000Z",
+      "end_time": "2025-12-31T23:59:50.239000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "input": "{\"input\":{\"response\":\"Sunny in Paris\"},\"options\":null}",
+      "input_format": "json",
+      "output": "Message has been sent",
+      "output_format": "text",
+      "input_preview": "{\"input\":{\"response\":\"Sunny in Paris\"},\"options\":null}",
+      "output_preview": "Message has been sent",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "metadata.class_name": "FinalAnswerTool",
+        "metadata.is_empty": "false",
+        "metadata.output_class": "StringToolOutput",
+        "openinference.span.kind": "TOOL",
+        "output.mime_type": "text/plain",
+        "tool.description": "Sends the final answer to the user",
+        "tool.json_schema": "{\"properties\": {\"response\": {\"description\": \"The final answer to the user\", \"title\": \"Response\", \"type\": \"string\"}}, \"required\": [\"response\"], \"title\": \"FinalAnswerToolSchema\", \"type\": \"object\"}",
+        "tool.name": "final_answer"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.beeai",
+      "scope_version": "0.1.85",
+      "events": [
+        {
+          "time": "2025-12-31T23:59:50.239000000Z",
+          "name": "start (tool.final_answer.start)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.239000000Z",
+          "name": "success (tool.final_answer.success)"
+        },
+        {
+          "time": "2025-12-31T23:59:50.239000000Z",
+          "name": "finish (tool.final_answer.finish)"
+        }
+      ],
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}
