@@ -7,7 +7,8 @@
   - **TL1.2** (the `[self_monitoring]` configuration) is committed before **TL4.3** starts. TL1.2 adds `self_monitoring: SelfMonitoringConfig::default()` to the three `ServerConfig { … }` literals (`test_support/mod.rs` twice, `ingest/fixtures_tests.rs` once), makes `load_from` `pub(crate)`, and adds `pub(crate) fn parse_otlp_endpoint`. TL4.3 adds only the `telemetry` field to those literals.
   - **TL1.3** (creates `crates/server/src/observability/mod.rs` and `pub mod observability;` in `lib.rs`) is committed before **TL4.1** starts. M4 never edits `lib.rs`.
   - **TL1.5** (`crates/server/src/observability/subscriber.rs`: `capped_filter`, `log_filter` (stdout), `export_filter`, `build`) is committed before **TL4.7** starts.
-  - **TL1.7** (CHANGELOG, spec 12, `docs/mvp-decisions.md`) is committed before **TL4.10** starts.
+  - **TL1.7** (`monitoring.md`, `backup.md` § Restore mode, `configuration.md`'s `restore_mode` row, `CHANGELOG.md`, spec 12) is committed before **TL4.9** and **TL4.10** start: both append to restore-mode text TL1.7 writes, and never rewrite it.
+  - **TL1.1** (root `Cargo.toml`) is committed before **TL4.4** starts: `git commit -- Cargo.toml` commits the whole file, so the two never run at the same time.
   - TL1.4 and TL1.5 also add lines to `observability/mod.rs`: never at the same time as TL4.1, TL4.2, TL4.4 or TL4.5.
 - If a name of M1's that this plan uses (listed in each phase) differs in the committed code, stop and report: M1's plan may still change under review.
 
@@ -89,11 +90,11 @@ The implementer of TL4.4 re-runs `cargo info uuid@1.29.2` and reports the versio
 TL1.3 ─► TL4.1 facts+buckets ─► TL4.2 switchboard ─► TL4.3 config ─► TL4.4 instance id ─► TL4.5 payload ─► TL4.6 sender+serve ─► TL4.7 notice filter
 TL1.2 ──────────────────────────────────────────────┘                                                                            TL1.5 ─┘
 TL4.8 packaging            (any time)
-TL4.9 docs and marketing   (any time)
+TL1.7 ─► TL4.9 docs and marketing
 TL1.7 ─► TL4.10 README, CHANGELOG, specs, D-W-18, Q notes
 ```
 
-TL4.1–TL4.7 run one after the other: they share `observability/mod.rs` and build on each other. TL4.8 and TL4.9 touch no Rust and may run in parallel with them and with each other; TL4.10 too, once TL1.7 is committed. The docs links (`#telemetry`) and env-var checks only pass once TL4.2 and TL4.3 are in, which the final `just check` sees.
+TL4.1–TL4.7 run one after the other: they share `observability/mod.rs` and build on each other. TL4.8, TL4.9 and TL4.10 touch no Rust and may run in parallel with them and with each other; TL4.9 and TL4.10 once TL1.7 is committed. The docs links (`#telemetry`) and env-var checks only pass once TL4.2 and TL4.3 are in, which the final `just check` sees.
 
 | Phase | Files | Shared with M1 (the coordinator serializes) |
 |---|---|---|
@@ -105,7 +106,7 @@ TL4.1–TL4.7 run one after the other: they share `observability/mod.rs` and bui
 | TL4.6 | `observability/heartbeat.rs`, `serve.rs` | `serve.rs` (M1 does not plan to edit it) |
 | TL4.7 | `observability/subscriber.rs` (M1's) | after TL1.5 |
 | TL4.8 | `tools/packaging/{binary,image,compose,helm}-smoke.sh`, `tools/packaging/telemetry-off-check.sh` (new), `tools/e2e/run.sh`, `justfile`, `deploy/compose/cetra.env.example` | none |
-| TL4.9 | `website/…/self-hosting/telemetry.md` (new), `website/astro.config.mjs`, `website/…/self-hosting/{security.md,index.md,backup.md}`, `website/src/marketing/home/DataOwnership.astro`, `website/src/pages/security.astro` | none (TL1.7 edits `monitoring.md` only) |
+| TL4.9 | `website/…/self-hosting/telemetry.md` (new), `website/astro.config.mjs`, `website/…/self-hosting/{security.md,index.md,backup.md,configuration.md}`, `website/src/marketing/home/DataOwnership.astro`, `website/src/pages/security.astro` | `backup.md`, `configuration.md`: after TL1.7 |
 | TL4.10 | `README.md`, `CHANGELOG.md`, `docs/spec/04-metadata-db.md`, `docs/spec/12-operations.md`, `docs/mvp-decisions.md`, the Q notes file (outside the repo) | `CHANGELOG.md`, spec 12, `mvp-decisions.md`: after TL1.7 |
 
 (`observability/…` is `crates/server/src/observability/…`; `website/…` is `website/src/content/docs/docs`.)
@@ -115,9 +116,10 @@ TL4.1–TL4.7 run one after the other: they share `observability/mod.rs` and bui
 - The implementer is Haiku. Follow the plan exactly. If a step is unclear, contradicts the code, or cannot be done as written, stop and report the question; do not improvise.
 - Edit only the files in the phase's **Edit** list. Report any change needed elsewhere.
 - **Do not run** `cargo build`, `cargo test`, `cargo clippy`, `cargo nextest` or any `just` recipe (the machine is loaded; the coordinator runs the checks once at the end of the milestone). Read-only commands (`git diff`, `grep`, `cargo info`, `bash -n`) are fine.
+- Formatting: run `rustfmt --edition 2024 <file>` on the **leaf** Rust files you created or changed (`facts.rs`, `buckets.rs`, `switchboard.rs`, `instance.rs`, `heartbeat.rs`, `config.rs`, `instance_settings.rs`, `serve.rs`, `subscriber.rs`, `test_support/mod.rs`, `fixtures_tests.rs`, `build.rs`), never on `lib.rs`, `observability/mod.rs` or `main.rs`: rustfmt also formats every module such a file declares, which may be another agent's half-written file. The coordinator's `just fmt` covers the rest.
 - **Done when** for every phase: the listed files changed as specified, nothing else changed, and one commit with the phase's subject exists.
 - Commit only your phase's files: `git add <files> && git commit -m "<subject>" -- <files>` (the `git add` is needed for new files). Other agents commit in the same checkout: if `.git/index.lock` exists, wait a few seconds and retry. Never `git stash`, never `git add -A`.
-- The milestone's final check, run by the coordinator: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just check`.
+- The milestone's final check, run by the coordinator: `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just fmt && just check`.
 - Rust rules (AGENTS.md): no `unwrap()`/`expect()` outside tests unless a comment states the invariant; no `unsafe`; no panic on input; `thiserror` errors; logs and errors never carry payload, emails, names, URLs with secrets or config values (ids and sizes only).
 - Doc comments in the new modules spell the noun "licence" (British), never the identifier spelling: TL4.5's test scans the non-test code for the identifier spelling.
 - In every new module, all non-test items come before the single `#[cfg(test)] mod tests` at the end of the file (TL4.5's licence test cuts each file at its first `#[cfg(test)]`).
@@ -999,8 +1001,8 @@ In `switchboard.rs`: `for_config_reads_the_config` (`crate::test_support::config
    1. `orgs`: `SELECT COUNT(*) FROM orgs WHERE state = 'active'` as `i64`.
    2. `projects`: `SELECT COUNT(*) FROM projects WHERE state = 'active'`.
    3. `users`: `SELECT COUNT(*) FROM users WHERE disabled_at IS NULL`.
-   4. Yesterday: `let today = DateTime::from_timestamp_nanos(now_ns).date_naive();` `let yesterday = today.pred_opt().unwrap_or(today);` (comment: `NaiveDate::MIN` has no predecessor; never reached for a real clock), formatted `"%Y-%m-%d"` as `usage.rs` does. `SELECT COALESCE(SUM(spans), 0), COALESCE(SUM(scores), 0) FROM usage_daily WHERE day = ?` as `(i64, i64)`.
-   5. Install age: `SELECT MIN(created_at) FROM users` as `Option<i64>`; age = `now_ns - min` when `Some` and positive, else 0, as `Duration::from_nanos(u64::try_from(…).unwrap_or(0))`.
+   4. Yesterday: `let today = DateTime::from_timestamp_nanos(now_ns).date_naive();` `let yesterday = today.pred_opt().unwrap_or(today);` (comment: `NaiveDate::MIN` has no predecessor; never reached for a real clock), formatted `"%Y-%m-%d"` as `usage.rs` does. `let (spans, scores) = sqlx::query_as::<_, (i64, i64)>("SELECT COALESCE(SUM(spans), 0), COALESCE(SUM(scores), 0) FROM usage_daily WHERE day = ?").bind(day).fetch_one(meta.reader()).await?;`
+   5. Install age: `sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(created_at) FROM users").fetch_one(meta.reader()).await?`; age = `now_ns - min` when `Some` and positive, else 0, as `Duration::from_nanos(u64::try_from(…).unwrap_or(0))`.
    6. `table_flags(meta)`.
    7. Convert every `i64` count with `u64::try_from(value).unwrap_or(0)` (a negative count cannot happen; 0 is the safe side), then build `Heartbeat { schema: HEARTBEAT_SCHEMA, instance_id, version: facts::VERSION, target: facts::TARGET, profile: facts::profile(), deployment, storage: storage_kind(config), uptime: uptime_bucket(uptime), install_age: install_age_bucket(age), orgs: count_bucket(orgs), projects: count_bucket(projects), users: count_bucket(users), spans_per_day: volume_bucket(spans), scores_per_day: volume_bucket(scores), features: features(config, flags) }`.
 6. In `observability/mod.rs` add `pub(crate) mod heartbeat;`.
@@ -1129,7 +1131,18 @@ In `switchboard.rs`: `for_config_reads_the_config` (`crate::test_support::config
    }
    ```
    (`meta.db` errors stay `MetaError` and are logged where they happen, step 7.)
-3. `pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, HeartbeatError>`, mirroring `identity_client` (`auth/oidc/mod.rs:192`): `reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(timeout).user_agent(format!("cetra/{}", facts::VERSION)).build().map_err(|_| HeartbeatError::Client)`. Its own client: never the evaluation runner's or the identity client.
+3. `pub(crate) fn client(timeout: Duration) -> Result<reqwest::Client, HeartbeatError>`, mirroring `identity_client` (`auth/oidc/mod.rs:192`): 
+   ```rust
+   let builder = reqwest::Client::builder()
+       .redirect(reqwest::redirect::Policy::none())
+       .timeout(timeout)
+       .user_agent(format!("cetra/{}", facts::VERSION));
+   // A developer's HTTP(S)_PROXY must not catch the tests' 127.0.0.1 receivers (as M1's export client).
+   #[cfg(test)]
+   let builder = builder.no_proxy();
+   builder.build().map_err(|_| HeartbeatError::Client)
+   ```
+   Outside tests it honours `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`, like `identity_client`. Its own client: never the evaluation runner's or the identity client.
 4. `pub(crate) fn heartbeat_url(endpoint: &str) -> String`: `format!("{}/v1/heartbeat", endpoint.trim_end_matches('/'))`.
 5. `fn wait_before_send(last_sent_ns: Option<i64>, now_ns: i64) -> Option<Duration>`: how long until the next heartbeat is due, or `None` when it is due now. Compute in `i128` so nothing overflows:
    ```rust
@@ -1413,7 +1426,8 @@ In `serve.rs` tests:
 - `website/astro.config.mjs`
 - `website/src/content/docs/docs/self-hosting/security.md`
 - `website/src/content/docs/docs/self-hosting/index.md`
-- `website/src/content/docs/docs/self-hosting/backup.md` (the restore-mode list only)
+- `website/src/content/docs/docs/self-hosting/backup.md` (§ Restore mode: its intro sentence and its list)
+- `website/src/content/docs/docs/self-hosting/configuration.md` (the `restore_mode` row only)
 - `website/src/marketing/home/DataOwnership.astro` (one card)
 - `website/src/pages/security.astro` (one card)
 
@@ -1467,7 +1481,7 @@ In `serve.rs` tests:
 
    The first heartbeat goes 10 to 20 minutes after the server starts, then one every 24 hours. cetra records in `meta.db` when the last heartbeat was accepted, so restarts send at most one a day.
 
-   The request is `POST https://telemetry.cetra.sh/v1/heartbeat` with a JSON body and the header `User-Agent: cetra/<version>`. It follows no redirect and gives up after 10 seconds. A heartbeat that fails is not retried before the next one, and failures are logged at `debug` only, so a server without internet access logs no warnings. To send it through a relay of your own, set [`telemetry.endpoint`](/docs/self-hosting/configuration-reference/#telemetry).
+   The request is `POST https://telemetry.cetra.sh/v1/heartbeat` with a JSON body and the header `User-Agent: cetra/<version>`. It follows no redirect and gives up after 10 seconds. It goes through the proxy in `HTTPS_PROXY` when one is set, except for hosts in `NO_PROXY`. A heartbeat that fails is not retried before the next one, and failures are logged at `debug` only, so a server without internet access logs no warnings. To send it through a relay of your own, set [`telemetry.endpoint`](/docs/self-hosting/configuration-reference/#telemetry).
 
    ## What it sends
 
@@ -1539,20 +1553,32 @@ In `serve.rs` tests:
    - [Telemetry](/docs/self-hosting/telemetry/): the anonymous daily heartbeat, field by field, and how to turn it off.
    ```
 
-5. `backup.md`, § Restore mode, the list after "With restore mode on, the server:": add as its last bullet, after "- sends no usage notices.":
+5. `backup.md`, § Restore mode. Append only; M1's TL1.7 wrote the text quoted here, and if it differs, stop and report.
+   1. The intro sentence after TL1.7 ends with `starts a server that makes no outbound call, except the self-monitoring export to your own endpoint ([Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp)).` Right after that sentence (same paragraph), add: `It sends nothing to us either: the heartbeat and crash reports are off in restore mode ([Telemetry](/docs/self-hosting/telemetry/)).`
+   2. The list under `With restore mode on, the server:` ends, after TL1.7, with `- keeps exporting its own logs to \`self_monitoring.otlp_endpoint\`, when it is set: that endpoint is yours.` Add after it, as the new last bullet:
+      ```markdown
+      - sends no heartbeat and no crash report to us (see [Telemetry](/docs/self-hosting/telemetry/)).
+      ```
+   (Crash reports arrive in M5; the sentence holds from now on, since the switchboard turns both off in restore mode.)
+5b. `configuration.md`, the `restore_mode` row. After TL1.7 it reads:
    ```markdown
-   - sends no heartbeat to us (see [Telemetry](/docs/self-hosting/telemetry/)).
+   | `restore_mode` | `CETRA_RESTORE_MODE` | `false` | no outbound calls except the self-monitoring export, for restore drills ([Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)) |
    ```
+   Change it to (one clause appended after `export`; the link kept):
+   ```markdown
+   | `restore_mode` | `CETRA_RESTORE_MODE` | `false` | no outbound calls except the self-monitoring export, and nothing sent to us (heartbeat, crash reports), for restore drills ([Backup and restore](/docs/self-hosting/backup/#restore-mode-restore-drills)) |
+   ```
+   If the row differs from the "after TL1.7" text, stop and report.
 6. `website/src/marketing/home/DataOwnership.astro`: replace the card
    ```astro
        <Card title="Nothing phones home">
          cetra sends no usage data. A licence key is checked offline.
        </Card>
    ```
-   with
+   with (same title; only the false sentence changes)
    ```astro
-       <Card title="No trace data leaves">
-         cetra sends us one anonymous heartbeat a day, with no trace data, and one setting turns it off. A licence key is checked offline.
+       <Card title="Nothing phones home">
+         Self-hosted cetra sends only an <a href="/docs/self-hosting/telemetry/">anonymous daily heartbeat</a>, which you can turn off. A licence key is checked offline.
        </Card>
    ```
 7. `website/src/pages/security.astro`, the "Self-hosted" card: replace
@@ -1561,7 +1587,7 @@ In `serve.rs` tests:
    ```
    with
    ```astro
-           <p>Traces go from your app to your server. cetra sends us only an anonymous daily heartbeat, with no trace data, which you can turn off (<a href="/docs/self-hosting/telemetry/">what it contains</a>), and a licence key is verified offline.</p>
+           <p>Traces go from your app to your server. Self-hosted cetra sends only an <a href="/docs/self-hosting/telemetry/">anonymous daily heartbeat</a>, which you can turn off, and a licence key is verified offline.</p>
    ```
    Keep the surrounding markup and indentation as they are; if the card's text differs from the quoted one, stop and report.
 
@@ -1616,20 +1642,25 @@ In `serve.rs` tests:
    ```
 4. `docs/spec/12-operations.md`:
    1. § Configuration, first paragraph: after the sentence about `CETRA_URL`, `CETRA_TOKEN` and `CETRA_PROJECT`, add: "`CETRA_TELEMETRY` is not a config key either: the loader reads it before the sources (`off`, `false` or `0` in any case; empty is ignored; any other value is a load error) and does not map it (D-TL-11)."
-   2. The `restore_mode` row. Before:
+   2. The `restore_mode` row. Append only. After M1's TL1.7 step 2.3 it reads:
       ```markdown
-      | `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) |
+      | `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) The self-monitoring export to the operator's own endpoint stays on (D-TL-1). |
       ```
-      After:
+      Append ` Nothing is sent to us: the heartbeat and crash reports are off (D-TL-11).` at the end of the third cell, before its closing `|`, so it reads:
       ```markdown
-      | `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off, and nothing is sent to us (D-TL-11); for restore drills (D-N-25) |
+      | `restore_mode` | | `false`. No outbound work: alert deliveries, webhooks, judges, the assistant, email and identity providers are off; for restore drills (D-N-25) The self-monitoring export to the operator's own endpoint stays on (D-TL-1). Nothing is sent to us: the heartbeat and crash reports are off (D-TL-11). |
       ```
+      If the row differs from the first text (for example TL1.7 punctuated it differently), keep TL1.7's text as it is and only append the clause; report the difference.
    3. Add two rows right after M1's `self_monitoring.*` rows (which follow the `log.format` / `log.level` row; if they are missing, after the `log.format` / `log.level` row):
       ```markdown
       | `telemetry.heartbeat` | | `true`. The anonymous daily heartbeat (D-TL-8); the switchboard below can turn it off |
       | `telemetry.endpoint` | | `"https://telemetry.cetra.sh"` (D-TL-10). `https`, or `http` to a loopback IP; no user info, query or fragment; the heartbeat goes to `<endpoint>/v1/heartbeat` |
       ```
-   4. The TLS line under the configuration table. After TL1.7 it reads `cetra has no \`tls.*\` and no \`telemetry.*\` keys: the loader refuses them as unknown keys. Its own logs are exported with \`[self_monitoring]\` (§ Self-monitoring, D-TL-1).` (before TL1.7 it read `cetra has no \`tls.*\` keys and no telemetry key: the loader refuses them as unknown keys.`). Whichever of the two is there, replace those sentences (keep the leading `TLS: terminated by a reverse proxy in the reference setups.`) with exactly:
+   4. The TLS line under the configuration table. It holds one of these two texts:
+      - the original: `cetra has no \`tls.*\` keys and no telemetry key: the loader refuses them as unknown keys.`
+      - after M1's TL1.7 step 3.2: `cetra has no \`tls.*\` keys: the loader refuses them as unknown keys. Its own logs are exported with \`[self_monitoring]\` (§ Self-monitoring, D-TL-1).`
+
+      If it holds neither, stop and report. Replace whichever is there (keep the leading `TLS: terminated by a reverse proxy in the reference setups.`) with exactly:
       ```markdown
       cetra has no `tls.*` keys: the loader refuses them as unknown keys. Its own logs are exported with `[self_monitoring]` (§ Self-monitoring, D-TL-1); `[telemetry]` controls what is sent to us (§ Telemetry to us, D-TL-1).
       ```
@@ -1698,7 +1729,7 @@ In `serve.rs` tests:
 
 ## After the last phase (coordinator)
 
-- Review each phase's diff against this plan, then run `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just check` once.
+- Review each phase's diff against this plan, then run `export PATH=$HOME/.local/share/nvm/v26.13.0/bin:$PATH && just fmt && just check` once.
 - A Sonnet code review of the milestone; fixes by a Haiku agent with an exact brief.
 - Update the TL row of `docs/roadmap.md` when the track's status changes.
 - Hand M3 the reuse points: `heartbeat::collect`, `switchboard::for_config` and `Decision`, `facts::*`; M3 adds a read-only `instance::existing_instance_id` (a `get_setting` that never creates the row). Hand M5: `shared_off`, `Inputs`, `Decision` (M5 adds `crash_reports`), `Features` (M5 adds `crash_reports_on`), `NOTICE_TARGET`, `instance::instance_id`, `facts::mark_process_start` and `facts::process_uptime`, `TelemetryConfig` (M5 adds `crash_reports`), the golden JSON. Hand M6: `Heartbeat` (M6 adds `usage`).
