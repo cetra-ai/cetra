@@ -103,5 +103,77 @@
     "price_cache_write": null,
     "price_reasoning": null,
     "tiers": null
+  },
+  {
+    "model_name": "openai/gpt-oss-20b",
+    "match_pattern": "openai/gpt\\-oss\\-20b",
+    "provider": "groq",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 0.075,
+    "price_output": 0.3,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
+  },
+  {
+    "model_name": "mistral-small-latest",
+    "match_pattern": "mistral\\-small\\-latest",
+    "provider": "mistral_ai",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 0.15,
+    "price_output": 0.6,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
+  },
+  {
+    "model_name": "command-a-03-2025",
+    "match_pattern": "command\\-a\\-03\\-2025",
+    "provider": "cohere",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 2.5,
+    "price_output": 10.0,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
+  },
+  {
+    "model_name": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    "match_pattern": "meta\\-llama/Llama\\-3\\.3\\-70B\\-Instruct\\-Turbo",
+    "provider": "together_ai",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 1.04,
+    "price_output": 1.04,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
+  },
+  {
+    "model_name": "llama3.1",
+    "match_pattern": "llama3\\.1",
+    "provider": "ollama",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 0.0,
+    "price_output": 0.0,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
+  },
+  {
+    "model_name": "gpt-4o-mini",
+    "match_pattern": "gpt-4o-mini(-\\d{4}-\\d{2}-\\d{2})?",
+    "provider": "azure.ai.openai",
+    "valid_from": "1970-01-01T00:00:00.000000000Z",
+    "price_input": 0.15,
+    "price_output": 0.6,
+    "price_cache_read": null,
+    "price_cache_write": null,
+    "price_reasoning": null,
+    "tiers": null
   }
 ]

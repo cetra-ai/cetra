@@ -32,6 +32,18 @@ dependencies = [
   # 2.14.0 (2026-11-07) is the first release that accepts the pinned 1.45.2.
   "google-adk==2.14.0",
   "openinference-instrumentation-google-adk==1.1.0",
+  # Native SDKs of M2 (track IN, docs/plans/in-integrations/spikes/m2-native-sdks.md) and their
+  # OpenInference instrumentors, each the version the spike found usable at the 7-day cutoff.
+  "groq==1.7.0",
+  "mistralai==3.7.0",
+  "cohere==7.3.1",
+  "ollama==0.6.3",
+  "together==3.1.1",
+  "openinference-instrumentation-groq==0.1.40",
+  "openinference-instrumentation-mistralai==2.3.5",
+  "openinference-instrumentation-cohere==0.1.22",
+  "openinference-instrumentation-ollama==0.1.20",
+  "openinference-instrumentation-together==0.1.20",
   # The OpenAI client's HTTP layer (openai 3.x is built on httpx2). The harness's real-host
   # transport subclasses its transport (D-IN-3). Pinned to the version in uv.lock.
   "httpx2==2.16.0",
@@ -75,6 +87,11 @@ files = ["src", "scenarios"]
 mypy_path = "src"
 # Every scenario entry point is main.py. mypy maps those paths to one module.
 exclude = ["main\\.py$"]
+
+# google-auth types Credentials as untyped; the scenario only builds a mock token.
+[[tool.mypy.overrides]]
+module = "google.oauth2.credentials"
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "opentelemetry.instrumentation.openai_v2"

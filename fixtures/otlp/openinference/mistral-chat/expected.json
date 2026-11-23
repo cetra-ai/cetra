@@ -1,0 +1,57 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "b4285997bd34192b6c97c5d43841c66c",
+      "span_id": "5684b5a2c0367a60",
+      "name": "MistralClient.chat",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.040000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "mistral_ai",
+      "request_model": "mistral-small-latest",
+      "input_tokens": 14,
+      "output_tokens": 8,
+      "total_tokens": 22,
+      "cost_input": 2.1000000000000002e-6,
+      "cost_output": 4.8e-6,
+      "cost_total": 6.9e-6,
+      "cost_source": "computed",
+      "request_params": "{\"frequency_penalty\":\"\",\"guardrails\":\"\",\"logprobs\":\"\",\"max_tokens\":\"\",\"metadata\":\"\",\"min_tokens\":\"\",\"model\":\"mistral-small-latest\",\"n\":\"\",\"presence_penalty\":\"\",\"prompt_cache_key\":\"\",\"prompt_logprobs\":\"\",\"prompt_mode\":\"\",\"random_seed\":\"\",\"reasoning_effort\":\"\",\"repetition_penalty\":\"\",\"retries\":\"\",\"service_tier\":\"\",\"stop\":\"\",\"stream\":false,\"temperature\":\"\",\"top_k\":\"\",\"top_logprobs\":\"\",\"top_p\":\"\",\"top_prompt_logprobs\":\"\"}",
+      "input": "[{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"content\":\"What is the capital of France?\"}]}]",
+      "input_format": "messages",
+      "output": "[{\"role\":\"assistant\",\"parts\":[{\"type\":\"text\",\"content\":\"The capital of France is Paris.\"}]}]",
+      "output_format": "messages",
+      "input_preview": "What is the capital of France?",
+      "output_preview": "The capital of France is Paris.",
+      "attributes": {
+        "input.mime_type": "application/json",
+        "llm.finish_reason": "stop",
+        "llm.model_name": "mistral-small-latest",
+        "llm.provider": "mistralai",
+        "llm.system": "mistralai",
+        "llm.token_count.completion": "8",
+        "llm.token_count.prompt": "14",
+        "llm.token_count.total": "22",
+        "openinference.span.kind": "LLM",
+        "output.mime_type": "application/json"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "python",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.45.2"
+      },
+      "scope_name": "openinference.instrumentation.mistralai",
+      "scope_version": "2.3.5",
+      "conventions": [
+        "openinference"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

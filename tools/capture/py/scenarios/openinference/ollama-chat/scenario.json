@@ -1,0 +1,29 @@
+{
+  "description": "Ollama SDK chat, one turn, traced by OpenInference through cetra's SDK.",
+  "spec_refs": [
+    "02 \u00a7 Convention detection",
+    "02 \u00a7 Model, provider, usage",
+    "02 \u00a7 Cost computation"
+  ],
+  "notes": "The Ollama client targets http://localhost:11434, the default local server, and the harness routes the request to the capture mock (D-IN-3). Ollama takes no API key. The instrumentor writes no server.address, so the turn has no host check. The instrumentor writes llm.provider ollama, so the provider comes from that explicit value (D-IN-2). The model llama3.1 is priced by the ollama row added to the built-in snapshot's fixtures at cost zero. Token counts are input 14 and output 8.",
+  "instrumentation": "openinference-instrumentation-ollama",
+  "libraries": [
+    "ollama",
+    "openinference-instrumentation-ollama",
+    "opentelemetry-sdk"
+  ],
+  "turns": [
+    {
+      "api": "ollama.chat",
+      "model": "llama3.1",
+      "message": {
+        "text": "The capital of France is Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 14,
+        "output": 8
+      }
+    }
+  ]
+}
