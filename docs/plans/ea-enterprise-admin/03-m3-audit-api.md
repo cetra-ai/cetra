@@ -78,7 +78,7 @@ D2 (feature, limit, purge) ──┐
 D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (docs)
 ```
 
-- D2 and D3 run in parallel; their files are disjoint.
+- D2 and D3 run in parallel: their files are disjoint. D3's code uses `Feature::AuditLog`, which D2 adds; that only matters at compile time, and the checks run once both are committed.
 - D3 holds the read routes and the exports together (no phase leaves a route without its handler).
 - D5 needs `just openapi` and `just api-examples` (coordinator) after D3.
 - D6 runs alongside D5.
@@ -114,7 +114,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
    - `merge_limits` (`entitlements/tokens.rs`) merges it like the others, with tests for value, `null` and missing;
    - every `Limits { … }` literal in the crate gets the field: search `Limits {` in `crates/server/src` and fix each in this phase's files. A literal in another file uses `..Default::default()` if it already does; otherwise report it.
 4. **`OrgLimits.audit_retention_days`** (`api/entitlements.rs`), `#[serde(default, skip_serializing_if = "Option::is_none")]`, and the `From<Limits>` mapping.
-5. **`crates/cli/src/main.rs` `limit_rows`:** add `("audit_retention_days", limits.audit_retention_days)`, bump the array length, and update its test.
+5. **`crates/cli/src/main.rs` `limit_rows`:** add `("audit_retention_days", limits.audit_retention_days)`, bump the array length, and update its test. This limit reads differently from the others: `None` prints "instance default" and `0` prints "kept forever". Special-case it where the rows are formatted. The `OrgLimits` field doc says the same ("Omitted: the instance's `audit.retention_days`; 0: kept forever"), as an exception to the struct's "omitted is unlimited" note.
 6. **`audit/retention.rs`:**
    - Replace `purge` with:
 
@@ -223,7 +223,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
    pub struct AuditLimit(pub u32);
    ```
 
-   `AuditExportParams` is the same struct without `limit` and `cursor`, plus `format: AuditExportFormat` (`csv` | `ndjson`, required). D4 uses it; define it here so the OpenAPI is complete.
+   `AuditExportParams` is the same struct without `limit` and `cursor`, plus `format: AuditExportFormat` (`csv` | `ndjson`, required). Step 6 uses it.
 
    - `from` is inclusive and `to` exclusive, as `UserListParams` documents.
    - `actor_id` and `target_id` are at most 64 characters (`field_error` otherwise).
@@ -246,7 +246,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
    pub(crate) fn filters(from: Option<&TimeParam>, to: Option<&TimeParam>, action: Option<&str>, actor_id: Option<&str>, target_id: Option<&str>, project_id: Option<Uuid>, outcome: Option<AuditOutcome>) -> Result<Filters, ApiError>;
    pub(crate) async fn page(pool: &SqlitePool, scope: &Scope, filters: &Filters, before_seq: Option<i64>, limit: u32) -> Result<Vec<Row>, MetaError>;
    pub(crate) async fn resolve(pool: &SqlitePool, scope: &Scope, rows: &[Row]) -> Result<Vec<AuditEvent>, MetaError>;
-   pub(crate) fn encode_cursor(seq: i64) -> String;
+   pub(crate) fn encode_cursor(seq: i64) -> String; // base64url of format!("{{\"seq\":{seq}}}"): no serde, so no error path
    pub(crate) fn decode_cursor(text: &str) -> Result<i64, ApiError>; // invalid → field_error("cursor", "invalid cursor")
    ```
 
@@ -269,7 +269,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
      - Use the base64url cursor model of `routes/admin.rs:~486-505` (`encode_cursor`, `cursor_error`) with a struct `{ seq: i64 }`.
      - `details` is parsed from the stored JSON. A parse failure gives `{}` and logs `tracing::warn!(id = %id, "audit details do not decode")`.
      - Ids are bound as text. Use `QueryBuilder` with `separated(", ")`, as `meta/users.rs:~503` `providers_by_user` does.
-3. **Routes** (`ee/audit/mod.rs`, SPDX header, final form, with the export handlers that D4 writes in `export.rs`):
+3. **Routes** (`ee/audit/mod.rs`, SPDX header, with the export handlers of step 6 in `export.rs`):
 
    ```rust
    pub(crate) mod export;
@@ -289,13 +289,13 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
    - Schemas: `AuditEvent`, `AuditActor`, `AuditRef`, `AuditOutcome`, `AuditRefStatus`, `AuditExportFormat`, plus `insert_page::<AuditEvent>("AuditEventPage")`.
 5. **Examples:**
    - `api_examples.rs`: `example("list_org_audit_events", params(&[("org","acme")]), BTreeMap::new(), "static/org-audit-events.json", "application/json")` and `example("list_admin_audit_events", …, "static/admin-audit-events.json", …)`.
-   - The two static files are canonical pretty JSON pages of 3 records each (one `member.role_changed` with a present actor, one `auth.login` from an anonymous actor with an IP, one with a `former_member` target), using the ids of `fixtures/api/README.md`'s fixed-identifier table. Extend the table with three audit event ids ending `…0d00`, `…0d01`, `…0d02` (check that they are unused).
+   - The two static files are canonical pretty JSON pages of 3 records each (one `member.role_changed` with a present actor, one `auth.login` from an anonymous actor with an IP, one with a `former_member` target), using the ids of `fixtures/api/README.md`'s fixed-identifier table. Extend the table with three audit event ids from a free range. `…0d01` to `…0d04` are dataset items, so grep `fixtures/api/README.md` and `api_examples.rs` and pick e.g. `…1000`, `…1001`, `…1002` when unused.
      - The files must round-trip through the DTOs: `details` keys in `serde_json`'s map order, `at` written with nine fractional digits (`…T12:00:00.000000000Z`).
    - **`crates/server/tests/api_examples.rs`:**
      - `generated_files_roundtrip` gets `"list_org_audit_events" | "list_admin_audit_events" => roundtrip::<Page<AuditEvent>>(…)` arms, as the deletions page has, with imports;
      - `manifest_covers_the_read_operations` exempts `get_org_audit_export` and `get_admin_audit_export`, as it exempts `get_dataset_export`.
    - **`crates/server/tests/openapi.rs`:** add the four operation ids to `OPERATIONS`, `"audit"` to `TAGS`, the routes with query parameters to `QUERY_OR_BODY`, the two admin ids to the session-security list (the `list_admin_users` group), and their expected errors to the per-id `expected_errors` branches (lists: `[400, 401, 403, 404, 429]`; admin: `[400, 401, 403, 429]`; exports the same as their lists).
-6. **Exports** (`ee/audit/export.rs`): D3's former D4 steps below, all in this phase.
+6. **Exports** (`ee/audit/export.rs`): the steps below.
 
 **Tests** (`ee/audit/mod.rs` tests, with `TestApp::with_license(&["audit_log"])` (`test_support:~266`); members via `test_support::member_in_org`, PATs and keys through the existing helpers of `routes/tokens.rs` and `routes/api_keys.rs` tests, an erased user by `DELETE FROM users` on the writer):
 - `admins_read_the_org_log_newest_first`;
@@ -310,6 +310,11 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 - `instance_log_needs_the_licence_or_a_cloud_cell`;
 - `details_never_carry_an_email` (over the example records).
 - `instance_scope_resolves_no_org_object_names`.
+- `instance_project_filter_matches_nothing`.
+
+In `ee/audit/`, refer to the core module as `crate::audit` (`use crate::audit::{Ctx, Event, record_alone};`): a bare `audit::` there names `ee::audit`.
+
+The generated `crates/server/openapi.json`, `fixtures/api/manifest.json` and `web/src/api/schema.gen.ts` are regenerated by the coordinator after this phase. `manifest_covers_the_read_operations` and the OpenAPI contract test fail until then: expected.
 
 #### D3 step 6 in detail — exports
 
@@ -368,7 +373,8 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 **Steps:**
 1. **Nav:**
    - an `adminOnly` flag on org nav items. The array is `as const`, so give **every** org item `adminOnly: false` except the new one, which has `true`. `visibleOrgNav` also hides `adminOnly` items unless `atLeast(role, "admin")` (`@/lib/roles`);
-   - the new item `{ to: "/$org/settings/audit-log", label: "Audit log", icon: ScrollText, description: "Who did what, and when", keywords: ["audit", "log", "security", "compliance"], adminOnly: true }` goes after "Provisioning".
+   - the new item `{ to: "/$org/settings/audit-log", label: "Audit log", icon: ScrollText, description: "Who did what, and when", keywords: ["audit", "log", "security", "compliance"], ownerOnly: false, adminOnly: true }` goes after "Provisioning";
+   - `settings-nav.test.ts` fixtures that build items with `ownerOnly` also get `adminOnly`.
 2. **`lib/search/audit.ts`:**
    - `parseAuditSearch(search)` returns `{ range: "24h" | "7d" | "30d" | "90d" | "all", action?: string, actor?: string, target?: string, outcome?: "success" | "failure", open?: string }`, using `lib/search/common.ts` helpers (`parseEnum`, `parseString(value, 200)`); the default range is `7d`;
    - `auditQuery(search, now)` maps it to the API's query (`from` = now − range, as RFC 3339; no `from` for `all`). The view computes `now` once per search change (`useMemo` keyed on the search, rounded down to the minute), so the query key is stable between renders.
@@ -387,7 +393,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 6. **Feature labels:**
    - `featureOffer` gets `case "audit_log": return "Available with Enterprise or an enterprise licence";`;
    - `FEATURE_NAMES` in `license-card.tsx` and `plan.tsx` get "Audit log", and `plan.tsx`'s `FEATURES` list gets `audit_log`;
-   - `plan.tsx`'s limits table gets "Audit retention" (`unlimited` or `${n} days`).
+   - `plan.tsx`'s limits table gets "Audit retention": "Instance default" when absent, "Kept forever" for 0, else `${n} days`.
 
 **Tests** (vitest, MSW `server.use`):
 - `audit-log.test.tsx`: `admin sees records with names and the former-member label`, `filters go to the URL and the query`, `opening a record shows its details`, `member sees the note`, `locked without the feature`, `export downloads a CSV`.
@@ -407,7 +413,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 **Edit:**
 - `website/src/content/docs/docs/platform/audit-log.mdx` (new), and its sidebar entry in `website/astro.config.mjs` (next to `sso`, ~124);
 - `website/src/content/docs/docs/platform/plans-and-licence.mdx`;
-- `website/src/content/docs/docs/self-hosting/configuration-reference.md` (the `audit.retention_days` description now mentions the org limit);
+- `website/src/content/docs/docs/self-hosting/configuration-reference.md` (the `audit.retention_days` description now mentions the org limit, which replaces it per org, 0 meaning kept forever);
 - `docs/spec/04-metadata-db.md`, `docs/spec/08-auth.md`, `docs/spec/09-api.md`, `docs/spec/11-ui.md`, `docs/spec/12-operations.md`;
 - `docs/plans/ea-enterprise-admin/README.md`, `docs/mvp-decisions.md` (D-P-12, D-P-13 lists);
 - `CHANGELOG.md`.
@@ -416,7 +422,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 1. **`audit-log.mdx`:**
    - what is recorded (the catalog groups) and what is not (data work);
    - privacy (ids stored, names resolved on read, former members);
-   - retention (365 days, `audit.retention_days`, the org limit on the cloud; a lapsed org returns to the instance value);
+   - retention (365 days, `audit.retention_days`; the org limit on the cloud, where 0 keeps records forever; a lapsed org returns to the instance value);
    - reading, filtering, exporting (the cap) and the instance log;
    - plans: Enterprise and the licence.
 
@@ -441,7 +447,7 @@ D3 (perm, catalog, read, export, routes) ──┴── D5 (web) ── D6 (doc
 
 ## After the phases (coordinating session)
 
-1. Run `just openapi` and `just api-examples` after D4, and commit.
+1. Run `just openapi` and `just api-examples` after D3, and commit.
 2. Review the diffs. Run `just check` once (Node on the PATH).
 3. Fix phase; a Sonnet code review of M3.
 4. Roadmap: "M3 implemented".
