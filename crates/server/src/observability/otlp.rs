@@ -746,8 +746,8 @@ mod tests {
         assert!(!log.should_log(t0 + Duration::from_secs(61)));
     }
 
-    #[test]
-    fn debug_hides_the_header_values() {
+    #[tokio::test]
+    async fn debug_hides_the_header_values() {
         let mut exporter = exporter_for("http://127.0.0.1:1/otlp");
         exporter.headers =
             request_headers(Some(&Secret::new("authorization=Bearer t0k3n".to_owned()))).unwrap();
