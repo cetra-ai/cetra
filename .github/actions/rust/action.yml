@@ -49,7 +49,7 @@ runs:
     - name: Cache Rust compilation with kache and Garage
       # The caller enables caching and supplies credentials only for trusted runs.
       if: inputs.cache == 'true' && inputs.s3-access-key-id != '' && inputs.s3-secret-access-key != ''
-      uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1
+      uses: kunobi-ninja/kache-action@061011817fd04b0e460f79d6bb3c115b1fc8f029 # v1
       with:
         version: "2.0.0"
         s3-bucket: kache
@@ -67,12 +67,12 @@ runs:
         pr-comment: false
 
     - name: Install just and cargo-deny
-      uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
       with:
         tool: just@1.59.0,cargo-deny@0.20.2
 
     - name: Install cargo-nextest
       if: inputs.nextest == 'true'
-      uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+      uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
       with:
         tool: cargo-nextest@0.9.151
