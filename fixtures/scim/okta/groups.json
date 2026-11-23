@@ -16,6 +16,14 @@
     }
   },
   {
+    "method": "GET",
+    "path": "/scim/v2/Groups?filter=displayName eq \"Engineering\"",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  },
+  {
     "method": "POST",
     "path": "/scim/v2/Groups",
     "body": {
@@ -27,6 +35,15 @@
       "status": 201,
       "save": { "group": "/id" },
       "json": { "/displayName": "Engineering" }
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/scim/v2/Groups?excludedAttributes=members",
+    "expect": {
+      "status": 200,
+      "json": { "/Resources/0/displayName": "Engineering" },
+      "absent": ["/Resources/0/members"]
     }
   },
   {

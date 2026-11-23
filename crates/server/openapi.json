@@ -37440,7 +37440,7 @@
           },
           "external_id": {
             "type": "string",
-            "description": "The identity provider's external id, when it sent one."
+            "description": "The identity provider's external id, when it sent one. Absent when it did not."
           },
           "id": {
             "type": "string",
@@ -37449,7 +37449,7 @@
           },
           "mapping": {
             "$ref": "#/components/schemas/ScimGroupMapping",
-            "description": "The group's role mapping. `null` when the group maps nothing."
+            "description": "The group's role mapping. Absent when the group maps nothing."
           },
           "member_count": {
             "type": "integer",

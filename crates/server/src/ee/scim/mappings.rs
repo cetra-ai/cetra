@@ -166,6 +166,11 @@ async fn set_mapping(
     }
 }
 
+/// Removes a group's mapping (D-EA-19). Removing it can raise members back to a higher default
+/// role: the members of the group whose other groups give no role get the default role back.
+/// `recompute_tx` gates that raise by the lapse (`scim`) and by the seat limit, so a lapsed or
+/// full org keeps them at their current role. Answers 204 also when the group has no mapping, and
+/// 404 when the group is not in the org.
 async fn remove_mapping(
     State(state): State<AppState>,
     Extension(access): Extension<OrgAccess>,
@@ -270,7 +275,7 @@ async fn projects_in_org_tx(
 fn only_lowers(old: &GroupMapping, new: &GroupMapping) -> bool {
     org_level(new.org_role) <= org_level(old.org_role)
         && new.projects.iter().all(|(project, role)| {
-            project_rank_in(old, *project).is_some_and(|rank| override_rank(*role) <= rank)
+            project_rank_in(old, *project).is_some_and(|rank| roles::override_rank(*role) <= rank)
         })
 }
 
@@ -281,7 +286,7 @@ fn writes_project_roles(old: &GroupMapping, new: &GroupMapping) -> bool {
         .iter()
         .any(|(project, role)| match project_rank_in(old, *project) {
             None => true,
-            Some(rank) => override_rank(*role) > rank,
+            Some(rank) => roles::override_rank(*role) > rank,
         })
 }
 
@@ -290,22 +295,12 @@ fn org_level(role: Option<OrgRole>) -> u8 {
     role.map_or(0, |role| roles::org_rank(role) + 1)
 }
 
-/// The rank of a stored project override: none < viewer < member < admin (D-EA-14).
-fn override_rank(role: ProjectOverride) -> u8 {
-    match role {
-        ProjectOverride::None => 0,
-        ProjectOverride::Viewer => 1,
-        ProjectOverride::Member => 2,
-        ProjectOverride::Admin => 3,
-    }
-}
-
 fn project_rank_in(mapping: &GroupMapping, project: ProjectId) -> Option<u8> {
     mapping
         .projects
         .iter()
         .find(|(id, _)| *id == project)
-        .map(|(_, role)| override_rank(*role))
+        .map(|(_, role)| roles::override_rank(*role))
 }
 
 /// P-6: when SCIM is on after the write, recomputes the roles of the group's members in the

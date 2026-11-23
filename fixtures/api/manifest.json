@@ -1638,6 +1638,17 @@
     "file": "static/deletion-preview.json"
   },
   {
+    "operation_id": "put_org_scim_group_mapping",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01",
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/scim-group.json"
+  },
+  {
     "operation_id": "put_prompt_label",
     "path_params": {
       "label": "staging",

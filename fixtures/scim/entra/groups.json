@@ -1,13 +1,5 @@
 [
   {
-    "method": "GET",
-    "path": "/scim/v2/Groups?excludedAttributes=members&filter=displayName eq \"Finance Admins\"",
-    "expect": {
-      "status": 200,
-      "json": { "/totalResults": 0 }
-    }
-  },
-  {
     "method": "POST",
     "path": "/scim/v2/Users",
     "body": {
@@ -25,6 +17,14 @@
     }
   },
   {
+    "method": "GET",
+    "path": "/scim/v2/Groups?filter=displayName eq \"Finance Admins\"",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  },
+  {
     "method": "POST",
     "path": "/scim/v2/Groups",
     "body": {
@@ -36,6 +36,15 @@
       "status": 201,
       "save": { "group": "/id" },
       "json": { "/displayName": "Finance Admins" }
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/scim/v2/Groups?excludedAttributes=members",
+    "expect": {
+      "status": 200,
+      "json": { "/Resources/0/displayName": "Finance Admins" },
+      "absent": ["/Resources/0/members"]
     }
   },
   {

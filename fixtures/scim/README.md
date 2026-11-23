@@ -39,6 +39,8 @@ Each file is one ordered scenario: a JSON array of steps, run in order against o
 - `expect.save` maps a name to a JSON pointer into the response body. The value is stored and
   replaces `{name}` in every later step.
 - `expect.json` maps a JSON pointer into the response body to the value it must have.
+- `expect.absent` lists JSON pointers that must not exist in the response body (for example a
+  `members` key that `excludedAttributes=members` must leave out).
 - `{name}` is replaced by plain text on the serialized step before it is parsed, so it works in
   paths, bodies and expected values alike.
 - The test runner percent-encodes the values of query parameters, so `filter` values can carry

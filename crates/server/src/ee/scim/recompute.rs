@@ -15,13 +15,20 @@ use crate::api::entitlements::Feature;
 use crate::audit::catalog::ScimAction;
 use crate::audit::{self, Event};
 use crate::auth::OrgRole;
-use crate::auth::roles::{ProjectOverride, Role, effective_project_role, org_rank};
+use crate::auth::roles::{ProjectOverride, Role, effective_project_role, org_rank, override_rank};
 use crate::entitlements::over_limit;
 use crate::http::AppState;
 use crate::meta::{MetaError, invites, members, users};
 
 /// How many refused user ids one `scim.role_raise_refused` record holds (P-4).
 const REFUSED_IDS_MAX: usize = 20;
+
+/// The org roles and project overrides of every member of an org, read once for a recompute of
+/// several users (see `recompute_tx`).
+struct Preloaded {
+    org_roles: HashMap<Uuid, OrgRole>,
+    overrides: HashMap<Uuid, Vec<(ProjectId, ProjectOverride)>>,
+}
 
 /// What the caller knows outside the write. The entitlements are read in memory, before the
 /// transaction starts (P-5).
@@ -58,6 +65,8 @@ impl RecomputeScope {
 ///
 /// Rows that are missing, inactive or not members of the org are skipped, and so is an owner.
 /// Rows are processed once each, ordered by `created_at, id` (P-8). `ctx` is the caller's.
+/// A user whose org-role raise is refused gets no raising override either: a seat refusal
+/// covers the user's overrides too. Lowerings and neutral changes still apply.
 ///
 /// # Errors
 ///
@@ -73,12 +82,27 @@ pub(crate) async fn recompute_tx(
     let mappings = scim_store::mappings_tx(conn, org).await?;
     let groups_by_user = scim_store::groups_by_user_tx(conn, org).await?;
     let rows = ordered_rows_tx(conn, org, scim_users).await?;
+    // Several users are read once, not once each (N+1). A user's org role and overrides are
+    // changed only when its own row is reached, so the copy is current for it. One user reads
+    // its own rows, as before.
+    let preloaded = if rows.len() > 1 {
+        Some(Preloaded {
+            org_roles: members::org_roles_of_org_tx(conn, org).await?,
+            overrides: members::project_overrides_of_org_tx(conn, org).await?,
+        })
+    } else {
+        None
+    };
 
     let mut users_checked: u32 = 0;
     let mut changed: u32 = 0;
     let mut refused: Vec<Uuid> = Vec::new();
     for row in &rows {
-        let Some(current) = members::org_role_tx(conn, org, row.user_id).await? else {
+        let current = match &preloaded {
+            Some(loaded) => loaded.org_roles.get(&row.user_id).copied(),
+            None => members::org_role_tx(conn, org, row.user_id).await?,
+        };
+        let Some(current) = current else {
             continue;
         };
         // D-EA-14 and D139: owners are never changed.
@@ -93,6 +117,7 @@ pub(crate) async fn recompute_tx(
         // for a Viewer whose raise would pass the seat limit (D-EA-14).
         let mut role = target;
         let mut seat_email = None;
+        let mut seat_refused = false;
         if org_rank(target) > org_rank(current) {
             if !scope.scim {
                 role = current;
@@ -101,6 +126,7 @@ pub(crate) async fn recompute_tx(
                     Some(email) => seat_email = Some(email),
                     None => {
                         role = current;
+                        seat_refused = true;
                         refused.push(row.id);
                     }
                 }
@@ -119,11 +145,19 @@ pub(crate) async fn recompute_tx(
             }
         }
 
-        let existing: HashMap<ProjectId, ProjectOverride> =
-            members::project_overrides_of_user_tx(conn, org, row.user_id)
+        let existing: HashMap<ProjectId, ProjectOverride> = match &preloaded {
+            Some(loaded) => loaded
+                .overrides
+                .get(&row.user_id)
+                .into_iter()
+                .flatten()
+                .copied()
+                .collect(),
+            None => members::project_overrides_of_user_tx(conn, org, row.user_id)
                 .await?
                 .into_iter()
-                .collect();
+                .collect(),
+        };
         if role == OrgRole::Admin {
             // D139: org admins have no overrides. Their effective access is the same either way.
             for project in existing.keys() {
@@ -148,9 +182,11 @@ pub(crate) async fn recompute_tx(
                 continue;
             }
             // A change that leaves effective access the same is neither a raise nor a lowering,
-            // so no entitlement gates it: it removes or rewrites a stale override.
+            // so no entitlement gates it: it removes or rewrites a stale override. A raise is
+            // skipped without `scim` and `project_roles`, and when the user's org-role raise was
+            // refused for the seat limit.
             let raises = effective_rank(after) > effective_rank(before);
-            if raises && !(scope.scim && scope.project_roles) {
+            if raises && (seat_refused || !(scope.scim && scope.project_roles)) {
                 continue;
             }
             match after_override {
@@ -272,16 +308,6 @@ fn effective_rank(role: Option<Role>) -> u8 {
     }
 }
 
-/// An override ranked none < viewer < member < admin (D-EA-14).
-fn override_rank(role: ProjectOverride) -> u8 {
-    match role {
-        ProjectOverride::None => 0,
-        ProjectOverride::Viewer => 1,
-        ProjectOverride::Member => 2,
-        ProjectOverride::Admin => 3,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode};
@@ -293,6 +319,7 @@ mod tests {
     use super::super::test_helpers::{create_user, scim_org, scim_request};
     use super::*;
     use crate::auth::ProjectOverride;
+    use crate::meta::invites;
     use crate::meta::members::add_org_member;
     use crate::meta::users::{EmailVerifiedVia, NewUser, insert_user as insert_account};
     use crate::test_support::{Seeded, TestApp};
@@ -852,5 +879,164 @@ mod tests {
             StatusCode::OK
         );
         assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
+    }
+
+    /// A pending invitation of `email` to `org`, written as an invite of the owner would be.
+    async fn pending_invite(app: &TestApp, org: OrgId, email: &str, role: OrgRole) {
+        let now = app.state.clock.now_ns();
+        let email = email.to_owned();
+        let owner = seeded_owner(app, org).await;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    invites::replace_invite(
+                        conn,
+                        org,
+                        &email,
+                        role,
+                        "scim-recompute-test-hash",
+                        owner,
+                        now,
+                        now + invites::INVITE_TTL_NS,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The owner of `org` (the seeded account), for the inviter of a test invitation.
+    async fn seeded_owner(app: &TestApp, org: OrgId) -> Uuid {
+        let owner: String = sqlx::query_scalar(
+            "SELECT user_id FROM org_members WHERE org_id = ? AND role = 'owner' LIMIT 1",
+        )
+        .bind(org.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        Uuid::parse_str(&owner).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_seat_refused_user_gets_no_raised_override() {
+        let (app, seeded) = app_with(&["scim"]).await;
+        let org = seeded.org_id;
+        let project = seeded.project.id;
+        let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
+        group_with(
+            &app,
+            org,
+            "admins",
+            vec![scim_id],
+            GroupMapping {
+                org_role: Some(OrgRole::Member),
+                projects: vec![(project, ProjectOverride::Admin)],
+            },
+        )
+        .await;
+        // The owner takes the only seat, so the Viewer's raise to Member is refused, and its
+        // raising project override is not written either.
+        let limited = scope(&app, org, OrgRole::Viewer, Some(1), true, true);
+        recompute(&app, limited, vec![scim_id]).await;
+        assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Viewer));
+        assert_eq!(override_of(&app, project, user).await, None);
+        assert_eq!(details_of(&app, "scim.role_raise_refused").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_raise_deletes_the_pending_invite() {
+        let (app, seeded) = app_with(&["scim"]).await;
+        let org = seeded.org_id;
+        let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![scim_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        pending_invite(&app, org, "x@acme.test", OrgRole::Member).await;
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            vec![scim_id],
+        )
+        .await;
+        assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
+        let left: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM invites WHERE org_id = ? AND email = 'x@acme.test' \
+             AND accepted_at IS NULL",
+        )
+        .bind(org.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(left, 0);
+    }
+
+    #[tokio::test]
+    async fn the_seat_check_excludes_the_users_own_invite() {
+        let (app, seeded) = app_with(&["scim"]).await;
+        let org = seeded.org_id;
+        let (scim_id, user) = managed(&app, org, "x@acme.test", OrgRole::Viewer).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![scim_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        // Seats: the owner (1) plus the user's own invitation. The invitation is removed by the
+        // raise, so it must not count against the limit of 2: the owner and the raised user fit.
+        pending_invite(&app, org, "x@acme.test", OrgRole::Member).await;
+        let limited = scope(&app, org, OrgRole::Viewer, Some(2), true, true);
+        recompute(&app, limited, vec![scim_id]).await;
+        assert_eq!(role_of(&app, org, user).await, Some(OrgRole::Member));
+        assert!(details_of(&app, "scim.role_raise_refused").await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn inactive_and_non_member_users_are_skipped() {
+        let (app, seeded) = app_with(&["scim"]).await;
+        let org = seeded.org_id;
+        let (inactive_id, inactive) = managed(&app, org, "i@acme.test", OrgRole::Viewer).await;
+        let (removed_id, removed) = managed(&app, org, "n@acme.test", OrgRole::Viewer).await;
+        group_with(
+            &app,
+            org,
+            "members",
+            vec![inactive_id, removed_id],
+            mapped(Some(OrgRole::Member)),
+        )
+        .await;
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    scim_store::set_user_active(conn, org, inactive_id, false, 0).await?;
+                    sqlx::query("DELETE FROM org_members WHERE org_id = ? AND user_id = ?")
+                        .bind(org.to_string())
+                        .bind(removed.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        recompute(
+            &app,
+            scope(&app, org, OrgRole::Viewer, None, true, true),
+            vec![inactive_id, removed_id],
+        )
+        .await;
+        assert_eq!(role_of(&app, org, inactive).await, Some(OrgRole::Viewer));
+        assert_eq!(role_of(&app, org, removed).await, None);
+        assert!(details_of(&app, "scim.roles_recomputed").await.is_empty());
     }
 }

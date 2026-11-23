@@ -209,7 +209,7 @@ fn members_change(value: &Value, add: bool) -> Result<GroupChange, ScimError> {
 }
 
 /// The member ids of a `members` value: an array of objects, each with a string `value`.
-fn member_values(value: &Value) -> Result<Vec<String>, ScimError> {
+pub(crate) fn member_values(value: &Value) -> Result<Vec<String>, ScimError> {
     let entries = value
         .as_array()
         .ok_or_else(|| ScimError::invalid_value("members must be an array."))?;
@@ -236,7 +236,7 @@ fn group_name(value: &Value) -> Result<String, ScimError> {
 }
 
 /// An externalId: a non-empty string, or `null` to clear it.
-fn external_id(value: &Value) -> Result<Option<String>, ScimError> {
+pub(crate) fn external_id(value: &Value) -> Result<Option<String>, ScimError> {
     match value {
         Value::Null => Ok(None),
         Value::String(text) if !text.trim().is_empty() => Ok(Some(text.clone())),

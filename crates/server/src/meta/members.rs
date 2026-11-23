@@ -1,6 +1,8 @@
 //! `org_members` and `project_members` (spec 04).
 #![cfg_attr(not(test), allow(dead_code))]
 
+use std::collections::HashMap;
+
 use cetra_core::ids::{OrgId, ProjectId};
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
@@ -416,6 +418,65 @@ struct MemberRecord {
     updated_at: i64,
     role: String,
     joined_at: i64,
+}
+
+/// The org role of every member of `org`, by user id. A recompute of several users reads them
+/// once, not once per user (track EA M6, P-2).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn org_roles_of_org_tx(
+    conn: &mut SqliteConnection,
+    org_id: OrgId,
+) -> Result<HashMap<Uuid, OrgRole>, MetaError> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT user_id, role FROM org_members WHERE org_id = ?")
+            .bind(org_id.to_string())
+            .fetch_all(&mut *conn)
+            .await?;
+    rows.into_iter()
+        .map(|(user, role)| {
+            let user = Uuid::parse_str(&user).map_err(|_| MetaError::Corrupt {
+                table: "org_members",
+                column: "user_id",
+            })?;
+            Ok((user, decode_org_role(&role)?))
+        })
+        .collect()
+}
+
+/// The project overrides of every member of `org`, by user id: what
+/// [`project_overrides_of_user_tx`] gives for each user, read in one query (track EA M6, P-2).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value does not decode.
+pub(crate) async fn project_overrides_of_org_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+) -> Result<HashMap<Uuid, Vec<(ProjectId, ProjectOverride)>>, MetaError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT pm.user_id, pm.project_id, pm.role FROM project_members pm \
+         JOIN projects p ON p.id = pm.project_id WHERE p.org_id = ?",
+    )
+    .bind(org.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut by_user: HashMap<Uuid, Vec<(ProjectId, ProjectOverride)>> = HashMap::new();
+    for (user, project, role) in rows {
+        let corrupt = |column: &'static str| MetaError::Corrupt {
+            table: "project_members",
+            column,
+        };
+        let user = Uuid::parse_str(&user).map_err(|_| corrupt("user_id"))?;
+        let project = Uuid::parse_str(&project).map_err(|_| corrupt("project_id"))?;
+        by_user
+            .entry(user)
+            .or_default()
+            .push((ProjectId::from_uuid(project), decode_override(&role)?));
+    }
+    Ok(by_user)
 }
 
 fn member_row(record: MemberRecord) -> Result<MemberRow, MetaError> {

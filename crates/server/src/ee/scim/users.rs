@@ -26,7 +26,6 @@ use super::schema::{
     list_response, resource_types, schemas, service_provider_config, user_resource,
 };
 use super::store::{self as scim_store, ScimUserFields, ScimUserRow, UserFilter};
-use crate::api::entitlements::Feature;
 use crate::audit::catalog::ScimAction;
 use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::Principal;
@@ -105,45 +104,6 @@ pub(crate) async fn admit(
         ));
     }
     Ok((*org_id, scim.default_role))
-}
-
-/// The per-request values a write needs, read before the transaction.
-#[derive(Clone, Copy)]
-pub(crate) struct Scope {
-    pub(crate) org: OrgId,
-    pub(crate) now: i64,
-    pub(crate) default_role: OrgRole,
-    pub(crate) max_seats: Option<u64>,
-    /// `scim` is entitled (D-EA-19).
-    pub(crate) entitled: bool,
-    /// `project_roles` is entitled (P-5).
-    pub(crate) project_roles: bool,
-}
-
-impl Scope {
-    /// The recompute inputs of this request (P-2).
-    pub(crate) fn recompute(self) -> RecomputeScope {
-        RecomputeScope {
-            org: self.org,
-            now: self.now,
-            default_role: self.default_role,
-            max_seats: self.max_seats,
-            scim: self.entitled,
-            project_roles: self.project_roles,
-        }
-    }
-}
-
-pub(crate) fn scope_of(state: &AppState, org: OrgId, default_role: OrgRole) -> Scope {
-    let now = state.clock.now_ns();
-    Scope {
-        org,
-        now,
-        default_role,
-        max_seats: state.entitlements.resolve(org, now).limits.max_seats,
-        entitled: crate::entitlements::of(state, org).allows(Feature::Scim),
-        project_roles: crate::entitlements::of(state, org).allows(Feature::ProjectRoles),
-    }
 }
 
 /// `<public_url>/scim/v2`, without a trailing slash.
@@ -421,10 +381,10 @@ async fn create_tx(
     conn: &mut SqliteConnection,
     state: &AppState,
     ctx: &audit::Ctx,
-    scope: Scope,
+    scope: RecomputeScope,
     attrs: Attrs,
 ) -> Result<Result<(ScimUserRow, Vec<String>), ScimError>, MetaError> {
-    let Scope {
+    let RecomputeScope {
         org,
         now,
         default_role,
@@ -505,7 +465,7 @@ async fn create_tx(
     sync_name_tx(conn, org, user_id, &attrs, now).await?;
     let row = scim_store::insert_user(conn, org, user_id, &attrs.fields(), now).await?;
     let role = if already_member {
-        recompute::recompute_tx(conn, ctx, &scope.recompute(), &[row.id]).await?;
+        recompute::recompute_tx(conn, ctx, &scope, &[row.id]).await?;
         members::org_role_tx(conn, org, user_id).await?
     } else {
         role
@@ -555,15 +515,15 @@ async fn update_tx(
     conn: &mut SqliteConnection,
     state: &AppState,
     ctx: &audit::Ctx,
-    scope: Scope,
+    scope: RecomputeScope,
     update: Update,
 ) -> Result<Result<(ScimUserRow, Vec<String>), ScimError>, MetaError> {
-    let Scope {
+    let RecomputeScope {
         org,
         now,
         default_role,
         max_seats,
-        entitled,
+        scim,
         ..
     } = scope;
     let Some(row) = scim_store::user_tx(conn, org, update.id).await? else {
@@ -588,7 +548,7 @@ async fn update_tx(
     let reactivating = !row.active && attrs.active;
     // Lapse (D-EA-19): a deactivation gets through and drops the other changes. A reactivation
     // and an attribute change are refused. A no-op is accepted.
-    if !entitled {
+    if !scim {
         if deactivating {
             attrs = Attrs {
                 active: false,
@@ -658,7 +618,7 @@ async fn update_tx(
         let groups = scim_store::groups_of_user_tx(conn, row.id).await?;
         let target = recompute::target_org_role(&groups, &mappings, default_role);
         users::ensure_member_tx(conn, org, row.user_id, target, max_seats, now).await?;
-        recompute::recompute_tx(conn, ctx, &scope.recompute(), &[row.id]).await?;
+        recompute::recompute_tx(conn, ctx, &scope, &[row.id]).await?;
         if scim_store::is_scim_disabled_tx(conn, row.user_id).await? {
             scim_store::clear_scim_disabled(conn, row.user_id).await?;
             users::set_disabled(conn, row.user_id, None, now).await?;
@@ -708,7 +668,7 @@ async fn update_tx(
 async fn run_update(
     state: &AppState,
     ctx: audit::Ctx,
-    scope: Scope,
+    scope: RecomputeScope,
     update: Update,
 ) -> Result<Response, ScimError> {
     let state_for_write = state.clone();
@@ -824,8 +784,8 @@ async fn create_user(
     body: Bytes,
 ) -> Result<Response, ScimError> {
     let (org, default_role) = admit(&state, &principal).await?;
-    let scope = scope_of(&state, org, default_role);
-    if !scope.entitled {
+    let scope = RecomputeScope::of(&state, org, default_role);
+    if !scope.scim {
         return Err(ScimError::forbidden(NOT_ENTITLED));
     }
     let body = json_object(&body)?;
@@ -873,7 +833,13 @@ async fn replace_user(
         replace: true,
         changes,
     };
-    run_update(&state, ctx, scope_of(&state, org, default_role), update).await
+    run_update(
+        &state,
+        ctx,
+        RecomputeScope::of(&state, org, default_role),
+        update,
+    )
+    .await
 }
 
 async fn patch_user(
@@ -892,7 +858,13 @@ async fn patch_user(
         replace: false,
         changes,
     };
-    run_update(&state, ctx, scope_of(&state, org, default_role), update).await
+    run_update(
+        &state,
+        ctx,
+        RecomputeScope::of(&state, org, default_role),
+        update,
+    )
+    .await
 }
 
 /// DELETE: deactivates an active user, then removes the row. Works when lapsed (D-EA-19).

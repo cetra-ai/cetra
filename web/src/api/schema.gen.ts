@@ -9577,14 +9577,14 @@ export interface components {
         ScimGroup: {
             /** @description The name the identity provider gave the group. */
             display_name: string;
-            /** @description The identity provider's external id, when it sent one. */
+            /** @description The identity provider's external id, when it sent one. Absent when it did not. */
             external_id?: string;
             /**
              * Format: uuid
              * @description Group id.
              */
             id: string;
-            /** @description The group's role mapping. `null` when the group maps nothing. */
+            /** @description The group's role mapping. Absent when the group maps nothing. */
             mapping?: components["schemas"]["ScimGroupMapping"];
             /**
              * Format: int32

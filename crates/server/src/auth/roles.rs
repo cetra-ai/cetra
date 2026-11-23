@@ -208,6 +208,16 @@ pub(crate) fn effective_project_role(org: OrgRole, ov: Option<ProjectOverride>) 
     }
 }
 
+/// The rank of a project override: none < viewer < member < admin (D-EA-14).
+pub(crate) fn override_rank(role: ProjectOverride) -> u8 {
+    match role {
+        ProjectOverride::None => 0,
+        ProjectOverride::Viewer => 1,
+        ProjectOverride::Member => 2,
+        ProjectOverride::Admin => 3,
+    }
+}
+
 /// `viewer < member < admin < owner`.
 pub(crate) fn org_rank(role: OrgRole) -> u8 {
     match role {

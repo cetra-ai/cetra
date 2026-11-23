@@ -30,6 +30,9 @@ struct Expect {
     save: BTreeMap<String, String>,
     #[serde(default)]
     json: BTreeMap<String, Value>,
+    /// JSON pointers that must not exist in the response body.
+    #[serde(default)]
+    absent: Vec<String>,
 }
 
 /// Percent-encodes the value of every query parameter of `path`. Unreserved characters
@@ -89,7 +92,10 @@ async fn replay(scenario: &str) {
         let response = request.send().await;
         assert_eq!(response.status.as_u16(), step.expect.status, "{label}");
 
-        if step.expect.save.is_empty() && step.expect.json.is_empty() {
+        if step.expect.save.is_empty()
+            && step.expect.json.is_empty()
+            && step.expect.absent.is_empty()
+        {
             continue;
         }
         let body: Value = response.json();
@@ -102,6 +108,12 @@ async fn replay(scenario: &str) {
         }
         for (pointer, expected) in &step.expect.json {
             assert_eq!(body.pointer(pointer), Some(expected), "{label}: {pointer}");
+        }
+        for pointer in &step.expect.absent {
+            assert!(
+                body.pointer(pointer).is_none(),
+                "{label}: {pointer} is present"
+            );
         }
     }
 }

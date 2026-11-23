@@ -90,11 +90,13 @@ pub struct ScimGroup {
     pub id: Uuid,
     /// The name the identity provider gave the group.
     pub display_name: String,
-    /// The identity provider's external id, when it sent one.
+    /// The identity provider's external id, when it sent one. Absent when it did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub external_id: Option<String>,
     /// How many SCIM users are in the group.
     pub member_count: u32,
-    /// The group's role mapping. `null` when the group maps nothing.
+    /// The group's role mapping. Absent when the group maps nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub mapping: Option<ScimGroupMapping>,
 }
 

@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use super::error::{ScimError, ScimJson};
 use super::filter::parse_group_filter;
-use super::patch::{GroupChange, group_changes};
+use super::patch::{GroupChange, external_id, group_changes, member_values};
 use super::recompute::{self, RecomputeScope};
 use super::schema::{group_resource, list_response};
 use super::store::{self as scim_store, ScimGroupRow};
@@ -106,37 +106,10 @@ fn display_name_of(body: &Value) -> Result<String, ScimError> {
         .ok_or_else(|| ScimError::invalid_value("displayName is required"))
 }
 
-/// The `externalId` of a request body: absent or `null` is none, else a non-blank string.
-fn external_id_of(body: &Value) -> Result<Option<String>, ScimError> {
-    match body.get("externalId") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if !text.trim().is_empty() => Ok(Some(text.clone())),
-        Some(_) => Err(ScimError::invalid_value(
-            "externalId must be a non-empty string or null.",
-        )),
-    }
-}
-
-/// The member ids of a `members` value: an array of objects, each with a string `value`.
-fn member_values(value: &Value) -> Result<Vec<String>, ScimError> {
-    let entries = value
-        .as_array()
-        .ok_or_else(|| ScimError::invalid_value("members must be an array."))?;
-    entries
-        .iter()
-        .map(|entry| {
-            entry
-                .get("value")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                .ok_or_else(|| ScimError::invalid_value("Member entries need a string value."))
-        })
-        .collect()
-}
-
 /// The ids of `values` that are SCIM users of `org`, in order and without repeats. A value that
 /// is not a UUID, or that names no user of the org, is skipped, so another org's user never
-/// joins (P-7, D-EA-12).
+/// joins (P-7, D-EA-12). By design an unknown id in an Add or a create is ignored: the request
+/// still answers 200 (or 201) and that id changes nothing.
 async fn known_members(
     conn: &mut SqliteConnection,
     org: OrgId,
@@ -426,7 +399,7 @@ async fn create_group(
     }
     let body = users::json_object(&body)?;
     let display_name = display_name_of(&body)?;
-    let external_id = external_id_of(&body)?;
+    let external_id_value = external_id(body.get("externalId").unwrap_or(&Value::Null))?;
     let members = match body.get("members") {
         Some(value) => member_values(value)?,
         None => Vec::new(),
@@ -440,7 +413,7 @@ async fn create_group(
                     conn,
                     org,
                     &display_name,
-                    external_id.as_deref(),
+                    external_id_value.as_deref(),
                     scope.now,
                 )
                 .await?;
@@ -491,7 +464,7 @@ async fn replace_group(
     let body = users::json_object(&body)?;
     let mut changes = vec![
         GroupChange::DisplayName(display_name_of(&body)?),
-        GroupChange::ExternalId(external_id_of(&body)?),
+        GroupChange::ExternalId(external_id(body.get("externalId").unwrap_or(&Value::Null))?),
     ];
     if let Some(value) = body.get("members") {
         changes.push(GroupChange::ReplaceMembers(member_values(value)?));
@@ -706,7 +679,7 @@ mod tests {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
         let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
-        let ada = create_user(&app, &token, "ada@example.com").await;
+        let ada = create_user(&app, &token, "grace@example.com").await;
         assert_eq!(ada.status, StatusCode::CREATED);
         let ada_id = id_of(&ada);
         let ada_account = account_of(&app, &ada_id).await;
@@ -838,7 +811,7 @@ mod tests {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
         let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
-        let ada = create_user(&app, &token, "ada@example.com").await;
+        let ada = create_user(&app, &token, "grace@example.com").await;
         let ada_id = id_of(&ada);
         let ada_account = account_of(&app, &ada_id).await;
         let admins = create(&app, &token, "Admins", &[]).await;
@@ -904,7 +877,7 @@ mod tests {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
         let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
-        let ada = create_user(&app, &token, "ada@example.com").await;
+        let ada = create_user(&app, &token, "grace@example.com").await;
         let ada_id = id_of(&ada);
         let ada_account = account_of(&app, &ada_id).await;
         let admins_id = id_of(&create(&app, &token, "Admins", &[]).await);
@@ -944,7 +917,7 @@ mod tests {
         let app = TestApp::with_license(&["org_sso"]).await;
         let seeded = app.seed().await;
         let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
-        let (ada, _) = provision(&app, seeded.org_id, "ada@example.com").await;
+        let (ada, _) = provision(&app, seeded.org_id, "grace@example.com").await;
         let (bob, _) = provision(&app, seeded.org_id, "bob@example.com").await;
         let now = app.state.clock.now_ns();
         let team = app

@@ -800,6 +800,7 @@ fn generated_files_roundtrip() {
             "get_org_scim" => roundtrip::<ScimSettings>(&example.file),
             "create_org_scim_token" => roundtrip::<CreatedScimToken>(&example.file),
             "list_org_scim_groups" => roundtrip::<ScimGroupList>(&example.file),
+            "put_org_scim_group_mapping" => roundtrip::<ScimGroup>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);
