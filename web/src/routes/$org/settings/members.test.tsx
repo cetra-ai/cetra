@@ -88,10 +88,9 @@ it("switching members keeps one role card", async () => {
   const row = within(grid).getByRole("row", { name: /ada@example.com/ });
   await user.click(within(row).getByText("ada@example.com"));
 
-  await screen.findByRole("form", { name: "Role of ada@example.com" });
-  const forms = screen.getAllByRole("form", { name: /^Role of / });
-  expect(forms).toHaveLength(1);
-  expect(within(forms[0]).getByRole("combobox")).toHaveTextContent("Owner");
+  const form = await screen.findByRole("form", { name: "Role of ada@example.com" });
+  expect(screen.getAllByRole("form", { name: /^Role of / })).toHaveLength(1);
+  expect(within(form).getByRole("combobox")).toHaveTextContent("Owner");
 });
 
 it("filters members by name or email", async () => {
