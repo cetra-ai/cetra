@@ -203,9 +203,15 @@ The device flow (RFC 8628) signs a CLI in on the cell: the CLI shows a code and 
   - email verification cannot be enabled (the setting is refused at startup).
 - **Delivery:** transactional emails are sent by a background task after the response is decided (D145), with 3 retries. Alert emails go through `notification_deliveries` (durable). Recipient addresses and contents are never logged; only template name, message ID and status are.
 
-## Auth events log
+## Audit records
 
-Not a full audit log (enterprise, later). Logins, failed logins, key creation/revocation, role changes and deletions are emitted as structured `tracing` events at `info` with `target = "audit"`, so operators can ship them. Events carry user, org, project and key ids, never emails, names or token values (D150). A failed login for an unknown email logs `account = "unknown"`.
+Every access and membership action writes an `audit_events` row (spec 04 § Audit records) and emits the same record as a structured `tracing` event at `info` with `target = "audit"`, whose message is the action name, so operators can ship them. The row is written in the transaction of its change, or before the action runs when the action changes nothing in `meta.db` (D-EA-2). The tracing line is its last step, after the insert. A failed write fails the request.
+
+Records carry user, org, project, key and token ids, the client IP and the user agent, never emails, names or token values (D150). The IP and user agent of a user's records are cleared when the user is deleted.
+
+Unauthenticated failures write no row, only a tracing line: a failed login for an unknown email logs `account = "unknown"`, and a control-plane token that fails is refused without a record. A failed login for a known account writes at most one row per account per minute.
+
+The catalog of actions, and the reads and exports of the log, are in `docs/plans/ea-enterprise-admin/README.md` § Audit log (D-EA-1 to D-EA-10).
 
 ## Client IP
 

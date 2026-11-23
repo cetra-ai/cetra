@@ -1038,6 +1038,57 @@ CREATE UNIQUE INDEX org_sso_domains_verified ON org_sso_domains(domain) WHERE ve
 
 Deleting an org deletes its provider and domains by cascade, and its identities (`identities.provider = 'org:<org_id>'`) explicitly, since no key references the org from `identities`.
 
+## Audit records (track EA, `audit_events`)
+
+Every access, membership and configuration action writes one row. The row is written in the transaction of the change it records, or, for an action that changes nothing in `meta.db`, in a transaction of its own before the action runs. A failed write fails the request (D-EA-2). Rows carry ids only; names and emails are joined at read time (D-EA-3). The catalog and the read API are in `docs/plans/ea-enterprise-admin/README.md` § Audit log.
+
+```sql
+CREATE TABLE audit_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    id TEXT NOT NULL UNIQUE,
+    at INTEGER NOT NULL,
+    org_id TEXT,
+    project_id TEXT,
+    action TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    actor_kind TEXT NOT NULL,
+    actor_id TEXT,
+    via TEXT,
+    credential_id TEXT,
+    target_kind TEXT,
+    target_id TEXT,
+    details TEXT NOT NULL DEFAULT '{}',
+    ip TEXT,
+    user_agent TEXT
+);
+CREATE INDEX audit_events_org ON audit_events (org_id, seq);
+CREATE INDEX audit_events_org_action ON audit_events (org_id, action, seq);
+CREATE INDEX audit_events_org_actor ON audit_events (org_id, actor_id, seq);
+CREATE INDEX audit_events_org_target ON audit_events (org_id, target_id, seq);
+CREATE INDEX audit_events_actor ON audit_events (actor_id);
+CREATE INDEX audit_events_at ON audit_events (at);
+```
+
+| Column | Meaning |
+|---|---|
+| `seq` | The sort, paging and stream cursor (D-EA-20). `meta.db` has one writer, so `seq` follows commit order. |
+| `id` | UUIDv7, the public id. Not a cursor. |
+| `at` | Write time, `i64` nanoseconds, UTC. |
+| `org_id` | The org; null for an instance record (D-EA-8). |
+| `project_id` | The project, for a project-scoped action. |
+| `action` | A dotted, append-only name from the catalog, e.g. `member.role_changed`. |
+| `outcome` | `success`, or `failure` for the actions the catalog marks as recording failures. |
+| `actor_kind`, `actor_id` | `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system` or `anonymous`, with the id of the user, key or control-plane token; null when there is none. |
+| `via`, `credential_id` | For a user: `session`, `pat` or `device`; `credential_id` is the PAT id. Never a token value. |
+| `target_kind`, `target_id` | The resource the action acted on, by kind and id. |
+| `details` | JSON with the fields the action's catalog entry allows: names of changed fields, roles, scopes, flags, limits. Never secrets, emails, names, payloads or URLs. |
+| `ip`, `user_agent` | The client IP (spec 08 § Client IP) and the user agent, truncated to 256 characters. |
+
+- **No foreign keys.** Records outlive the users, orgs and projects they name. The table has no `CHECK`: action names are append-only, and a `CHECK` would make each new name a format change (D-R-34).
+- **Purge.** An hourly task deletes records whose `at` is older than `audit.retention_days` (spec 12), in batches of 5,000 rows, each batch its own write. `0` keeps everything. The task is off in restore mode.
+- **Org drop.** When an org's drop is applied, its rows are deleted in the drop's transaction, and an instance record `org.dropped` is written.
+- **User deletion.** In the user's deletion transaction, the `ip` and `user_agent` of the rows whose actor is that user are cleared. The rows keep their ids.
+
 ## Encryption of secrets
 
 The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`CETRA_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `cetra admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).

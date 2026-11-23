@@ -66,6 +66,7 @@ GitHub and Google also accept the split form (`CETRA_AUTH__GITHUB__CLIENT_ID`, `
 | `storage.anchor.window` | | unset (`storage.query.trace_lookback`) |
 | `storage.deletion.max_delay` | | `"24h"` |
 | `eval.workers` | | `16` (1–256, D-I-6) |
+| `audit.retention_days` | | `365`: days an audit record is kept (spec 04 § Audit records), then deleted by an hourly task. `0` keeps records forever; otherwise 30 or more. The task is off under `restore_mode`; D-EA-7 |
 | `security.allow_private_network_egress` | | `false` (D166) |
 | `log.format` / `log.level` | `CETRA_LOG` | `pretty` on TTY else `json` / `info` |
 

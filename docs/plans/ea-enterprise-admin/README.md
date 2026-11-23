@@ -99,12 +99,12 @@ Indexes support the reads: `(org_id, seq)`, `(org_id, action, seq)`, `(org_id, a
 - `audit::record(tx, event)` takes the `meta.db` transaction of the change, so a change never commits without its record and a rolled-back change leaves none (D-EA-2).
 - **Actions that change nothing in `meta.db`** (sign-ins, SQL runs, exports, MCP tool calls) record in a transaction of their own, **before** the action runs. If that write fails, the action is refused. Such records carry the request's parameters, never a result: no row counts or durations, which are only known after the data has left.
 - **Work done later by a worker** (a deletion applied, retention purged, a domain lapsed) records when the worker commits it, with actor `system`.
-- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored, at most one row per account and minute with a count, and an attempt refused by the lockout (`auth/limits.rs`) is not stored. A SCIM call with a revoked or expired token is a tracing line only.
+- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored, at most one row per account and minute, and an attempt refused by the lockout (`auth/limits.rs`) is not stored. A SCIM call with a revoked or expired token is a tracing line only.
 - **An org-provider sign-in writes two rows** in one transaction: the instance record and the org's record (D-EA-9).
 - **One request, one record.** A bulk operation (a dataset import, adds by filter, a batch of SCIM group members) writes one record with a count, never one per item.
 - **Restore mode** (N's M3) refuses outbound calls and stops workers, not `meta.db` writes. So recording and SCIM run normally, the stream sends nothing, and the hourly audit purge is off, since it cannot be undone on a restored copy.
 - A failed audit write fails the request. The alternative, a change with no record, is what an audit log exists to prevent. This is unlike Langfuse, which never lets the audit write fail the caller.
-- After commit, the same function emits the `tracing` line with target `audit`, so operators who ship stdout keep their pipeline.
+- As its last step inside the transaction, the same function emits the `tracing` line with target `audit`, so operators who ship stdout keep their pipeline. Call sites therefore record after every check that can roll the transaction back; only a failed `COMMIT` can leave a line with no row.
 - The event is a Rust enum, one variant per catalog action, each with its typed details. The action name, the target and the `details` JSON come from the variant. Call sites cannot write free-form strings.
 
 #### Event catalog (D-EA-4)
@@ -290,7 +290,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | ID | Decision | Rejected alternatives |
 |---|---|---|
 | D-EA-1 | **Always record (user).** Every org and the instance record, whatever the plan. Reading, export and streaming need `audit_log`. Recording is core, reading is `ee`; amends D-P-4's wording. | Record only when entitled: history would start at purchase, and the upgrade sale loses its proof. |
-| D-EA-2 | **Same transaction, fail closed.** A record commits with its `meta.db` change. An action that changes nothing in `meta.db` (sign-in, SQL run, export, MCP call) records before it runs. A failed audit write fails the request. The `tracing` line follows the commit. Unauthenticated failures are tracing lines only; a bulk request writes one record. | Best effort after commit (Langfuse): a crash or error leaves a change with no record. Outbox and relay: needless with one SQLite file. |
+| D-EA-2 | **Same transaction, fail closed.** A record commits with its `meta.db` change. An action that changes nothing in `meta.db` (sign-in, SQL run, export, MCP call) records before it runs. A failed audit write fails the request. The `tracing` line follows the insert, as the transaction's last step. Unauthenticated failures are tracing lines only; a known account's failed sign-ins write at most one record a minute; a bulk request writes one record. | Best effort after commit (Langfuse): a crash or error leaves a change with no record. Outbox and relay: needless with one SQLite file. |
 | D-EA-3 | **Ids only, resolved on read (user).** Actor and target are ids. The API, UI and exports join the current name and email. An erased user reads as "Deleted user". | Snapshot the email (Langfuse Cloud): emails outlive erasure, and AGENTS.md forbids them. |
 | D-EA-4 | **A typed catalog.** One enum variant per action, with a dotted append-only name and typed details. It covers access, configuration, deletions and data leaving the product, not edits of the data itself. Every `target: "audit"` call site is replaced, or moved to its module's target. | Free-form strings (both competitors): unfilterable and unreviewable. Logging every mutation generically (LangWatch): it records args, which leak secrets. |
 | D-EA-5 | **Allow-listed details, no snapshots.** Changes record field names, plus old and new values only for roles, scopes, flags and limits. A test refuses secret- or email-like field names. | Whole before/after objects: leaked a private key at LangWatch (H2). |
@@ -318,7 +318,7 @@ Recording comes first because it is core and replaces existing code. It is split
 
 - **Delivers:**
   - the `audit_events` table (`seq` cursor) and `audit::record`, in the change's transaction or before the action;
-  - the catalog for sign-in, orgs and projects, members, invites and overrides, credentials, SSO and instance events, with those call sites replaced and the gaps filled: logout, signup, session revocation, invite revoked, overrides, org and project create and rename, licence install, and the old and new role on role changes;
+  - the catalog for sign-in, orgs and projects, members, invites and overrides, credentials, SSO, instance events and deletions, with those call sites replaced and the gaps filled: logout, signup, session revocation, invite revoked, overrides, org and project create and rename, licence install, and the old and new role on role changes;
   - IP and user agent on every request-driven record;
   - unauthenticated failures kept as tracing lines;
   - the retention key and the hourly purge, the org-drop deletion, and clearing IP and user agent on user deletion;
@@ -330,7 +330,7 @@ Recording comes first because it is core and replaces existing code. It is split
 ### M2 — Audit catalog completion
 
 - **Delivers:**
-  - the catalog for project objects, deletions and data leaving the product (SQL runs, exports, MCP tool calls, recorded before they run);
+  - the catalog for project objects and data leaving the product (SQL runs, exports, MCP tool calls, recorded before they run);
   - the catalog is one enum split into a module per group, so M2 and M5 add variants in different files;
   - one record per bulk request;
   - the remaining `target: "audit"` lines either replaced, or moved to their module's target when they are data edits.

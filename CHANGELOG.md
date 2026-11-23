@@ -7,6 +7,10 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ## [Unreleased]
 
+### Added
+
+- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
+
 ### Changed
 
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
