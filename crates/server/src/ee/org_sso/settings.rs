@@ -128,6 +128,10 @@ const SWITCH_ENFORCED: &str =
 const ENTITY_ID_CHANGE: &str =
     "Changing the IdP entity ID deletes the linked identities; confirm the change.";
 
+/// The 409 for an IdP entity ID change while SSO is enforced (D-SA-21).
+const ENTITY_ID_ENFORCED: &str =
+    "Turn off enforcement before changing the identity provider's entity ID.";
+
 /// The 400 field error when a SAML save names no complete source (D-SA-18).
 const SAML_SOURCE: &str =
     "give a metadata URL, the metadata XML, or the entity ID, SSO URL and certificates";
@@ -440,7 +444,7 @@ async fn save_saml_provider(
     source: SamlSource,
     now: i64,
 ) -> Result<(), ApiError> {
-    let (metadata, metadata_url, refreshed_at) = saml_metadata(state, source, now).await?;
+    let (metadata, metadata_url, refreshed_at) = saml_metadata(state, org, source, now).await?;
     let sso_allowed = url::Url::parse(metadata.sso_url())
         .is_ok_and(|url| state.org_sso.policy().allows_url(&url));
     if !sso_allowed {
@@ -483,6 +487,11 @@ async fn save_saml_provider(
                         let old = store::saml_tx(conn, row.id).await?;
                         let entity_changed =
                             old.is_some_and(|old| old.idp_entity_id != write.idp_entity_id);
+                        // An enforced provider cannot change its IdP (D-SA-21): the check is
+                        // on the stored row, before the confirmation.
+                        if entity_changed && row.enforced {
+                            return Ok(SamlSave::EntityEnforced);
+                        }
                         if entity_changed && !confirmed {
                             return Ok(SamlSave::EntityConfirm);
                         }
@@ -505,6 +514,9 @@ async fn save_saml_provider(
         SamlSave::EntityConfirm => Err(ApiError::Conflict {
             detail: ENTITY_ID_CHANGE,
         }),
+        SamlSave::EntityEnforced => Err(ApiError::Conflict {
+            detail: ENTITY_ID_ENFORCED,
+        }),
     }
 }
 
@@ -512,12 +524,21 @@ async fn save_saml_provider(
 /// Pasted metadata and manual fields have neither (D-SA-11).
 async fn saml_metadata(
     state: &AppState,
+    org: OrgId,
     source: SamlSource,
     now: i64,
 ) -> Result<(IdpMetadata, Option<String>, Option<i64>), ApiError> {
     match source {
         SamlSource::Url(url) => {
             refuse_outbound(state, "identity provider check")?;
+            // Each fetch shares the org's domain-check bucket, 10 a minute (track SA M4 L7).
+            state
+                .limits
+                .sso_dns_checks
+                .check(&org, now)
+                .map_err(|retry| ApiError::RateLimited {
+                    retry_after_s: retry.0.as_secs().max(1),
+                })?;
             let bytes = state
                 .org_sso
                 .fetch_metadata(&url)
@@ -758,6 +779,7 @@ async fn patch_org_sso(
                     return Ok(Patch::Missing);
                 };
                 if current.id != snapshot.id
+                    || current.protocol != snapshot.protocol
                     || current.enabled != snapshot.enabled
                     || current.enforced != snapshot.enforced
                     || current.last_login_at != snapshot.last_login_at
@@ -1056,6 +1078,8 @@ enum SamlSave {
     Enforced,
     /// The IdP entity ID changes and the request did not confirm it (D-SA-2).
     EntityConfirm,
+    /// The IdP entity ID changes while SSO is enforced (D-SA-21).
+    EntityEnforced,
 }
 
 /// What a flags update found and did.
@@ -2664,6 +2688,87 @@ mod tests {
         let saved = put_saml(&app, &owner.cookie, &saml_xml("Acme SAML")).await;
         assert_eq!(saved.status, StatusCode::OK);
         assert_eq!(identity_providers(&app).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_entity_id_change_is_refused_while_enforced() {
+        let (app, seeded, owner) = saml_app().await;
+        configure_org_saml(
+            &app,
+            seeded.org_id,
+            &[TestKey::Idp],
+            "acme.test",
+            true,
+            true,
+        )
+        .await;
+        insert_org_identity(&app, owner.id, seeded.org_id).await;
+
+        let other = metadata_xml(&[TestKey::Idp]).replace(IDP_ENTITY_ID, "https://idp.test/other");
+        let mut payload = json!({
+            "display_name": "Acme SAML",
+            "jit_role": "member",
+            "metadata_xml": other,
+        });
+        let refused = put_saml(&app, &seeded.cookie, &payload).await;
+        assert_eq!(refused.status, StatusCode::CONFLICT);
+        assert_eq!(detail(&refused), ENTITY_ID_ENFORCED);
+        // Confirming does not help while enforced.
+        payload["confirm_entity_id_change"] = json!(true);
+        let confirmed = put_saml(&app, &seeded.cookie, &payload).await;
+        assert_eq!(confirmed.status, StatusCode::CONFLICT);
+        assert_eq!(detail(&confirmed), ENTITY_ID_ENFORCED);
+        assert_eq!(identity_providers(&app).await.len(), 1);
+        let provider = view_of(&app, "acme", &seeded.cookie)
+            .await
+            .provider
+            .expect("provider");
+        assert!(provider.enabled);
+        assert!(provider.enforced);
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_entity_id_change_disables_the_provider() {
+        let (app, seeded, owner) = saml_app().await;
+        configure_org_saml(
+            &app,
+            seeded.org_id,
+            &[TestKey::Idp],
+            "acme.test",
+            true,
+            false,
+        )
+        .await;
+        let other = metadata_xml(&[TestKey::Idp]).replace(IDP_ENTITY_ID, "https://idp.test/other");
+        let payload = json!({
+            "display_name": "Acme SAML",
+            "jit_role": "member",
+            "metadata_xml": other,
+            "confirm_entity_id_change": true,
+        });
+        let confirmed = put_saml(&app, &owner.cookie, &payload).await;
+        assert_eq!(confirmed.status, StatusCode::OK);
+        let provider = confirmed.json::<OrgSsoView>().provider.expect("provider");
+        assert!(!provider.enabled);
+        assert_eq!(provider.last_login_at, None);
+        assert_eq!(saml_of(&confirmed).idp_entity_id, "https://idp.test/other");
+    }
+
+    #[tokio::test]
+    async fn metadata_fetches_are_rate_limited_per_org() {
+        let (app, _seeded, owner) = saml_app().await;
+        let server = MetadataServer::start(metadata_xml(&[TestKey::Idp]).into_bytes()).await;
+        let payload = json!({
+            "display_name": "Acme SAML",
+            "jit_role": "member",
+            "metadata_url": server.url(),
+        });
+        for _ in 0..10 {
+            let saved = put_saml(&app, &owner.cookie, &payload).await;
+            assert_eq!(saved.status, StatusCode::OK);
+        }
+        let limited = put_saml(&app, &owner.cookie, &payload).await;
+        assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

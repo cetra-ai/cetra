@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use super::login::{SignIn, sign_in_core};
 use super::saml_pending::{PENDING_TTL_NS, Pending};
-use super::{OrgProvider, ProviderKind, SamlProvider, SpUrls};
+use super::{OrgProvider, ProviderKind, SamlProvider};
 use crate::api::org_sso::SsoProtocol;
 use crate::auth::limits::network_key;
 use crate::auth::oidc::flow::{LoginError, display_name};
@@ -33,10 +33,12 @@ use crate::meta::users::normalize_email;
 use crate::routes::entitlements::OrgIdPath;
 use crate::routes::oauth::redirect;
 
-/// The binder cookie of a pending login, scoped to the ACS (D-SA-10).
-const SAML_COOKIE: &str = cetra_core::cetra_name!("_saml");
-/// The loop-guard cookie of an unsolicited restart, scoped to the SP paths (D-SA-5).
-const SAML_RESTART_COOKIE: &str = cetra_core::cetra_name!("_saml_restart");
+/// The binder cookie of a pending login (D-SA-10, D-SA-20). The `__Host-` prefix forbids
+/// `Domain` and requires `Path=/` and `Secure`, so a sibling subdomain cannot set it.
+const SAML_COOKIE: &str = "__Host-cetra_saml";
+/// The loop-guard cookie of an unsolicited restart (D-SA-5, D-SA-20). Same prefix rules as
+/// [`SAML_COOKIE`].
+const SAML_RESTART_COOKIE: &str = "__Host-cetra_saml_restart";
 /// The fixed RelayState (D-SA-10).
 const RELAY_STATE: &str = "cetra";
 /// The largest form body the ACS reads (D-SA-12).
@@ -95,19 +97,19 @@ fn sso_unavailable() -> Result<Response, ApiError> {
     redirect("/login?error=sso_unavailable", std::iter::empty())
 }
 
-/// A `Set-Cookie` for a SAML cookie: `Secure` and `SameSite=None`, because the IdP's POST to
-/// the ACS is cross-site.
-fn cookie(name: &str, value: &str, path: &str, max_age: u64) -> HeaderValue {
+/// A `Set-Cookie` for a SAML cookie: `Path=/` (the `__Host-` rule), `Secure` and
+/// `SameSite=None`, because the IdP's POST to the ACS is cross-site.
+fn cookie(name: &str, value: &str, max_age: u64) -> HeaderValue {
     let text =
-        format!("{name}={value}; HttpOnly; Secure; SameSite=None; Path={path}; Max-Age={max_age}");
+        format!("{name}={value}; HttpOnly; Secure; SameSite=None; Path=/; Max-Age={max_age}");
     // The name, the hex and base64url values, and the paths are ASCII.
     #[allow(clippy::expect_used)]
     HeaderValue::from_str(&text).expect("saml cookie is ascii")
 }
 
-/// A `Set-Cookie` that clears `name` at `path`.
-fn clear(name: &str, path: &str) -> HeaderValue {
-    cookie(name, "", path, 0)
+/// A `Set-Cookie` that clears `name`.
+fn clear(name: &str) -> HeaderValue {
+    cookie(name, "", 0)
 }
 
 /// The value of the cookie `name` in `headers`, if any.
@@ -121,6 +123,25 @@ fn named_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
             let cookie = Cookie::parse_encoded(part.trim().to_owned()).ok()?;
             (cookie.name() == name).then(|| cookie.value().to_owned())
         })
+}
+
+/// The binder cookie of the request. Two binder cookies in one request are refused (D-SA-20):
+/// `Err(())`, since a sibling subdomain could have set the second one.
+fn binder_cookie(headers: &HeaderMap) -> Result<Option<String>, ()> {
+    let values: Vec<String> = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(';'))
+        .filter_map(|part| Cookie::parse_encoded(part.trim().to_owned()).ok())
+        .filter(|cookie| cookie.name() == SAML_COOKIE)
+        .map(|cookie| cookie.value().to_owned())
+        .collect();
+    match values.as_slice() {
+        [] => Ok(None),
+        [binder] => Ok(Some(binder.clone())),
+        _ => Err(()),
+    }
 }
 
 /// `GET /api/auth/saml/{org_id}`: the SP's metadata document (D-SA-12).
@@ -157,7 +178,7 @@ async fn start(
     state
         .limits
         .sso_discover
-        .check(&ip, now)
+        .check(&network_key(ip), now)
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
@@ -220,12 +241,7 @@ pub(crate) async fn begin(
     .map_err(internal)?;
     redirect(
         &location,
-        [cookie(
-            SAML_COOKIE,
-            &binder,
-            &sp.acs_path,
-            BINDER_MAX_AGE_SECS,
-        )],
+        [cookie(SAML_COOKIE, &binder, BINDER_MAX_AGE_SECS)],
     )
 }
 
@@ -240,12 +256,12 @@ fn refuse(error: &LoginError) -> Result<Response, ApiError> {
 
 /// A failure after the pending entry is consumed: the binder cookie is cleared. The restart
 /// cookie stays, so a loop stops (D-SA-5).
-fn fail(error: LoginError, sp: &SpUrls) -> Result<Response, ApiError> {
+fn fail(error: LoginError) -> Result<Response, ApiError> {
     match error {
         LoginError::Internal(error) => Err(ApiError::Internal(error)),
         error => redirect(
             &format!("/login?error={}", error.code().unwrap_or("provider_error")),
-            [clear(SAML_COOKIE, &sp.acs_path)],
+            [clear(SAML_COOKIE)],
         ),
     }
 }
@@ -265,7 +281,7 @@ async fn acs(
     state
         .limits
         .saml_acs
-        .check(&ip, now)
+        .check(&network_key(ip), now)
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
@@ -298,16 +314,14 @@ async fn acs(
         let sp = super::sp_urls(&state.config.public_url, org);
         return redirect(
             &sp.start_path,
-            [cookie(
-                SAML_RESTART_COOKIE,
-                "1",
-                &sp.saml_path,
-                RESTART_MAX_AGE_SECS,
-            )],
+            [cookie(SAML_RESTART_COOKIE, "1", RESTART_MAX_AGE_SECS)],
         );
     };
     // 6. Take the pending entry. Its binder must match the browser's binder cookie (D-SA-10).
-    let binder = named_cookie(&headers, SAML_COOKIE);
+    // Two binder cookies are refused before the entry is touched (D-SA-20).
+    let Ok(binder) = binder_cookie(&headers) else {
+        return refuse(&LoginError::SamlInvalid);
+    };
     let Ok(pending) = state
         .org_sso
         .with_pending(|table| table.take(&in_response_to, org, binder.as_deref(), now))
@@ -319,7 +333,7 @@ async fn acs(
     // 7. The provider's flags. A disabled provider serves only an owner's Test sign-in (D-SA-5).
     let enabled = state.org_sso.flags(org).is_some_and(|flags| flags.enabled);
     if !enabled && pending.test_owner.is_none() {
-        return fail(LoginError::SsoUnavailable, &sp);
+        return fail(LoginError::SsoUnavailable);
     }
     // 8. The Response's validity, signature and content (D-SA-9).
     let expected = cetra_saml::ExpectedResponse {
@@ -333,11 +347,11 @@ async fn acs(
     let assertion = match cetra_saml::validate_response(&received, &expected) {
         Ok(assertion) => assertion,
         Err(cetra_saml::ResponseError::EncryptedAssertion) => {
-            return fail(LoginError::SamlUnsupported, &sp);
+            return fail(LoginError::SamlUnsupported);
         }
         Err(error) => {
             tracing::info!(target: "audit", org_id = %org, reason = ?error, "saml response refused");
-            return fail(LoginError::SamlInvalid, &sp);
+            return fail(LoginError::SamlInvalid);
         }
     };
     // 9. The email, normalized. Without one the login is refused (D-SA-6).
@@ -346,11 +360,12 @@ async fn acs(
         .as_deref()
         .and_then(|email| normalize_email(email).ok())
     else {
-        return fail(LoginError::EmailNotVerified, &sp);
+        return fail(LoginError::EmailNotVerified);
     };
     // 10. The sign-in core both protocols share (D-SA-12).
     let input = SignIn {
         org,
+        provider_id: provider.id,
         protocol: SsoProtocol::Saml,
         jit_role: provider.jit_role,
         subject: assertion.name_id,
@@ -362,7 +377,7 @@ async fn acs(
     };
     let logged_in = match sign_in_core(&state, input).await {
         Ok(logged_in) => logged_in,
-        Err(error) => return fail(error, &sp),
+        Err(error) => return fail(error),
     };
     // 11. The session, and the audit line.
     let user_agent = headers
@@ -382,7 +397,7 @@ async fn acs(
             let mut response = error.into_response();
             response
                 .headers_mut()
-                .append(header::SET_COOKIE, clear(SAML_COOKIE, &sp.acs_path));
+                .append(header::SET_COOKIE, clear(SAML_COOKIE));
             return Ok(response);
         }
     };
@@ -395,11 +410,7 @@ async fn acs(
     );
     redirect(
         &logged_in.redirect,
-        [
-            clear(SAML_COOKIE, &sp.acs_path),
-            clear(SAML_RESTART_COOKIE, &sp.saml_path),
-            session,
-        ],
+        [clear(SAML_COOKIE), clear(SAML_RESTART_COOKIE), session],
     )
 }
 
@@ -416,15 +427,17 @@ mod tests {
 
     use super::*;
     use crate::api::common::ProblemCode;
+    use crate::api::org_sso::JitRole;
     use crate::auth::roles::{OrgRole, org_role_str};
     use crate::ee::org_sso::saml_pending::PendingTable;
     use crate::ee::org_sso::store;
+    use crate::test_support::mock_idp::MockIdp;
     use crate::test_support::oauth::{
         SESSION_NAME, cookie_header, location, one_cookie, set_cookies,
     };
     use crate::test_support::{
-        TestApp, TestResponse, begin_saml, capture_logs, configure_org_saml, license_key,
-        license_key_until, org_sso_app_with, post_acs, saml_app, saml_options,
+        TestApp, TestResponse, begin_saml, capture_logs, configure_org_saml, configure_org_sso,
+        license_key, license_key_until, org_sso_app_with, post_acs, saml_app, saml_options,
     };
 
     const AUTHORIZE: &str = "/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme";
@@ -479,7 +492,7 @@ mod tests {
         assert_eq!(response.status, StatusCode::FOUND);
         assert_eq!(location(&response), "/acme");
         one_cookie(&response, SESSION_NAME);
-        assert!(cookie_header(&response, "cetra_saml").contains("Max-Age=0"));
+        assert!(cookie_header(&response, "__Host-cetra_saml").contains("Max-Age=0"));
         let provider = store::identity_provider(org);
         assert_eq!(
             count(
@@ -516,9 +529,14 @@ mod tests {
         assert!(location(&response).starts_with(IDP_SSO_URL));
         let xml = authn_request_xml(&response);
         assert!(xml.contains(&format!("https://cetra.example/api/auth/saml/{org}/acs")));
-        let binder = cookie_header(&response, "cetra_saml");
-        let path = format!("Path=/api/auth/saml/{org}/acs");
-        for attribute in ["HttpOnly", "Secure", "SameSite=None", path.as_str()] {
+        let binder = cookie_header(&response, "__Host-cetra_saml");
+        for attribute in [
+            "HttpOnly",
+            "Secure",
+            "SameSite=None",
+            "Path=/",
+            "Max-Age=600",
+        ] {
             assert!(binder.contains(attribute), "{binder}");
         }
     }
@@ -638,13 +656,13 @@ mod tests {
         let start = format!("/api/auth/saml/{org}/start");
         let first = post_acs(&app, org, &b64, &[]).await;
         assert_eq!(location(&first), start.as_str());
-        assert!(cookie_header(&first, "cetra_saml_restart").contains("Max-Age=120"));
-        let restart = one_cookie(&first, "cetra_saml_restart");
+        assert!(cookie_header(&first, "__Host-cetra_saml_restart").contains("Max-Age=120"));
+        let restart = one_cookie(&first, "__Host-cetra_saml_restart");
         let second = post_acs(&app, org, &b64, &[restart.as_str()]).await;
         assert_eq!(location(&second), "/login?error=saml_invalid");
         let started = app.request(Method::GET, &start).send().await;
         assert!(location(&started).starts_with(IDP_SSO_URL));
-        one_cookie(&started, "cetra_saml");
+        one_cookie(&started, "__Host-cetra_saml");
     }
 
     #[tokio::test]
@@ -1040,5 +1058,92 @@ mod tests {
             .send()
             .await;
         crate::http::restore::tests::assert_refused(&response, "external sign-in");
+    }
+
+    #[tokio::test]
+    async fn two_binder_cookies_are_refused() {
+        let (app, seeded, _owner) = saml_app().await;
+        let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let (request_id, binder, _) = begin_saml(&app, None).await;
+        let (_other_id, other_binder, _) = begin_saml(&app, None).await;
+        let b64 = signed(&app, org, &request_id);
+        let refused = post_acs(&app, org, &b64, &[binder.as_str(), other_binder.as_str()]).await;
+        assert_eq!(location(&refused), "/login?error=saml_invalid");
+        assert!(set_cookies(&refused).is_empty());
+        // The refusal leaves the pending entry for the one-cookie request.
+        let response = post_acs(&app, org, &b64, &[binder.as_str()]).await;
+        assert_eq!(location(&response), "/acme");
+    }
+
+    #[tokio::test]
+    async fn the_acs_limit_counts_an_ipv6_slash_64() {
+        let (app, seeded, _owner) = saml_app().await;
+        let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let host: IpAddr = "2001:db8::1".parse().expect("an IPv6 address");
+        let neighbour: IpAddr = "2001:db8::2".parse().expect("an IPv6 address");
+        for _ in 0..60 {
+            let response = app
+                .request(Method::POST, &acs_path(org))
+                .header("content-type", "application/x-www-form-urlencoded")
+                .origin(Some("https://idp.test"))
+                .peer(host)
+                .send()
+                .await;
+            assert_eq!(location(&response), "/login?error=saml_invalid");
+        }
+        let limited = app
+            .request(Method::POST, &acs_path(org))
+            .header("content-type", "application/x-www-form-urlencoded")
+            .origin(Some("https://idp.test"))
+            .peer(neighbour)
+            .send()
+            .await;
+        assert_eq!(limited.status, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn a_provider_switched_during_sign_in_is_unavailable() {
+        let (app, seeded, _owner) = saml_app().await;
+        let org = seeded.org_id;
+        configure_org_saml(&app, org, &[TestKey::Idp], "acme.test", true, false).await;
+        let stored = store::provider(app.state.meta.reader(), org)
+            .await
+            .expect("the provider query")
+            .expect("a provider");
+        let sign_in = |provider_id: Uuid, protocol: SsoProtocol| SignIn {
+            org,
+            provider_id,
+            protocol,
+            jit_role: JitRole::Viewer,
+            subject: "ada-subject".to_owned(),
+            email: "ada@acme.test".to_owned(),
+            name: None,
+            test: false,
+            test_owner: None,
+            redirect: "/acme".to_owned(),
+        };
+        // The provider row was deleted and created again since the sign-in was validated.
+        let replaced = sign_in_core(&app.state, sign_in(Uuid::now_v7(), SsoProtocol::Saml)).await;
+        assert!(matches!(replaced, Err(LoginError::SsoUnavailable)));
+        // The provider changed protocol since the sign-in was validated.
+        let switched = sign_in_core(&app.state, sign_in(stored.id, SsoProtocol::Oidc)).await;
+        assert!(matches!(switched, Err(LoginError::SsoUnavailable)));
+        // The validated provider still matches, so the sign-in goes through.
+        let matching = sign_in_core(&app.state, sign_in(stored.id, SsoProtocol::Saml)).await;
+        assert!(matching.is_ok());
+    }
+
+    #[tokio::test]
+    async fn sp_metadata_of_an_oidc_org_is_404() {
+        let (app, seeded, _owner) = saml_app().await;
+        let idp = MockIdp::start().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let response = app
+            .request(Method::GET, &format!("/api/auth/saml/{}", seeded.org_id))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::NOT_FOUND);
     }
 }

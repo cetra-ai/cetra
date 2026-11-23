@@ -7,6 +7,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use cetra_core::ids::OrgId;
+use uuid::Uuid;
 
 use crate::api::org_sso::{JitRole, SsoProtocol};
 use crate::auth::oidc::{IdpHttp, IdpHttpError, OidcProvider};
@@ -70,6 +71,8 @@ impl fmt::Debug for ProviderConfig {
 /// An org's built provider. `Debug` omits the client secret (OidcProvider's own `Debug` does).
 #[derive(Debug)]
 pub(crate) struct OrgProvider {
+    /// The `org_sso_providers` row this provider was built from (D-SA-21 checks it at sign-in).
+    pub(crate) id: Uuid,
     pub(crate) kind: ProviderKind,
     pub(crate) jit_role: JitRole,
     config: ProviderConfig,
@@ -268,7 +271,9 @@ impl OrgSso {
                 tracing::warn!(org_id = %row.org_id, "org identity provider skipped");
                 continue;
             };
+            // A rebuilt row (new id) is built again, so its sign-ins check the new id.
             if let Some(existing) = current.providers.get(&row.org_id)
+                && existing.id == row.id
                 && existing.config == config
             {
                 providers.insert(row.org_id, Arc::clone(existing));
@@ -280,6 +285,7 @@ impl OrgSso {
                     providers.insert(
                         row.org_id,
                         Arc::new(OrgProvider {
+                            id: row.id,
                             kind,
                             jit_role: row.jit_role,
                             config,

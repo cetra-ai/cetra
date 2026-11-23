@@ -261,6 +261,7 @@ pub(crate) async fn finish(
         state,
         SignIn {
             org,
+            provider_id: provider.id,
             protocol: SsoProtocol::Oidc,
             jit_role: provider.jit_role,
             subject: claims.subject,
@@ -277,6 +278,8 @@ pub(crate) async fn finish(
 /// What a protocol's front hands to [`sign_in_core`]: a verified subject and email of `org`.
 pub(crate) struct SignIn {
     pub(crate) org: OrgId,
+    /// The provider row the sign-in was validated against; `admit` checks it (D-SA-21).
+    pub(crate) provider_id: Uuid,
     pub(crate) protocol: SsoProtocol,
     /// The role a joining user gets (D-P-56), from the org's provider.
     pub(crate) jit_role: JitRole,
@@ -327,6 +330,8 @@ pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<Logg
     .then(|| input.jit_role.org_role());
     let admit_input = Admit {
         org,
+        provider_id: input.provider_id,
+        protocol: input.protocol,
         identity: store::identity_provider(org),
         subject: input.subject,
         email: input.email,
@@ -392,6 +397,10 @@ pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<Logg
 /// What one org login brings to `admit`. All values are owned, so the write can take them.
 struct Admit {
     org: OrgId,
+    /// The provider row the sign-in was validated against, and its protocol. `admit` refuses
+    /// the login when the stored row no longer matches (D-SA-21, track SA M4 L1).
+    provider_id: Uuid,
+    protocol: SsoProtocol,
     /// `org:<org>`, the identity's provider.
     identity: String,
     subject: String,
@@ -445,6 +454,16 @@ enum Target {
 async fn admit(conn: &mut SqliteConnection, input: &Admit) -> Result<Admitted, MetaError> {
     let org = input.org;
     let now = input.now;
+    // The provider the sign-in was validated against must still be the stored one: the same
+    // row, the same protocol, and enabled unless this is a Test sign-in (track SA M4 L1). The
+    // check runs before any write, since the transaction serializes writers.
+    let stored = store::provider_tx(conn, org).await?;
+    let matches = stored.is_some_and(|row| {
+        row.id == input.provider_id && row.protocol == input.protocol && (row.enabled || input.test)
+    });
+    if !matches {
+        return Ok(Admitted::SsoUnavailable);
+    }
     let known = identities::identity_user_tx(conn, &input.identity, &input.subject).await?;
     let target = match known {
         Some(user_id) => {

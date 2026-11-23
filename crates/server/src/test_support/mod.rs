@@ -1927,7 +1927,7 @@ async fn answer_metadata(
 
 /// Starts a SAML login through `/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme`,
 /// with `cookie` when given. Returns the request ID read back from the redirect's
-/// `SAMLRequest`, the binder cookie (`cetra_saml=…`) and the response.
+/// `SAMLRequest`, the binder cookie (`__Host-cetra_saml=…`) and the response.
 pub(crate) async fn begin_saml(
     app: &TestApp,
     cookie: Option<&str>,
@@ -1963,7 +1963,7 @@ pub(crate) async fn begin_saml(
     let marker = " ID=\"";
     let start = xml.find(marker).expect("the request ID") + marker.len();
     let request_id = xml[start..start + 33].to_owned();
-    let binder = oauth::one_cookie(&response, "cetra_saml");
+    let binder = oauth::one_cookie(&response, "__Host-cetra_saml");
     (request_id, binder, response)
 }
 

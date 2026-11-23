@@ -754,14 +754,17 @@ pub(crate) async fn put_saml_provider(
                 .await?
                 .ok_or_else(|| corrupt("org_sso_saml", "provider_id"))?;
             let entity_changed = old.idp_entity_id != write.idp_entity_id;
+            // A changed IdP entity ID turns the provider off until a new Test sign-in (D-SA-21).
             sqlx::query(
                 "UPDATE org_sso_providers SET display_name = ?, jit_role = ?, updated_at = ?, \
+                 enabled = CASE WHEN ? THEN 0 ELSE enabled END, \
                  last_login_at = CASE WHEN ? THEN NULL ELSE last_login_at END \
                  WHERE org_id = ?",
             )
             .bind(&write.display_name)
             .bind(write.jit_role.as_str())
             .bind(now)
+            .bind(entity_changed)
             .bind(entity_changed)
             .bind(org.to_string())
             .execute(&mut *conn)
