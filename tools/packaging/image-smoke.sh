@@ -32,6 +32,7 @@ docker volume create "$volume" >/dev/null
 docker run -d --name "$name" \
   -v "$volume:/data" \
   -p 127.0.0.1::8080 -p 127.0.0.1::4318 \
+  -e CETRA_TELEMETRY=off \
   -e CETRA_INIT_ADMIN_EMAIL=smoke@example.com \
   -e CETRA_INIT_ADMIN_PASSWORD=cetra-smoke-1 \
   -e CETRA_INIT_ORG=Smoke \

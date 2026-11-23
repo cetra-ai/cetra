@@ -42,6 +42,7 @@ trap cleanup EXIT
 
 key="sk-cetra-SMOKE0123456789ABCDEFGHIJKLMNOPQ"
 
+CETRA_TELEMETRY=off \
 CETRA_DATA_DIR="$dir/data" \
 CETRA_PUBLIC_URL="http://127.0.0.1:${http_port}" \
 CETRA_HTTP_ADDR="127.0.0.1:${http_port}" \
