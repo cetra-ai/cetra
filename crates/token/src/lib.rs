@@ -214,6 +214,14 @@ pub struct LimitsClaim {
         skip_serializing_if = "Option::is_none"
     )]
     pub max_annotation_queues: Option<Option<u64>>,
+    /// Audit log retention in days (D-EA-7): `0` keeps forever. Missing or `null`: the
+    /// instance's `audit.retention_days`.
+    #[serde(
+        default,
+        with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub audit_retention_days: Option<Option<u64>>,
 }
 
 /// `kind: "control_plane"` (D-P-24, D-P-28).
@@ -690,6 +698,7 @@ mod tests {
                 max_active_online_rules: Some(None),
                 max_active_issue_sources: Some(None),
                 max_annotation_queues: Some(None),
+                audit_retention_days: Some(Some(365)),
             },
             sso_domains: vec!["acme.test".to_owned()],
         });
@@ -721,6 +730,28 @@ mod tests {
         assert_eq!(
             serde_json::from_value::<LimitsClaim>(value).unwrap(),
             queues
+        );
+
+        // An audit retention limit round-trips too: `null` is distinct from a missing key (D-EA-7).
+        let retention = LimitsClaim {
+            audit_retention_days: Some(None),
+            ..LimitsClaim::default()
+        };
+        let value = serde_json::to_value(&retention).unwrap();
+        assert_eq!(value, json!({"audit_retention_days": null}));
+        assert_eq!(
+            serde_json::from_value::<LimitsClaim>(value).unwrap(),
+            retention
+        );
+        let kept = LimitsClaim {
+            audit_retention_days: Some(Some(0)),
+            ..LimitsClaim::default()
+        };
+        let value = serde_json::to_value(&kept).unwrap();
+        assert_eq!(value, json!({"audit_retention_days": 0}));
+        assert_eq!(
+            serde_json::from_value::<LimitsClaim>(value).unwrap(),
+            kept
         );
     }
 

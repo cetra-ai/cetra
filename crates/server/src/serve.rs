@@ -782,9 +782,7 @@ fn spawn_audit_purge(state: AppState) -> JoinHandle<()> {
         loop {
             interval.tick().await;
             let now = state.clock.now_ns();
-            let purged =
-                crate::audit::retention::purge(&state.meta, state.config.audit.retention_days, now)
-                    .await;
+            let purged = crate::audit::retention::purge(&state, now).await;
             match purged {
                 Ok(removed) if removed > 0 => {
                     tracing::info!(removed, "purged old audit records");

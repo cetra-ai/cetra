@@ -87,6 +87,9 @@ pub(crate) struct Limits {
     pub(crate) max_active_online_rules: Option<u64>,
     pub(crate) max_active_issue_sources: Option<u64>,
     pub(crate) max_annotation_queues: Option<u64>,
+    /// Audit log retention in days (D-EA-7). `None`: the instance's `audit.retention_days`;
+    /// `Some(0)`: kept forever; otherwise at least 30 days (plan P-4).
+    pub(crate) audit_retention_days: Option<u64>,
 }
 
 /// The instance defaults, resolved from config once (`[entitlements.defaults]`).
@@ -125,6 +128,8 @@ impl Defaults {
                 max_active_online_rules: config.max_active_online_rules,
                 max_active_issue_sources: config.max_active_issue_sources,
                 max_annotation_queues: config.max_annotation_queues,
+                // No `[entitlements.defaults]` key: the instance's `audit.retention_days` applies.
+                audit_retention_days: None,
             },
         }
     }
@@ -592,6 +597,8 @@ mod tests {
         assert!(Feature::OrgSso.is_ee());
         assert_eq!(Feature::from_name("scim"), Some(Feature::Scim));
         assert!(Feature::Scim.is_ee());
+        assert_eq!(Feature::from_name("audit_log"), Some(Feature::AuditLog));
+        assert!(Feature::AuditLog.is_ee());
         assert_eq!(Feature::from_name("audit_logs"), None);
         assert!(Feature::ALL.len() <= 32);
     }

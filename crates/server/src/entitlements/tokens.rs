@@ -132,6 +132,7 @@ fn merge_limits(claim: &LimitsClaim, defaults: &Limits) -> Limits {
             defaults.max_active_issue_sources,
         ),
         max_annotation_queues: merge(claim.max_annotation_queues, defaults.max_annotation_queues),
+        audit_retention_days: merge(claim.audit_retention_days, defaults.audit_retention_days),
     }
 }
 
@@ -244,6 +245,35 @@ mod tests {
         assert_eq!(
             merge_limits(&LimitsClaim::default(), &defaults).max_annotation_queues,
             Some(3)
+        );
+    }
+
+    #[test]
+    fn merge_limits_takes_the_audit_retention_claim_or_the_default() {
+        let defaults = Limits {
+            audit_retention_days: Some(90),
+            ..Limits::default()
+        };
+        let claim_value = LimitsClaim {
+            audit_retention_days: Some(Some(365)),
+            ..LimitsClaim::default()
+        };
+        let claim_null = LimitsClaim {
+            audit_retention_days: Some(None),
+            ..LimitsClaim::default()
+        };
+        assert_eq!(
+            merge_limits(&claim_value, &defaults).audit_retention_days,
+            Some(365)
+        );
+        // `null` gives no limit: the purge then uses the instance's `audit.retention_days` (P-4).
+        assert_eq!(
+            merge_limits(&claim_null, &defaults).audit_retention_days,
+            None
+        );
+        assert_eq!(
+            merge_limits(&LimitsClaim::default(), &defaults).audit_retention_days,
+            Some(90)
         );
     }
 
