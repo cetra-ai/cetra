@@ -758,7 +758,6 @@ fn has_control(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use base64::Engine as _;
 
     use super::*;
     use crate::test_idp::{

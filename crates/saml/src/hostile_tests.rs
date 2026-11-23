@@ -468,7 +468,7 @@ fn both_signed_one_broken() {
     } else {
         "A"
     };
-    let mut altered = xml.clone();
+    let mut altered = xml;
     altered.replace_range(middle..middle + 1, replacement);
     assert_eq!(check(&altered), Err(ResponseError::SignatureInvalid));
 }
