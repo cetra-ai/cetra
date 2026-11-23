@@ -1549,7 +1549,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"Operations": [{"op": "replace", "value": {"active": false}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": false}}]}),
         )
         .await;
         assert_eq!(deactivated.status, StatusCode::OK);
@@ -1598,7 +1598,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"Operations": [{
+            &json!({"schemas": [PATCH_OP], "Operations": [{
                 "op": "replace",
                 "path": "emails[type eq \"work\"].value",
                 "value": "other@example.com"
@@ -1649,7 +1649,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"Operations": [{"op": "replace", "value": {"userName": "lin@example.com"}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"userName": "lin@example.com"}}]}),
         )
         .await;
         assert_eq!(response.status, StatusCode::CONFLICT);
@@ -1669,7 +1669,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"Operations": [{"op": "replace", "value": {"userName": "grace2@example.com"}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"userName": "grace2@example.com"}}]}),
         )
         .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
@@ -1738,7 +1738,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"Operations": [{"op": "replace", "value": {"active": true}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
         assert_eq!(noop.status, StatusCode::OK);
@@ -1746,7 +1746,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"Operations": [{"op": "replace", "value": {"active": false}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": false}}]}),
         )
         .await;
         assert_eq!(off.status, StatusCode::OK);
@@ -1754,7 +1754,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"Operations": [{"op": "replace", "value": {"active": true}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
         assert_eq!(back.status, StatusCode::FORBIDDEN);
