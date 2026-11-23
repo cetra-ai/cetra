@@ -308,20 +308,26 @@ fn none() -> Priced {
     }
 }
 
-/// For a gateway span, the publisher's provider and the model names to try, in order (D-IN-13,
-/// spec 02 § Cost computation step 2). `None` when `provider` is not a gateway, or when `model`
-/// is not `vendor/name` with a vendor in [`PUBLISHER_VENDORS`], or when the name is `:free` or empty.
+/// For a gateway span, the (publisher provider, model name) pairs to try, in order (D-IN-13,
+/// spec 02 § Cost computation step 2). `None` when `provider` is not a gateway, when the name is
+/// `:free` or empty, or when `model` is `vendor/name` with a vendor not in [`PUBLISHER_VENDORS`].
+/// A model without `/` (OpenLLMetry strips `vendor/` for OpenRouter) is tried by name with each
+/// publisher in table order. The name is cut at its first `:`; `.` also tries `-`.
 #[must_use]
-pub fn publisher_candidates(provider: &str, model: &str) -> Option<(&'static str, Vec<String>)> {
+pub fn publisher_candidates(provider: &str, model: &str) -> Option<Vec<(&'static str, String)>> {
     if GATEWAY_PROVIDERS.binary_search(&provider).is_err() {
         return None;
     }
-    let (vendor, name) = model.split_once('/')?;
-    let vendor = vendor.to_ascii_lowercase();
-    let index = PUBLISHER_VENDORS
-        .binary_search_by_key(&vendor.as_str(), |&(known, _)| known)
-        .ok()?;
-    let publisher = PUBLISHER_VENDORS[index].1;
+    let (publisher, name) = match model.split_once('/') {
+        Some((vendor, name)) => {
+            let vendor = vendor.to_ascii_lowercase();
+            let index = PUBLISHER_VENDORS
+                .binary_search_by_key(&vendor.as_str(), |&(known, _)| known)
+                .ok()?;
+            (Some(PUBLISHER_VENDORS[index].1), name)
+        }
+        None => (None, model),
+    };
     if name.ends_with(":free") {
         return None;
     }
@@ -329,11 +335,27 @@ pub fn publisher_candidates(provider: &str, model: &str) -> Option<(&'static str
     if name.is_empty() {
         return None;
     }
-    let mut candidates = vec![name.to_owned()];
-    if name.contains('.') {
-        candidates.push(name.replace('.', "-"));
+    let mut candidates = Vec::new();
+    match publisher {
+        Some(publisher) => {
+            candidates.push((publisher, name.to_owned()));
+            if name.contains('.') {
+                candidates.push((publisher, name.replace('.', "-")));
+            }
+        }
+        None => {
+            for &(_, publisher) in PUBLISHER_VENDORS {
+                candidates.push((publisher, name.to_owned()));
+            }
+            if name.contains('.') {
+                let dashed = name.replace('.', "-");
+                for &(_, publisher) in PUBLISHER_VENDORS {
+                    candidates.push((publisher, dashed.clone()));
+                }
+            }
+        }
     }
-    Some((publisher, candidates))
+    Some(candidates)
 }
 
 struct Reported {
@@ -456,10 +478,11 @@ fn lookup<'a>(
     ranked_lookup(prices, model, provider, start_time)
         .map(|(_, row)| row)
         .or_else(|| {
-            let (publisher, names) = publisher_candidates(provider?, model)?;
-            names.iter().find_map(|name| {
-                ranked_lookup(prices, name, Some(publisher), start_time).map(|(_, row)| row)
-            })
+            publisher_candidates(provider?, model)?
+                .into_iter()
+                .find_map(|(publisher, name)| {
+                    ranked_lookup(prices, &name, Some(publisher), start_time).map(|(_, row)| row)
+                })
         })
 }
 
@@ -1007,25 +1030,22 @@ mod tests {
     fn publisher_candidates_follow_the_vendor_table() {
         assert_eq!(
             publisher_candidates("openrouter", "openai/gpt-4o-mini"),
-            Some(("openai", vec!["gpt-4o-mini".to_owned()]))
+            Some(vec![("openai", "gpt-4o-mini".to_owned())])
         );
         assert_eq!(
             publisher_candidates("openrouter", "anthropic/claude-sonnet-4.5"),
-            Some((
-                "anthropic",
-                vec![
-                    "claude-sonnet-4.5".to_owned(),
-                    "claude-sonnet-4-5".to_owned()
-                ]
-            ))
+            Some(vec![
+                ("anthropic", "claude-sonnet-4.5".to_owned()),
+                ("anthropic", "claude-sonnet-4-5".to_owned()),
+            ])
         );
         assert_eq!(
             publisher_candidates("openrouter", "x-ai/grok-4:nitro"),
-            Some(("x_ai", vec!["grok-4".to_owned()]))
+            Some(vec![("x_ai", "grok-4".to_owned())])
         );
         assert_eq!(
             publisher_candidates("vercel_ai_gateway", "OpenAI/gpt-4o"),
-            Some(("openai", vec!["gpt-4o".to_owned()]))
+            Some(vec![("openai", "gpt-4o".to_owned())])
         );
         assert_eq!(
             publisher_candidates("openrouter", "meta-llama/llama-3.3-70b"),
@@ -1035,9 +1055,39 @@ mod tests {
             publisher_candidates("openrouter", "openai/gpt-oss-20b:free"),
             None
         );
-        assert_eq!(publisher_candidates("openrouter", "gpt-4o"), None);
+        assert_eq!(
+            publisher_candidates("openrouter", "gpt-4o"),
+            Some(
+                [
+                    "anthropic",
+                    "cohere",
+                    "deepseek",
+                    "gcp.gemini",
+                    "mistral_ai",
+                    "openai",
+                    "x_ai",
+                ]
+                .into_iter()
+                .map(|publisher| (publisher, "gpt-4o".to_owned()))
+                .collect()
+            )
+        );
+        assert_eq!(publisher_candidates("openrouter", "gpt-oss-20b:free"), None);
         assert_eq!(publisher_candidates("openrouter", "openai/"), None);
+        assert_eq!(publisher_candidates("openrouter", ":nitro"), None);
         assert_eq!(publisher_candidates("groq", "openai/gpt-oss-120b"), None);
+        assert_eq!(publisher_candidates("groq", "gpt-4o"), None);
+    }
+
+    #[test]
+    fn a_gateway_span_with_a_bare_model_is_priced_by_a_publisher() {
+        let prices = table(vec![
+            row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 1.0),
+            row("gpt-4o-mini", PriceScope::Builtin, Some("groq"), 0, 7.0),
+        ]);
+        let priced = priced_with(&prices, Some("openrouter"), "gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
     }
 
     #[test]

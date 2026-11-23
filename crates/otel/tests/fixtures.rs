@@ -893,10 +893,9 @@ fn pick_price_or_publisher<'a>(
     start_time: i64,
 ) -> Option<&'a PriceRow> {
     pick_price(rows, model, provider, start_time).or_else(|| {
-        let (publisher, names) = cetra_otel::publisher_candidates(provider?, model)?;
-        names
-            .iter()
-            .find_map(|name| pick_price(rows, name, Some(publisher), start_time))
+        cetra_otel::publisher_candidates(provider?, model)?
+            .into_iter()
+            .find_map(|(publisher, name)| pick_price(rows, &name, Some(publisher), start_time))
     })
 }
 
