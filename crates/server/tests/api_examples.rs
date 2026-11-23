@@ -63,6 +63,7 @@ use cetra_server::api::online_rules::{
 };
 use cetra_server::api::openapi::openapi;
 use cetra_server::api::org_sso::OrgSso;
+use cetra_server::api::scim::ScimSettings;
 use cetra_server::api::payload::Payload;
 use cetra_server::api::playground::PlaygroundRunRequest;
 use cetra_server::api::prompts::{
@@ -794,6 +795,7 @@ fn generated_files_roundtrip() {
             | "get_admin_license" => {}
             "get_device_request" => roundtrip::<DeviceRequest>(&example.file),
             "get_org_sso" => roundtrip::<OrgSso>(&example.file),
+            "get_org_scim" => roundtrip::<ScimSettings>(&example.file),
             "list_llm_connections" => roundtrip::<Page<LlmConnection>>(&example.file),
             "get_llm_connection" | "post_llm_connection" => {
                 roundtrip::<LlmConnection>(&example.file);

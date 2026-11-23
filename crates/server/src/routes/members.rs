@@ -1,7 +1,7 @@
 //! Org members and per-project overrides (spec 08, D139).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -18,6 +18,7 @@ use crate::audit::catalog::MemberAction;
 use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectOverride, ProjectPerm, Role};
+use crate::ee::scim::store as scim_store;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
@@ -83,6 +84,8 @@ pub(crate) enum MemberChange {
     Done,
     Missing,
     Forbidden,
+    /// The member is managed by the org's identity provider (D-EA-18).
+    ScimManaged,
 }
 
 enum RoleChange {
@@ -91,6 +94,8 @@ enum RoleChange {
     Forbidden,
     /// The org's seat limit, which the new role would exceed.
     OverLimit(u64),
+    /// The member is managed by the org's identity provider (D-EA-18).
+    ScimManaged,
 }
 
 async fn list_org_members(
@@ -99,13 +104,15 @@ async fn list_org_members(
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<OrgMember>>, ApiError> {
     let members = members::org_members(state.meta.reader(), access.org.id).await?;
+    let managed = scim_managed_ids(&state, access.org.id).await?;
     let rows = members
         .into_iter()
         .map(|member| {
+            let scim_managed = managed.contains(&member.user.id);
             (
                 member.user.email.clone(),
                 member.user.id.to_string(),
-                org_member(&member),
+                org_member(&member, scim_managed),
             )
         })
         .collect();
@@ -130,6 +137,7 @@ async fn update_org_member(
     let role = body.role;
     let now = state.clock.now_ns();
     let limits_state = state.clone();
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -143,6 +151,9 @@ async fn update_org_member(
                 let Some(target_role) = members::org_role_tx(conn, org_id, target).await? else {
                     return Ok(RoleChange::Missing);
                 };
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(RoleChange::ScimManaged);
+                }
                 if !may_set_role(actor_role, target_role, role) {
                     return Ok(RoleChange::Forbidden);
                 }
@@ -193,9 +204,11 @@ async fn update_org_member(
         RoleChange::Missing => return Err(ApiError::NotFound),
         RoleChange::Forbidden => return Err(forbidden()),
         RoleChange::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
+        RoleChange::ScimManaged => return Err(ApiError::ScimManaged),
     }
+    let managed = scim_managed_ids(&state, org_id).await?;
     let member = find_member(&state, org_id, target).await?;
-    Ok(error::Json(org_member(&member)))
+    Ok(error::Json(org_member(&member, managed.contains(&target))))
 }
 
 async fn remove_org_member(
@@ -209,6 +222,7 @@ async fn remove_org_member(
     let actor = user.id;
     let org_id = access.org.id;
     let now = state.clock.now_ns();
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -221,6 +235,9 @@ async fn remove_org_member(
                 };
                 if actor != target && !may_remove_other(actor_role, target_role) {
                     return Ok(MemberChange::Forbidden);
+                }
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(MemberChange::ScimManaged);
                 }
                 members::remove_org_member(conn, org_id, target).await?;
                 // A disabled owner does not count: the org must keep one who can act.
@@ -248,6 +265,7 @@ async fn remove_org_member(
         MemberChange::Done => {}
         MemberChange::Missing => return Err(ApiError::NotFound),
         MemberChange::Forbidden => return Err(forbidden()),
+        MemberChange::ScimManaged => return Err(ApiError::ScimManaged),
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -310,12 +328,25 @@ async fn find_member(
         .ok_or(ApiError::NotFound)
 }
 
-fn org_member(member: &MemberRow) -> OrgMember {
+fn org_member(member: &MemberRow, scim_managed: bool) -> OrgMember {
     OrgMember {
         user: member_user(member),
         role: member.role,
         joined_at: member.joined_at,
+        scim_managed,
     }
+}
+
+/// The ids of the org's members that its identity provider manages (D-EA-18). Empty unless
+/// SCIM locks the org, so the list costs one query only while it does.
+async fn scim_managed_ids(
+    state: &AppState,
+    org: cetra_core::ids::OrgId,
+) -> Result<HashSet<Uuid>, ApiError> {
+    if !crate::ee::scim::locks(state, org).await? {
+        return Ok(HashSet::new());
+    }
+    Ok(scim_store::managed_user_ids(state.meta.reader(), org).await?)
 }
 
 pub(crate) fn project_member(member: &MemberRow, stored: Option<ProjectOverride>) -> ProjectMember {

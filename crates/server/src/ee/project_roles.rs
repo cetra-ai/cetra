@@ -15,6 +15,7 @@ use crate::api::members::{ProjectMember, ProjectRoleOverride, SetProjectOverride
 use crate::audit::catalog::MemberAction;
 use crate::audit::{self, Event, TargetKind};
 use crate::auth::roles::{ProjectOverride, ProjectPerm, project_override_str};
+use crate::ee::scim::store as scim_store;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError};
@@ -59,6 +60,7 @@ async fn set_project_override(
     let project_id = access.project.id;
     let override_role = stored_override(body.role);
     let now = state.clock.now_ns();
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -68,6 +70,9 @@ async fn set_project_override(
                 };
                 if matches!(role, OrgRole::Owner | OrgRole::Admin) {
                     return Ok(MemberChange::Forbidden);
+                }
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(MemberChange::ScimManaged);
                 }
                 let old = members::project_override_tx(conn, project_id, target).await?;
                 members::set_project_override(conn, project_id, target, override_role).await?;
@@ -103,6 +108,7 @@ async fn set_project_override(
                 errors: Vec::new(),
             });
         }
+        MemberChange::ScimManaged => return Err(ApiError::ScimManaged),
     }
     let stored = members::project_override(state.meta.reader(), project_id, target).await?;
     let members = members::org_members(state.meta.reader(), org_id).await?;
@@ -125,10 +131,14 @@ async fn remove_project_override(
         return Err(ApiError::NotFound);
     }
     let now = state.clock.now_ns();
-    state
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
+    let outcome = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(MemberChange::ScimManaged);
+                }
                 let old = members::project_override_tx(conn, project_id, target).await?;
                 // Removing no override is a no-op and records nothing.
                 if members::remove_project_override(conn, project_id, target).await? {
@@ -146,10 +156,13 @@ async fn remove_project_override(
                     )
                     .await?;
                 }
-                Ok(())
+                Ok(MemberChange::Done)
             })
         })
         .await?;
+    if matches!(outcome, MemberChange::ScimManaged) {
+        return Err(ApiError::ScimManaged);
+    }
     Ok(StatusCode::NO_CONTENT)
 }
 

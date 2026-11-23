@@ -155,6 +155,9 @@ use super::scores::{
     FeedbackRequest, FeedbackResult, FeedbackValue, ScoreBatch, ScoreCreate, ScoreListParams,
     ScoreWriteResult,
 };
+use super::scim::{
+    CreateScimTokenRequest, CreatedScimToken, ScimSettings, ScimToken, UpdateScimSettings,
+};
 use super::sessions::{SessionDetail, SessionListParams, SessionSort, SessionSummary};
 use super::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
 use super::traces::{
@@ -258,6 +261,11 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<PutOrgSsoProvider>();
     set.insert::<AddOrgSsoDomain>();
     set.insert::<PatchOrgSso>();
+    set.insert::<ScimSettings>();
+    set.insert::<ScimToken>();
+    set.insert::<UpdateScimSettings>();
+    set.insert::<CreateScimTokenRequest>();
+    set.insert::<CreatedScimToken>();
     set.insert::<SsoDiscoverRequest>();
     set.insert::<SsoDiscovery>();
     set.insert::<DevicePurpose>();
@@ -1017,6 +1025,7 @@ fn paths() -> Paths {
     let paths = admin_paths(paths);
     let paths = invite_paths(paths);
     let paths = org_sso_paths(paths);
+    let paths = scim_paths(paths);
     let paths = project_paths(paths);
     let paths = member_paths(paths);
     let paths = connection_paths(paths);
@@ -1738,6 +1747,93 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/sso/domains/{id}",
             PathItem::new(HttpMethod::Delete, remove_domain),
+        )
+}
+
+fn scim_paths(paths: PathsBuilder) -> PathsBuilder {
+    let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
+    let get = operation(
+        "get_org_scim",
+        "orgs",
+        "Read the org's SCIM provisioning settings",
+    )
+    .description(Some(
+        "The enabled flag, the default role, the SCIM base URL, the verified SCIM domains and the live tokens, without their secrets. Owners only, session only (D-EA-15). Needs no feature, so the page stays readable after a lapse.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .responses(responses(
+        "200",
+        json_of::<ScimSettings>("The org's SCIM settings."),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let patch = operation(
+        "update_org_scim",
+        "orgs",
+        "Turn the org's SCIM provisioning on or off, or change the default role",
+    )
+    .description(Some(
+        "Turning SCIM on or changing the default role needs the `scim` feature, and turning SCIM on needs a verified domain (409). Turning it off always works. The default role is `viewer` or `member`. While SCIM is on, managed members cannot be changed by hand (D-EA-18). Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("UpdateScimSettings")))
+    .responses(responses(
+        "200",
+        json_of::<ScimSettings>("The SCIM settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let create_token = operation(
+        "create_org_scim_token",
+        "orgs",
+        "Create a SCIM bearer token",
+    )
+    .description(Some(
+        "Creates a `scim-cetra-…` token for the identity provider. The secret is in this response only. At most two tokens are live at once (409 otherwise). Needs the `scim` feature. Owners only, session only.",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![path_string("org", "Org UUID or slug.")]))
+    .request_body(Some(json_body("CreateScimTokenRequest")))
+    .responses(responses(
+        "201",
+        json_of::<CreatedScimToken>("The token, with its secret."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let revoke_token = operation(
+        "revoke_org_scim_token",
+        "orgs",
+        "Revoke a SCIM bearer token",
+    )
+    .description(Some(
+        "The token stops working at once. Works without the feature. Owners only, session only.",
+    ))
+    .securities(Some(session_only))
+    .parameters(Some(vec![
+        path_string("org", "Org UUID or slug."),
+        path_uuid("id", "Token id."),
+    ]))
+    .responses(responses(
+        "204",
+        ResponseBuilder::new()
+            .description("The token is revoked.")
+            .build(),
+        AUTH_ERRORS,
+    ))
+    .build();
+    let mut settings = PathItem::new(HttpMethod::Get, get);
+    settings.patch = Some(patch);
+    paths
+        .path("/api/v1/orgs/{org}/scim", settings)
+        .path(
+            "/api/v1/orgs/{org}/scim/tokens",
+            PathItem::new(HttpMethod::Post, create_token),
+        )
+        .path(
+            "/api/v1/orgs/{org}/scim/tokens/{id}",
+            PathItem::new(HttpMethod::Delete, revoke_token),
         )
 }
 

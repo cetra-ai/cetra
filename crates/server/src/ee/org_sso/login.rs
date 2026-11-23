@@ -249,6 +249,10 @@ pub(crate) async fn finish(
     if !listed {
         return Err(LoginError::DomainNotAllowed);
     }
+    // D-EA-18: while SCIM locks the org, a login never creates or joins a member.
+    let scim_locks = crate::ee::scim::locks(state, org)
+        .await
+        .map_err(|error| LoginError::Internal(Box::new(error)))?;
     let input = Admit {
         org,
         identity: store::identity_provider(org),
@@ -258,7 +262,8 @@ pub(crate) async fn finish(
         domains,
         jit: of(state, org)
             .allows(Feature::OrgSso)
-            .then(|| provider.jit_role.org_role()),
+            .then(|| provider.jit_role.org_role())
+            .filter(|_| !scim_locks),
         max_seats: state.entitlements.resolve(org, now).limits.max_seats,
         signup: state.config.auth.signup,
         test: saved.test,
@@ -1073,6 +1078,52 @@ mod tests {
         .await;
         let seeded = app.seed().await;
         configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let response = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
+        assert_eq!(location(&response), "/acme");
+        assert_eq!(
+            count(
+                &app,
+                "SELECT COUNT(*) FROM org_members m JOIN users u ON u.id = m.user_id \
+                 WHERE u.email = 'ada@acme.test'",
+            )
+            .await,
+            0
+        );
+    }
+
+    /// D-EA-18: while SCIM locks the org, an unknown user of its domain signs in without
+    /// joining, as a lapsed org does.
+    #[tokio::test]
+    async fn org_sso_jit_is_off_while_scim_is_on() {
+        let idp = MockIdp::start().await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.license_key = Some(crate::config::Secret::new(
+                crate::test_support::license_key(&["org_sso", "scim"]),
+            ));
+        })
+        .await;
+        let seeded = app.seed().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+        let org = seeded.org_id;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::put_org_scim(
+                        conn,
+                        org,
+                        true,
+                        crate::api::account::OrgRole::Viewer,
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
         let response = sign_in(&app, &idp, None, "ada-sub", "ada@acme.test", None).await;
         assert_eq!(location(&response), "/acme");
         assert_eq!(

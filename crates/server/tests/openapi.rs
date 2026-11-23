@@ -87,6 +87,18 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ),
     ("get", "/api/v1/orgs/{org}/usage", "get_org_usage"),
     ("get", "/api/v1/orgs/{org}/sso", "get_org_sso"),
+    ("get", "/api/v1/orgs/{org}/scim", "get_org_scim"),
+    ("patch", "/api/v1/orgs/{org}/scim", "update_org_scim"),
+    (
+        "post",
+        "/api/v1/orgs/{org}/scim/tokens",
+        "create_org_scim_token",
+    ),
+    (
+        "delete",
+        "/api/v1/orgs/{org}/scim/tokens/{id}",
+        "revoke_org_scim_token",
+    ),
     ("patch", "/api/v1/orgs/{org}/sso", "patch_org_sso"),
     (
         "put",
@@ -1288,6 +1300,10 @@ fn document_lint() {
                 | "post_org_sso_domain"
                 | "post_org_sso_domain_verify"
                 | "delete_org_sso_domain"
+                | "get_org_scim"
+                | "update_org_scim"
+                | "create_org_scim_token"
+                | "revoke_org_scim_token"
                 | "delete_org"
                 | "delete_project"
                 | "patch_issue"
@@ -1440,6 +1456,8 @@ fn document_lint() {
             || *id == "put_org_sso_provider"
             || *id == "post_org_sso_domain"
             || *id == "patch_org_sso"
+            || *id == "update_org_scim"
+            || *id == "create_org_scim_token"
         {
             expected_errors.extend(["400", "401", "403", "404", "409", "429"]);
         } else if *id == "post_org_sso_domain_verify" || *id == "delete_org_sso_provider" {

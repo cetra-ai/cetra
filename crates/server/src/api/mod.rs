@@ -39,6 +39,7 @@ pub mod saved_views;
 pub mod schema;
 pub mod score_definitions;
 pub mod scores;
+pub mod scim;
 pub mod sessions;
 pub mod sql;
 pub mod traces;

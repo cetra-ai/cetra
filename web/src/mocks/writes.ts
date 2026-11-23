@@ -46,8 +46,10 @@ import onlineRuleResumedDocument from "../../../fixtures/api/static/online-rule-
 import orgDocument from "../../../fixtures/api/static/org.json";
 import orgMembersDocument from "../../../fixtures/api/static/org-members.json";
 import orgModelPricesDocument from "../../../fixtures/api/static/org-model-prices.json";
+import orgScimDocument from "../../../fixtures/api/static/org-scim.json";
 import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
+import scimTokenCreatedDocument from "../../../fixtures/api/static/scim-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
 import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
@@ -119,6 +121,17 @@ export const WRITE_OPERATIONS: readonly WriteOperation[] = [
     path: "/api/v1/orgs/{org}/sso/domains/{id}",
   },
   { operationId: "patch_org_sso", method: "patch", path: "/api/v1/orgs/{org}/sso" },
+  { operationId: "update_org_scim", method: "patch", path: "/api/v1/orgs/{org}/scim" },
+  {
+    operationId: "create_org_scim_token",
+    method: "post",
+    path: "/api/v1/orgs/{org}/scim/tokens",
+  },
+  {
+    operationId: "revoke_org_scim_token",
+    method: "delete",
+    path: "/api/v1/orgs/{org}/scim/tokens/{id}",
+  },
   {
     operationId: "post_llm_connection",
     method: "post",
@@ -630,6 +643,9 @@ const RESPONSES: Record<string, Respond> = {
   post_org_sso_domain_verify: () => HttpResponse.json(orgSsoDocument),
   delete_org_sso_domain: () => noContent(),
   patch_org_sso: () => HttpResponse.json(orgSsoDocument),
+  update_org_scim: () => HttpResponse.json(orgScimDocument),
+  create_org_scim_token: () => HttpResponse.json(scimTokenCreatedDocument, { status: 201 }),
+  revoke_org_scim_token: () => noContent(),
   post_org_invite: ({ body }) =>
     HttpResponse.json(
       {

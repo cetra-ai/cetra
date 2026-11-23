@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::api::account::OrgMembership;
 use crate::api::common::{Page, PageParams, Problem, ProblemCode};
+use crate::api::entitlements::Feature;
 use crate::api::invites::{CreateInviteRequest, CreatedInvite, Invite, InviteOrg, InvitePreview};
 use crate::api::members::MemberUser;
 use crate::audit::catalog::InviteAction;
@@ -18,6 +19,8 @@ use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, OrgRole};
 use crate::auth::secret::{hash_token, is_opaque_token, new_opaque_token};
 use crate::demo::is_demo_org;
+use crate::ee::scim::domains::{in_domains, scim_domains_tx};
+use crate::ee::scim::store as scim_store;
 use crate::email::Email;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
@@ -98,6 +101,8 @@ enum Created {
     Forbidden,
     /// The org's seat limit, which is what the caller hit.
     OverLimit(u64),
+    /// The email is on a verified SCIM domain while SCIM locks the org (D-EA-18).
+    ScimManaged,
 }
 
 enum Accepted {
@@ -105,6 +110,8 @@ enum Accepted {
     Missing,
     WrongEmail,
     OverLimit(u64),
+    /// The invitation is for a verified SCIM domain while SCIM locks the org (D-EA-18).
+    ScimManaged,
 }
 
 async fn list_invites(
@@ -153,6 +160,8 @@ async fn create_invite(
     let invited_by = inviter.as_ref().map(member_user);
     let inviter_name = inviter.and_then(|user| user.name);
     let max_seats = state.entitlements.resolve(org_id, now).limits.max_seats;
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
+    let domains_state = state.clone();
     let created = state
         .meta
         .write(move |conn| {
@@ -174,6 +183,12 @@ async fn create_invite(
                 .await?;
                 if existing.is_some() {
                     return Err(MetaError::Conflict("already a member"));
+                }
+                if locks {
+                    let listed = scim_domains_tx(&domains_state, conn, org_id, now).await?;
+                    if in_domains(&listed, &email_for_db) {
+                        return Ok(Created::ScimManaged);
+                    }
                 }
                 if let Some(limit) = max_seats.filter(|_| role != OrgRole::Viewer) {
                     let seats = members::seat_members_tx(conn, org_id).await?
@@ -216,6 +231,7 @@ async fn create_invite(
             });
         }
         Created::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
+        Created::ScimManaged => return Err(ApiError::ScimManaged),
     };
     let url = state
         .config
@@ -340,6 +356,15 @@ async fn accept_invite(
                 } else if invite.accepted_at.is_some() {
                     return Ok(Accepted::Missing);
                 } else {
+                    // D-EA-18: the test of `ee::scim::locks`, read inside this transaction.
+                    let scim_on = scim_store::org_scim_tx(conn, org.id).await?.enabled
+                        && crate::entitlements::of(&limits_state, org.id).allows(Feature::Scim);
+                    if scim_on {
+                        let listed = scim_domains_tx(&limits_state, conn, org.id, now).await?;
+                        if in_domains(&listed, &invite.email) {
+                            return Ok(Accepted::ScimManaged);
+                        }
+                    }
                     let max_seats = limits_state
                         .entitlements
                         .resolve(org.id, now)
@@ -411,6 +436,7 @@ async fn accept_invite(
             Some("this invitation is for another email address".to_owned()),
         ))),
         Accepted::OverLimit(limit) => Err(plan_limit(limit, ("seat", "seats"))),
+        Accepted::ScimManaged => Err(ApiError::ScimManaged),
     }
 }
 

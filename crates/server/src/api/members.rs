@@ -34,6 +34,9 @@ pub struct OrgMember {
     #[serde(with = "cetra_core::time_serde")]
     #[schema(value_type = String, format = DateTime)]
     pub joined_at: i64,
+    /// The org's identity provider manages this member: its role, overrides and removal
+    /// are locked (D-EA-18). False when SCIM is off or not entitled.
+    pub scim_managed: bool,
 }
 
 /// `PATCH /api/v1/orgs/{org}/members/{user}`.
