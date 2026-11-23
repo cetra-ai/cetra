@@ -7,8 +7,32 @@ import {
   ThemeProvider,
 } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { startAnalytics, type WireEvent } from "@/lib/analytics";
 
 describe("ThemeToggle", () => {
+  it("picking a theme is tracked", async () => {
+    const sent: WireEvent[][] = [];
+    const stop = startAnalytics({
+      send: async (events) => {
+        sent.push(events);
+      },
+      flushMs: 60_000,
+    });
+    try {
+      const user = userEvent.setup();
+      render(
+        <ThemeProvider>
+          <ThemeToggle />
+        </ThemeProvider>,
+      );
+      await user.click(screen.getByRole("button", { name: "Theme" }));
+      await user.click(screen.getByRole("menuitemradio", { name: "Dark" }));
+    } finally {
+      stop();
+    }
+    expect(sent.flat()).toEqual([{ name: "theme.changed", properties: { theme: "dark" } }]);
+  });
+
   it("selects Dark from the menu", async () => {
     const user = userEvent.setup();
     render(

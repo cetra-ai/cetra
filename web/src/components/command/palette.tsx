@@ -19,6 +19,7 @@ import {
   CommandItem,
   CommandList,
 } from "@/components/ui/command";
+import { track } from "@/lib/analytics";
 import { setTimeZone, useTimeZone } from "@/lib/settings";
 import {
   type Chord,
@@ -49,6 +50,11 @@ function isOverlayOpen(): boolean {
 
 export function CommandPalette() {
   const [palette, setPalette] = useState(false);
+  useEffect(() => {
+    if (palette) {
+      track({ name: "command_palette.opened" });
+    }
+  }, [palette]);
   const [help, setHelp] = useState(false);
   const [query, setQuery] = useState("");
   const navigate = useNavigate();

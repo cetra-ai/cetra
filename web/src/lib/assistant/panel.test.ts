@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { startAnalytics, type WireEvent } from "@/lib/analytics";
 import {
   defaultWindow,
   fitWindow,
@@ -16,6 +17,37 @@ const CONVERSATION_ID = "01900000-0000-7000-8000-000000001a01";
 afterEach(() => {
   vi.restoreAllMocks();
   localStorage.clear();
+});
+
+/** Starts analytics for one test; `stop` sends the queue and returns the sent events' names. */
+function trackedNames(run: () => void): string[] {
+  const sent: WireEvent[][] = [];
+  const stop = startAnalytics({
+    send: async (events) => {
+      sent.push(events);
+    },
+    flushMs: 60_000,
+  });
+  try {
+    run();
+  } finally {
+    stop();
+  }
+  return sent.flat().map((event) => event.name);
+}
+
+it("opening the panel is tracked once", () => {
+  expect(
+    trackedNames(() => {
+      setPanelOpen(true);
+      setPanelOpen(true);
+      setPanelOpen(false);
+    }),
+  ).toEqual(["assistant.panel_opened"]);
+});
+
+it("toggling the panel open is tracked", () => {
+  expect(trackedNames(() => togglePanel())).toEqual(["assistant.panel_opened"]);
 });
 
 it("persists the open state and the current conversation of a project", () => {

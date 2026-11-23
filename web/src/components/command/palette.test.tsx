@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { expect, it } from "vitest";
+import { startAnalytics, type WireEvent } from "@/lib/analytics";
 import { SHORTCUTS, shortcutLabel } from "@/lib/shortcuts";
 import { renderApp } from "@/test/render";
 
@@ -10,6 +11,25 @@ async function openPalette(user: Awaited<ReturnType<typeof renderApp>>["user"]) 
   await user.keyboard("{Meta>}k{/Meta}");
   return screen.findByRole("dialog", { name: /Command palette/ });
 }
+
+it("opening the palette is tracked once", async () => {
+  const sent: WireEvent[][] = [];
+  const stop = startAnalytics({
+    send: async (events) => {
+      sent.push(events);
+    },
+    flushMs: 60_000,
+  });
+  try {
+    const { user } = await renderApp("/acme/support-bot/traces");
+    await screen.findByRole("grid", { name: "Traces" });
+    await openPalette(user);
+  } finally {
+    // Nothing is sent before the 60 s interval, so `stop` sends the queue.
+    stop();
+  }
+  expect(sent.flat().map((event) => event.name)).toEqual(["command_palette.opened"]);
+});
 
 it("opens the palette with Ctrl/Cmd+K and shows the platform's key", async () => {
   const { user } = await renderApp("/acme/support-bot/traces");

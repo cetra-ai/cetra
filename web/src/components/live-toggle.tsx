@@ -2,6 +2,7 @@ import { cn } from "cn";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { track } from "@/lib/analytics";
 import type { StreamStatus } from "@/lib/sse";
 
 const DOT: Record<Exclude<StreamStatus, "closed">, string> = {
@@ -31,7 +32,10 @@ export function LiveToggle({
         size="sm"
         checked={pressed}
         disabled={disabled}
-        onCheckedChange={onPressedChange}
+        onCheckedChange={(on) => {
+          track({ name: "live_tail.toggled", properties: { on } });
+          onPressedChange(on);
+        }}
       />
       <Label htmlFor="traces-live" className="text-caption font-normal">
         Live

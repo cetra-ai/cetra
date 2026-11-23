@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { track } from "@/lib/analytics";
 import { STORAGE_PREFIX } from "@/product";
 
 export type ListLayout = "drawer" | "bottom" | "page";
@@ -39,6 +40,7 @@ export function getListLayout(): ListLayout {
 }
 
 export function setListLayout(next: ListLayout): void {
+  const changed = next !== getListLayout();
   fallback = next;
   try {
     localStorage.setItem(LIST_LAYOUT_STORAGE_KEY, next);
@@ -46,6 +48,9 @@ export function setListLayout(next: ListLayout): void {
     // Private mode can throw. The choice still applies for this page.
   }
   emit();
+  if (changed) {
+    track({ name: "list_layout.changed", properties: { layout: next } });
+  }
 }
 
 function subscribe(listener: () => void): () => void {
