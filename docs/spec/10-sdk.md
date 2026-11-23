@@ -175,7 +175,7 @@ Known, accepted differences that the fixtures do not cover. The SDK guides list 
 - **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to cetra too; TypeScript sends only ours. The Python guide warns about it (https://cetra.sh/docs/reference/python/opentelemetry/#known-limits).
 - **Abandoned generators.** A half-consumed Python sync generator that is garbage-collected ends its span with status ok; TypeScript (no finalizer) and Python async generators leave it unexported.
 
-## Python API (`pip install cetra-sdk`; Python ≥ 3.11; extras `cetra-sdk[openai]`, `[anthropic]`, `[langchain]`, `[llama-index]`, `[litellm]`, `[google-genai]`, `[bedrock]`, `[openai-agents]`, `[crewai]`, `[dspy]`, `[groq]`, `[mistralai]`, `[cohere]`, `[ollama]`, `[together]`, `[instructor]`, `[agno]`, `[smolagents]`, `[haystack]`, `[beeai]`, `[autogen-agentchat]`, `[all]`)
+## Python API (`pip install cetra-sdk`; Python ≥ 3.11; extras `cetra-sdk[openai]`, `[anthropic]`, `[langchain]`, `[llama-index]`, `[litellm]`, `[google-genai]`, `[bedrock]`, `[openai-agents]`, `[crewai]`, `[dspy]`, `[groq]`, `[mistralai]`, `[cohere]`, `[ollama]`, `[together]`, `[instructor]`, `[agno]`, `[smolagents]`, `[haystack]`, `[beeai]`, `[all]`)
 
 ```python
 import cetra
@@ -260,9 +260,9 @@ The SDK does not patch `threading` or executors. The Python guide (https://cetra
 | `smolagents` | `cetra-sdk[smolagents]` | `openinference.instrumentation.smolagents` | `SmolagentsInstrumentor` | `openinference-instrumentation-smolagents>=0.1.50` |
 | `haystack` | `cetra-sdk[haystack]` | `openinference.instrumentation.haystack` | `HaystackInstrumentor` | `openinference-instrumentation-haystack>=0.1.53` |
 | `beeai` | `cetra-sdk[beeai]` | `openinference.instrumentation.beeai` | `BeeAIInstrumentor` | `openinference-instrumentation-beeai>=0.1.36` (Python < 3.15) |
-| `autogen-agentchat` | `cetra-sdk[autogen-agentchat]` | `openinference.instrumentation.autogen_agentchat` | `AutogenAgentChatInstrumentor` | `openinference-instrumentation-autogen-agentchat>=0.1.29` |
+| `autogen-agentchat` | — (install `openinference-instrumentation-autogen-agentchat`) | `openinference.instrumentation.autogen_agentchat` | `AutogenAgentChatInstrumentor` | `openinference-instrumentation-autogen-agentchat>=0.1.29` |
 
-`cetra-sdk[all]` installs every one. The `instructor` and `beeai` distributions do not support every Python version: their extras install only where the marker in the table allows.
+`cetra-sdk[all]` installs every one that has an extra. The `instructor` and `beeai` distributions do not support every Python version: their extras install only where the marker in the table allows. A row without an extra names a distribution that cetra does not depend on: the AutoGen instrumentor pins protobuf below 5.30, which would cap the SDK's own protobuf (D-IN-24).
 
 With `openai` named, the SDK also stamps the host of the OpenAI client's base URL (D-IN-18). It wraps the OpenAI resource `create` methods (chat completions, responses and embeddings, sync and async) outermost. A context variable holds the client's base-URL host during the call, and the span processor sets `server.address` on spans that start during it and have none, so the server's endpoint rule (spec 02 § Model, provider, usage) can name OpenRouter, Novita or another provider behind the OpenAI client. Shutdown restores the methods. Other methods (`parse`, `responses.stream`) are not wrapped, so their spans carry no host.
 

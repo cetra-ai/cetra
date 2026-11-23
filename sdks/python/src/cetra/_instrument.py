@@ -1,7 +1,8 @@
 """The OpenInference instrumentor registry and its wiring (D-F-7).
 
 ``instrument=["openai", ...]`` names come from ``REGISTRY``; each maps to an
-OpenInference instrumentor class and the extra that installs it. The
+OpenInference instrumentor class and the extra that installs it — or, for a row
+without an extra, the distribution the user installs instead (D-IN-24). The
 ``openinference`` and ``opentelemetry.instrumentation`` imports live inside
 :func:`enable_for`: without an extra none of it is installed, and an empty
 ``instrument`` list must import nothing.
@@ -21,12 +22,17 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True, slots=True)
 class Instrumentor:
-    """One registry row: a name, the extra that installs it, and its class."""
+    """One registry row: a name, the extra that installs it, and its class.
+
+    A row with no extra names in ``package`` the distribution to install
+    instead; cetra never depends on it (D-IN-24).
+    """
 
     name: str
-    extra: str
+    extra: str | None
     module: str
     cls: str
+    package: str | None = None
 
 
 # Fixed by § Python instrumentors (plan F). A plain dict so tests can patch a
@@ -156,9 +162,10 @@ REGISTRY: dict[str, Instrumentor] = {
         ),
         Instrumentor(
             name="autogen-agentchat",
-            extra="autogen-agentchat",
+            extra=None,
             module="openinference.instrumentation.autogen_agentchat",
             cls="AutogenAgentChatInstrumentor",
+            package="openinference-instrumentation-autogen-agentchat",
         ),
     )
 }
@@ -243,6 +250,9 @@ def _stamp_host(runtime: "Runtime") -> None:
 
 
 def _extra_hint(entry: Instrumentor) -> str:
+    if entry.extra is None:
+        # Every registry row without an extra names a package (see Instrumentor).
+        return f"instrument: {entry.name!r} needs `pip install {entry.package}`"
     return f"instrument: {entry.name!r} needs `pip install cetra-sdk[{entry.extra}]`"
 
 

@@ -80,6 +80,25 @@ def test_resolve_missing_module_names_the_extra(
     assert str(info.value) == "instrument: 'fake' needs `pip install cetra-sdk[fake]`"
 
 
+def test_resolve_missing_module_names_the_package_when_there_is_no_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = Instrumentor(
+        name="fake",
+        extra=None,
+        module="cetra_tests_missing_module",
+        cls="FakeInstrumentor",
+        package="openinference-instrumentation-autogen-agentchat",
+    )
+    monkeypatch.setitem(REGISTRY, entry.name, entry)
+    with pytest.raises(ConfigError) as info:
+        resolve(["fake"])
+    assert (
+        str(info.value)
+        == "instrument: 'fake' needs `pip install openinference-instrumentation-autogen-agentchat`"
+    )
+
+
 def test_init_with_bad_name_installs_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CETRA_API_KEY", raising=False)
     with pytest.raises(ConfigError):
@@ -235,10 +254,9 @@ OTHER_ENTRIES = [entry for entry in REGISTRY.values() if entry.name not in ("ope
 
 @pytest.mark.parametrize("entry", OTHER_ENTRIES, ids=[entry.name for entry in OTHER_ENTRIES])
 def test_other_registry_entries_import(entry: Instrumentor) -> None:
-    """The nineteen other names: module and class exist when the extra is installed."""
-    module: Any = pytest.importorskip(
-        entry.module, reason=f"cetra-sdk[{entry.extra}] not installed"
-    )
+    """The nineteen other names: module and class exist when the extra or package is installed."""
+    install = f"cetra-sdk[{entry.extra}]" if entry.extra is not None else entry.package
+    module: Any = pytest.importorskip(entry.module, reason=f"{install} not installed")
     assert getattr(module, entry.cls, None) is not None
 
 
