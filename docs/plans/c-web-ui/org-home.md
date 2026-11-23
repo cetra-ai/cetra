@@ -238,7 +238,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 }
 ```
 
-   - `fn parse_ids(raw: &str) -> Result<Vec<ProjectId>, ApiError>`: split on `,`, trim each part, parse each with `ProjectId::from_str` (import `std::str::FromStr`); any parse error, a count outside `1..=MAX_IDS`, or a duplicate gives `ApiError::BadRequest { detail: None, errors: vec![field_error("ids", IDS_MESSAGE)] }`. An empty string splits into one empty part, which fails to parse: 400. Same shape as `parse_ids` in `routes/experiments.rs` (do not touch that one).
+   - `fn parse_ids(raw: &str) -> Result<Vec<ProjectId>, ApiError>`: split on `,`, trim each part, parse each with `ProjectId::from_str` (import `std::str::FromStr`); any parse error, a count outside `1..=MAX_IDS`, or a duplicate gives `field_error("ids", IDS_MESSAGE)` (`http/error.rs:407`: it returns the whole `ApiError::BadRequest` with that one field error and no detail). An empty string splits into one empty part, which fails to parse: 400. Same shape as `parse_ids` in `routes/experiments.rs` (do not touch that one).
    - `fn activity_window(now: i64) -> Result<storage::TimeWindow, ApiError>`, exactly:
 
 ```rust
