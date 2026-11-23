@@ -60,7 +60,8 @@
 - **P-6. Recompute only while SCIM is on.** The settings and mapping routes recompute only when `org_scim.enabled` is true after their write. When SCIM is off, members are edited by hand (D-EA-18, "Lifting the locks").
 - **P-7. Org scoping.** Every group route, and every mapping route, first loads the group with `group_tx(conn, org, id)` inside its write (404 otherwise). Store functions taking only a group id are then always called with a group of the path's org.
 - **P-8. Order and cost.** A recompute processes users ordered by `scim_users.created_at, id`, so seat allocation is deterministic. It loads the org's mappings once (`mappings_tx`) and the user-to-groups map in one query (`groups_by_user_tx`), not per user.
-- **P-9. Shared helpers.** G2 owns `users.rs` and makes its helpers `pub(crate)`: `admit`, `route`, `Scope`, `scope_of`, `ListQuery`, `parse_id`, `json_object`, `base_url`, `write_error` and `evict`. G3 uses them; it never copies them. Write closures keep M5's convention: a refusal found before the first write returns `Ok(Err(ScimError))`, so nothing half-applies.
+- **P-9. Shared helpers.** G2 owns `users.rs` and makes its helpers `pub(crate)`: `admit`, `route`, `Scope` and its fields, `scope_of`, `ListQuery` and its fields, `parse_id`, `json_object`, `base_url`, `write_error`, `evict`, and a new `page(q: &ListQuery) -> (u32, u32)` extracted from `list_users` (startIndex default 1, min 1; count default 100, clamped 0..=200). G3 uses them; it never copies them. Inside the SCIM modules, write `super::users::…` for these helpers and `crate::meta::users::…` for the account functions (`ensure_member_tx`, `user_by_id_tx`), since both modules are named `users`.
+- Turning SCIM off and on again without changing the default role recomputes nothing; the next change that touches a member does. Write closures keep M5's convention: a refusal found before the first write returns `Ok(Err(ScimError))`, so nothing half-applies.
 
 ## Versions
 
@@ -81,7 +82,7 @@ G7 (docs) after G2–G4
 - G1a's `mod.rs` names modules that later phases create; the tree compiles once G2–G5 are committed.
 - Prerequisite: M5's fix commits are in (they are: the tree is clean).
 
-**Shared rules:** M1's shared rules, M5's P-8, the SPDX header on `ee/` files. No group display name, email, name or external id in logs or records.
+**Shared rules:** M1's shared rules, M5's rule on closures (clone state and ctx before a `meta.write` closure), the SPDX header on `ee/` files. No group display name, email, name or external id in logs or records.
 
 ---
 
@@ -136,7 +137,6 @@ G7 (docs) after G2–G4
 
    pub(crate) async fn insert_group(conn, org, display_name: &str, external_id: Option<&str>, now) -> Result<ScimGroupRow, MetaError>; // Conflict("uniqueness")
    pub(crate) async fn group_tx(conn, org, id) -> Result<Option<ScimGroupRow>, MetaError>;
-   pub(crate) async fn group(pool, org, id) -> Result<Option<ScimGroupRow>, MetaError>;
    pub(crate) async fn list_groups(pool, org, filter: Option<&GroupFilter>, start_index: u32, count: u32) -> Result<(u64, Vec<ScimGroupRow>), MetaError>;
    pub(crate) async fn all_groups(pool, org) -> Result<Vec<ScimGroupRow>, MetaError>; // ORDER BY display_name, for the settings page
    pub(crate) async fn update_group(conn, org, id, display_name: &str, external_id: Option<&str>, now) -> Result<(), MetaError>; // Conflict("uniqueness")
@@ -148,7 +148,6 @@ G7 (docs) after G2–G4
    pub(crate) async fn add_group_members_tx(conn, org, group: Uuid, users: &[Uuid]) -> Result<Vec<Uuid>, MetaError>;
    pub(crate) async fn remove_group_members_tx(conn, group: Uuid, users: &[Uuid]) -> Result<Vec<Uuid>, MetaError>; // returns the ids removed
    pub(crate) async fn groups_of_user_tx(conn, scim_user: Uuid) -> Result<Vec<Uuid>, MetaError>;
-   pub(crate) async fn mapping_tx(conn, group: Uuid) -> Result<Option<GroupMapping>, MetaError>;
    pub(crate) async fn mappings(pool, org) -> Result<HashMap<Uuid, GroupMapping>, MetaError>;
    pub(crate) async fn put_mapping(conn, group: Uuid, mapping: &GroupMapping, now) -> Result<(), MetaError>; // replaces the org row and the project rows
    pub(crate) async fn delete_mapping(conn, group: Uuid) -> Result<bool, MetaError>;
@@ -175,7 +174,8 @@ G7 (docs) after G2–G4
    | `RoleRaiseRefused { count: u32, scim_user_ids: Vec<Uuid> }` | `scim.role_raise_refused` | — (at most 20 ids) |
 
 5. **`test_helpers.rs`** (`#[cfg(test)]`, SPDX), the shared setup for G2–G5's tests:
-   - `pub(crate) async fn scim_org(app: &TestApp, seeded: &Seeded, domain: &str, default_role: OrgRole) -> String` (licensed app expected; writes `put_org_scim(enabled)`, a verified `insert_domain`, `insert_token`; returns the bearer token);
+   - `pub(crate) async fn scim_org_in(app: &TestApp, org: OrgId, owner: Uuid, domain: &str, default_role: OrgRole) -> String` (licensed app expected; writes `put_org_scim(enabled)`, a verified `insert_domain`, `insert_token`; returns the token), with the same body as `users.rs`'s private `scim_org_in`;
+   - `pub(crate) async fn scim_org(app: &TestApp, seeded: &Seeded, domain: &str, default_role: OrgRole) -> String`, a thin wrapper over the seeded org;
    - `pub(crate) fn bearer(token: &str) -> String`;
    - `pub(crate) async fn create_user(app, token, user_name) -> TestResponse` (POST /scim/v2/Users with the PatchOp-free User body);
    - `pub(crate) async fn create_group(app, token, display_name, members: &[&str]) -> TestResponse`;
@@ -233,7 +233,7 @@ G7 (docs) after G2–G4
 4. **`schema.rs`:**
    - `pub(crate) const GROUP_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:Group";`
    - `pub(crate) fn group_resource(row: &ScimGroupRow, members: Option<&[Uuid]>, base_url: &str) -> Value`. It holds `schemas`, `id`, `displayName`, `externalId` when set, and `members: [{"value": id, "$ref": "<base>/Users/<id>"}]` when `members` is `Some`. Without them (`excludedAttributes=members`) the key is omitted. `meta` has `resourceType: Group`, `created`, `lastModified` (as `user_resource` formats them) and `location: <base>/Groups/<id>`. No member `display`.
-   - `resource_types` lists User and Group (count 2); `schemas` adds the core Group schema with `displayName` (required), `externalId` and `members` (multi-valued complex: `value`, `$ref`), count 3. Update the count assertions in the tests.
+   - `resource_types` lists User and Group (count 2); `schemas` adds the core Group schema with `displayName` (required), `externalId` and `members` (multi-valued complex: `value`, `$ref`), count 3. In `schema.rs`'s tests, rename `resource_types_lists_only_users` and update the `schemas()` `totalResults` from 2 to 3.
 
 **Tests:**
 - filter: `parses_display_name_eq`, `refuses_member_filters_on_groups`.
@@ -276,8 +276,6 @@ G7 (docs) after G2–G4
    Use `auth::roles::org_rank` for org roles; do not redefine it.
 
    In `meta/members.rs`, add `pub(crate) async fn project_overrides_of_user_tx(conn, org: OrgId, user: Uuid) -> Result<Vec<(ProjectId, ProjectOverride)>, MetaError>` (`SELECT pm.project_id, pm.role FROM project_members pm JOIN projects p ON p.id = pm.project_id WHERE p.org_id = ? AND pm.user_id = ?`, parsed with `parse_project_override`).
-
-   ```rust
    ```
 
    Load `mappings_tx` and `groups_by_user_tx` once. Then **per user**, deduplicated and ordered by `scim_users.created_at, id` (P-8):
@@ -292,7 +290,7 @@ G7 (docs) after G2–G4
    6. **Overrides**, for the final org role. Read the existing ones with `project_overrides_of_user_tx`.
       - **`Admin`:** remove them all (D139: admins have none). Count each removal.
       - **Otherwise:** the desired map is project → the highest override among the groups' project rows (none < viewer < member < admin). For each project in the union of the existing and the desired:
-        - compare effective access before and after (P-5);
+        - compare effective access before and after (P-5), both computed with the **final** org role, so only the override change is judged;
         - when they differ, apply the change (`set_project_override` or `remove_project_override`) if it lowers access, or if `scope.scim && scope.project_roles`; otherwise skip it;
         - count each applied change.
    7. After all users:
@@ -301,7 +299,7 @@ G7 (docs) after G2–G4
 
    `ctx` is the caller's (a SCIM token, or the owner on the settings routes).
 2. **`users.rs`:**
-   - Make the helpers of P-9 `pub(crate)`, and move the tests onto `ee::scim::test_helpers`, deleting the private copies of those helpers.
+   - Make the helpers of P-9 `pub(crate)` (fields included) and extract `page`. Move the tests onto `ee::scim::test_helpers`, deleting the private copies of those helpers; existing `scim_org(app, seeded, domain)` calls gain `OrgRole::Viewer`.
    - **Create:** when the user was already a member (`ensure_member_tx` returned `None`), call `recompute_tx(…, &[scim_user_id])` after `insert_user`. This replaces M5's P-5; remove that comment.
    - **Reactivation**, in this order:
      1. `set_user_active(true)`;
@@ -407,7 +405,7 @@ G7 (docs) after G2–G4
      - an empty mapping (no org role, no projects) is a 400: use DELETE.
    - Converters between `ProjectOverride` and `ProjectRoleOverride` are written in `mappings.rs` (the existing ones are private in `ee/project_roles.rs` and `routes/members.rs`).
    - Gating: needs `scim`, except when the change only lowers roles (every new value is lower than or equal to the old one, and no new rows). Writing project roles needs `project_roles` when any project row is new or higher.
-   - In one write: `put_mapping`, then, when SCIM is enabled (P-6), `recompute_tx(group members)`, then record `GroupMappingChanged { org_role, projects }`. The actor is the owner. DELETE does the same with `delete_mapping`.
+   - In one write: read `org_scim_tx` (for `enabled` and `default_role`, used to build the `RecomputeScope`), `put_mapping`, then, when SCIM is enabled (P-6), `recompute_tx(group members)`, then record `GroupMappingChanged { org_role, projects }`. The actor is the owner. DELETE does the same with `delete_mapping`.
 3. **OpenAPI:**
    - the three operations (tag `orgs`, security `session`) and the DTO schemas;
    - `tests/openapi.rs`: the ids in `OPERATIONS`, the session list, and `expected_errors` copied from the SCIM settings operations;
