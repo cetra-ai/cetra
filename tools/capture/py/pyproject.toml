@@ -64,6 +64,19 @@ dependencies = [
   "openinference-instrumentation-beeai==0.1.36",
   "guardrails-ai==0.11.0",
   "deepagents==0.7.32",
+  # Native GenAI frameworks of M4 (track IN, docs/plans/in-integrations/spikes/m4-python-genai.md)
+  # and AutoGen's OpenInference instrumentor, each the version the spike found usable at the
+  # 7-day cutoff.
+  "pydantic-ai-slim[openai]==2.68.0",
+  "semantic-kernel==1.47.0",
+  "strands-agents[openai]==1.65.0",
+  "agent-framework-core==1.26.0",
+  "agent-framework-openai==1.18.2",
+  "ag2[openai,tracing]==1.3.2",
+  "autogen-agentchat==0.7.5",
+  "autogen-ext[openai]==0.7.5",
+  "openinference-instrumentation-autogen-agentchat==0.1.29",
+  "mirascope[openai,ops]==2.8.2",
   # The SDK under test, from this repository (editable), so the harness uses its runtime.
   "cetra-sdk",
 ]
@@ -82,7 +95,15 @@ exclude-newer = "7 days" # D74/D117: no release younger than 7 days
 exclude-newer-package = { google-adk = "2026-11-07T01:04:00Z" }
 # instructor 1.17.0 caps jiter<0.15 and guardrails-ai 0.11.0 caps openai<3. Both work with
 # the pins above (spike finding 5).
-override-dependencies = ["jiter>=0.16", "openai==3.45.0"]
+# Mirascope 2.8.2's extras cap anthropic, google-genai and the Google GenAI instrumentor below
+# the versions this project pins (M4 spike, § Capture project). The overrides keep the pins.
+override-dependencies = [
+  "jiter>=0.16",
+  "openai==3.45.0",
+  "anthropic==2.4.0",
+  "google-genai==2.34.0",
+  "opentelemetry-instrumentation-google-genai==1.1b1",
+]
 
 [tool.uv.sources]
 cetra-sdk = { path = "../../../sdks/python", editable = true }
@@ -125,6 +146,17 @@ follow_imports = "skip"
 [[tool.mypy.overrides]]
 module = "opentelemetry.instrumentation.openai_agents"
 follow_imports = "skip"
+
+# mirascope ships no py.typed marker, so its decorators and calls are Any. The scenario
+# module only has to run, not type-check against it.
+[[tool.mypy.overrides]]
+module = "mirascope"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "mirascope_agent_tool"
+disallow_untyped_decorators = false
+warn_return_any = false
 
 # smolagents ships no py.typed marker.
 [[tool.mypy.overrides]]

@@ -916,6 +916,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_mock_without_turns_fails_any_request() {
+        let mock = Mock::new(Vec::new());
+        let response = send(&mock, "POST", "/v1/chat/completions", "{}").await;
+        assert_eq!(response.status(), 500);
+        let log = mock.finish();
+        assert!(log.served.is_empty());
+        assert_eq!(log.errors, vec!["request 1: no scripted turn left"]);
+    }
+
+    #[tokio::test]
     async fn head_api_hello_is_ok_and_not_logged() {
         let mock = Mock::new(Vec::new());
         let response = mock

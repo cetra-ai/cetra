@@ -410,9 +410,6 @@ impl Scenario {
         {
             return Err("libraries must contain instrumentation".to_owned());
         }
-        if self.turns.is_empty() {
-            return Err("turns must be non-empty".to_owned());
-        }
         reject_duplicates(&self.libraries, "libraries")?;
         reject_duplicates(
             &self
@@ -455,7 +452,11 @@ impl Scenario {
     }
 
     fn check_turns(&self) -> Result<(), String> {
-        let provider = self.turns[0].api.provider();
+        // A program that makes no provider request has no turns. The mock then fails any request.
+        let Some(first) = self.turns.first() else {
+            return Ok(());
+        };
+        let provider = first.api.provider();
         for (index, turn) in self.turns.iter().enumerate() {
             if turn.api.provider() != provider {
                 return Err(format!(
@@ -1241,10 +1242,6 @@ mod tests {
         assert_reason(value, "libraries must contain instrumentation");
 
         let mut value = chat();
-        value["turns"] = json!([]);
-        assert_reason(value, "turns must be non-empty");
-
-        let mut value = chat();
         value["turns"][0]["chunks"] = json!(0);
         assert_reason(value, "turns[0].chunks must be at least 1");
     }
@@ -1375,11 +1372,15 @@ mod tests {
             serde_json::to_vec(&value).expect("json"),
         )
         .expect("write");
-        let error = Scenario::load(&dir).expect_err("invalid");
-        let CaptureError::ScenarioInvalid { case, reason } = error else {
-            panic!("expected ScenarioInvalid");
-        };
-        assert_eq!(case, "genai/empty-turns");
-        assert!(reason.contains("turns must be non-empty"), "{reason}");
+        let loaded = Scenario::load(&dir).expect("a scenario without turns is valid");
+        assert!(loaded.turns.is_empty());
+    }
+
+    #[test]
+    fn a_scenario_without_turns_is_valid() {
+        let mut value = chat();
+        value["turns"] = json!([]);
+        let scenario: Scenario = serde_json::from_value(value).expect("parse");
+        scenario.check().expect("no turns is valid");
     }
 }

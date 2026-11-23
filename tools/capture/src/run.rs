@@ -546,7 +546,7 @@ fn process(
     scrub(
         &mut request,
         &ScrubContext {
-            provider: provider(scenario)?,
+            provider: provider(scenario),
             mock_port,
             receiver_port,
             home: home_dir()?,
@@ -557,14 +557,15 @@ fn process(
     Ok(request)
 }
 
-fn provider(scenario: &Scenario) -> Result<Provider, CaptureError> {
-    match scenario.turns.first() {
-        Some(turn) => Ok(turn.api.provider()),
-        None => Err(CaptureError::ScenarioInvalid {
-            case: scenario.case.to_string(),
-            reason: "turns must be non-empty".to_owned(),
-        }),
-    }
+/// Provider whose real host replaces the mock address in the scrub.
+///
+/// A scenario without turns sends no request to the mock, so no mock address can appear
+/// and the fallback host is never written.
+fn provider(scenario: &Scenario) -> Provider {
+    scenario
+        .turns
+        .first()
+        .map_or(Provider::OpenAi, |turn| turn.api.provider())
 }
 
 fn ingest_nanos(scenario: &Scenario) -> Result<i64, CaptureError> {

@@ -1,0 +1,22 @@
+{
+  "description": "Microsoft Agent Framework agent run with one tool call, traced with sensitive data enabled.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "agent-framework-core",
+    "instrumentation_version": "1.26.0",
+    "language": "python",
+    "libraries": {
+      "agent-framework-core": "1.26.0",
+      "agent-framework-openai": "1.18.2",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T20:02:01Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "enable_instrumentation(enable_sensitive_data=True) on the harness provider. The client is OpenAIChatCompletionClient pointed at the mock, with agent-framework-core and agent-framework-openai, not the meta package (M4 spike, Capture project). gen_ai.agent.id is a UUID per run and is volatile. agent_framework.function.invocation.duration is a measured duration and is a timing attribute."
+}

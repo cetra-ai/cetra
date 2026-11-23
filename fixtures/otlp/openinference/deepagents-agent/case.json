@@ -11,7 +11,7 @@
       "openinference-instrumentation-langchain": "0.1.81",
       "opentelemetry-sdk": "1.45.2"
     },
-    "captured_at": "2026-11-23T16:56:41Z"
+    "captured_at": "2026-11-23T20:10:45Z"
   },
   "spec_refs": [
     "02 § Convention detection",

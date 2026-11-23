@@ -1,0 +1,22 @@
+{
+  "description": "AG2 agent run with one tool call, traced by AG2's telemetry middleware.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "ag2",
+    "instrumentation_version": "1.3.2",
+    "language": "python",
+    "libraries": {
+      "ag2": "1.3.2",
+      "opentelemetry-sdk": "1.45.2"
+    },
+    "captured_at": "2026-11-23T20:02:05Z"
+  },
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output",
+    "02 § Normalization rules"
+  ],
+  "notes": "TelemetryMiddleware on the harness provider, with agent_name weather_agent, provider_name openai and the model name. Each chat span is followed by a record_usage model_call span that repeats its tokens (ag2.span.type usage). The usage span is a span, not an llm span, so the tokens count once (D-IN-23 item 1). ag2.usage.event_id is a random id per run and is volatile."
+}
