@@ -2,13 +2,14 @@
 
 Status: **draft for the user's review** (2026-11-23). Decisions `D-TL-<n>` (`docs/mvp-decisions.md` § Track TL). "(user)" marks the user's answers of 2026-11-23. One Sonnet cold review done and fixed (`side-session-notes/…/tl-design-review.md`).
 
-Today `cetra serve` sends nothing anywhere: it writes logs to stdout and serves Prometheus `/metrics` when `metrics_addr` is set (D-N-28). This track adds five things, each documented and switchable:
+Today `cetra serve` sends nothing anywhere: it writes logs to stdout and serves Prometheus `/metrics` when `metrics_addr` is set (D-N-28). This track adds six things, each documented and switchable:
 
 1. **Self-monitoring over OTLP.** The operator points `cetra serve` at an OTLP/HTTP endpoint of their choice (Sentry, Grafana, an OpenTelemetry Collector, a Datadog Agent, another cetra) and the server exports its own logs, errors and traces there. Off by default.
 2. **Our cloud uses the same mechanism.** Cells set those keys to a destination we run. The deploy wiring, the control plane and the choice of destination are track Q's (§ Requests to track Q).
 3. **Opt-in crash reports to us.** One switch, off by default, sends panics and ERROR events to `telemetry.cetra.sh`, with code-defined facts only (user).
 4. **`cetra debug-bundle`.** One local JSON file with build info, the config with secrets removed, recent logs and storage stats, for a GitHub issue.
 5. **An anonymous daily heartbeat** from self-hosted installs, on by default (user), off with `CETRA_TELEMETRY=off`, `DO_NOT_TRACK` or in CI.
+6. **Product analytics (user).** One typed catalog of product events: on our cloud, per-user events go to PostHog through the server; everywhere, bucketed feature counts ride on the heartbeat.
 
 Research: `side-session-notes/…/tl-competitors.md` (Langfuse, Laminar, Opik, MLflow, Helicone).
 
@@ -30,6 +31,8 @@ Research: `side-session-notes/…/tl-competitors.md` (Langfuse, Laminar, Opik, M
 - **A UI for telemetry settings.** Config and environment only.
 - **Remote configuration** of telemetry (MLflow fetches a config file each start). The binary does what its config says.
 - **Server-side symbolication** of crash backtraces (§ 3).
+- **Session replay, autocapture and any analytics script in the browser** (§ 6).
+- **Per-user analytics on self-hosted installs** sent to us: only anonymous bucketed feature counts (§ 6).
 - **Our cloud's deploy wiring and the relay service** themselves: track Q.
 
 ## What competitors do (summary)
@@ -83,6 +86,10 @@ resource = "deployment.environment=prod"          # extra resource attributes, k
 heartbeat = true                        # 5. daily anonymous heartbeat
 crash_reports = false                   # 3. opt-in crash reports
 endpoint = "https://telemetry.cetra.sh" # for tests and egress proxies
+
+[analytics]                             # 6. per-user product events to PostHog (off when unset; set on our cloud cells)
+posthog_host = "https://eu.i.posthog.com"
+posthog_key = "phc_…"                   # secret
 ```
 
 Env forms follow the loader (`CETRA_SELF_MONITORING__OTLP_ENDPOINT`, …); `resource` and `otlp_headers` are strings so that their env forms work. `CETRA_TELEMETRY` is not the `[telemetry]` table: it is read before the loader and filtered out of the `CETRA_` mapping, like `CETRA_CONFIG` (D-TL-11). `otlp_endpoint`: `http` or `https`, no userinfo, no query; its path is kept and `/v1/logs` or `/v1/traces` appended. `telemetry.endpoint`: `https`, or `http` only to a loopback address (tests). Every key goes into the configuration reference page; spec 12's "cetra has no telemetry key", D-W-18's "`telemetry.*` refused", spec 12 § Self-monitoring and D38/D-N-33's "OTel self-traces stay deferred" are amended (D-TL-1).
@@ -185,6 +192,26 @@ Never: emails, domains, names, URLs, host names, licence keys or licence state, 
 
 **Startup notice.** One line at `info` under a dedicated target that the log filter always lets through (like the `rmcp` cap, but raising), so it shows at `log.level = "warn"` too: the heartbeat is on, what it sends, the instance id, the docs URL and how to turn it off; or that it is off, and why. Crash reports get the same line.
 
+### 6. Product analytics (user)
+
+The user wants to know what people do in the product: which features they use and how. One typed event catalog feeds two sinks (D-TL-14):
+
+```
+ web UI ── POST /api/v1/analytics/events ──┐
+                                           ├─► catalog check ─┬─► PostHog sender (only when [analytics] is set: our cloud cells)
+ API handlers ── analytics::record(...) ───┘                  └─► feature counters ─► heartbeat `usage` buckets (self-hosted)
+```
+
+**The catalog (D-TL-15).** One Rust enum, one variant per event, with a dotted append-only name (`sql_console.run`, `evaluator.created`, `playground.run`, `dataset.imported`, `dashboard.edited`, `trace.viewed`, `page.viewed`, …) and typed properties: enums, booleans, counts, durations, and our entity ids (project id). Never names, free text, URLs, filter values, attribute keys or payload. `page.viewed` carries the router's route template (`/orgs/$org/projects/$project/traces`), never the URL. The list is written in M6's plan from the pages and routes of the day (about 30–40 events) and is the same idea as the audit log's typed catalog (D-EA-4). A golden test fixes the names and property keys, so every addition shows in review.
+
+**Web events go through the server.** The UI sends catalog events to `POST /api/v1/analytics/events` on its own origin (session cookie, at most 50 events per request, answered `204` whatever happens). The server drops a name or property the catalog does not know, adds the user id and org id from the session (the browser cannot claim another user), and hands the event to the sinks. Consequences: no third-party script in the UI, the CSP stays `default-src 'self'`, no cookie of ours or PostHog's is set, ad blockers do not distort the numbers, and autocapture and session replay are impossible by construction. A request carrying `DNT: 1` or `Sec-GPC: 1` is dropped for the PostHog sink (it still counts toward the anonymous feature counters). The UI sends nothing when `GET /api/auth/config` says analytics is off, which is every self-hosted install by default.
+
+**Server events.** API handlers record the events whose truth is on the server (an evaluator created through the API or MCP, an export downloaded, a backfill started) with the same `record` function, so an action counts once whether the UI, the CLI, the SDK or an agent did it.
+
+**PostHog sink (cloud).** `[analytics]` with `posthog_host` (e.g. `https://eu.i.posthog.com`) and `posthog_key` (a secret path); off when unset. A self-hosted operator may point it at their own PostHog; nothing in the binary names ours. Each event goes to PostHog's capture API in batches (every 10 s or 100 events, bounded queue of 10 000, dropped when full, failures logged at `debug` once a minute): `distinct_id` = the user's UUID, `$groups` = `{ "org": <org id> }`, the catalog properties, `$ip` = null, `$process_person_profile` true. No email, name or org name is ever sent; PostHog person and group properties are limited to the user's org role and the org's plan name. Our cloud's privacy policy names PostHog as a processor (Q).
+
+**Feature counters (self-hosted).** Every catalog event, from any source, increments an in-memory counter per event name; counters are saved hourly to `instance_settings['telemetry.usage_counts']` and reset when a heartbeat is sent. The heartbeat gains `usage`: for each event name, the count since the last heartbeat in the buckets `0`, `1-9`, `10-99`, `100-999`, `1000+`. No users, orgs, sequences or timings. Turned off with the heartbeat (the switchboard).
+
 ### The switchboard (D-TL-11)
 
 One function decides, at startup, what may go to us. The first match wins:
@@ -236,7 +263,9 @@ All are MIT or Apache-2.0 (on the `deny.toml` allow-list).
 | D-TL-10 | Crash reports and heartbeats go to `telemetry.cetra.sh`, a relay track Q runs (user). | The control plane; a vendor DSN in the binary. |
 | D-TL-11 | One switchboard: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, restore mode, then CI and debug builds for the heartbeat, then config; fail closed. | Licence-dependent rules; no CI detection. |
 | D-TL-12 | Crash reports are spooled to disk before sending. | An in-memory queue: a panic that ends the process would never be reported. |
-| D-TL-13 | Our errors go to Sentry EU; heartbeats stay in the relay's own storage, no PostHog (user). | A cetra project only (no log records, weak triage); SigNoz, Grafana Cloud; a product-analytics SaaS for heartbeats. |
+| D-TL-13 | Our errors go to Sentry EU (user); heartbeats stay in the relay's own storage. | A cetra project only (no log records, weak triage); SigNoz, Grafana Cloud; a product-analytics SaaS for heartbeats. |
+| D-TL-14 | Product analytics (user): one event catalog, two sinks: per-user events to PostHog when `[analytics]` is set (our cloud), bucketed feature counts in the heartbeat (self-hosted). Web events go through the server. | posthog-js in the UI (third-party script, CSP change, cookies, autocapture and replay would capture prompts shown on screen); per-user analytics on self-hosted installs. |
+| D-TL-15 | A typed catalog with dotted names and code-defined properties; page views by route template; the user and org from the session; `DNT`/`Sec-GPC` honoured. | Free-form event names and properties (unreviewable, leak user text). |
 
 ## Requests to track Q
 
@@ -245,6 +274,7 @@ Written to `side-session-notes/…/tl-requests-for-q.md` when the design is appr
 - **TL-Q1 — the relay at `telemetry.cetra.sh`.** `POST /v1/heartbeat` and `POST /v1/crash`, JSON bodies of D-TL-8 and D-TL-5 (schema 1; unknown schema → 400), bodies ≤ 64 KiB, rate limit per source address without storing it, 2xx with an empty body. Heartbeats stored without the address (one row per `instance_id` per day, kept 13 months). Crash reports forwarded to our error destination, kept 90 days. A way to delete an instance's data on request.
 - **TL-Q2 — cells.** Each cell sets `self_monitoring.otlp_endpoint` and `otlp_headers` (from a secret) to our destination, `self_monitoring.resource = "cetra.cell=<name>"`, `telemetry.heartbeat = false` (a cell is ours) and `telemetry.crash_reports = false` (its errors already reach us through self-monitoring).
 - **TL-Q3 — the control plane** exports its own logs and traces the same way, so cloud errors are in one place.
+- **TL-Q4 — PostHog.** A PostHog EU project; each cell sets `analytics.posthog_host` and `analytics.posthog_key` (from a secret); the control plane's own pages, if they want events, use the same catalog names; the cloud privacy policy names PostHog (and Sentry) as processors.
 - **Destination: Sentry, EU region (user, D-TL-13).** For the cloud's logs, errors and traces (TL-Q2, TL-Q3) and for forwarded crash reports (the relay turns them into Sentry events, so they group as issues). The binary knows only an OTLP endpoint and the relay's hostname, so the choice is configuration and can change without a release. Before relying on it, Q checks that ERROR log records sent over OTLP show up as Sentry issues; if not, the cells send to an OpenTelemetry Collector that forwards to Sentry. Heartbeats stay in the relay's own storage (a small database queried with SQL); no product-analytics SaaS such as PostHog (user).
 
 ## Milestones
@@ -269,10 +299,15 @@ Delivers: `[telemetry]` (`heartbeat`, `endpoint`), `CETRA_TELEMETRY` and `DO_NOT
 
 Delivers: `telemetry.crash_reports`, the report type, the crash layer, the panic hook's spool, the sender, the caps and dedup, the path rule, the leak tests, the Telemetry docs page section listing every field. Depends on M1 (panic hook) and M4 (switchboard, instance id, endpoint).
 
+### M6 — Product analytics
+
+Delivers: the event catalog, `analytics::record` in the API handlers, `POST /api/v1/analytics/events` and its OpenAPI entry, the `analytics` flag in `GET /api/auth/config`, the web client (page views by route template and UI-only events), the PostHog sink and `[analytics]` config, the feature counters and the heartbeat's `usage` field, the leak and golden tests, the Telemetry docs page section, TL-Q4. Depends on M4 (heartbeat, switchboard). Leaves out: dashboards in PostHog (Q).
+
 ## Open questions for the user
 
 1. **Naming.** `[self_monitoring]` for the operator's export (spec 12's heading) and `[telemetry]` for what goes to us. OK, or `[otel]` / `[otlp_export]`?
 2. **Heartbeat fields.** Is the `features` list right, and is `deployment` (docker/kubernetes/binary) acceptable?
 3. **Debug bundle and hosts.** The bundle shows host names, bucket names and paths (the user reviews it before posting). Keep, or redact them too?
 4. **Export defaults.** Logs at `warn` and traces at 10 % by default once an endpoint is set (an ingest-heavy server would otherwise export one log line and one trace per OTLP request). OK?
-5. **Milestone order.** Debug bundle (M3) before the heartbeat (M4) and crash reports (M5). OK?
+5. **Milestone order.** Debug bundle (M3) before the heartbeat (M4), crash reports (M5) and product analytics (M6). OK?
+6. **Analytics opt-out for cloud users.** Besides `DNT`/`Sec-GPC`, should a cloud user get an "Allow product analytics" switch in account settings (proposed: no for now; first-party, pseudonymous, no cookies)?
