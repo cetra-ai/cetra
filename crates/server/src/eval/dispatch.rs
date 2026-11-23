@@ -11,6 +11,7 @@ use futures::FutureExt;
 use sqlx::SqliteConnection;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinSet;
+use tracing::Instrument as _;
 use uuid::Uuid;
 
 use super::execute::{self, ClaimedJob};
@@ -23,6 +24,7 @@ use crate::meta::eval_jobs::{self, Candidate, Finish, JobUsage, PruneReport};
 use crate::meta::issues;
 use crate::meta::online_rules;
 use crate::meta::projects;
+use crate::observability::spans;
 
 /// Webhook evaluators run at most this many jobs at once (D-I-6).
 pub(crate) const WEBHOOK_SLOTS: usize = 4;
@@ -406,15 +408,25 @@ async fn claim_all(
 async fn run_claimed(state: AppState, job: ClaimedJob, permits: Permits) {
     let id = job.row.id;
     let claims = job.claims;
-    let outcome = AssertUnwindSafe(execute::run_job(&state, job))
+    let span = spans::eval_job(
+        job.row.id,
+        job.row.project_id,
+        job.row.evaluator_id,
+        &job.row.kind,
+    );
+    let outcome = AssertUnwindSafe(execute::run_job(&state, job).instrument(span.clone()))
         .catch_unwind()
         .await;
     match outcome {
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => {
+            span.record(spans::OUTCOME, "recorded");
+        }
         Ok(Err(error)) => {
+            span.record(spans::OUTCOME, "record_failed");
             tracing::error!(job_id = %id, error = %error, "eval job could not be recorded");
         }
         Err(_panic) => {
+            span.record(spans::OUTCOME, "panicked");
             tracing::error!(job_id = %id, "eval job panicked");
             if let Err(error) = finish_panicked(&state, id, claims).await {
                 tracing::error!(job_id = %id, error = %error, "eval job could not be failed");
