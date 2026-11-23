@@ -263,6 +263,9 @@ pub(crate) async fn start(state: &AppState, decision: Decision) -> Option<JoinHa
 }
 
 #[cfg(test)]
+mod leak_tests;
+
+#[cfg(test)]
 mod tests {
     use std::time::Duration;
 
