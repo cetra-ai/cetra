@@ -28,7 +28,7 @@ import { StatusPill } from "@/components/settings/status-pill";
 import { TypeToConfirmDialog } from "@/components/type-to-confirm-dialog";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import { providerLabel } from "@/lib/llm-adapters";
 import { canManageConnections } from "@/lib/roles";
 import { parseSettingsListSearch, type SettingsListSearch } from "@/lib/search/settings-list";
 
@@ -60,9 +60,9 @@ const COLUMNS: DataTableColumn<Connection>[] = [
     id: "provider",
     size: 180,
     header: "Provider",
-    accessorFn: (connection) => LLM_ADAPTER_LABELS[connection.adapter],
+    accessorFn: (connection) => providerLabel(connection),
     enableSorting: true,
-    cell: ({ row }) => LLM_ADAPTER_LABELS[row.original.adapter],
+    cell: ({ row }) => providerLabel(row.original),
   },
   {
     id: "model",
@@ -112,7 +112,7 @@ const COLUMNS: DataTableColumn<Connection>[] = [
 
 const SORT_KEYS: Record<string, (connection: Connection) => SortValue> = {
   name: (connection) => connection.name,
-  provider: (connection) => LLM_ADAPTER_LABELS[connection.adapter],
+  provider: (connection) => providerLabel(connection),
   model: (connection) => connection.default_model,
   status: (connection) => connection.status,
   // RFC 3339 times with a fixed-width fraction sort as text.
@@ -265,7 +265,7 @@ function ConnectionsList({
   const visible = sortRows(
     filterRows(rows, search.q, (connection) => [
       connection.name,
-      LLM_ADAPTER_LABELS[connection.adapter],
+      providerLabel(connection),
       connection.default_model,
     ]),
     sorting,
@@ -351,7 +351,7 @@ function ConnectionDetail({
       title={connection.name}
       subtitle={
         <span className="flex flex-wrap items-center gap-2">
-          {LLM_ADAPTER_LABELS[connection.adapter]}
+          {providerLabel(connection)}
           {failing ? (
             <StatusPill tone="error" title={connection.last_error}>
               Failing
@@ -417,7 +417,7 @@ function ConnectionDetail({
 
 function ReadOnlyDetails({ connection }: { connection: Connection }) {
   const details: [string, string][] = [
-    ["Provider", LLM_ADAPTER_LABELS[connection.adapter]],
+    ["Provider", providerLabel(connection)],
     ["Base URL", connection.base_url ?? "Default"],
     ["Default model", connection.default_model ?? "—"],
     ["API key", connection.api_key_hint ? `••••${connection.api_key_hint}` : "••••"],

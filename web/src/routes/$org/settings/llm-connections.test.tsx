@@ -31,7 +31,10 @@ const LIST = "/acme/settings/llm-connections";
 async function openConnection(path = LIST) {
   const rendered = await renderApp(path);
   const grid = await screen.findByRole("grid", { name: "LLM connections" });
-  await rendered.user.click(within(grid).getByText(CONNECTION_NAME));
+  // The name column comes first; the provider cell also reads OpenAI.
+  const cell = within(grid).getAllByText(CONNECTION_NAME)[0];
+  expect(cell).toBeDefined();
+  await rendered.user.click(cell as HTMLElement);
   const form = await screen.findByRole("form", { name: "Edit connection" });
   return { ...rendered, form };
 }
@@ -53,14 +56,34 @@ it("lists connections with provider, model and status", async () => {
   await renderApp(LIST);
 
   const grid = await screen.findByRole("grid", { name: "LLM connections" });
-  expect(within(grid).getByText("OpenAI")).toBeInTheDocument();
-  expect(within(grid).getByText("OpenAI-compatible")).toBeInTheDocument();
+  // The name and the provider both read "OpenAI" (the fixture has no base URL).
+  expect(within(grid).getAllByText("OpenAI")).toHaveLength(2);
   expect(within(grid).getByText("gpt-5-mini")).toBeInTheDocument();
   expect(within(grid).getByText("OK")).toBeInTheDocument();
   expect(orgNav().getByRole("link", { name: "LLM connections" })).toHaveAttribute(
     "aria-current",
     "page",
   );
+});
+
+it("labels an OpenAI connection with a base URL as OpenAI-compatible", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [{ ...CONNECTION, base_url: "https://gw.example.com/v1" }],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await openConnection();
+
+  const grid = screen.getByRole("grid", { name: "LLM connections" });
+  expect(within(grid).getByText("OpenAI-compatible")).toBeInTheDocument();
+
+  const panelTitle = screen.getByRole("heading", { level: 2, name: CONNECTION_NAME });
+  expect(
+    within(panelTitle.parentElement as HTMLElement).getByText("OpenAI-compatible"),
+  ).toBeInTheDocument();
 });
 
 it("opens the row's panel and writes its id to the URL", async () => {
@@ -591,7 +614,10 @@ it("a member sees the list and the details, but cannot manage", async () => {
     "Only admins and owners can add connections",
   );
 
-  await user.click(within(grid).getByText(CONNECTION_NAME));
+  // The name column comes first; the provider cell also reads OpenAI.
+  const cell = within(grid).getAllByText(CONNECTION_NAME)[0];
+  expect(cell).toBeDefined();
+  await user.click(cell as HTMLElement);
   expect(await screen.findByText("Extra headers")).toBeInTheDocument();
   expect(searchOf(router)).toMatchObject({ open: CONNECTION_ID });
   expect(screen.queryByRole("form", { name: "Edit connection" })).toBeNull();
