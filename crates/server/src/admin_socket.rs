@@ -2,7 +2,8 @@
 //!
 //! `<data_dir>/admin.sock` answers one request per connection: the client writes
 //! one JSON line and reads one JSON line back, then the server closes the
-//! connection. `cetra admin backup` is the only client in M2.
+//! connection. Its clients are `cetra admin backup` (command `backup`) and
+//! `cetra debug-bundle` (command `debug_info`, track TL M3).
 //!
 //! The socket is bound as `admin.tmp`, made `0600`, then renamed, so it never
 //! exists under its real name with a wider mode. A connecting process is accepted
@@ -24,6 +25,8 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::backup::{self, BackupReport};
 use crate::http::AppState;
+use crate::observability::debug_info::{self, DebugInfo};
+use crate::observability::ring;
 
 /// The socket's file name in the data directory.
 pub const ADMIN_SOCKET: &str = "admin.sock";
@@ -35,6 +38,11 @@ const ADMIN_SOCKET_TMP: &str = "admin.tmp";
 const SOCKET_MODE: u32 = 0o600;
 /// The largest request, including its newline.
 const MAX_REQUEST: usize = 64 * 1024;
+/// The commands `parse` accepts (D-R-36: only added to).
+const COMMANDS: [&str; 2] = ["backup", "debug_info"];
+/// The largest response line the server writes and a client reads, newline included. The
+/// `debug_info` log lines are trimmed to fit.
+pub const MAX_RESPONSE: usize = 4 * 1024 * 1024;
 /// How long a client may take to send its request. A backup itself has no limit.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the accept loop waits after a failed `accept` (for example `EMFILE`).
@@ -56,6 +64,8 @@ pub enum AdminRequest {
         #[serde(default)]
         meta_only: bool,
     },
+    /// The running server's state for a bug report (`observability::debug_info::collect`).
+    DebugInfo,
 }
 
 /// One request line: the protocol version and the command.
@@ -67,6 +77,8 @@ pub struct AdminEnvelope {
 }
 
 /// One response on the socket. The client decides on the variant, not on `ok`.
+/// Variants are tried in order: a line with `report` is `Done`, one with `debug_info` is
+/// `Info`, else `Failed`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AdminResponse {
@@ -75,6 +87,12 @@ pub enum AdminResponse {
         v: u32,
         ok: bool,
         report: BackupReport,
+    },
+    /// The `debug_info` answer (`ok` is `true`).
+    Info {
+        v: u32,
+        ok: bool,
+        debug_info: Box<DebugInfo>,
     },
     /// The request failed (`ok` is `false`), with a stable `code`.
     Failed {
@@ -220,6 +238,7 @@ async fn serve_connection(mut stream: UnixStream, state: AppState, server_uid: u
     let response = match parse(&line) {
         Err(response) => response,
         Ok(AdminRequest::Backup { to, meta_only }) => run_backup(&state, to, meta_only).await,
+        Ok(AdminRequest::DebugInfo) => debug_info_response(&state).await,
     };
     write_response(&mut stream, &response).await;
 }
@@ -241,6 +260,42 @@ async fn run_backup(state: &AppState, to: PathBuf, meta_only: bool) -> AdminResp
         },
         Ok(Err(error)) => AdminResponse::failed(error.code(), error.to_string()),
         Err(_join) => AdminResponse::failed("io", "the backup task stopped"),
+    }
+}
+
+/// Collects the server's state and trims its log lines so the line fits [`MAX_RESPONSE`].
+async fn debug_info_response(state: &AppState) -> AdminResponse {
+    let mut info = debug_info::collect(state, ring::installed()).await;
+    fit_response(&mut info);
+    AdminResponse::Info {
+        v: ADMIN_PROTOCOL,
+        ok: true,
+        debug_info: Box::new(info),
+    }
+}
+
+/// Room for the envelope around the debug info (`{"v":1,"ok":true,"debug_info":…}`) and the
+/// newline.
+const ENVELOPE_BYTES: usize = 64;
+
+/// Drops the oldest tenth of the log lines (at least one) until the serialized info fits in
+/// [`MAX_RESPONSE`] with its envelope, and marks the lines trimmed. Without log lines left,
+/// it stops: the rest is a few kilobytes.
+fn fit_response(info: &mut DebugInfo) {
+    loop {
+        let size = serde_json::to_vec(info).map_or(usize::MAX, |bytes| bytes.len());
+        if size.saturating_add(ENVELOPE_BYTES) <= MAX_RESPONSE {
+            return;
+        }
+        let Some(logs) = info.logs.as_mut() else {
+            return;
+        };
+        if logs.lines.is_empty() {
+            return;
+        }
+        let drop = (logs.lines.len() / 10).max(1);
+        logs.lines.drain(..drop);
+        logs.trimmed = true;
     }
 }
 
@@ -276,8 +331,8 @@ async fn read_line(stream: &mut UnixStream) -> io::Result<Vec<u8>> {
     Ok(line)
 }
 
-/// Four steps: the JSON, then the protocol version (D-R-36), then the command, then its
-/// fields.
+/// Four steps: the JSON, then the protocol version (D-R-36), then the command (one of
+/// [`COMMANDS`]), then its fields.
 fn parse(line: &[u8]) -> Result<AdminRequest, AdminResponse> {
     if line.len() > MAX_REQUEST {
         return Err(AdminResponse::failed(
@@ -295,7 +350,7 @@ fn parse(line: &[u8]) -> Result<AdminRequest, AdminResponse> {
         None => return Err(unsupported_protocol("no version")),
     }
     if let Some(command) = value.get("command").and_then(Value::as_str)
-        && command != "backup"
+        && !COMMANDS.contains(&command)
     {
         return Err(AdminResponse::failed("unknown_command", "unknown command"));
     }
@@ -437,10 +492,117 @@ mod tests {
                 assert!(ok, "{response}");
                 assert_eq!(report.mode, BackupMode::Full);
             }
+            AdminResponse::Info { .. } => panic!("{response}"),
             AdminResponse::Failed { .. } => panic!("{response}"),
         }
         assert!(target.join("manifest.json").is_file());
         running.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_debug_info_request_returns_the_server_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let running = bind(config(dir.path()), None).await.unwrap();
+        let response = ask(
+            &dir.path().join(ADMIN_SOCKET),
+            "{\"v\":1,\"command\":\"debug_info\"}\n",
+        )
+        .await;
+        match decode_response(&response).unwrap() {
+            AdminResponse::Info { ok, debug_info, .. } => {
+                assert!(ok, "{response}");
+                assert_eq!(debug_info.schema, 1);
+                assert_eq!(debug_info.version, env!("CARGO_PKG_VERSION"));
+                assert!(debug_info.ready.ready, "{response}");
+            }
+            AdminResponse::Done { .. } | AdminResponse::Failed { .. } => panic!("{response}"),
+        }
+        running.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn a_debug_info_request_round_trips() {
+        let line = serde_json::to_string(&AdminEnvelope {
+            v: ADMIN_PROTOCOL,
+            request: AdminRequest::DebugInfo,
+        })
+        .unwrap();
+        assert_eq!(line, "{\"v\":1,\"command\":\"debug_info\"}");
+        assert!(matches!(
+            parse(line.as_bytes()),
+            Ok(AdminRequest::DebugInfo)
+        ));
+    }
+
+    #[test]
+    fn extra_request_fields_are_ignored() {
+        assert!(matches!(
+            parse(br#"{"v":1,"command":"debug_info","later":true}"#),
+            Ok(AdminRequest::DebugInfo)
+        ));
+    }
+
+    #[test]
+    fn a_backup_answer_still_decodes_as_done() {
+        let report = BackupReport {
+            dir: PathBuf::from("/x"),
+            mode: BackupMode::Full,
+            created_at: "2026-11-16T00:00:00Z".to_owned(),
+            objects: 0,
+            object_bytes: 0,
+            linked: 0,
+            copied: 0,
+            duration_ms: 1,
+        };
+        let line = serde_json::to_string(&AdminResponse::Done {
+            v: ADMIN_PROTOCOL,
+            ok: true,
+            report,
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_response(&line),
+            Ok(AdminResponse::Done { ok: true, .. })
+        ));
+    }
+
+    #[test]
+    fn the_client_reads_an_info_answer_with_an_unknown_field() {
+        let mut line = serde_json::to_value(AdminResponse::Info {
+            v: ADMIN_PROTOCOL,
+            ok: true,
+            debug_info: Box::new(debug_info::sample()),
+        })
+        .unwrap();
+        line["later"] = json!(1);
+        line["debug_info"]["later"] = json!(1);
+        assert!(matches!(
+            decode_response(&line.to_string()),
+            Ok(AdminResponse::Info { ok: true, .. })
+        ));
+    }
+
+    #[test]
+    fn fit_response_trims_the_oldest_lines() {
+        let mut info = debug_info::sample();
+        let logs = info.logs.as_mut().unwrap();
+        logs.lines = (0..3000)
+            .map(|i| format!("{i:06}{}", "a".repeat(2042)))
+            .collect();
+        fit_response(&mut info);
+        assert!(serde_json::to_vec(&info).unwrap().len() + ENVELOPE_BYTES <= MAX_RESPONSE);
+        let logs = info.logs.as_ref().unwrap();
+        assert!(logs.trimmed);
+        assert!(logs.lines.last().unwrap().starts_with("002999"));
+    }
+
+    #[test]
+    fn fit_response_leaves_a_small_info_alone() {
+        let mut info = debug_info::sample();
+        let before = info.clone();
+        fit_response(&mut info);
+        assert_eq!(info, before);
+        assert!(!info.logs.as_ref().unwrap().trimmed);
     }
 
     #[tokio::test]
@@ -513,6 +675,7 @@ mod tests {
             .await,
             ask(&socket, "not json\n").await,
             ask(&socket, "{\"v\":1,\"command\":\"restore\"}\n").await,
+            ask(&socket, "{\"v\":1,\"command\":\"debug_info\"}\n").await,
             // `forbidden` cannot be produced from a test (it needs another uid).
             serde_json::to_string(&AdminResponse::failed("forbidden", "m")).unwrap() + "\n",
         ];
@@ -605,12 +768,17 @@ mod tests {
             "{\"v\":1,\"command\":\"restore\"}",
             "{\"command\":\"backup\",\"to\":\"/x\"}",
             "{\"v\":1,\"command\":\"backup\"}",
+            "{\"v\":1,\"command\":\"debug_info\"}",
         ] {
             if let Err(AdminResponse::Failed { code, .. }) = parse(request.as_bytes()) {
                 codes.push(code);
             }
         }
         codes.push("forbidden".to_owned());
+        assert!(matches!(
+            parse(b"{\"v\":1,\"command\":\"debug_info\"}"),
+            Ok(AdminRequest::DebugInfo)
+        ));
         codes.sort_unstable();
         codes.dedup();
         assert_eq!(

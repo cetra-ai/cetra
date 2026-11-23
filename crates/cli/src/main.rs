@@ -687,6 +687,9 @@ async fn backup_command(to: &Path, meta_only: bool, config: Option<&Path>) -> an
             )?;
             Ok(())
         }
+        AdminResponse::Info { .. } => {
+            anyhow::bail!("the server answered a backup request with debug info")
+        }
         AdminResponse::Failed { code, message, .. } => {
             anyhow::bail!("backup failed ({code}): {message}")
         }

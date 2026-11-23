@@ -136,18 +136,20 @@ pub(super) async fn build(out: &Path) -> Vec<SocketLine> {
     );
     lines.push(send_raw(&data, json!({"v": ADMIN_PROTOCOL, "command": "restore"})).await);
     lines.push(send_raw(&data, json!({"command": "backup", "to": "/nowhere"})).await);
+    lines.push(send_raw(&data, json!({"v": ADMIN_PROTOCOL, "command": "debug_info"})).await);
     running
         .shutdown()
         .await
         .expect("shut the golden server down");
     // The answers the check replays: the first backup works, the second finds its target
-    // non-empty, and the three refusals name their codes.
+    // non-empty, the three refusals name their codes, and debug_info answers (track TL M3).
     let expected_codes = [
         None,
         Some("target_not_empty"),
         Some("bad_request"),
         Some("unknown_command"),
         Some("unsupported_protocol"),
+        None,
     ];
     for (line, code) in lines.iter().zip(expected_codes) {
         assert_eq!(
@@ -226,7 +228,8 @@ pub(super) async fn exchange(data: &Path, request: &str) -> String {
 }
 
 /// Writes `admin_socket.jsonl`: one `{request, response}` object per line, with the backup target
-/// replaced by `/golden/out` and the times of the report redacted.
+/// replaced by `/golden/out`, the times of the report redacted, and the per-run values of the
+/// debug_info answer zeroed.
 fn write_socket_lines(out: &Path, lines: &[SocketLine], target: &Path) {
     let mut text = String::new();
     for line in lines {
@@ -237,6 +240,34 @@ fn write_socket_lines(out: &Path, lines: &[SocketLine], target: &Path) {
             report.insert("created_at".to_owned(), json!("<redacted>"));
             report.insert("duration_ms".to_owned(), json!(0));
             report.insert("dir".to_owned(), json!(TARGET));
+        }
+        if let Some(info) = response
+            .get_mut("debug_info")
+            .and_then(Value::as_object_mut)
+        {
+            // Values that differ per run or machine (track TL M3); the replay checks `ok` and
+            // `code` and decodes the line, which a null `Option` and a zero still do.
+            info.insert("uptime_secs".to_owned(), json!(0));
+            info.insert("logs".to_owned(), Value::Null);
+            if let Some(telemetry) = info.get_mut("telemetry").and_then(Value::as_object_mut) {
+                telemetry.insert("heartbeat_preview".to_owned(), Value::Null);
+            }
+            if let Some(health) = info
+                .get_mut("storage")
+                .and_then(|storage| storage.get_mut("health"))
+                .and_then(Value::as_object_mut)
+            {
+                health.insert("disk_free_bytes".to_owned(), json!(0));
+            }
+            if let Some(stats) = info
+                .get_mut("storage")
+                .and_then(|storage| storage.get_mut("stats"))
+                .and_then(Value::as_object_mut)
+            {
+                for key in ["wal_bytes", "flush_nanos"] {
+                    stats.insert(key.to_owned(), json!({"spans": 0, "scores": 0}));
+                }
+            }
         }
         text.push_str(&json!({"request": request, "response": response}).to_string());
         text.push('\n');
