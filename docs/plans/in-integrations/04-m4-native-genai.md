@@ -106,6 +106,62 @@ The openapi check is `just openapi`, then `cargo nextest run -p cetra-server --t
 
 **J. Mirascope prefix strip (IN4.5 step 4).** It compares the raw lowercased `gen_ai.provider.name`, read with `bag.get` before rule 12 aliases it, against the model's prefix. New `Source` rows carry the `Convention` value of the family they belong to: `Genai` for `gen_ai.*`, `mirascope.*`, `mastra.*` and `pydantic_ai.*`; `Voltagent` for VoltAgent keys.
 
+## Amendments from the second review (override everything above them)
+
+**K. Strands legacy events** replace amendment E. The shapes are taken from the real dump, `/tmp/claude-1000/-home-sebastien-travaux-llm-observer/8e518996-ebba-4428-93c2-4baf3ee35424/scratchpad/m4py/strands/dump_default.txt`; read it before writing the code.
+
+The rule applies on spans whose scope name starts with `strands` (gate), to the legacy events:
+
+| Span | Event | What it carries | Reads as |
+|---|---|---|---|
+| `chat`, `execute_event_loop_cycle` | `gen_ai.system.message`, `gen_ai.user.message`, `gen_ai.assistant.message` | `content`: a JSON array of Converse blocks | one input message each, with the role from the event name |
+| `chat`, `execute_event_loop_cycle` | `gen_ai.tool.message` | `content`: `toolResult` blocks, no `id` attribute | one `tool` input message; each part's id is the block's `toolUseId` |
+| `chat`, `execute_event_loop_cycle` | `gen_ai.choice` | `message`: Converse blocks (text and/or `toolUse`); `finish_reason`; on the cycle span also `tool.result`, which is ignored | the output assistant message, with that finish reason |
+| `execute_tool` | `gen_ai.tool.message` | `content`: the tool's arguments as JSON (e.g. `{"city":"Paris"}`), plus `id` | the span's input (`json`), not a message |
+| `execute_tool` | `gen_ai.choice` | `message`: `[{"text": …}]`, plus `id` | the span's output: the joined text of the text blocks (`text`) |
+| `invoke_agent` | `gen_ai.choice` | `message`: a plain string (with a trailing newline) | the span's output (`text`), as is |
+
+These rules fill a field only when no higher source filled it. If the dump shows a shape this table does not cover, stop and report.
+
+**L. The R11 and R8 contracts.**
+- **R11:** `convert/converse.rs` exposes `pub(crate) fn converse_message(role: Role, blocks: &[serde_json::Value]) -> Result<Message, ConvertError>`. `Role` and `Message` are `cetra_core`'s message types; `ConvertError` is the error type `convert/vercel.rs` uses. It builds one `Message` with one part per block:
+  - `{"text": s}` → text part;
+  - `{"toolUse": {"toolUseId", "name", "input"}}` → `ToolCall { id: toolUseId, name, arguments: input }`;
+  - `{"toolResult": {"toolUseId", "content": [blocks], "status"}}` → `ToolCallResponse { id: toolUseId, response }`, where `response` is the joined text of its text blocks when it has any, else the JSON of `content`, and `status` goes into `extra`.
+
+  Any other block gives `Err`, and the caller then follows the existing `messages:genai:<field>` failure path. Amendment K's readers call it, with the finish reason set by the caller on the output message.
+- **R8:** in `convert/openinference.rs`, after the flattened messages are parsed and before `openai_messages`, a message with role `function`, no content, and `function.M` entries is turned directly into one `cetra_core` `Message` with role `tool` and one `ToolCallResponse { id: call_id, response: content }` part per entry (`name`, `is_error` in `extra`). Show it as its own function, with a unit test.
+
+**M. VoltAgent payload keys and gated fields** (amendment F, completed).
+- The VoltAgent reader marks plain `input`, `output` and `llm.messages` as payload itself, and only on `voltagent` spans. These keys are NOT added to any static registry, so `drop_lower_payloads` never drops `input`/`output` on another span.
+- V3, V4 and V6 are not rows in the static `Source` tables. After the generic extraction, on a `voltagent` span, they fill `request_model`, the token columns and `session_id` when those are still empty, and mark the keys consumed.
+- The VoltAgent page's Limits add: "If you rename VoltAgent's instrumentation scope, only the agent span is recognised as VoltAgent."
+
+**N. IN4.1 and IN4.2.**
+- Each phase blesses its own cases (`just fixtures-bless`), checks every new `expected.json` against IN4.8's checklist, and stops if an existing case changes.
+- Both Done-when lists add `cargo nextest run -p cetra-otel --test golden --test fixtures`.
+- The commit subjects drop "(input only)": `Capture native GenAI framework runs`, `Capture Mastra and VoltAgent runs`.
+
+**O. Spike programs per case** (copy, then adapt to the harness: `mock_url("/v1")`, `setup()`/`finish()`, tool call id `call_weather_1`, model `gpt-4o-mini-2024-07-18`):
+- `pydanticai/t.py`;
+- `sk/t.py`;
+- `strands/t.py`, run twice, with and without `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`;
+- `maf/t.py` (agent) and `maf/t2.py` (workflow);
+- `ag2/t.py`;
+- `autogen/t.py` in AutoGen-instrumentor-only mode: remove the OpenAI instrumentor the program's default `MODE=oi` adds (D-IN-23 item 3). IN4.1 checks there is exactly one `llm` span per model call; if not, stop and report;
+- `mirascope/t.py`;
+- `mastra/run3.mjs`;
+- `volt/run5.mjs`.
+
+The programs' `shared/common.py` and fake server are replaced by the capture harness.
+
+**P. Other edits.**
+- IN4.4's Edit list adds `crates/otel/src/usage.rs`.
+- IN4.6's Edit list adds `website/src/content/docs/docs/integrations/agno.mdx`: remove its Limits bullet about the normalize error, and regenerate the skill references if the page is listed.
+- IN4.2: do not loosen the `@opentelemetry/api` override in `tools/capture/ts/pnpm-workspace.yaml`. If Mastra or VoltAgent need it loosened, stop and report.
+
+**Q. AutoGen registry (D-IN-24, the user, 2026-11-23).** `instrument=["autogen-agentchat"]` exists without a `cetra-sdk` extra. The AutoGen instrumentor pins protobuf below 5.30, which would cap the SDK's own lock. The page says `pip install openinference-instrumentation-autogen-agentchat`. IN4.10 records D-IN-24 in the design (amending D-IN-7) and in `mvp-decisions.md`.
+
 ## What it is, and what it is not
 
 When it is done:
