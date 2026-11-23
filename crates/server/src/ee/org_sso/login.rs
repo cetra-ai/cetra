@@ -69,7 +69,7 @@ async fn discover(
     state
         .limits
         .sso_discover
-        .check(&ip, state.clock.now_ns())
+        .check(&crate::auth::limits::network_key(ip), state.clock.now_ns())
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
@@ -111,7 +111,7 @@ async fn authorize(
     state
         .limits
         .sso_discover
-        .check(&ip, now)
+        .check(&crate::auth::limits::network_key(ip), now)
         .map_err(|retry| ApiError::RateLimited {
             retry_after_s: retry.0.as_secs().max(1),
         })?;
