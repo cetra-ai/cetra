@@ -16,6 +16,9 @@ use serde_json::Value;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::evaluators::StatsWindow;
 use crate::api::online_rules::{
@@ -392,6 +395,7 @@ async fn create_online_rule(
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    let target = body.target;
     let draft = RuleDraft {
         name: body.name.trim().to_owned(),
         target: body.target,
@@ -438,6 +442,11 @@ async fn create_online_rule(
                 project_id = %project,
                 user_id = %user.id,
                 "online rule created"
+            );
+            record(
+                &state,
+                &Event::OnlineRuleCreated { target },
+                &Actor::project(&principal, &access),
             );
             let json = rule_json(&state, &row, &JobCounts::default(), now).await?;
             Ok((StatusCode::CREATED, error::Json(json)))
@@ -1362,6 +1371,10 @@ mod tests {
         assert_eq!(page["data"], json!([created]));
         assert_eq!(page["org_enabled_rules"], 1);
         assert!(page["next_cursor"].is_null());
+        assert!(
+            app.state.analytics.counters.get("online_rule.created") >= 1,
+            "online_rule.created not counted"
+        );
     }
 
     /// D-T-8: a write waits while a price write holds the lock, so the price table it checks

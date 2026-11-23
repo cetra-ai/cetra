@@ -11,6 +11,9 @@ use axum_extra::extract::cookie::Cookie;
 use cetra_core::ids::OrgId;
 
 use super::secret::{hash_token, is_opaque_token, new_opaque_token};
+use crate::analytics::actor::{Actor, Via};
+use crate::analytics::catalog::{Event, SignInMethod};
+use crate::analytics::record;
 use crate::http::AppState;
 use crate::http::error::ApiError;
 use crate::meta::web_sessions::{
@@ -52,6 +55,15 @@ pub(crate) async fn start_session(
     ip: Option<IpAddr>,
     origin: SessionOrigin,
 ) -> Result<HeaderValue, ApiError> {
+    let method = match origin {
+        SessionOrigin::Password => SignInMethod::Password,
+        SessionOrigin::Provider => SignInMethod::Provider,
+        SessionOrigin::OrgProvider(_) => SignInMethod::OrgProvider,
+    };
+    let sso_org = match origin {
+        SessionOrigin::OrgProvider(org) => Some(org),
+        _ => None,
+    };
     let token = new_opaque_token().map_err(|error| ApiError::Internal(Box::new(error)))?;
     let now = state.clock.now_ns();
     let expires_at = now.saturating_add(duration_ns(LIFETIME));
@@ -82,6 +94,14 @@ pub(crate) async fn start_session(
             })
         })
         .await?;
+    record(
+        state,
+        &Event::UserSignedIn { method },
+        &Actor {
+            org_id: sso_org,
+            ..Actor::user(user_id, Via::Session)
+        },
+    );
     Ok(set_cookie(state, &token.plaintext, LIFETIME.as_secs()))
 }
 
@@ -365,6 +385,10 @@ mod tests {
                 .to_str()
                 .unwrap()
                 .contains("Secure")
+        );
+        assert!(
+            app.state.analytics.counters.get("user.signed_in") >= 1,
+            "user.signed_in not counted"
         );
     }
 

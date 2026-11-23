@@ -9,6 +9,9 @@ use axum::routing::{get, post};
 use cetra_core::ids::ProjectId;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::api::device::{
     DeviceApproveRequest, DeviceCodeRequest, DeviceCodeResponse, DeviceGrant, DeviceGrantProject,
@@ -228,6 +231,11 @@ async fn approve(
             tracing::info!(target: "audit", %token_id, user_id = %user.id, purpose = ?pending.purpose, "device code approved");
         }
     }
+    record(
+        &state,
+        &Event::DeviceApproved,
+        &Actor::principal(&principal),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -653,6 +661,10 @@ mod tests {
 
         let again = poll(&app, &code.device_code).await;
         assert_eq!(error_code(&again), "expired_token");
+        assert!(
+            app.state.analytics.counters.get("device.approved") >= 1,
+            "device.approved not counted"
+        );
     }
 
     #[tokio::test]

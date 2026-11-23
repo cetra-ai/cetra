@@ -13,6 +13,9 @@ use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::backfills::{Backfill, BackfillEstimate, BackfillStatus, CreateBackfillRequest};
 use crate::api::common::{FieldError, Page};
 use crate::auth::principal::{self, Principal};
@@ -176,6 +179,11 @@ async fn create_backfill(
                 user_id = %user_id,
                 max_targets = row.max_targets,
                 "online rule backfill started"
+            );
+            record(
+                &state,
+                &Event::BackfillStarted,
+                &Actor::project(&principal, &access),
             );
             Ok((StatusCode::ACCEPTED, error::Json(backfill_json(&row)?)))
         }
@@ -928,6 +936,10 @@ mod tests {
         assert!(logs.contains("online rule backfill started"), "{logs}");
         assert!(logs.contains(&backfill.to_string()), "{logs}");
         assert!(logs.contains(&seeded.user_id.to_string()), "{logs}");
+        assert!(
+            app.state.analytics.counters.get("backfill.started") >= 1,
+            "backfill.started not counted"
+        );
     }
 
     #[tokio::test]

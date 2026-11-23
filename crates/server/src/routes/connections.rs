@@ -15,6 +15,9 @@ use cetra_core::ids::OrgId;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
@@ -152,6 +155,7 @@ async fn create_llm_connection(
     error::Json(body): error::Json<CreateLlmConnectionRequest>,
 ) -> Result<(StatusCode, error::Json<LlmConnection>), ApiError> {
     let user = principal::session_user(&principal)?;
+    let adapter = body.adapter;
     let mut errors = Vec::new();
     check_name(&body.name, &mut errors);
     check_api_key(&body.api_key, &mut errors);
@@ -216,6 +220,11 @@ async fn create_llm_connection(
         org_id = %org_id,
         user_id = %user_id,
         "llm connection created"
+    );
+    record(
+        &state,
+        &Event::LlmConnectionCreated { adapter },
+        &Actor::org(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(connection_json(&row)?)))
 }
@@ -1780,6 +1789,10 @@ mod tests {
         assert_eq!(list.status, 200);
         let page: Page<LlmConnection> = list.json();
         assert_eq!(page.data, vec![connection]);
+        assert!(
+            app.state.analytics.counters.get("llm_connection.created") >= 1,
+            "llm_connection.created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

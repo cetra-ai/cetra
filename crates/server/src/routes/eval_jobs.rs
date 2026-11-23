@@ -14,6 +14,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::alert_rules::{decode_cursor, encode_cursor};
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::connections::TestErrorClass;
 use crate::api::eval_jobs::{
@@ -191,6 +194,11 @@ async fn run_evaluator(
         project_id = %project,
         user_id = %user.id,
         "evaluator run queued"
+    );
+    record(
+        &state,
+        &Event::EvaluatorRun,
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::ACCEPTED, error::Json(job_json(&queued)?)))
 }
@@ -543,6 +551,10 @@ mod tests {
                 .expect("row");
         assert_eq!(priority, 0);
         assert_eq!(dedup, format!("manual:{id}"));
+        assert!(
+            app.state.analytics.counters.get("evaluator.run") >= 1,
+            "evaluator.run not counted"
+        );
     }
 
     #[tokio::test]

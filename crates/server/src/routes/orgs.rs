@@ -9,6 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::account::{CreateOrgRequest, OrgMembership, OrgRole, UpdateOrgRequest};
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::auth::principal::{self, Principal};
@@ -127,6 +130,7 @@ async fn create_org(
         .await?;
     tracing::info!(target: "audit", %user_id, org_id = %org.id, "org created");
     let demo = is_demo_org(&state.config, org.id);
+    record(&state, &Event::OrgCreated, &Actor::principal(&principal));
     Ok((
         StatusCode::CREATED,
         error::Json(membership(&org, OrgRole::Owner, demo)),
@@ -410,6 +414,10 @@ mod tests {
         let fetched: OrgMembership = fetched.json();
         assert_eq!(fetched.role, OrgRole::Owner);
         assert_eq!(fetched.id, org.id);
+        assert!(
+            app.state.analytics.counters.get("org.created") >= 1,
+            "org.created not counted"
+        );
     }
 
     #[tokio::test]

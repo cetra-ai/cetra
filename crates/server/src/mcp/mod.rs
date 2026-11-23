@@ -29,6 +29,9 @@ use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::Value;
 use tracing::Instrument as _;
 
+use crate::analytics::actor::{Actor, Via};
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::auth::principal::{AuthUser, Principal};
 use crate::http::AppState;
@@ -76,6 +79,7 @@ async fn mcp(
         state,
         user,
         request_span: tracing::Span::current(),
+        opted_out: crate::analytics::actor::request_opted_out(),
     };
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
@@ -103,6 +107,8 @@ pub(crate) struct McpServer {
     user: AuthUser,
     /// The request's `http.request` span: rmcp runs a tool call in a spawned task, so the call's span names it as its parent explicitly.
     request_span: tracing::Span,
+    /// The request opted out of per-user analytics (captured here: rmcp runs tools in spawned tasks, outside the request's scope).
+    opted_out: bool,
 }
 
 impl ServerHandler for McpServer {
@@ -160,6 +166,7 @@ impl ServerHandler for McpServer {
             }
         };
         span.record(spans::TOOL, tool);
+        let ok = outcome.is_ok();
         let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let result = match outcome {
             Ok(body) => {
@@ -174,6 +181,13 @@ impl ServerHandler for McpServer {
                 output::failure(&error)
             }
         };
+        let actor = Actor {
+            opted_out: self.opted_out,
+            ..Actor::user(self.user.id, Via::Pat)
+        };
+        for event in tool_events(tool, ok) {
+            record(&self.state, &event, &actor);
+        }
         Ok(result.into())
     }
 }
@@ -231,6 +245,20 @@ impl McpServer {
         };
         Ok(pair)
     }
+}
+
+/// The catalog events of one finished tool call: `mcp.tool_called`, plus the event of the
+/// same action in the UI or API for the tools that have one (`query_sql` is a SQL console
+/// run, `get_trace` a trace read), so those count whichever client ran them.
+fn tool_events(tool: &'static str, ok: bool) -> Vec<Event> {
+    let mut events = vec![Event::McpToolCalled { tool, ok }];
+    if ok && tool == sql::QUERY_SQL {
+        events.push(Event::SqlConsoleRun);
+    }
+    if ok && tool == traces::GET_TRACE {
+        events.push(Event::TraceViewed);
+    }
+    events
 }
 
 #[cfg(test)]
@@ -365,6 +393,7 @@ mod tests {
 
     use super::test_helpers::*;
     use super::{INSTRUCTIONS, output};
+    use super::{sql, tool_events, tools, traces};
     use crate::api::convert;
     use crate::auth::roles::{KeyScope, OrgRole, ProjectOverride};
     use crate::auth::secret::{self, KeyKind};
@@ -545,6 +574,38 @@ mod tests {
         assert_eq!(body["error"]["code"], json!(-32602));
         assert_eq!(body["error"]["message"], json!("unknown tool"));
         assert!(body.get("result").is_none());
+        assert_eq!(app.state.analytics.counters.get("mcp.tool_called"), 0);
+    }
+
+    #[test]
+    fn tool_events_add_sql_and_trace_reads() {
+        use crate::analytics::catalog::Event;
+        assert_eq!(
+            tool_events(sql::QUERY_SQL, true),
+            vec![
+                Event::McpToolCalled {
+                    tool: "query_sql",
+                    ok: true,
+                },
+                Event::SqlConsoleRun,
+            ]
+        );
+        let trace = tool_events(traces::GET_TRACE, true);
+        assert_eq!(trace.last(), Some(&Event::TraceViewed));
+        assert_eq!(
+            tool_events(sql::QUERY_SQL, false),
+            vec![Event::McpToolCalled {
+                tool: "query_sql",
+                ok: false,
+            }]
+        );
+        assert_eq!(
+            tool_events(tools::LIST_PROJECTS, true),
+            vec![Event::McpToolCalled {
+                tool: "list_projects",
+                ok: true,
+            }]
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1023,6 +1084,10 @@ mod tests {
         let (is_error, body) = call(&app, &token, "query_sql", &select_one).await;
         assert!(!is_error, "{body}");
         assert_eq!(body["rows"], json!([{"one": 1}]));
+        assert!(
+            app.state.analytics.counters.get("sql_console.run") >= 1,
+            "sql_console.run not counted"
+        );
     }
 
     // Tools
@@ -1045,6 +1110,10 @@ mod tests {
                 "truncated": false,
                 "notes": [],
             })
+        );
+        assert!(
+            app.state.analytics.counters.get("mcp.tool_called") >= 1,
+            "mcp.tool_called not counted"
         );
     }
 

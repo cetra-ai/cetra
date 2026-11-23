@@ -8,6 +8,9 @@ use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::account::OrgMembership;
 use crate::api::common::{Page, PageParams, Problem, ProblemCode};
 use crate::api::invites::{CreateInviteRequest, CreatedInvite, Invite, InviteOrg, InvitePreview};
@@ -228,6 +231,11 @@ async fn create_invite(
             },
         );
     }
+    record(
+        &state,
+        &Event::InviteCreated { role },
+        &Actor::org(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(CreatedInvite {
@@ -672,6 +680,10 @@ mod tests {
         assert_eq!(listed.data.len(), 1);
         assert_eq!(listed.data[0].id, second.invite.id);
         assert!(listed.next_cursor.is_none());
+        assert!(
+            app.state.analytics.counters.get("invite.created") >= 1,
+            "invite.created not counted"
+        );
     }
 
     #[tokio::test]

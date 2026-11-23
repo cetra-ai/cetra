@@ -20,6 +20,9 @@ use serde_json::Value;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::evaluators::{
     CreateEvaluatorRequest, Evaluator, EvaluatorKind, EvaluatorScoreStats, EvaluatorStats,
@@ -508,6 +511,11 @@ async fn create_evaluator(
                 kind = kind.as_str(),
                 url_host = host.as_deref().unwrap_or(""),
                 "evaluator created"
+            );
+            record(
+                &state,
+                &Event::EvaluatorCreated { kind },
+                &Actor::project(&principal, &access),
             );
             Ok((StatusCode::CREATED, error::Json(evaluator_json(&row)?)))
         }
@@ -1214,6 +1222,10 @@ mod tests {
             .await
             .json::<Value>();
         assert_eq!(page["data"], json!([created]));
+        assert!(
+            app.state.analytics.counters.get("evaluator.created") >= 1,
+            "evaluator.created not counted"
+        );
     }
 
     #[tokio::test]

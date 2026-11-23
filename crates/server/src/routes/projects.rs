@@ -8,6 +8,9 @@ use axum::routing::{get, patch, post};
 use cetra_core::ids::OrgId;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::auth::principal::{self, Principal};
@@ -127,6 +130,7 @@ enum ProjectCreate {
 
 async fn create_project(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
     error::Json(body): error::Json<CreateProjectRequest>,
 ) -> Result<Response, ApiError> {
@@ -176,6 +180,11 @@ async fn create_project(
         }
     };
     // CreateProject requires an org admin, whose effective project role is admin.
+    record(
+        &state,
+        &Event::ProjectCreated,
+        &Actor::org(&principal, &access),
+    );
     Ok((
         StatusCode::CREATED,
         error::Json(project_json(&project, Some(Role::Admin))),
@@ -483,6 +492,10 @@ mod tests {
         }))
         .await;
         assert_eq!(zero.status, 400);
+        assert!(
+            app.state.analytics.counters.get("project.created") >= 1,
+            "project.created not counted"
+        );
     }
 
     #[tokio::test]

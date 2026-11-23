@@ -7,6 +7,9 @@ use axum::routing::{delete, get, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::keys::{ApiKey, ApiKeyKind, ApiKeyScope, CreateApiKeyRequest, CreatedApiKey};
 use crate::auth::principal::{self, Principal};
@@ -82,6 +85,7 @@ async fn create_api_key(
     error::Json(body): error::Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, error::Json<CreatedApiKey>), ApiError> {
     let user = principal::session_user(&principal)?;
+    let api_key_kind = body.kind;
     let name = optional_name(body.name)?;
     let (kind, scopes) = checked_scopes(body.kind, body.scopes)?;
     let now = state.clock.now_ns();
@@ -119,6 +123,11 @@ async fn create_api_key(
         project_id = %project_id,
         user_id = %user_id,
         "api key created"
+    );
+    record(
+        &state,
+        &Event::ApiKeyCreated { kind: api_key_kind },
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,
@@ -691,6 +700,10 @@ mod tests {
             .await;
         let after: Page<ApiKey> = after.json();
         assert!(after.data[0].last_used_at.is_some());
+        assert!(
+            app.state.analytics.counters.get("api_key.created") >= 1,
+            "api_key.created not counted"
+        );
     }
 
     #[tokio::test]
