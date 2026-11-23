@@ -2,13 +2,13 @@
 //! the OTLP log export to the operator's endpoint, and the `tracing` subscriber the CLI
 //! installs. Prometheus `/metrics` is [`crate::telemetry`] (D-N-28).
 
-pub(crate) mod otlp;
-pub mod panic;
-pub mod subscriber;
 pub(crate) mod buckets;
 pub(crate) mod facts;
 pub(crate) mod heartbeat;
 pub(crate) mod instance;
+pub(crate) mod otlp;
+pub mod panic;
+pub mod subscriber;
 pub(crate) mod switchboard;
 
 /// Why the subscriber or the export could not be built. Messages name keys and static

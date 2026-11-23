@@ -946,8 +946,7 @@ mod tests {
     use prost::Message;
 
     use super::{
-        AdminCommand, Cli, Command, EntitlementsCommand, OrgSsoCommand, humantime_duration,
-        run_cli,
+        AdminCommand, Cli, Command, EntitlementsCommand, OrgSsoCommand, humantime_duration, run_cli,
     };
     use crate::output;
     use crate::test_server::TestServer;
