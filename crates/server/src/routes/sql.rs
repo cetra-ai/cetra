@@ -18,6 +18,7 @@ use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use serde_json::{Map, Value};
 use tokio::sync::oneshot;
+use tracing::Instrument as _;
 
 use crate::api::common::ProblemCode;
 use crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
@@ -27,6 +28,7 @@ use crate::demo::DemoVisitor;
 use crate::http::AppState;
 use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::{self, ApiError, field_error};
+use crate::observability::spans;
 use crate::routes::read::open_query_windowed;
 
 /// Request bodies are at most 256 KiB (the statement itself is capped at 64 KiB by A2).
@@ -216,14 +218,42 @@ async fn run_sql(
     let query_len = body.query.len();
     let format = negotiate(&headers);
     let Some(export) = format.export() else {
+        let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL);
+        span.record(
+            spans::PROJECT_ID,
+            tracing::field::display(access.project.id),
+        );
         let demo = visitor.map(|_| &state.config.demo);
-        let result = run_json(&state, &access, body, demo).await;
+        let result = run_json(&state, &access, body, demo)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(result) => {
+                span.record(spans::ROWS, spans::count(result.rows.len()));
+                span.record(spans::OUTCOME, "ok");
+            }
+            Err(error) => {
+                span.record(spans::OUTCOME, failure_kind(error));
+            }
+        }
         log_end(access.project.id, "json", query_len, started, &result);
         return result.map(|result| error::Json(result).into_response());
     };
-    match start_export(&state, &access, body, format, export, started).await {
-        Ok(response) => Ok(response),
+    let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL_EXPORT);
+    span.record(
+        spans::PROJECT_ID,
+        tracing::field::display(access.project.id),
+    );
+    match start_export(&state, &access, body, format, export, started)
+        .instrument(span.clone())
+        .await
+    {
+        Ok(response) => {
+            span.record(spans::OUTCOME, "ok");
+            Ok(response)
+        }
         Err(error) => {
+            span.record(spans::OUTCOME, failure_kind(&error));
             log_failure(
                 access.project.id,
                 format.label(),
@@ -703,7 +733,10 @@ mod tests {
     use crate::auth::roles::{OrgRole, ProjectOverride};
     use crate::demo::tests::{signed_in, world_with};
     use crate::meta::members::set_project_override;
+    use crate::observability::otlp::receiver::{Captured, int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::{Seeded, TestApp, TestResponse, set_limits};
+    use opentelemetry_proto::tonic::trace::v1::Span as ProtoSpan;
 
     /// The example request and its answer, checked against the real handler.
     const EXAMPLE_REQUEST: &str = include_str!("../../../../fixtures/api/requests/sql-query.json");
@@ -1922,5 +1955,59 @@ mod tests {
         let text = String::from_utf8_lossy(&response.body).into_owned();
         assert_eq!(text.lines().count(), 2, "a header and one data row: {text}");
         assert!(text.lines().nth(1).unwrap().ends_with('1'), "{text}");
+    }
+
+    /// The one span named `name` that a test captured.
+    fn only(captured: &Captured, name: &str) -> ProtoSpan {
+        let mut spans = captured.named(name);
+        assert_eq!(spans.len(), 1, "{name}: {spans:?}");
+        spans.remove(0)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sql_query_runs_in_a_query_span_without_its_text() {
+        let (app, seeded) = loaded().await;
+        let ((status, body), captured) = capture_spans(post_sql(
+            &app,
+            &seeded,
+            &json!({"query": "SELECT 'sk-cetra-planted00000000000000000000000000' AS planted"}),
+        ))
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let request = only(&captured, "http.request");
+        let query = only(&captured, "query");
+        assert_eq!(
+            string_attribute(&query.attributes, "kind"),
+            Some("sql".to_owned())
+        );
+        assert_eq!(
+            string_attribute(&query.attributes, "project_id"),
+            Some(seeded.project.id.to_string())
+        );
+        assert_eq!(int_attribute(&query.attributes, "rows"), Some(1));
+        assert_eq!(
+            string_attribute(&query.attributes, "outcome"),
+            Some("ok".to_owned())
+        );
+        assert_eq!(query.parent_span_id, request.span_id);
+
+        let text = captured.text();
+        assert!(!text.contains("SELECT"), "{text}");
+        assert!(!text.contains("sk-cetra-planted"), "{text}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_sql_query_records_its_failure_kind() {
+        let (app, seeded) = loaded().await;
+        let ((status, body), captured) =
+            capture_spans(post_sql(&app, &seeded, &json!({"query": "SELEC 1"}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+        let query = only(&captured, "query");
+        assert_eq!(
+            string_attribute(&query.attributes, "outcome"),
+            Some("invalid".to_owned())
+        );
     }
 }
