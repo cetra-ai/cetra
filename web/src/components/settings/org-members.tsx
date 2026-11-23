@@ -255,9 +255,9 @@ export function MemberPanel({
       subtitle={member.user.name ? member.user.email : undefined}
       onClose={() => onClose()}
     >
-      <RoleForm key={member.user.id} org={org} member={member} actorRole={actorRole} />
+      <RoleForm key={`role-${member.user.id}`} org={org} member={member} actorRole={actorRole} />
       <RemoveMember
-        key={member.user.id}
+        key={`remove-${member.user.id}`}
         org={org}
         member={member}
         actorRole={actorRole}
