@@ -26,7 +26,12 @@
     "zod": "4.6.7",
     "@anthropic-ai/claude-code": "2.1.323",
     "@openai/codex": "0.167.2",
-    "@google/gemini-cli": "0.68.0"
+    "@google/gemini-cli": "0.68.0",
+    "@mastra/core": "1.83.0",
+    "@mastra/observability": "1.24.0",
+    "@mastra/otel-exporter": "1.5.2",
+    "@voltagent/core": "2.11.1",
+    "ai": "6.0.322"
   },
   "devDependencies": {
     "typescript": "5.9.3",

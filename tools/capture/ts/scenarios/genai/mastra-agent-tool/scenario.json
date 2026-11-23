@@ -1,0 +1,62 @@
+{
+  "description": "Mastra agent run with one tool call, exported by Mastra's OtelExporter with its default span tree.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "The agent is weather-agent with one tool, get_weather, on openai.chat('gpt-4o-mini') at the mock. The exporter gets the runner's traces endpoint itself, with logs off, and the scenario calls shutdown to flush. The kept tree is invoke_agent [agent] > agent_step [model step] > chat [llm] and execute_tool get_weather, plus generic and model_generation spans; the agent span and its steps carry the run's input and output in mastra.* keys. processor_run and model_chunk spans are dropped: their names and count are exporter internals. mastra.metadata.runId and mastra.metadata.headers (the response date) are random or time-based, and mastra.model_generation.input repeats the prompt with createdAt clock stamps; all three are listed as volatile. mastra.completion_start_time is an instant, shifted with the spans. No telemetry leaves the process: the mock is the only host.",
+  "instrumentation": "@mastra/otel-exporter",
+  "libraries": ["@mastra/core", "@mastra/observability", "@mastra/otel-exporter"],
+  "span_names": [
+    "invoke_agent weather-agent",
+    "generic weather-agent",
+    "model_generation gpt-4o-mini",
+    "agent_step weather-agent",
+    "chat gpt-4o-mini",
+    "execute_tool get_weather"
+  ],
+  "timestamp_attributes": [
+    { "key": "mastra.completion_start_time", "format": "rfc3339" }
+  ],
+  "volatile_attributes": [
+    "mastra.metadata.runId",
+    "mastra.metadata.headers",
+    "mastra.model_generation.input"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "text": "It is sunny in Paris."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

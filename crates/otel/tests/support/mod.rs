@@ -37,6 +37,7 @@ pub const GROUPS: &[&str] = &[
     "claude_code",
     "codex",
     "gemini_cli",
+    "voltagent",
     "cetra",
     "edge",
 ];
