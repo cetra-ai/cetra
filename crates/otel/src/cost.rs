@@ -270,8 +270,7 @@ pub(crate) fn apply(
     let Some(model) = charge.model else {
         return none();
     };
-    let matched = lookup(prices, model, charge.provider, charge.start_time)
-        .or_else(|| publisher_row(prices, model, charge));
+    let matched = lookup(prices, model, charge.provider, charge.start_time);
     let Some(matched) = matched else {
         return none();
     };
@@ -302,18 +301,6 @@ fn none() -> Priced {
         source: Some(CostSource::None),
         ..Priced::default()
     }
-}
-
-/// The row of the model's publisher, for a gateway span that no row of its own prices (D-IN-13).
-fn publisher_row<'a>(
-    prices: &'a PriceTable,
-    model: &str,
-    charge: &Charge<'_>,
-) -> Option<&'a PriceRow> {
-    let (publisher, names) = publisher_candidates(charge.provider?, model)?;
-    names
-        .iter()
-        .find_map(|name| lookup(prices, name, Some(publisher), charge.start_time))
 }
 
 /// For a gateway span, the publisher's provider and the model names to try, in order (D-IN-13,
@@ -453,13 +440,22 @@ fn first_number(
     (present, found)
 }
 
+/// The row that prices `model` for `provider` at `start_time`. When no row of the gateway
+/// `provider` matches, a gateway span falls back to its model publisher's rows (D-IN-13).
 fn lookup<'a>(
     prices: &'a PriceTable,
     model: &str,
     provider: Option<&str>,
     start_time: i64,
 ) -> Option<&'a PriceRow> {
-    ranked_lookup(prices, model, provider, start_time).map(|(_, row)| row)
+    ranked_lookup(prices, model, provider, start_time)
+        .map(|(_, row)| row)
+        .or_else(|| {
+            let (publisher, names) = publisher_candidates(provider?, model)?;
+            names.iter().find_map(|name| {
+                ranked_lookup(prices, name, Some(publisher), start_time).map(|(_, row)| row)
+            })
+        })
 }
 
 /// The winning row and its index in the flat order: the base's rows, then this table's rows.
@@ -1190,6 +1186,26 @@ mod tests {
         assert!(
             prices
                 .price_for("no-such-model-anywhere", None, 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn price_for_applies_the_gateway_fallback() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        let matched = prices
+            .price_for("openai/gpt-4o-mini", Some("openrouter"), 0)
+            .expect("the publisher's row prices an OpenRouter span");
+        assert_eq!(matched.provider.as_deref(), Some("openai"));
+        assert!(
+            prices
+                .price_for("openai/gpt-4o-mini", Some("novita"), 0)
                 .is_none()
         );
     }

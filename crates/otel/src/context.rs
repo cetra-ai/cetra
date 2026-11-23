@@ -1425,6 +1425,30 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_providers_are_rule_12_fixed_points_and_priced_or_listed() {
+        // LiteLLM has no chat rows for these; the gateways among them are priced by the
+        // publisher's row (D-IN-13).
+        const UNPRICED_ENDPOINT_PROVIDERS: &[&str] = &[
+            "helicone",
+            "huggingface",
+            "nvidia_nim",
+            "openrouter",
+            "portkey",
+        ];
+        let priced: std::collections::BTreeSet<String> = crate::cost::builtin_price_rows()
+            .into_iter()
+            .filter_map(|row| row.provider)
+            .collect();
+        for (_, name) in ENDPOINT_PROVIDERS {
+            assert_eq!(&canonical_provider(name, false), name);
+            assert!(
+                priced.contains(*name) || UNPRICED_ENDPOINT_PROVIDERS.contains(name),
+                "endpoint provider {name} has no built-in row and is not listed as unpriced"
+            );
+        }
+    }
+
+    #[test]
     fn every_snapshot_provider_is_a_fixed_point_of_rule_12() {
         for row in crate::cost::builtin_price_rows() {
             if let Some(provider) = &row.provider {
