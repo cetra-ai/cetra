@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Sign-in through an org's provider (track P M5, D-P-55, D-P-56, D-P-57, D-P-65).
 
-use std::io;
+use std::{fmt, io};
 
 use axum::extract::State;
 use axum::http::{HeaderMap, Method};
@@ -12,10 +12,10 @@ use serde::Deserialize;
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
-use super::{normalize_domain, store};
+use super::{ProviderKind, normalize_domain, store};
 use crate::api::account::SignupPolicy;
 use crate::api::entitlements::Feature;
-use crate::api::org_sso::{SsoDiscoverRequest, SsoDiscovery};
+use crate::api::org_sso::{JitRole, SsoDiscoverRequest, SsoDiscovery, SsoProtocol};
 use crate::auth::OrgRole;
 use crate::auth::oidc::ExchangeError;
 use crate::auth::oidc::flow::{self, LoggedIn, LoginError, display_name};
@@ -145,8 +145,11 @@ async fn authorize(
     let redirect_uri = state.config.public_url.join("/api/auth/callback/sso");
     let csrf = new_opaque_token().map_err(internal)?.plaintext;
     let nonce = new_opaque_token().map_err(internal)?.plaintext;
-    let (location, verifier) = match provider
-        .oidc
+    // SA2.5 starts SAML logins here; until then a SAML provider has no OIDC redirect.
+    let ProviderKind::Oidc(oidc) = &provider.kind else {
+        return unavailable();
+    };
+    let (location, verifier) = match oidc
         .authorization_url(&redirect_uri, &csrf, &nonce, now)
         .await
     {
@@ -218,13 +221,16 @@ pub(crate) async fn finish(
     let Some(provider) = state.org_sso.provider(org) else {
         return Err(LoginError::SsoUnavailable);
     };
+    // The OIDC callback serves only an OIDC provider; a SAML org is not signed in here.
+    let ProviderKind::Oidc(oidc) = &provider.kind else {
+        return Err(LoginError::SsoUnavailable);
+    };
     let enabled = state.org_sso.flags(org).is_some_and(|flags| flags.enabled);
     if !enabled && !saved.test {
         return Err(LoginError::SsoUnavailable);
     }
     let redirect_uri = state.config.public_url.join("/api/auth/callback/sso");
-    let claims = provider
-        .oidc
+    let claims = oidc
         .exchange_code(&redirect_uri, code, &saved.pkce_verifier, &saved.nonce, now)
         .await
         .map_err(flow::login_exchange)?;
@@ -241,32 +247,91 @@ pub(crate) async fn finish(
         .as_deref()
         .and_then(|email| normalize_email(email).ok())
         .ok_or(LoginError::EmailNotVerified)?;
+    sign_in_core(
+        state,
+        SignIn {
+            org,
+            protocol: SsoProtocol::Oidc,
+            jit_role: provider.jit_role,
+            subject: claims.subject,
+            email,
+            name: display_name(claims.name),
+            test: saved.test,
+            test_owner: saved.test_owner,
+            redirect: saved.redirect,
+        },
+    )
+    .await
+}
+
+/// What a protocol's front hands to [`sign_in_core`]: a verified subject and email of `org`.
+pub(crate) struct SignIn {
+    pub(crate) org: OrgId,
+    pub(crate) protocol: SsoProtocol,
+    /// The role a joining user gets (D-P-56), from the org's provider.
+    pub(crate) jit_role: JitRole,
+    pub(crate) subject: String,
+    /// Normalized (`normalize_email`).
+    pub(crate) email: String,
+    /// The display name, as `flow::display_name` reads it.
+    pub(crate) name: Option<String>,
+    pub(crate) test: bool,
+    pub(crate) test_owner: Option<Uuid>,
+    /// The sanitized redirect the login returns to.
+    pub(crate) redirect: String,
+}
+
+/// `Debug` prints the org, the protocol and whether this is a Test sign-in only.
+impl fmt::Debug for SignIn {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SignIn")
+            .field("org", &self.org)
+            .field("protocol", &self.protocol)
+            .field("test", &self.test)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The sign-in core both protocols call (D-SA-5, D-SA-12): the domain check, the decision of
+/// `admit`, the audit lines and the redirect. The route starts the session.
+///
+/// # Errors
+///
+/// Returns a [`LoginError`] when the login is refused or the store fails.
+pub(crate) async fn sign_in_core(state: &AppState, input: SignIn) -> Result<LoggedIn, LoginError> {
+    let org = input.org;
+    let now = state.clock.now_ns();
     let domains = state.org_sso.domains_of(org);
-    let listed = email
+    let listed = input
+        .email
         .rsplit_once('@')
         .is_some_and(|(_, domain)| domains.iter().any(|item| item == domain));
     if !listed {
         return Err(LoginError::DomainNotAllowed);
     }
-    let input = Admit {
+    // A SAML org joins its users only with `saml` as well as `org_sso` (D-SA-4).
+    let entitlements = of(state, org);
+    let jit = (entitlements.allows(Feature::OrgSso)
+        && (input.protocol == SsoProtocol::Oidc || entitlements.allows(Feature::Saml)))
+    .then(|| input.jit_role.org_role());
+    let admit_input = Admit {
         org,
         identity: store::identity_provider(org),
-        subject: claims.subject,
-        email,
-        name: display_name(claims.name),
+        subject: input.subject,
+        email: input.email,
+        name: input.name,
         domains,
-        jit: of(state, org)
-            .allows(Feature::OrgSso)
-            .then(|| provider.jit_role.org_role()),
+        jit,
         max_seats: state.entitlements.resolve(org, now).limits.max_seats,
         signup: state.config.auth.signup,
-        test: saved.test,
-        test_owner: saved.test_owner,
+        test: input.test,
+        test_owner: input.test_owner,
         now,
     };
     let admitted = state
         .meta
-        .write(move |conn| Box::pin(async move { admit(conn, &input).await }))
+        .write(move |conn| Box::pin(async move { admit(conn, &admit_input).await }))
         .await;
     let admitted = match admitted {
         Ok(admitted) => admitted,
@@ -305,7 +370,7 @@ pub(crate) async fn finish(
             .map_or_else(String::new, |row| row.slug);
         format!("/sso/no-seat?org={slug}")
     } else {
-        saved.redirect
+        input.redirect
     };
     Ok(LoggedIn {
         user_id,
@@ -569,6 +634,7 @@ fn listed(domains: &[String], email: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use axum::http::{Method, StatusCode, header};
+    use cetra_saml::test_idp::TestKey;
     use uuid::Uuid;
 
     use super::*;
@@ -583,8 +649,9 @@ mod tests {
         SESSION_NAME, begin_at, finish, grant, location, me, one_cookie,
     };
     use crate::test_support::{
-        TestApp, TestResponse, assert_logs_clean, configure_org_sso, make_instance_admin,
-        org_sso_app, org_sso_app_with, reload_org_sso, second_org, session_cookie_via,
+        TestApp, TestResponse, assert_logs_clean, configure_org_saml, configure_org_sso,
+        make_instance_admin, org_sso_app, org_sso_app_with, reload_org_sso, second_org,
+        session_cookie_via,
     };
 
     const AUTHORIZE: &str = "/api/auth/sso/authorize?domain=acme.test&redirect=%2Facme";
@@ -1374,6 +1441,51 @@ mod tests {
             .send()
             .await;
         assert_eq!(location(&response), "/login?error=invalid_state");
+    }
+
+    #[tokio::test]
+    async fn a_saml_provider_does_not_serve_the_oidc_callback() {
+        let (app, seeded, _owner) = org_sso_app().await;
+        configure_org_saml(
+            &app,
+            seeded.org_id,
+            &[TestKey::Idp],
+            "acme.test",
+            true,
+            false,
+        )
+        .await;
+        let now = app.state.clock.now_ns();
+        let instance = state_cookie::seal(
+            &app.state.oauth_key,
+            &OAuthState {
+                provider: PROVIDER.to_owned(),
+                state: "csrf".to_owned(),
+                nonce: "nonce".to_owned(),
+                pkce_verifier: "verifier".to_owned(),
+                redirect: "/".to_owned(),
+                setup_token: None,
+                created_ns: now,
+                org_id: Some(seeded.org_id.as_uuid()),
+                test: false,
+                test_owner: None,
+            },
+            false,
+        )
+        .expect("cookie");
+        let pair = instance
+            .to_str()
+            .expect("text")
+            .split(';')
+            .next()
+            .expect("pair")
+            .to_owned();
+        let response = app
+            .request(Method::GET, &format!("{CALLBACK_SSO}?state=csrf&code=abc"))
+            .header(header::COOKIE.as_str(), &pair)
+            .send()
+            .await;
+        assert_eq!(location(&response), "/login?error=sso_unavailable");
     }
 
     async fn discover_for(
