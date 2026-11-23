@@ -44,3 +44,12 @@ it("keeps the role flags on the items that had them", () => {
   const keys = projectSettingsNav.find((item) => item.label === "API keys");
   expect(keys?.adminOnly).toBe(true);
 });
+
+it("lists provisioning after single sign-on as an owner-only item", () => {
+  const sso = orgSettingsNav.findIndex((item) => item.label === "Single sign-on");
+  expect(orgSettingsNav[sso + 1]).toMatchObject({
+    label: "Provisioning",
+    to: "/$org/settings/provisioning",
+    ownerOnly: true,
+  });
+});

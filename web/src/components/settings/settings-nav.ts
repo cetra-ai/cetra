@@ -13,6 +13,7 @@ import {
   Settings2,
   ShieldAlert,
   Users,
+  UsersRound,
 } from "lucide-react";
 
 export type SettingsNavItem = {
@@ -87,6 +88,14 @@ export const orgSettingsNav = [
     icon: LockKeyhole,
     description: "Identity provider and domains",
     keywords: ["sso", "oidc", "saml", "domain"],
+    ownerOnly: true,
+  },
+  {
+    to: "/$org/settings/provisioning",
+    label: "Provisioning",
+    icon: UsersRound,
+    description: "SCIM from your identity provider",
+    keywords: ["scim", "okta", "entra", "provisioning"],
     ownerOnly: true,
   },
 ] as const;

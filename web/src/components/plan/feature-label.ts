@@ -13,5 +13,7 @@ export function featureOffer(feature: Feature): string {
       return "Available with an enterprise licence";
     case "org_sso":
       return "Available with the Teams add-on or an enterprise licence";
+    case "scim":
+      return "SCIM provisioning is part of the Enterprise plan and the self-hosted licence";
   }
 }
