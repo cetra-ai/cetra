@@ -29,7 +29,7 @@ When it is done:
 - An `llm` or `embedding` span whose provider is empty or `openai`, and which carries a known host in `server.address`, `url.full` or `gen_ai.openai.api_base`, gets that host's provider.
 - `fireworks`, `together`, `watsonx` and LiteLLM's ids resolve to their semconv names, and `autogen` or `spring_ai` in `gen_ai.system` is skipped like `gcp.vertex.agent`.
 - An OpenRouter, Vercel AI Gateway, Helicone, Portkey or Cloudflare AI Gateway span on `openai/gpt-4o-mini` is priced by OpenAI's row.
-- The snapshot has Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic, watsonx, Together and Vercel AI Gateway rows.
+- The snapshot has Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic, Together and Vercel AI Gateway rows.
 - `cetra.init(instrument=["openai"])` puts `server.address` on OpenAI-client spans.
 - The capture mock serves a scenario turn under a real host such as `openrouter.ai`.
 
