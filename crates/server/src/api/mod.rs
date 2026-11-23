@@ -7,6 +7,7 @@ pub mod account;
 pub mod admin;
 pub mod agent_context;
 pub mod alerts;
+pub mod analytics;
 pub mod annotation_queues;
 pub mod assistant;
 pub mod backfills;

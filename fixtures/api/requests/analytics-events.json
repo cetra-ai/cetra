@@ -1,0 +1,23 @@
+{
+  "events": [
+    {
+      "name": "page.viewed",
+      "org": "acme",
+      "project": "support-bot",
+      "properties": {
+        "route": "/$org/$project/traces/"
+      }
+    },
+    {
+      "name": "live_tail.toggled",
+      "org": "acme",
+      "project": "support-bot",
+      "properties": {
+        "on": true
+      }
+    },
+    {
+      "name": "command_palette.opened"
+    }
+  ]
+}
