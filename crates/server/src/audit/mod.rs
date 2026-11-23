@@ -107,7 +107,7 @@ impl Actor {
 
     /// The actor a principal stands for. `Session` → `User{via: Session}`,
     /// `Pat` → `User{via: Pat, credential_id: Some(token_id)}`, `ApiKey` → `ApiKey`,
-    /// `ControlPlane` → `ControlPlane{token_id}`.
+    /// `ControlPlane` → `ControlPlane{token_id}`, `Scim` → `Scim{token_id}`.
     pub(crate) fn of(principal: &Principal) -> Self {
         match principal {
             Principal::Session { user, .. } => Self::User {
@@ -123,6 +123,9 @@ impl Actor {
             Principal::ApiKey { key_id, .. } => Self::ApiKey { key_id: *key_id },
             Principal::ControlPlane { token_id, .. } => Self::ControlPlane {
                 token_id: token_id.to_string(),
+            },
+            Principal::Scim { token_id, .. } => Self::Scim {
+                token_id: *token_id,
             },
         }
     }

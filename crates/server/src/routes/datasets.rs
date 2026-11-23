@@ -339,7 +339,7 @@ pub(crate) fn created_by(principal: &Principal) -> Option<String> {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => Some(user.id.to_string()),
         Principal::ApiKey { key_id, .. } => Some(format!("key:{key_id}")),
-        Principal::ControlPlane { .. } => None,
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => None,
     }
 }
 

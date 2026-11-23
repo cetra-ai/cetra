@@ -1092,7 +1092,7 @@ pub(crate) fn added_by_of(principal: &Principal) -> Result<(store::AddedByKind, 
         Principal::Session { user, .. } => Ok((store::AddedByKind::User, user.id)),
         Principal::Pat { token_id, .. } => Ok((store::AddedByKind::Pat, *token_id)),
         Principal::ApiKey { key_id, .. } => Ok((store::AddedByKind::Key, *key_id)),
-        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::NotFound),
     }
 }
 

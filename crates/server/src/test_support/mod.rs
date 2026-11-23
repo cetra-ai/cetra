@@ -393,6 +393,8 @@ impl TestApp {
             pat_cache: crate::auth::principal::PatCache::new(),
             last_used: crate::auth::last_used::LastUsed::new(),
             token_last_used: crate::auth::last_used::LastUsed::tokens(),
+            scim_cache: crate::auth::principal::ScimCache::new(),
+            scim_last_used: crate::auth::last_used::LastUsed::scim_tokens(),
             setup: crate::bootstrap::SetupState::new(),
             password_hasher: tokio::sync::OnceCell::new(),
             mailer,

@@ -493,6 +493,8 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         pat_cache: crate::auth::principal::PatCache::new(),
         last_used: crate::auth::last_used::LastUsed::new(),
         token_last_used: crate::auth::last_used::LastUsed::tokens(),
+        scim_cache: crate::auth::principal::ScimCache::new(),
+        scim_last_used: crate::auth::last_used::LastUsed::scim_tokens(),
         setup: crate::bootstrap::SetupState::new(),
         password_hasher: tokio::sync::OnceCell::new(),
         mailer,
@@ -809,6 +811,9 @@ fn spawn_last_used(state: AppState) -> JoinHandle<()> {
             if let Err(error) = state.token_last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
             }
+            if let Err(error) = state.scim_last_used.flush(&state.meta).await {
+                tracing::error!(error = %error, "last_used flush failed");
+            }
         }
     })
 }
@@ -1046,6 +1051,9 @@ impl Running {
                 tracing::error!(error = %error, "last_used flush failed");
             }
             if let Err(error) = state.token_last_used.flush(&state.meta).await {
+                tracing::error!(error = %error, "last_used flush failed");
+            }
+            if let Err(error) = state.scim_last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
             }
             if let Err(error) = state.usage.flush(&state.meta).await {

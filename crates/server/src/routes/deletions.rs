@@ -503,7 +503,7 @@ fn actor(principal: &Principal) -> Result<(store::ActorKind, Uuid), ApiError> {
             Ok((store::ActorKind::User, user.id))
         }
         Principal::ApiKey { key_id, .. } => Ok((store::ActorKind::ApiKey, *key_id)),
-        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::NotFound),
     }
 }
 

@@ -17,6 +17,7 @@ use crate::meta::MetaError;
 enum Table {
     ApiKeys,
     Tokens,
+    ScimTokens,
 }
 
 /// In-memory `last_used_at` updates, one timestamp per id.
@@ -34,6 +35,11 @@ impl LastUsed {
     /// Updates for `personal_tokens`.
     pub(crate) fn tokens() -> Self {
         Self::with_table(Table::Tokens)
+    }
+
+    /// Updates for `scim_tokens` (track EA M5).
+    pub(crate) fn scim_tokens() -> Self {
+        Self::with_table(Table::ScimTokens)
     }
 
     fn with_table(table: Table) -> Self {
@@ -83,6 +89,9 @@ impl LastUsed {
                         Table::ApiKeys => crate::meta::api_keys::set_last_used(conn, &rows).await,
                         Table::Tokens => {
                             crate::meta::personal_tokens::set_last_used(conn, &rows).await
+                        }
+                        Table::ScimTokens => {
+                            crate::ee::scim::store::set_tokens_last_used(conn, &rows).await
                         }
                     }
                 })

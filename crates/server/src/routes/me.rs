@@ -77,7 +77,10 @@ async fn change_password(
         Principal::Session {
             user, session_hash, ..
         } => (user, session_hash),
-        Principal::ApiKey { .. } | Principal::Pat { .. } | Principal::ControlPlane { .. } => {
+        Principal::ApiKey { .. }
+        | Principal::Pat { .. }
+        | Principal::ControlPlane { .. }
+        | Principal::Scim { .. } => {
             return Err(ApiError::Forbidden {
                 code: ProblemCode::Forbidden,
             });

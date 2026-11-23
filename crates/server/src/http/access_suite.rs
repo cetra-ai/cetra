@@ -14,6 +14,7 @@ use uuid::Uuid;
 use super::{Access, RouteDef, routes};
 use crate::api::account::{OrgRole, SignupPolicy};
 use crate::auth::roles::{self, KeyScope, ProjectPerm, Role};
+use crate::auth::secret::{self, KeyKind};
 use crate::config::Secret;
 use crate::meta::MetaError;
 use crate::meta::members::add_org_member;
@@ -72,6 +73,7 @@ enum Who {
     KeyPublic,
     KeyForeign,
     ControlPlane,
+    Scim,
 }
 
 struct Caller {
@@ -127,7 +129,11 @@ async fn every_route_against_every_principal() {
 async fn suite() -> (Vec<String>, usize) {
     let app = TestApp::with_config(|config| {
         config.auth.signup = SignupPolicy::Open;
-        config.license_key = Some(Secret::new(license_key(&["project_roles"])));
+        config.license_key = Some(Secret::new(license_key(&[
+            "project_roles",
+            "scim",
+            "org_sso",
+        ])));
     })
     .await;
     let mut world = build(&app).await;
@@ -193,9 +199,11 @@ async fn build(app: &TestApp) -> World {
         create_key(app, &ada.cookie, &project_a, "secret", &["read"], "extra").await;
     let (_, key_foreign) =
         create_key(app, &bob.cookie, &project_b, "secret", &["read"], "foreign").await;
+    let scim = mint_scim_token(app, org_id, ada.id).await;
     let control_plane = control_plane_token("orgs", "GET", "/");
     for secret in [
         control_plane.clone(),
+        scim.clone(),
         pat_read.clone(),
         pat_write.clone(),
         token_extra,
@@ -253,8 +261,36 @@ async fn build(app: &TestApp) -> World {
             bearer(Who::KeyForeign, key_foreign),
             // Signed per request in `call`: a control-plane token names its method and path.
             bearer(Who::ControlPlane, control_plane),
+            bearer(Who::Scim, scim),
         ],
     }
+}
+
+/// A SCIM token of the world's org, minted as the token route does.
+async fn mint_scim_token(app: &TestApp, org: OrgId, created_by: Uuid) -> String {
+    let minted = secret::new_key(KeyKind::Scim).unwrap();
+    let plaintext = minted.plaintext.clone();
+    let now = app.state.clock.now_ns();
+    app.state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                crate::ee::scim::store::insert_token(
+                    conn,
+                    org,
+                    "suite",
+                    &minted.prefix,
+                    &minted.hash,
+                    created_by,
+                    now,
+                )
+                .await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+    plaintext
 }
 
 fn session(who: Who, signed: &SignedUp) -> Caller {
@@ -363,7 +399,8 @@ fn checked_routes() -> Vec<RouteDef> {
     routes()
         .into_iter()
         .filter(|route| {
-            route.documented || matches!(route.access, Access::Key { .. } | Access::Pat)
+            route.documented
+                || matches!(route.access, Access::Key { .. } | Access::Pat | Access::Scim)
         })
         .collect()
 }
@@ -469,7 +506,11 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
     match access {
         Access::Public => Outcome::Allowed,
         Access::User { session_only } => {
-            if is_key(who) || who == Who::ControlPlane || (session_only && !is_session(who)) {
+            if is_key(who)
+                || who == Who::ControlPlane
+                || who == Who::Scim
+                || (session_only && !is_session(who))
+            {
                 Outcome::Denied403
             } else {
                 Outcome::Allowed
@@ -483,7 +524,7 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
             }
         }
         Access::Org { perm, session_only } => {
-            if is_key(who) || who == Who::ControlPlane {
+            if is_key(who) || who == Who::ControlPlane || who == Who::Scim {
                 return Outcome::Denied404;
             }
             if session_only && !is_session(who) {
@@ -518,8 +559,15 @@ fn expected(access: Access, method: &Method, who: Who) -> Outcome {
                 Outcome::Denied403
             }
         }
+        Access::Scim => {
+            if who == Who::Scim {
+                Outcome::Allowed
+            } else {
+                Outcome::Denied403
+            }
+        }
         Access::Project { perm, session_only } => {
-            if who == Who::ControlPlane {
+            if who == Who::ControlPlane || who == Who::Scim {
                 return Outcome::Denied404;
             }
             if is_key(who) {
@@ -556,7 +604,8 @@ fn org_membership(who: Who) -> Option<OrgRole> {
         | Who::KeyIngest
         | Who::KeyPublic
         | Who::KeyForeign
-        | Who::ControlPlane => None,
+        | Who::ControlPlane
+        | Who::Scim => None,
     }
 }
 
@@ -574,7 +623,8 @@ fn project_role(who: Who) -> Option<Role> {
         | Who::KeyIngest
         | Who::KeyPublic
         | Who::KeyForeign
-        | Who::ControlPlane => None,
+        | Who::ControlPlane
+        | Who::Scim => None,
     }
 }
 
@@ -634,7 +684,8 @@ fn assert_every_route_declares_access() {
             | Access::Project { .. }
             | Access::Key { .. }
             | Access::Pat
-            | Access::ControlPlane { .. } => {}
+            | Access::ControlPlane { .. }
+            | Access::Scim => {}
         }
         if route.path.contains("{project}") {
             assert!(
