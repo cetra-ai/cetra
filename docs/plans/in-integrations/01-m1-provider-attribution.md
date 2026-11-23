@@ -399,7 +399,7 @@ All pass.
    - `("openai/gpt-4o", Some("openrouter"))`, between `("no-provider", None)` and `("other", …)`;
    - no row for `stray/name` or for the bedrock key.
 
-   Assert the novita row's prices with the file's existing per-token to per-million helper (e.g. `Some(million(2.7e-7))` and `Some(million(4.1e-7))`; use whatever the test already uses), not literal `0.27` and `0.41`. `collisions` stays 2. Set the `collisions` assertion to the value the conversion returns, and state the old and new values in the phase report.
+   Assert the novita row's prices with the file's existing per-token to per-million helper (e.g. `Some(million(2.7e-7))` and `Some(million(4.1e-7))`; use whatever the test already uses), not literal `0.27` and `0.41`. The `collisions` assertion stays 2 (`stray/name` and the bedrock key are skipped, and the other new rows differ in provider); if the conversion returns another value, stop and report it.
 
 5. In `provider_mapping_covers_the_litellm_names`, add `("clf_ai_gateway", "cloudflare_ai_gateway")`.
 
