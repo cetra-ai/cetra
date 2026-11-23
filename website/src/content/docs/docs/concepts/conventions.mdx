@@ -13,6 +13,7 @@ Instrumentation libraries describe an LLM call with attributes, and they do not 
 |---|---|---|
 | cetra | any attribute starting with `cetra.` | Kind, input, output, session, user, tags, metadata, environment, release, time to first token, cost |
 | [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | `gen_ai.*` attributes, or events named `gen_ai.*` | Operation, models, provider, messages, system instructions, tool definitions, token counts, finish reasons, conversation ID |
+| [VoltAgent](/docs/integrations/voltagent/) | `voltagent.*` attributes, or an instrumentation scope starting with `@voltagent/` | Span kind, model, input and output, token counts, session |
 | [OpenInference](/docs/integrations/openinference/) | `openinference.span.kind`, or `llm.*`, `input.value`, `output.value`, `embedding.*`, `retrieval.*`, `tool.*` | Kind, models, input and output messages, tool definitions, token counts, cost, session, user |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | `ai.*` attributes | Operation, models, prompt, response, tool calls, token counts, telemetry metadata |
 | [OpenLLMetry](/docs/integrations/openllmetry/) | `traceloop.*`, or `gen_ai.prompt.N.*` and `gen_ai.completion.N.*` | Kind, prompt and completion messages, entity input and output, association properties |
@@ -28,12 +29,13 @@ A span can carry several conventions. The Vercel AI SDK, for example, writes bot
 
 1. cetra
 2. OpenTelemetry GenAI
-3. OpenInference
-4. Vercel AI SDK
-5. OpenLLMetry
-6. Langfuse
-7. Laminar
-8. Google ADK
+3. VoltAgent
+4. OpenInference
+5. Vercel AI SDK
+6. OpenLLMetry
+7. Langfuse
+8. Laminar
+9. Google ADK
 
 The winner takes the whole field. cetra never merges the message lists of two conventions into one.
 

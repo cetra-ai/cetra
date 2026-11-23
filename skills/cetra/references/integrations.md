@@ -70,8 +70,11 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
+| [AG2](https://cetra.sh/docs/integrations/ag2/) | ✓ | — | AG2's own telemetry middleware | captured |
 | [Agno](https://cetra.sh/docs/integrations/agno/) | ✓ | — | `instrument=["agno"]` | captured |
 | [aisuite](https://cetra.sh/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
+| [AutoGen](https://cetra.sh/docs/integrations/autogen/) | ✓ | — | `instrument=["autogen-agentchat"]` | captured |
+| [Bedrock AgentCore](https://cetra.sh/docs/integrations/bedrock-agentcore/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
 | [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/) | ✓ | — | `instrument=["beeai"]` | captured |
 | [Claude Agent SDK](https://cetra.sh/docs/integrations/claude-agent-sdk/) | ✓ | ✓ | Claude Code's OpenTelemetry spans | captured |
 | [CrewAI](https://cetra.sh/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
@@ -84,12 +87,23 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [LangChain](https://cetra.sh/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
 | [LangGraph](https://cetra.sh/docs/integrations/langgraph/) | ✓ | ✓ | `instrument=["langchain"]` | captured (Python), SDK test (TypeScript) |
 | [LlamaIndex](https://cetra.sh/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
+| [Mastra](https://cetra.sh/docs/integrations/mastra/) | — | ✓ | Mastra's OpenTelemetry exporter | captured |
+| [Microsoft Agent Framework](https://cetra.sh/docs/integrations/agent-framework/) | ✓ | — | Agent Framework's own OpenTelemetry spans | captured |
+| [Mirascope](https://cetra.sh/docs/integrations/mirascope/) | ✓ | — | Mirascope's `ops` traces | captured |
 | [OpenAI Agents SDK](https://cetra.sh/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [OpenHands](https://cetra.sh/docs/integrations/openhands/) | ✓ | — | Laminar SDK's OTLP export | hand-written |
+| [Pydantic AI](https://cetra.sh/docs/integrations/pydantic-ai/) | ✓ | — | Pydantic AI's own OpenTelemetry spans | captured |
+| [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/) | ✓ | — | Semantic Kernel's own OpenTelemetry spans | captured |
 | [smolagents](https://cetra.sh/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
+| [Strands Agents](https://cetra.sh/docs/integrations/strands/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
 | [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | setup only |
 | [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
+| [VoltAgent](https://cetra.sh/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
 
+- [AG2](https://cetra.sh/docs/integrations/ag2/): Agent runs and tool calls.
 - [Agno](https://cetra.sh/docs/integrations/agno/): Agent runs, model calls and tools.
+- [AutoGen](https://cetra.sh/docs/integrations/autogen/): AgentChat agents, model calls and tools.
+- [Bedrock AgentCore](https://cetra.sh/docs/integrations/bedrock-agentcore/): AgentCore agents, through their Strands spans.
 - [BeeAI Framework](https://cetra.sh/docs/integrations/beeai/): Agents in Python.
 - [Claude Agent SDK](https://cetra.sh/docs/integrations/claude-agent-sdk/): Claude Code turns inside your app.
 - [CrewAI](https://cetra.sh/docs/integrations/crewai/): CrewAI from Python.
@@ -102,9 +116,17 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [LangChain](https://cetra.sh/docs/integrations/langchain/): Chains, agents, models and tools.
 - [LangGraph](https://cetra.sh/docs/integrations/langgraph/): Graphs, nodes and tools.
 - [LlamaIndex](https://cetra.sh/docs/integrations/llama-index/): LlamaIndex from Python.
+- [Mastra](https://cetra.sh/docs/integrations/mastra/): Agent runs, steps and tool calls.
+- [Microsoft Agent Framework](https://cetra.sh/docs/integrations/agent-framework/): Agents and workflow steps.
+- [Mirascope](https://cetra.sh/docs/integrations/mirascope/): Ops traces, model calls and tool loops.
 - [OpenAI Agents SDK](https://cetra.sh/docs/integrations/openai-agents/): Agent runs and function tools.
+- [OpenHands](https://cetra.sh/docs/integrations/openhands/): SDK conversations, steps and tools.
+- [Pydantic AI](https://cetra.sh/docs/integrations/pydantic-ai/): Agent runs, model calls and tool calls.
+- [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/): Agents, plugin functions and model calls.
 - [smolagents](https://cetra.sh/docs/integrations/smolagents/): Agent steps, model calls and tools.
+- [Strands Agents](https://cetra.sh/docs/integrations/strands/): Event loop cycles, model calls and tools.
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
+- [VoltAgent](https://cetra.sh/docs/integrations/voltagent/): Agent runs, model calls and tools, with the session.
 
 ## Coding agents
 

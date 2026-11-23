@@ -12,6 +12,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - Calls through the OpenAI client show the provider read from the endpoint's host when the instrumentation records it: cetra's Python SDK with `instrument=["openai"]` (which now records the client's host), OpenLLMetry, and OpenInference for TypeScript. This covers OpenRouter, Groq, Novita, Together, Fireworks, DeepSeek, xAI, Databricks and the other hosts in the host table.
 - Integration pages for 35 model providers and aisuite, with captured spans for Groq, Mistral AI, Cohere, Together AI, Ollama, Azure OpenAI and Vertex AI; `cetra-sdk` extras `groq`, `mistralai`, `cohere`, `ollama` and `together`.
 - Integration pages for Instructor, Agno, smolagents, Haystack, BeeAI Framework, Guardrails AI, Deep Agents, Temporal, LangGraph and the Claude Agent SDK, with captured spans for nine of them (seven new captures; LangGraph and the Claude Agent SDK use existing ones); `cetra-sdk` extras `instructor`, `agno`, `smolagents`, `haystack` and `beeai`.
+- Integration pages for Pydantic AI, Semantic Kernel, Strands Agents, Bedrock AgentCore, Microsoft Agent Framework, AG2, AutoGen, Mirascope, OpenHands, Mastra and VoltAgent, with captured spans for ten of them (OpenHands's case is hand-written), and the `voltagent` convention for VoltAgent's spans. AutoGen is `instrument=["autogen-agentchat"]`, with `openinference-instrumentation-autogen-agentchat` installed separately.
 
 ### Changed
 
@@ -24,6 +25,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - OpenRouter, Vercel AI Gateway, Helicone, Portkey and Cloudflare AI Gateway spans are priced by the model publisher's price, and the built-in prices include Groq, Novita, Nebius, DeepInfra, Baseten, Hyperbolic and Together models that were missing.
+- OpenInference outputs labelled as JSON that hold plain text, as Agno's do, no longer record a `cetra.normalize_error` attribute.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

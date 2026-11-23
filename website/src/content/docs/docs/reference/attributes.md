@@ -82,6 +82,22 @@ When a span carries no cetra attribute for a field, cetra reads the field from t
 |---|---|
 | `server.address`, `url.full`, `gen_ai.openai.api_base` | Provider, when the provider is missing or `openai` on an `llm` or `embedding` span. The host names the provider, for example `openrouter.ai` gives `openrouter`. |
 
+### VoltAgent
+
+Read on spans that VoltAgent writes: spans with a `voltagent.*` attribute, or whose instrumentation scope starts with `@voltagent/`.
+
+| Attribute | Feeds |
+|---|---|
+| `span.type` | Span kind: `llm` and `tool` |
+| `entity.type` | Span kind `agent`, when `span.type` is missing |
+| `llm.model`, `ai.model.name` | Request model, after `gen_ai.request.model` |
+| `llm.usage.prompt_tokens`, `llm.usage.completion_tokens` | Input and output token counts, on `llm` spans |
+| `llm.usage.cached_tokens` | Cache read token count, on `llm` spans |
+| `llm.usage.reasoning_tokens` | Reasoning token count, on `llm` spans |
+| `llm.messages` | Input messages, on `llm` spans (AI SDK messages) |
+| `input`, `output` | Input and output, when `llm.messages` does not supply them |
+| `conversation.id`, `voltagent.conversation_id` | Session |
+
 ### OpenInference
 
 | Attribute | Feeds |

@@ -243,8 +243,11 @@ export default defineConfig({
                 {
                   label: "Frameworks",
                   items: [
+                    { label: "AG2", link: "/docs/integrations/ag2/" },
                     { label: "Agno", link: "/docs/integrations/agno/" },
                     { label: "aisuite", link: "/docs/integrations/aisuite/" },
+                    { label: "AutoGen", link: "/docs/integrations/autogen/" },
+                    { label: "Bedrock AgentCore", link: "/docs/integrations/bedrock-agentcore/" },
                     { label: "BeeAI Framework", link: "/docs/integrations/beeai/" },
                     { label: "Claude Agent SDK", link: "/docs/integrations/claude-agent-sdk/" },
                     { label: "CrewAI", link: "/docs/integrations/crewai/" },
@@ -257,10 +260,21 @@ export default defineConfig({
                     { label: "LangChain", link: "/docs/integrations/langchain/" },
                     { label: "LangGraph", link: "/docs/integrations/langgraph/" },
                     { label: "LlamaIndex", link: "/docs/integrations/llama-index/" },
+                    { label: "Mastra", link: "/docs/integrations/mastra/" },
+                    {
+                      label: "Microsoft Agent Framework",
+                      link: "/docs/integrations/agent-framework/",
+                    },
+                    { label: "Mirascope", link: "/docs/integrations/mirascope/" },
                     { label: "OpenAI Agents SDK", link: "/docs/integrations/openai-agents/" },
+                    { label: "OpenHands", link: "/docs/integrations/openhands/" },
+                    { label: "Pydantic AI", link: "/docs/integrations/pydantic-ai/" },
+                    { label: "Semantic Kernel", link: "/docs/integrations/semantic-kernel/" },
                     { label: "smolagents", link: "/docs/integrations/smolagents/" },
+                    { label: "Strands Agents", link: "/docs/integrations/strands/" },
                     { label: "Temporal", link: "/docs/integrations/temporal/" },
                     { label: "Vercel AI SDK", link: "/docs/integrations/vercel-ai-sdk/" },
+                    { label: "VoltAgent", link: "/docs/integrations/voltagent/" },
                   ],
                 },
                 {
