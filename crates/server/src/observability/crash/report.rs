@@ -28,10 +28,12 @@ pub(crate) const MAX_FIELDS: usize = 32;
 pub(crate) const MAX_SPOOLED_BYTES: usize = 63 * 1024;
 const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
 
-/// Frames of the reporter itself, dropped from the top of a backtrace.
+/// Frames of the reporter itself, dropped from the top of a backtrace. An impl's frames are
+/// spelled `<Type>::method`, `<Type>::method::{closure#0}` or `<Type as Trait>::method`, so
+/// the prefixes are matched after a leading `<` and the reporter's types have no trailing `::`.
 const REPORTER_PREFIXES: [&str; 6] = [
     "cetra_server::observability::crash::report::capture_frames",
-    "cetra_server::observability::crash::Reporter::",
+    "cetra_server::observability::crash::Reporter",
     "cetra_server::observability::crash::report_panic",
     "cetra_server::observability::crash::layer::CrashLayer",
     "cetra_server::observability::panic::report",
@@ -39,8 +41,9 @@ const REPORTER_PREFIXES: [&str; 6] = [
 ];
 
 /// Crates whose frames above the first kept frame are dropped (design § 3: runtime frames
-/// collapsed). `backtrace` and the `tracing` crates are the reporter's own path.
-const RUNTIME_ROOTS: [&str; 8] = [
+/// collapsed). `backtrace` and the `tracing` crates are the reporter's own path; `__rustc` is
+/// where the compiler puts `rust_begin_unwind`.
+const RUNTIME_ROOTS: [&str; 9] = [
     "std",
     "core",
     "alloc",
@@ -49,6 +52,7 @@ const RUNTIME_ROOTS: [&str; 8] = [
     "tracing",
     "tracing_core",
     "tracing_subscriber",
+    "__rustc",
 ];
 
 /// What a report is about.
@@ -230,13 +234,21 @@ pub(crate) fn strip_hash(name: &str) -> &str {
 }
 
 /// The first path segment of a function name, ignoring leading `<` (`<alloc::boxed::Box<F>
-/// as …>::call` is `alloc`); empty for a name without `::` (a C symbol).
+/// as …>::call` is `alloc`). Empty for a name without a path: a C symbol (`_Unwind_Backtrace`),
+/// or a symbol whose generic arguments come before any `::` (`unwrap<(), …>`,
+/// `trace_unsynchronized<…>`), which the symbol table gives without its crate.
 fn root(name: &str) -> &str {
     let trimmed = name.trim_start_matches('<');
-    trimmed.find("::").map_or("", |end| &trimmed[..end])
+    let path_end = trimmed.find("::");
+    match path_end {
+        // The first `<` of generic arguments before the first `::` ends the name's own
+        // identifier, so there is no path to read.
+        Some(end) if !trimmed[..end].contains('<') => &trimmed[..end],
+        _ => "",
+    }
 }
 
-/// A frame of a runtime crate or a C symbol.
+/// A frame of a runtime crate, a C symbol, or another name printed without its crate.
 fn is_runtime(name: &str) -> bool {
     let root = root(name);
     root.is_empty() || RUNTIME_ROOTS.contains(&root)
@@ -655,6 +667,72 @@ mod tests {
         assert_eq!(frames, ["cetra_storage::wal::Wal::sync"]);
     }
 
+    /// The frames above `capture_frames` as v0 mangling prints them: the backtrace crate's
+    /// entry points without their crate path, and an impl's self type in angle brackets.
+    #[test]
+    fn a_v0_capture_stack_starts_at_the_caller() {
+        let raw = [
+            "trace_unsynchronized<cetra_server::observability::crash::report::capture_frames::{closure_env#0}>",
+            "backtrace::backtrace::trace::<cetra_server::observability::crash::report::capture_frames::{closure#0}>",
+            "cetra_server::observability::crash::report::capture_frames",
+            "cetra_server::observability::crash::report::tests::capture_frames_names_its_caller::marker_for_capture_test",
+        ];
+        let frames = clean_frames(raw.iter().map(|name| (*name).to_owned()).collect());
+        assert_eq!(frames, [raw[3]]);
+    }
+
+    /// The frames above a panicking function as v0 mangling prints them, from the panic hook
+    /// of a child process: the reporter's impls, the hook, the panic runtime (including
+    /// `__rustc::rust_begin_unwind` and the path-less `unwrap`), down to the panicking code.
+    #[test]
+    fn a_v0_panic_stack_starts_at_the_panicking_code() {
+        let raw = [
+            "trace_unsynchronized<cetra_server::observability::crash::report::capture_frames::{closure_env#0}>",
+            "backtrace::backtrace::trace::<cetra_server::observability::crash::report::capture_frames::{closure#0}>",
+            "cetra_server::observability::crash::report::capture_frames",
+            "<cetra_server::observability::crash::Reporter>::report_panic::{closure#0}",
+            "<cetra_server::observability::crash::Reporter>::occurrence::<<cetra_server::observability::crash::Reporter>::report_panic::{closure#0}>",
+            "<cetra_server::observability::crash::Reporter>::report_panic",
+            "cetra_server::observability::crash::report_panic",
+            "report",
+            "cetra_server::observability::panic::install::{closure#0}::{closure#0}",
+            "<alloc::boxed::Box<dyn for<'a, 'b> core::ops::function::Fn<(&'a std::panic::PanicHookInfo<'b>,), Output = ()> + core::marker::Send + core::marker::Sync> as core::ops::function::Fn<(&std::panic::PanicHookInfo,)>>::call",
+            "std::panicking::panic_with_hook",
+            "std::panicking::panic_handler::{closure#0}",
+            "std::sys::backtrace::__rust_end_short_backtrace::<std::panicking::panic_handler::{closure#0}, !>",
+            "__rustc::rust_begin_unwind",
+            "core::panicking::panic_fmt",
+            "core::result::unwrap_failed",
+            "unwrap<(), alloc::string::String>",
+            "crash_child_process",
+            "cetra_server::observability::crash::leak_tests::crash_child_process::{closure#0}",
+            "<cetra_server::observability::crash::leak_tests::crash_child_process::{closure#0} as core::ops::function::FnOnce<()>>::call_once",
+        ];
+        let frames = clean_frames(raw.iter().map(|name| (*name).to_owned()).collect());
+        assert_eq!(frames, [raw[18], raw[19]]);
+    }
+
+    #[test]
+    fn root_rules() {
+        let cases = [
+            ("cetra_storage::wal::Wal::sync", "cetra_storage"),
+            (
+                "<alloc::boxed::Box<F,A> as core::ops::function::Fn<Args>>::call",
+                "alloc",
+            ),
+            ("backtrace::backtrace::trace::<…>", "backtrace"),
+            ("__rustc::rust_begin_unwind", "__rustc"),
+            // No path: a C symbol, or generic arguments before any `::`.
+            ("_Unwind_Backtrace", ""),
+            ("main", ""),
+            ("trace_unsynchronized<cetra_server::…>", ""),
+            ("unwrap<(), alloc::string::String>", ""),
+        ];
+        for (name, expected) in cases {
+            assert_eq!(root(name), expected, "name {name}");
+        }
+    }
+
     #[test]
     fn a_dependency_frame_above_cetra_is_kept() {
         let raw = [
@@ -723,7 +801,9 @@ mod tests {
         assert!(
             frames[..position]
                 .iter()
-                .all(|frame| !frame.starts_with("backtrace::"))
+                .all(|frame| !frame.starts_with("backtrace::")),
+            "{:?}",
+            frames
         );
         assert!(
             frames

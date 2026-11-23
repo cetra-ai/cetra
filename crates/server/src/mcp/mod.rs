@@ -1677,8 +1677,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn a_tool_call_runs_in_a_query_span_under_its_request() {
         let (app, _, tok) = app_with_token().await;
-        let ((is_error, _), captured) =
-            capture_spans(call(&app, &tok, "list_projects", &json!({}))).await;
+        let ((is_error, _), captured) = capture_spans(async {
+            let outcome = call(&app, &tok, "list_projects", &json!({})).await;
+            // rmcp answers from a spawned task it does not await, which still holds its copy
+            // of the request span (`McpServer::request_span`): give the runtime a moment to
+            // finish it, so `http.request` closes before the capture flushes.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            outcome
+        })
+        .await;
         assert!(!is_error);
 
         let request = only(&captured, "http.request");

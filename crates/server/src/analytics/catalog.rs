@@ -854,11 +854,19 @@ mod tests {
 
     #[test]
     fn the_route_value_is_the_catalog_constant() {
-        let built = String::from("/$org/");
-        let properties = props(json!({"route": built}));
-        match parse_web("page.viewed", &properties) {
+        // The input is a heap string, dropped with its event before the route is read: the
+        // stored route outlives it, so it is not a borrow of the input.
+        let event = {
+            let properties = props(json!({"route": String::from("/$org/")}));
+            parse_web("page.viewed", &properties)
+        };
+        match event {
             Some(Event::PageViewed { route }) => {
-                assert!(std::ptr::eq(route, PAGE_ROUTES[1]));
+                assert_eq!(route, "/$org/");
+                // By value: a `const` is copied into every codegen unit that reads it, so two
+                // spellings of the same entry need not share an address.
+                assert_eq!(route, PAGE_ROUTES[1]);
+                assert!(PAGE_ROUTES.contains(&route));
             }
             other => panic!("expected a page view, got {other:?}"),
         }

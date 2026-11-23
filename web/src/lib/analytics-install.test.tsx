@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import type { WireEvent } from "@/lib/analytics";
 import { installAnalytics } from "@/lib/analytics-install";
 import { server } from "@/mocks/node";
+import { problemResponse } from "@/test/problem";
 import { renderApp } from "@/test/render";
 import authConfig from "../../../fixtures/api/static/auth-config.json";
 
@@ -18,6 +19,11 @@ function analyticsOn(): void {
   server.use(
     http.get("/api/auth/config", () => HttpResponse.json({ ...authConfig, analytics: true })),
   );
+}
+
+/** The shared mocks are signed in: `/login` would redirect to `/` before it renders. */
+function signedOut(): void {
+  server.use(http.get("/api/auth/me", () => problemResponse(401, "unauthorized")));
 }
 
 it("installs nothing when analytics is off", async () => {
@@ -82,7 +88,7 @@ it("a search change is not a page view", async () => {
   await router.navigate({
     to: "/$org/$project/traces",
     params: { org: "acme", project: "support-bot" },
-    search: { q: "error" },
+    search: { search: "error" },
   });
   await new Promise((resolve) => setTimeout(resolve, 100));
   expect(sent.filter((e) => e.name === "page.viewed")).toHaveLength(1);
@@ -90,6 +96,7 @@ it("a search change is not a page view", async () => {
 
 it("public pages send no page view", async () => {
   analyticsOn();
+  signedOut();
   const { router, queryClient } = await renderApp("/login");
   const sent: WireEvent[] = [];
   const send = vi.fn(async (events: WireEvent[]) => {

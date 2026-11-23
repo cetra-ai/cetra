@@ -1046,6 +1046,7 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/projects/{project}/prompt-settings",
         "put_prompt_settings",
     ),
+    ("post", "/api/v1/analytics/events", "post_analytics_events"),
 ];
 
 const QUERY_OR_BODY: &[&str] = &[
@@ -1162,6 +1163,7 @@ const TAGS: &[&str] = &[
     "issues",
     "assistant",
     "ingest",
+    "analytics",
 ];
 
 const METHODS: &[&str] = &[
@@ -1311,6 +1313,7 @@ fn document_lint() {
                 | "get_device_request"
                 | "post_device_approve"
                 | "post_device_deny"
+                | "post_analytics_events"
         ) {
             let security = operation_security.unwrap_or_else(|| panic!("{id}"));
             assert_eq!(security.len(), 1, "{id}");
@@ -1341,6 +1344,10 @@ fn document_lint() {
             expected_errors.extend(["400"]);
         } else if *id == "post_device_approve" {
             expected_errors.extend(["400", "401", "403", "404", "429"]);
+        } else if *id == "post_analytics_events" {
+            // Always 204 once signed in: no 400 whatever the body held, and a caller past the
+            // rate limit also gets 204.
+            expected_errors.extend(["401", "403"]);
         } else if *id == "get_oauth_callback" {
             // Failure is a redirect, not a problem response.
         } else if *id == "post_setup" || *id == "post_signup" {
