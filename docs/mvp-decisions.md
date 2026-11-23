@@ -1034,6 +1034,7 @@ Decisions of track IN (`docs/plans/in-integrations/00-design.md`, research in th
 | D-IN-17 | Spikes | **A milestone's spikes run before its plan**, written up in `docs/plans/in-integrations/spikes/`; a result that changes a decision or the scope updates the design first. |
 | D-IN-18 | SDK host stamp | **cetra's Python SDK wraps the OpenAI client's resource methods outermost when `instrument` names `openai` and sets `server.address` from the client's base-URL host on spans started during the call**, because OpenInference and OpenAI v2 write no host. TypeScript needs nothing: OpenInference JS already writes `server.address` (the user, 2026-11-23). |
 | D-IN-19 | M1 cases | **M1 captures OpenRouter and Novita through OpenInference (via cetra's runtime, pinning D-IN-18) and OpenLLMetry; no OpenAI v2 case. The capture mock checks a turn's `host` against the `Host` header. `clf_ai_gateway` becomes `cloudflare_ai_gateway`.** |
+| D-IN-20 | Request-model retry | **When the response model finds no price row, pricing repeats the lookup with the request model if it differs** (OpenLLMetry strips `vendor/` from the response model). |
 
 ## Open
 

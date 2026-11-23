@@ -242,6 +242,8 @@ pub(crate) struct Charge<'a> {
     pub provider: Option<&'a str>,
     /// `response_model`, or `request_model` when the response names none.
     pub model: Option<&'a str>,
+    /// `request_model` when it differs from `model`; tried when `model` finds no row (D-IN-20).
+    pub request_model: Option<&'a str>,
     /// Span start, nanoseconds.
     pub start_time: i64,
     /// Token columns.
@@ -270,7 +272,10 @@ pub(crate) fn apply(
     let Some(model) = charge.model else {
         return none();
     };
-    let matched = lookup(prices, model, charge.provider, charge.start_time);
+    let matched = lookup(prices, model, charge.provider, charge.start_time).or_else(|| {
+        let request_model = charge.request_model?;
+        lookup(prices, request_model, charge.provider, charge.start_time)
+    });
     let Some(matched) = matched else {
         return none();
     };
@@ -989,6 +994,7 @@ mod tests {
                 kind: SpanKind::Llm,
                 provider,
                 model: Some(model),
+                request_model: None,
                 start_time: 0,
                 usage: &usage_input(tokens),
             },
@@ -1158,6 +1164,7 @@ mod tests {
                 kind: SpanKind::Llm,
                 provider: None,
                 model: Some("known"),
+                request_model: None,
                 start_time: 0,
                 usage: &Usage::default(),
             },
@@ -1167,6 +1174,77 @@ mod tests {
         assert_eq!(priced.total, None);
         assert_eq!(priced.source, Some(CostSource::None));
         assert_eq!(priced.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn the_request_model_is_tried_when_the_response_model_has_no_row() {
+        let prices = table(vec![
+            row(
+                &exact_pattern("gpt-4o-mini"),
+                PriceScope::Builtin,
+                Some("openai"),
+                0,
+                1.0,
+            ),
+            row(
+                &exact_pattern("deepseek/deepseek-v3.2"),
+                PriceScope::Builtin,
+                Some("novita"),
+                0,
+                2.0,
+            ),
+        ]);
+        let usage = usage_input(1_000_000);
+        let cost = |provider: Option<&str>, model: Option<&str>, request_model: Option<&str>| {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&[], &mut warnings);
+            apply(
+                &mut bag,
+                &Charge {
+                    kind: SpanKind::Llm,
+                    provider,
+                    model,
+                    request_model,
+                    start_time: 0,
+                    usage: &usage,
+                },
+                &prices,
+                &mut warnings,
+            )
+        };
+
+        // (a) OpenLLMetry strips the `openai/` prefix from the response model; the request model
+        // reaches the publisher's row through the gateway fallback.
+        let priced = cost(
+            Some("openrouter"),
+            Some("unknown-model"),
+            Some("openai/gpt-4o-mini"),
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+
+        // (b) A reseller's `vendor/model` row is matched by the request model.
+        let priced = cost(
+            Some("novita"),
+            Some("deepseek-v3.2"),
+            Some("deepseek/deepseek-v3.2"),
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(2.0));
+
+        // (c) Without a request model there is nothing to retry.
+        let priced = cost(Some("novita"), Some("deepseek-v3.2"), None);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.input, None);
+
+        // (d) The request model is not used when the response model finds a row.
+        let priced = cost(
+            Some("openai"),
+            Some("gpt-4o-mini"),
+            Some("deepseek/deepseek-v3.2"),
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
     }
 
     #[test]
@@ -1258,6 +1336,7 @@ mod tests {
             kind: SpanKind::Llm,
             provider: None,
             model: Some("gpt-4o-mini"),
+            request_model: None,
             start_time: 0,
             usage: &usage,
         };

@@ -207,33 +207,37 @@ fn prices() {
             if span.cost_source != Some(CostSource::Computed) {
                 continue;
             }
-            let Some(model) = model_of(span) else {
+            let models = price_models(span);
+            if models.is_empty() {
                 failures.push(format!(
                     "{}: computed cost span {} has no model",
                     label(case),
                     span.span_id
                 ));
                 continue;
-            };
-            let matched = rows.iter().zip(compiled.iter()).any(|(row, pattern)| {
-                price_row_matches(
-                    row,
-                    pattern,
+            }
+            let matched = models.iter().any(|&model| {
+                rows.iter().zip(compiled.iter()).any(|(row, pattern)| {
+                    price_row_matches(
+                        row,
+                        pattern,
+                        model,
+                        span.provider.as_deref(),
+                        span.start_time,
+                    )
+                }) || pick_price_or_publisher(
+                    &rows,
                     model,
                     span.provider.as_deref(),
                     span.start_time,
                 )
-            }) || pick_price_or_publisher(
-                &rows,
-                model,
-                span.provider.as_deref(),
-                span.start_time,
-            )
-            .is_some();
+                .is_some()
+            });
             if !matched {
                 failures.push(format!(
-                    "{}: no price row matches model {model}",
-                    label(case)
+                    "{}: no price row matches model {}",
+                    label(case),
+                    models.join(", ")
                 ));
             }
         }
@@ -682,7 +686,7 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
         Some(CostSource::Computed) => check_computed(label, span, rows, failures),
         Some(CostSource::None) => {
             let priced = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
-            let matched = model_of(span).is_some_and(|model| {
+            let matched = price_models(span).into_iter().any(|model| {
                 rows.iter().any(|row| {
                     let Ok(pattern) = compile_anchored(&row.match_pattern) else {
                         return false;
@@ -721,18 +725,23 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
 }
 
 fn check_computed(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<String>) {
-    let Some(model) = model_of(span) else {
+    let models = price_models(span);
+    if models.is_empty() {
         failures.push(format!(
             "{label}: {} cost_source computed but model is absent",
             span.span_id
         ));
         return;
-    };
-    let Some(row) = pick_price_or_publisher(rows, model, span.provider.as_deref(), span.start_time)
-    else {
+    }
+    let priced_by = models.iter().find_map(|&model| {
+        pick_price_or_publisher(rows, model, span.provider.as_deref(), span.start_time)
+            .map(|row| (model, row))
+    });
+    let Some((_, row)) = priced_by else {
         failures.push(format!(
-            "{label}: {} no price row for model {model}",
-            span.span_id
+            "{label}: {} no price row for model {}",
+            span.span_id,
+            models.join(", ")
         ));
         return;
     };
@@ -921,10 +930,22 @@ fn same_provider(row_provider: &str, span_provider: &str) -> bool {
         || (span_provider == "gcp.gen_ai" && matches!(row_provider, "gcp.gemini" | "gcp.vertex_ai"))
 }
 
-fn model_of(span: &Span) -> Option<&str> {
-    span.response_model
-        .as_deref()
-        .or(span.request_model.as_deref())
+/// The models that price a span, in order: the response model, then the request model when it
+/// differs (D-IN-20). Mirrors `cost::apply`, which repeats the lookup with the request model.
+fn price_models(span: &Span) -> Vec<&str> {
+    let mut models: Vec<&str> = Vec::new();
+    for model in [
+        span.response_model.as_deref(),
+        span.request_model.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !models.contains(&model) {
+            models.push(model);
+        }
+    }
+    models
 }
 
 fn check_media_bounds(case: &Case, failures: &mut Vec<String>) {

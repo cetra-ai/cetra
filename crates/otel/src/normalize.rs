@@ -273,15 +273,21 @@ fn accept_span(
         Some(nanos) => Some(nanos),
         None => agents::ttft(agent, &mut bag, &mut warnings),
     };
+    let model = fields
+        .response_model
+        .as_deref()
+        .or(fields.request_model.as_deref());
+    let request_model = fields
+        .request_model
+        .as_deref()
+        .filter(|request| Some(*request) != model);
     let priced = crate::cost::apply(
         &mut bag,
         &crate::cost::Charge {
             kind: span_kind,
             provider: fields.provider.as_deref(),
-            model: fields
-                .response_model
-                .as_deref()
-                .or(fields.request_model.as_deref()),
+            model,
+            request_model,
             start_time,
             usage: &counted,
         },
