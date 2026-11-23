@@ -451,10 +451,6 @@ mod tests {
         StatusCode::NO_CONTENT
     }
 
-    async fn no_content() -> StatusCode {
-        StatusCode::NO_CONTENT
-    }
-
     /// The `http.request` span of the request whose matched route is `route`.
     fn request_span(captured: &Captured, route: &str) -> ProtoSpan {
         captured
@@ -571,9 +567,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn health_probes_have_no_span() {
-        let app =
-            TestApp::with_routes(Router::new().route("/api/v1/analytics/events", post(no_content)))
-                .await;
+        // The real analytics route (M6) is in the router already, so a test route at its path
+        // would be a duplicate: the beacon is posted with a session, as the UI posts it.
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
         let ((), captured) = capture_spans(async {
             let live = app
                 .request(axum::http::Method::GET, "/healthz")
@@ -584,7 +581,8 @@ mod tests {
             assert_eq!(ready.status, 200);
             let beacon = app
                 .request(axum::http::Method::POST, "/api/v1/analytics/events")
-                .origin(None)
+                .header("cookie", &seeded.cookie)
+                .json(&serde_json::json!({"events": []}))
                 .send()
                 .await;
             assert_eq!(beacon.status, 204);
