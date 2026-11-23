@@ -1,0 +1,77 @@
+[
+  {
+    "method": "POST",
+    "path": "/scim/v2/Users",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"],
+      "userName": "group.member@acme.test",
+      "name": { "givenName": "Grace", "familyName": "Hopper" },
+      "displayName": "Grace Hopper",
+      "emails": [{ "primary": true, "type": "work", "value": "group.member@acme.test" }],
+      "active": true
+    },
+    "expect": {
+      "status": 201,
+      "save": { "user": "/id" }
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/scim/v2/Groups",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"],
+      "displayName": "Engineering",
+      "members": []
+    },
+    "expect": {
+      "status": 201,
+      "save": { "group": "/id" },
+      "json": { "/displayName": "Engineering" }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Groups/{group}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "add", "path": "members", "value": [{ "value": "{user}" }] }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/members/0/value": "{user}" }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Groups/{group}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [
+        { "op": "replace", "value": { "id": "{group}", "displayName": "Renamed" } }
+      ]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/displayName": "Renamed", "/members/0/value": "{user}" }
+    }
+  },
+  {
+    "method": "PATCH",
+    "path": "/scim/v2/Groups/{group}",
+    "body": {
+      "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+      "Operations": [{ "op": "remove", "path": "members[value eq \"{user}\"]" }]
+    },
+    "expect": {
+      "status": 200,
+      "json": { "/displayName": "Renamed", "/members": [] }
+    }
+  },
+  {
+    "method": "DELETE",
+    "path": "/scim/v2/Groups/{group}",
+    "expect": {
+      "status": 204
+    }
+  }
+]

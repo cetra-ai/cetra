@@ -1,0 +1,10 @@
+[
+  {
+    "method": "GET",
+    "path": "/scim/v2/Users?startIndex=1&count=1",
+    "expect": {
+      "status": 200,
+      "json": { "/totalResults": 0 }
+    }
+  }
+]
