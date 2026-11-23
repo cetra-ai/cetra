@@ -26,6 +26,8 @@ use crate::api::annotation_queues::{
     UpdateAnnotationQueue,
 };
 use crate::api::common::{FieldError, Page};
+use crate::audit::catalog::AnnotationQueueAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::entitlements::Visibility;
@@ -337,6 +339,7 @@ async fn create_queue(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateAnnotationQueue>,
 ) -> Result<Response, ApiError> {
     // A key creates a queue with no creator: the column names a person.
@@ -368,7 +371,7 @@ async fn create_queue(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::insert_queue_tx(
+                let outcome = store::insert_queue_tx(
                     conn,
                     project,
                     org,
@@ -383,13 +386,20 @@ async fn create_queue(
                     plan_limit,
                     now,
                 )
-                .await
+                .await?;
+                if let QueueCreate::Created(row) = &outcome {
+                    let event = Event::new(AnnotationQueueAction::Created)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::AnnotationQueue, row.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(outcome)
             })
         })
         .await?;
     match outcome {
         QueueCreate::Created(row) => {
-            tracing::info!(project_id = %project, queue_id = %row.id, "annotation queue created");
             let json = queue_json(&row, None);
             Ok((StatusCode::CREATED, error::Json(json)).into_response())
         }
@@ -406,10 +416,12 @@ async fn create_queue(
 async fn update_queue(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(path): error::Path<QueuePath>,
     error::Json(body): error::Json<UpdateAnnotationQueue>,
 ) -> Result<error::Json<AnnotationQueue>, ApiError> {
     let project = access.project.id;
+    let org = access.project.org_id;
     let mut errors = Vec::new();
     let name = body
         .name
@@ -439,14 +451,22 @@ async fn update_queue(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { store::update_tx(conn, project, id, version, changes, now).await },
-            )
+            Box::pin(async move {
+                let outcome =
+                    store::update_tx(conn, project, id, version, changes, now).await?;
+                if let QueueUpdate::Updated(_) = &outcome {
+                    let event = Event::new(AnnotationQueueAction::Updated)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::AnnotationQueue, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(outcome)
+            })
         })
         .await?;
     match outcome {
         QueueUpdate::Updated(row) => {
-            tracing::info!(project_id = %project, queue_id = %id, "annotation queue updated");
             let visible_from = Visibility::window(&state, access.project.org_id).visible_from();
             let counts =
                 store::counts(state.meta.reader(), project, &[row.id], visible_from).await?;
@@ -466,16 +486,30 @@ async fn update_queue(
 async fn delete_queue(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(path): error::Path<QueuePath>,
 ) -> Result<StatusCode, ApiError> {
     let project = access.project.id;
+    let org = access.project.org_id;
     let id = path.id;
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete(conn, project, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let deleted = store::delete(conn, project, id).await?;
+                if deleted {
+                    let event = Event::new(AnnotationQueueAction::Deleted)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::AnnotationQueue, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(deleted)
+            })
+        })
         .await?;
     if deleted {
-        tracing::info!(project_id = %project, queue_id = %id, "annotation queue deleted");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -2034,6 +2068,40 @@ mod tests {
     }
 
     /// Adds `body` to the queue `queue` as the owner.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queue_create_is_recorded_items_are_not() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let definition = define(&app, seeded.project.id, "relevance", false).await;
+        let queue = create(&app, &seeded, "Review", definition).await;
+        let now = app.state.clock.now_ns();
+        app.commit_trace_at(&seeded.project, trace_id(1), 0, now)
+            .await;
+        let added = add(
+            &app,
+            &seeded,
+            queue.id,
+            json!({"items": [{"trace_id": trace_id(1).to_hex()}]}),
+        )
+        .await;
+        assert_eq!(added.status, StatusCode::CREATED);
+
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT action, target_id FROM audit_events WHERE action LIKE 'annotation_queue.%' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "annotation_queue.created".to_owned(),
+                Some(queue.id.to_string())
+            )]
+        );
+    }
+
     async fn add(app: &TestApp, seeded: &Seeded, queue: Uuid, body: Value) -> TestResponse {
         let path = format!("{}/{queue}/items", base(seeded));
         send(app, Method::POST, &path, &seeded.cookie, Some(body)).await

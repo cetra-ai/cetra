@@ -6,7 +6,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::output;
+use super::record_tool;
 use super::tools::arguments;
+use crate::audit;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -50,6 +52,7 @@ struct GetArguments {
 pub(crate) async fn list_prompts(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: ListArguments = arguments(raw)?;
@@ -63,6 +66,7 @@ pub(crate) async fn list_prompts(
         })?;
     let max_chars = output::max_chars(args.max_chars)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, LIST_PROMPTS, &access, None).await?;
     let filter = PromptFilter {
         q: args.q,
         label: args.label.filter(|label| label != LATEST),
@@ -113,6 +117,7 @@ fn prompt_item(row: &PromptRow) -> Value {
 pub(crate) async fn get_prompt(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: GetArguments = arguments(raw)?;
@@ -123,6 +128,7 @@ pub(crate) async fn get_prompt(
         });
     }
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, GET_PROMPT, &access, None).await?;
     let reader = state.meta.reader();
     let row = store::get_prompt(reader, access.project.id, &args.name)
         .await?
