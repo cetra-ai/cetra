@@ -1018,7 +1018,8 @@ pub enum ConfigError {
     MissingFile(PathBuf),
 }
 
-fn default_data_dir() -> PathBuf {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn default_data_dir() -> PathBuf {
     PathBuf::from("./cetra-data")
 }
 
@@ -1074,6 +1075,24 @@ fn default_trace_sample_ratio() -> TraceSampleRatio {
     TraceSampleRatio::DEFAULT
 }
 
+/// The file, then the `CETRA_*` variables, as one figment: the sources [`load_from`]
+/// extracts and [`source_tree`] shows.
+fn sources(toml: Option<&str>, env: &[(&str, &str)]) -> Figment {
+    let mut figment = Figment::new();
+    if let Some(toml) = toml {
+        figment = figment.merge(Toml::string(toml));
+    }
+    figment.merge(EnvSource { pairs: env })
+}
+
+/// The merged sources as one dictionary, before serde defaults, validation and the
+/// `storage.data_dir` injection: what the debug bundle shows (D-TL-6). A TOML syntax
+/// error is mapped as [`load_from`] maps it, so its text names a position only.
+pub(crate) fn source_tree(toml: Option<&str>, env: &[(&str, &str)]) -> Result<Dict, ConfigError> {
+    let mut data = sources(toml, env).data().map_err(map_figment)?;
+    Ok(data.remove(&Profile::Default).unwrap_or_default())
+}
+
 /// Defaults, then `toml`, then `env`, validated. Also used by tests outside this module to
 /// build a config from TOML.
 pub(crate) fn load_from(
@@ -1087,11 +1106,7 @@ pub(crate) fn load_from(
                 reason: TELEMETRY_VALUES,
             }
         })?;
-    let mut figment = Figment::new();
-    if let Some(toml) = toml {
-        figment = figment.merge(Toml::string(toml));
-    }
-    figment = figment.merge(EnvSource { pairs: env });
+    let mut figment = sources(toml, env);
     if figment.find_value("storage.data_dir").is_ok() {
         return Err(ConfigError::Invalid {
             key: "storage.data_dir",
@@ -1147,7 +1162,8 @@ fn apply_oidc_env(auth: &mut AuthSettings, env: &[(&str, &str)]) -> Result<(), C
     Ok(())
 }
 
-fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
     let Some(path) = configured_path(path) else {
         return Ok(None);
     };
@@ -1162,7 +1178,8 @@ fn read_toml(path: Option<&Path>) -> Result<Option<String>, ConfigError> {
     }
 }
 
-fn configured_path(path: Option<&Path>) -> Option<PathBuf> {
+/// Also read by the debug bundle (track TL M3).
+pub(crate) fn configured_path(path: Option<&Path>) -> Option<PathBuf> {
     match path {
         Some(path) => Some(path.to_path_buf()),
         None => std::env::var_os("CETRA_CONFIG").map(PathBuf::from),
