@@ -77,7 +77,7 @@ No new external dependency. `crates/server/Cargo.toml` gains the workspace crate
 
 | Phase | Edits | Depends on | Parallel with |
 |---|---|---|---|
-| SA2.1 Storage | `crates/server/migrations/meta/0031_org_sso_saml.sql`, `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs` (only `SsoProtocol`), `crates/server/Cargo.toml`, and the mechanical `ProviderRow` adaptations in `crates/server/src/ee/org_sso/{settings,mod}.rs` and `crates/server/src/golden_tests/dump.rs` | M1 | SA2.2 |
+| SA2.1 Storage | `crates/server/migrations/meta/0032_org_sso_saml.sql`, `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs` (only `SsoProtocol`), `crates/server/Cargo.toml`, and the mechanical `ProviderRow` adaptations in `crates/server/src/ee/org_sso/{settings,mod}.rs` and `crates/server/src/golden_tests/dump.rs` | M1 | SA2.2 |
 | SA2.2 Feature `saml` | `crates/server/src/api/entitlements.rs`, `crates/server/src/entitlements/mod.rs` (tests only), `crates/server/src/config.rs` (test only), `web/src/components/plan/feature-label.ts`, `web/src/routes/$org/settings/plan.tsx`, `web/src/ee/license-card.tsx` | M1 | SA2.1 |
 | SA2.3 Index, pending table, sign-in core | `crates/server/src/ee/org_sso/{mod.rs,login.rs,saml_pending.rs}`, `crates/server/src/test_support/mod.rs`, `crates/server/src/serve.rs` (`OrgSso::new` call only, if its signature changes) | SA2.1, SA2.2 | — |
 | SA2.4 Settings API | `crates/server/src/api/org_sso.rs`, `crates/server/src/ee/org_sso/settings.rs`, `fixtures/api/static/org-sso.json`, `web/src/ee/org-sso/org-sso-settings.tsx`, `web/src/mocks/writes.ts` | SA2.3 | SA2.5 |
@@ -117,12 +117,12 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
 
 **Goal:** the provider row gains a protocol, and the SAML configuration has its tables and store functions (D-SA-17).
 
-**Edit:** `crates/server/migrations/meta/0031_org_sso_saml.sql` (new), `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs`, `crates/server/Cargo.toml`, `crates/server/src/ee/org_sso/settings.rs`, `crates/server/src/ee/org_sso/mod.rs`, `crates/server/src/golden_tests/dump.rs`.
+**Edit:** `crates/server/migrations/meta/0032_org_sso_saml.sql` (new), `crates/server/src/meta/migration_tests.rs`, `crates/server/src/ee/org_sso/store.rs`, `crates/server/src/api/org_sso.rs`, `crates/server/Cargo.toml`, `crates/server/src/ee/org_sso/settings.rs`, `crates/server/src/ee/org_sso/mod.rs`, `crates/server/src/golden_tests/dump.rs`.
 
 **Steps:**
 
 1. `crates/server/Cargo.toml`: under `[dependencies]`, add `cetra-saml.workspace = true` (alphabetical among the `cetra-*` lines). Under `[dev-dependencies]`, add `cetra-saml = { workspace = true, features = ["test-idp"] }`.
-2. `0031_org_sso_saml.sql`, exactly:
+2. `0032_org_sso_saml.sql`, exactly:
    ```sql
    -- Track SA M2 (D-SA-17): an org's one SSO provider is OIDC or SAML. Pre-release rebuild:
    -- SQLite cannot drop NOT NULL. No table references org_sso_providers.
@@ -176,7 +176,7 @@ Phases marked parallel run at the same time in the same worktree. Their Edit lis
    ```
    No `;` or `--` may appear inside a string literal (`statements()` splits naively); none does.
 3. `migration_tests.rs`:
-   - Append `31, // 0031 rebuilds org_sso_providers for SAML (D-SA-17)` to `PRE_RELEASE_NON_ADDITIVE`.
+   - Append `32, // 0032 rebuilds org_sso_providers for SAML (D-SA-17)` to `PRE_RELEASE_NON_ADDITIVE`.
    - Append an `AlteringCase` with `version: 31`:
      - `seed`, two statements:
        - `"INSERT INTO orgs (id, name, slug, state, created_at, updated_at) VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Acme', 'acme', 'active', 1, 2)"`;
@@ -978,7 +978,7 @@ Cases:
 **Steps** (line numbers from the code facts §7; the text is new prose in the specs' style: short, present tense, decision IDs in parentheses):
 1. **Spec 04**, § "Per-org SSO (track P, `ee`)":
    - The intro says one provider per org, OIDC or SAML (D-SA-2, D-SA-17).
-   - Replace the `org_sso_providers` DDL with migration 0031's, and add `org_sso_saml` and `org_sso_saml_certificates`.
+   - Replace the `org_sso_providers` DDL with migration 0032's, and add `org_sso_saml` and `org_sso_saml_certificates`.
    - A sentence: SAML rows have no sealed column, certificates are DER rows, and nothing is JSON.
 2. **Spec 08**:
    - D141 paragraph (line 41): add the exemption of `POST /api/auth/saml/{org_id}/acs` (exact path) and why.

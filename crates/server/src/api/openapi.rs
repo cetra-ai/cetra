@@ -58,7 +58,7 @@ use super::common::{ExclusionParams, Limit, Page, PageParams, Problem, SortOrder
 use super::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
-    TestLlmConnectionRequest, UpdateLlmConnectionRequest,
+    TestLlmConnectionRequest, TestUnsavedLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
 use super::dashboards::{
     AggBody, BreakdownBody, Chart, ChartType, CreateDashboard, Dashboard, DashboardListParams,
@@ -327,6 +327,7 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<CreateLlmConnectionRequest>();
     set.insert::<UpdateLlmConnectionRequest>();
     set.insert::<TestLlmConnectionRequest>();
+    set.insert::<TestUnsavedLlmConnectionRequest>();
     set.insert::<LlmConnectionTestError>();
     set.insert::<LlmConnectionTestResult>();
     set.insert_page::<LlmConnection>("LlmConnectionPage");
@@ -2509,12 +2510,30 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 401, 403, 404, 409, 429],
     ))
     .build();
+    let test_unsaved = operation(
+        "post_unsaved_llm_connection_test",
+        "llm_connections",
+        "Test an unsaved LLM connection",
+    )
+    .description(Some("Organization admins and owners. Nothing is stored."))
+    .parameters(Some(vec![org.clone()]))
+    .request_body(Some(json_body("TestUnsavedLlmConnectionRequest")))
+    .responses(responses(
+        "200",
+        json_of::<LlmConnectionTestResult>(
+            "The outcome. A provider failure is ok: false, not an error status.",
+        ),
+        &[400, 401, 403, 404, 429],
+    ))
+    .build();
     let test = operation(
         "post_llm_connection_test",
         "llm_connections",
         "Test an LLM connection",
     )
-    .description(Some("Organization admins and owners."))
+    .description(Some(
+        "Organization admins and owners. Draft fields test values that are not saved; such a test stores nothing.",
+    ))
     .parameters(Some(vec![org, id]))
     .request_body(Some(json_body("TestLlmConnectionRequest")))
     .responses(responses(
@@ -2536,6 +2555,10 @@ fn connection_paths(paths: PathsBuilder) -> PathsBuilder {
         .path(
             "/api/v1/orgs/{org}/llm-connections/{id}/test",
             PathItem::new(HttpMethod::Post, test),
+        )
+        .path(
+            "/api/v1/orgs/{org}/llm-connections/test",
+            PathItem::new(HttpMethod::Post, test_unsaved),
         )
 }
 

@@ -21,6 +21,7 @@ export function TextField({
   min,
   max,
   step,
+  list,
 }: {
   id: string;
   label: string;
@@ -41,6 +42,8 @@ export function TextField({
   min?: number;
   max?: number;
   step?: number;
+  /** The id of a `<datalist>` of suggestions. */
+  list?: string;
 }) {
   const describedBy = [description ? `${id}-description` : null, error ? `${id}-error` : null]
     .filter((item): item is string => item !== null)
@@ -66,6 +69,7 @@ export function TextField({
       min={min}
       max={max}
       step={step}
+      list={list}
     />
   );
   return (

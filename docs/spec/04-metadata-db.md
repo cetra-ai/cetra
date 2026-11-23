@@ -142,6 +142,8 @@ CREATE TABLE llm_connections (
   status TEXT NOT NULL DEFAULT 'ok',
   last_error TEXT,
   last_error_at INTEGER,
+  last_tested_at INTEGER,             -- last test of the saved values (D-I-54)
+  last_test_ok INTEGER,               -- 1 ok, 0 failed; NULL with last_tested_at
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -149,7 +151,7 @@ CREATE TABLE llm_connections (
 );
 ```
 
-Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are sealed (§ Encryption of secrets); `api_key_hint` and `extra_header_names` are what the API shows.
+Connections belong to the org (D-I-4). `secret_enc` and `extra_headers_enc` are sealed (§ Encryption of secrets); `api_key_hint` and `extra_header_names` are what the API shows. `last_tested_at` and `last_test_ok` hold the last test of the saved values; a change of what a test calls clears them (D-I-54).
 
 ## Deletion requests
 

@@ -13,7 +13,7 @@ use super::{META_FORMAT_VERSION, MetaDb, connect, migrator};
 const PRE_RELEASE_NON_ADDITIVE: &[i64] = &[
     8,  // 0008 drops orgs.limits (D-P-11)
     30, // 0030 sets issue_sources.last_notified_at and rebuilds notification_deliveries (D-IC-21)
-    31, // 0031 rebuilds org_sso_providers for SAML (D-SA-17)
+    32, // 0032 rebuilds org_sso_providers for SAML (D-SA-17)
 ];
 /// Released migrations that changed the format; each came with a META_FORMAT_VERSION bump.
 const FORMAT_CHANGING_MIGRATIONS: &[i64] = &[];
@@ -181,6 +181,21 @@ const ALTERING_CASES: &[AlteringCase] = &[
     },
     AlteringCase {
         version: 31,
+        seed: &[
+            "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c1', 'Acme', 'acme', 'active', 1, 2)",
+            "INSERT INTO llm_connections (id, org_id, name, adapter, secret_enc, api_key_hint,
+            created_at, updated_at)
+            VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000001c2', '018f6b4e-7c1a-7c1a-8c1a-0000000001c1',
+            'kept', 'openai', x'01', 'WXYZ', 3, 4)",
+        ],
+        read: "SELECT id || '|' || name || '|' || adapter || '|' || api_key_hint || '|' || status
+            || '|' || created_at || '|' || updated_at || '|' || COALESCE(last_tested_at, 'NULL')
+            || '|' || COALESCE(last_test_ok, 'NULL') FROM llm_connections",
+        expected: "018f6b4e-7c1a-7c1a-8c1a-0000000001c2|kept|openai|WXYZ|ok|3|4|NULL|NULL",
+    },
+    AlteringCase {
+        version: 32,
         seed: &[
             "INSERT INTO orgs (id, name, slug, state, created_at, updated_at)
             VALUES ('018f6b4e-7c1a-7c1a-8c1a-0000000000a7', 'Acme', 'acme', 'active', 1, 2)",

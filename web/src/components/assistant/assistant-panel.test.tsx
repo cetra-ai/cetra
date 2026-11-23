@@ -59,6 +59,24 @@ it("opens the panel from the top bar and shows the connection notice", async () 
   expect(within(region).getByText(/sent to that provider/)).toBeInTheDocument();
 });
 
+it("names an OpenAI-compatible server in the connection notice", async () => {
+  server.use(
+    http.get(STATUS, () =>
+      HttpResponse.json({
+        usable: true,
+        connection_name: "Gateway",
+        adapter: "openai",
+        base_url: "https://gw.example.com/v1",
+        model: "gpt-4o",
+      }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/traces");
+
+  const region = await openPanelFromTopBar(user);
+  expect(await within(region).findByText(/Answers use/)).toHaveTextContent("OpenAI-compatible");
+});
+
 it("keeps the typed text on an evaluator form when the panel opens and closes", async () => {
   const { user } = await renderApp("/acme/support-bot/evaluators/new");
 

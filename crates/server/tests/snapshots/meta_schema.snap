@@ -682,7 +682,7 @@ CREATE TABLE llm_connections (
   last_error_at INTEGER,
   created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL, last_tested_at INTEGER, last_test_ok INTEGER,
   UNIQUE(org_id, name)
 )
 
