@@ -6,3 +6,6 @@
 pub(crate) mod actor;
 pub(crate) mod catalog;
 pub(crate) mod counters;
+pub(crate) mod posthog;
+#[cfg(test)]
+pub(crate) mod test_receiver;
