@@ -314,6 +314,20 @@ Routes refused by a managed member's lock (D-EA-18) answer `409 scim_managed`: `
 | `GET /api/v1/admin/audit-events` | Instance admins (`Access::InstanceAdmin`). The instance log only (records with no org). `project_id` is accepted and matches nothing. Gate: `audit_log` on the licence, or `entitlements.control_plane`; otherwise `403 plan_required`. Resolves users only; other kinds are `unresolved` |
 | `GET /api/v1/admin/audit-events/export?format=csv\|ndjson` | As the org export, for the instance log, under the same gate |
 
+### Audit stream (track EA M4, `ee`)
+
+Owners (`ManageAuditStream`, session only) manage the org's destination; instance admins (`Access::InstanceAdmin`) manage the instance's, with the instance log's gate. Every route needs `audit_log` on the licence (or `entitlements.control_plane`) except `DELETE`, which works when the feature has lapsed (D-EA-19). Refused in restore mode: the test route.
+
+| Method & path | Notes |
+|---|---|
+| `GET /api/v1/orgs/{org}/audit-stream` | The destination as `AuditStream`: `url_host`, `header_name`, `enabled` and `status` (`last_success_at`, `last_error`, `failing_since`, `lag` in records, `lost_records`). `404` when there is none. The URL, the header value and the secret are never returned |
+| `PUT /api/v1/orgs/{org}/audit-stream` | Body `{url, header_name?, header_value?, enabled}`, unknown fields refused. Create answers `201` with `CreatedAuditStream` (the `stream` and the `secret`, shown once); the cursor starts at the newest record. Update answers `200` with `AuditStream`, and keeps the stored header value when `header_value` is omitted and the name is unchanged. `400 field_error` when the URL is not `https` or is over 2,048 bytes, has user info, or the header name is invalid or reserved, or the value is over 1,024 bytes or has a line break. `409` when the stored settings cannot be read (remove and create again) |
+| `DELETE /api/v1/orgs/{org}/audit-stream` | `204`, or `404` when there is none |
+| `POST /api/v1/orgs/{org}/audit-stream/secret` | Rotates the signing secret. `200` with `RotatedAuditStreamSecret` (`secret`, shown once) |
+| `POST /api/v1/orgs/{org}/audit-stream/test` | Sends one signed test line now and does not move the cursor. `200` with `AuditStreamTest` `{reached, status}`. `status` is the HTTP status of any answer; a connection error or a timeout gives `reached: false` and no status, so the route reveals reachability only |
+
+The same five operations exist under `/api/v1/admin/audit-stream` for the instance destination.
+
 ## Response shapes (observability read API)
 
 Field lists live in the Rust types (`cetra_server::api`) and the contract file; these are the rules behind them (D70, D73).

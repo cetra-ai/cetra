@@ -1085,9 +1085,15 @@ CREATE INDEX audit_events_at ON audit_events (at);
 | `ip`, `user_agent` | The client IP (spec 08 § Client IP) and the user agent, truncated to 256 characters. |
 
 - **No foreign keys.** Records outlive the users, orgs and projects they name. The table has no `CHECK`: action names are append-only, and a `CHECK` would make each new name a format change (D-R-34).
-- **Purge.** An hourly task deletes records whose `at` is older than `audit.retention_days` (spec 12), in batches of 5,000 rows, each batch its own write. `0` keeps everything. The task is off in restore mode.
+- **Purge.** An hourly task deletes records whose `at` is older than `audit.retention_days` (spec 12), in batches of 5,000 rows, each batch its own write. `0` keeps everything. The task is off in restore mode. Each batch also sets `lost_before_seq` of the stream destinations whose cursor is below the batch's last `seq` (below).
 - **Org drop.** When an org's drop is applied, its rows are deleted in the drop's transaction, and an instance record `org.dropped` is written.
 - **User deletion.** In the user's deletion transaction, the `ip` and `user_agent` of the rows whose actor is that user are cleared. The rows keep their ids.
+
+## Audit stream destinations (track EA M4, `ee`)
+
+Migration `0034_audit_stream.sql` (D-EA-11). One row of `audit_stream_destinations` per org, and one with `org_id` null for the instance; a unique index allows one row per scope. `config_enc` is the sealed stream config (the URL, the signing secret and the optional header), with the row id as associated data (D-I-2). `url_host` is the only part of the URL kept in clear. `cursor_seq` is the last `audit_events.seq` the destination accepted (D-EA-20). `attempts`, `next_attempt_at`, `last_success_at`, `last_error`, `failing_since` and `alerted_at` drive the backoff and the 24 h email. `lost_before_seq` is set when retention deletes records above the cursor (purge, § Audit records). No text column has a `CHECK` (D-R-34).
+
+The delivery task (every 10 s, off in restore mode) reads the records of each destination with `seq > cursor_seq`, oldest first, and moves `cursor_seq` only after a 2xx answer. Its writes match the `updated_at` the task read, so an edit or a delete made during a delivery is kept as the edit left it.
 
 ## SCIM provisioning (track EA M5, `ee`)
 

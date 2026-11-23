@@ -13,6 +13,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - SCIM 2.0 user provisioning (Enterprise and the self-hosted licence): per-org tokens, Okta and Entra ID compatible Users endpoint, deprovisioning that revokes access, and members managed by the identity provider.
 - SCIM groups and role mappings to org and project roles, with Okta and Entra ID setup guides.
 - Audit log pages and API for organization admins and instance admins, with filters and CSV/NDJSON export (Enterprise and the self-hosted licence).
+- Audit log streaming to an HTTPS endpoint (Splunk, Datadog or any NDJSON receiver), signed, with retries.
 
 ### Changed
 

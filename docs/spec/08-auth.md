@@ -132,6 +132,7 @@ Setting an override needs the `project_roles` entitlement (Teams add-on or an en
 | Delete org, transfer ownership, change owners | | | | ✓ |
 | Manage SCIM provisioning: enable, default role, tokens (session only, `ManageProvisioning`) | | | | ✓ |
 | Read and export the org's audit log (`ViewAudit`, session or PAT, never an API key; EA D-EA-10) | | | ✓ | ✓ |
+| Manage the org's audit stream: the destination, its secret, the test (`ManageAuditStream`, session only; EA D-EA-11) | | | | ✓ |
 | Instance settings (instance admins only) | — | — | — | — |
 
 Evaluators, online rules and score definitions: project `member` and above; API keys cannot manage them (D-I-24). Dashboards: project `member` and above through a session or a read-write PAT; a `read` key and a read-only PAT read them and run their queries (D-C-16).
@@ -234,6 +235,8 @@ Records carry user, org, project, key and token ids, the client IP and the user 
 Unauthenticated failures write no row, only a tracing line: a failed login for an unknown email logs `account = "unknown"`, and a control-plane token that fails is refused without a record. A SCIM call with an unknown, revoked or expired token is refused the same way. SCIM operations that change a member record it with the SCIM token as the actor (`scim_token`), and the target is the cetra user id. A failed login for a known account writes at most one row per account per minute.
 
 The catalog also covers project objects (evaluators, online rules, score definitions, alert rules and channels, LLM connections, model prices, prompts, datasets, issue sources, dashboards, annotation queues and the assistant setting) and data leaving the product: SQL runs, SQL and dataset exports, and MCP tool calls that name a project. SQL runs, exports and MCP tool calls record a SHA-256 of the query text, never the text, before they run. SQL runs by demo-org visitors are not recorded (D-EA-23).
+
+Stream changes record `audit.stream_set`, `audit.stream_removed` and `audit.stream_secret_rotated`, with the host, whether a header is set and the enabled flag, never the header value or the secret (EA M4, spec 04 § Audit stream destinations).
 
 The catalog of actions, and the reads and exports of the log, are in `docs/plans/ea-enterprise-admin/README.md` § Audit log (D-EA-1 to D-EA-10).
 
