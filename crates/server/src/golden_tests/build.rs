@@ -1192,7 +1192,7 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     )
     .await?;
     members::add_org_member(conn, org.id, scim_member.id, OrgRole::Viewer, now).await?;
-    scim::insert_user(
+    let scim_row = scim::insert_user(
         conn,
         org.id,
         scim_member.id,
@@ -1228,6 +1228,21 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     .bind(org.id.to_string())
     .bind(now)
     .execute(&mut *conn)
+    .await?;
+
+    // SCIM groups (EA M6): one group with the provisioned member, mapped to an org role and to
+    // one project.
+    let group = scim::insert_group(conn, org.id, "Golden group", None, now).await?;
+    scim::add_group_members_tx(conn, org.id, group.id, &[scim_row.id]).await?;
+    scim::put_mapping(
+        conn,
+        group.id,
+        &scim::GroupMapping {
+            org_role: Some(OrgRole::Member),
+            projects: vec![(p1.id, ProjectOverride::Viewer)],
+        },
+        now,
+    )
     .await?;
 
     Ok(())
