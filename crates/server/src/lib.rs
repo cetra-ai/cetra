@@ -5,6 +5,7 @@
 //! response types for the observability read API (`docs/spec/09-api.md`).
 //! [`api::openapi::openapi`] is the contract written to `crates/server/openapi.json`.
 //! `http` is the axum router. [`serve`] binds it for `cetra serve`.
+//! [`observability`] holds cetra's own log export, its subscriber and its panic hook (track TL).
 
 pub mod admin;
 pub mod admin_socket;
@@ -34,6 +35,7 @@ pub(crate) mod issues;
 pub(crate) mod live;
 pub(crate) mod mcp;
 pub(crate) mod meta;
+pub mod observability;
 pub(crate) mod prices;
 pub(crate) mod prompts;
 pub(crate) mod retention;
