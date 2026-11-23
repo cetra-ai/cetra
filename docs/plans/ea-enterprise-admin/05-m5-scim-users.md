@@ -13,7 +13,7 @@
 
 **Prerequisites.**
 - M1 is green.
-- M2's phases B1–B5 are committed: C1b edits `routes/datasets.rs` and `routes/annotation_queues.rs` (one match arm each), which B4 and B5 edit, and C1a's audit catalog edit follows B1.
+- M2 is fully committed and green (all of B1–B6 and its fix phase). M5 edits `audit/`, `routes/members.rs`, `routes/invites.rs`, `routes/datasets.rs`, `routes/annotation_queues.rs` and other files M1 and M2 touched, so it starts from a clean tree.
 - Branch `claude/ea-enterprise-admin` in `/home/sebastien/travaux/llm-observer/.claude/worktrees/ea-design`.
 - The next free migration number when C1a starts: check `crates/server/migrations/meta/`. It is `0032` unless an M2 phase added one; use the next free number and say so.
 
@@ -61,12 +61,16 @@
 - **P-1. Verified domains.** On every instance, the org's SCIM domains are its verified `org_sso_domains` rows (read in the write transaction with `store::domains_tx`, filtered on `verified_at`), minus domains the instance configuration claims (`instance_claims`, D-P-54).
   - When `entitlements.control_plane` is true, the org token's `sso_domains` are added (a union).
   - The in-memory `OrgSso` index is **not** used: it skips orgs without a provider.
+  - Helpers: `instance_claims(&AuthSettings, domain) -> bool` (`ee/org_sso/mod.rs:~319`, call it with `&state.config.auth`); `normalize_domain(raw) -> Option<String>` (`ee/org_sso/mod.rs:~288`).
 - **P-2. One error rewrite.** A middleware layer on the router turns every `application/problem+json` response to a `/scim/v2` path into a SCIM error with the same status. So 401, 403, 404, 405, 413, 415 and 429 from `authenticate`, `enforce`, extractors and fallbacks need no per-site code. SCIM handlers return `ScimError` directly for SCIM-specific `scimType`s.
 - **P-3. Shared code, no second implementation.**
   - `meta::users::revoke_access_tx` (sessions and PATs) replaces the private body of `routes/internal_users.rs` `revoke_access`.
   - `meta::users::reset_unproven_tx` (the D-P-66 reset) replaces the inline block in `ee/org_sso/login.rs` `admit`.
   - Both old call sites use the new functions in the same phase.
 - **P-4. `default_role`.** `org_scim.default_role` is `viewer` or `member` (D-EA-14's `scim_default_role`), `viewer` by default.
+- **P-6. Instance admins.** SCIM never touches an instance admin's credentials (D-P-58, and org SSO's `LinkRefused`). Creating one links the membership only (no `reset_unproven_tx`), and deactivating one only removes the membership and marks the row inactive.
+- **P-7. Inactive means no access.** A SCIM row with `active = false` never has a membership in the org. A `POST` or `PUT` with `active: false` for a user who is a member runs the deactivation (C3 step 10).
+- **P-8. State in closures.** Clone `AppState` (`let state = state.clone();`) and the ctx before a `meta.write` closure that needs them; the closure cannot borrow.
 - **P-5. Owners and admins.** In M5, SCIM never changes an existing member's role. A provisioned user who is already a member keeps their role; only new memberships get `default_role`. M6 adds recomputation from groups.
 
 ## Versions
@@ -76,9 +80,9 @@ No new dependency.
 ## Phase graph
 
 ```
-C1a (store, feature, catalog, key kind) ──┬── C1b (principal, access, limits, caches)
-                                          └── C1c (shared lifecycle helpers)
-C2 (SCIM protocol: errors, filter, patch, schema)          [independent of C1*]
+C1a (store, feature, catalog, key kind, module skeleton) ──┬── C1b (principal, access, limits, caches)
+                                                           ├── C1c (shared lifecycle helpers)
+                                                           └── C2 (SCIM protocol: errors, filter, patch, schema)
 C1a + C1b + C1c + C2 ── C3 (Users and discovery endpoints)
 C1a + C1b + C1c ─────── C4 (Provisioning API, locks, JIT off)
 C1a ─────────────────── C5 (cloud sso_domains)
@@ -86,7 +90,8 @@ C4 ──────────────────── C6 (web)
 C3 + C4 + C5 ────────── C7 (docs)
 ```
 
-- In parallel: C1b with C1c and C2; then C3 with C4 and C5; then C6 with C7.
+- In parallel: C1b with C1c and C2; then C3 with C4 and C5 (C5 after C1b, which also edits `test_support/mod.rs`); then C6 with C7.
+- C1a writes `ee/scim/mod.rs` in its final form (every `mod` line, `routes()` and `locks()`). Later phases only create their files, so no two phases edit `mod.rs`.
 - `crates/server/openapi.json` and `web/src/api/schema.gen.ts` are generated, by the coordinating session only, after C4 (`just openapi`).
 - `fixtures/api` regeneration (`just api-examples`) is the coordinator's too.
 
@@ -104,14 +109,15 @@ C3 + C4 + C5 ────────── C7 (docs)
 **Edit:**
 - `crates/server/migrations/meta/00NN_scim.sql` (new; NN = next free number)
 - `crates/server/src/ee/mod.rs` (`pub(crate) mod scim;`)
-- `crates/server/src/ee/scim/mod.rs` (new; module docs and `pub(crate) mod store;` only, plus the modules later phases add)
+- `crates/server/src/ee/scim/mod.rs` (new, final form: step 7)
 - `crates/server/src/ee/scim/store.rs` (new)
 - `crates/server/src/api/entitlements.rs`
 - `crates/server/src/entitlements/mod.rs` (tests only)
 - `crates/server/src/auth/secret.rs`
+- `crates/server/src/routes/api_keys.rs` (its exhaustive `KeyKind` matches, ~265 and ~273, only)
 - `crates/server/src/api/common.rs` (`ProblemCode::ScimManaged`)
 - `crates/server/src/http/error.rs` (the `ApiError` variant and its mapping)
-- `crates/server/src/audit/catalog/scim.rs` (new), `crates/server/src/audit/catalog/mod.rs`, `crates/server/src/audit/mod.rs` (`Actor::Scim`, `TargetKind::ScimToken`), `crates/server/src/audit/tests.rs`
+- `crates/server/src/audit/catalog/scim.rs` (new), `crates/server/src/audit/catalog/mod.rs`, `crates/server/src/audit/mod.rs` (`Actor::Scim` and its `kind`/`id` arms, `TargetKind::ScimToken`; not `Actor::of`, which is C1b's), `crates/server/src/audit/tests.rs`
 
 **Steps:**
 
@@ -190,6 +196,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    pub(crate) async fn set_user_active(conn, org, id, active: bool, disabled_account: bool, now) -> Result<(), MetaError>;
    pub(crate) async fn delete_user(conn, org, id) -> Result<bool, MetaError>;
    pub(crate) async fn is_managed_tx(conn, org, user_id) -> Result<bool, MetaError>; // EXISTS active row
+   pub(crate) async fn managed_user_ids(pool, org) -> Result<std::collections::HashSet<Uuid>, MetaError>; // active rows' user ids
 
    /// What a list filter matches (C2 parses it).
    pub(crate) enum UserFilter { UserName(String), ExternalId(String), Email(String) }
@@ -200,7 +207,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    - `OrgRole` parse and format use `roles::parse_org_role` and `org_role_str`. A stored `default_role` that is not `viewer` or `member` is `MetaError::Corrupt { table: "org_scim", column: "default_role" }`.
 3. `api/entitlements.rs`: add `Scim` at the end of `Feature`:
    - doc: "SCIM 2.0 provisioning (track EA M5): Enterprise or an enterprise licence.";
-   - `ALL: [Self; 5]`, name `"scim"`, `is_ee` true;
+   - append to `ALL` and bump its length (`[Self; 5]` now; M3 appends `audit_log` after it), name `"scim"`, `is_ee` true;
    - `locked_detail`: "SCIM provisioning is part of the Enterprise plan and the self-hosted licence.".
 
    In `entitlements/mod.rs` tests, add `scim` to the round-trip test's known names. The `audit_logs` unknown-name assertion stays: M3 adds `audit_log`.
@@ -232,9 +239,37 @@ C3 + C4 + C5 ────────── C7 (docs)
    - `catalog/mod.rs`: module, re-export, `Action::Scim` and `From`.
    - `audit/mod.rs`:
      - `Actor::Scim { token_id: Uuid }`: kind `scim_token`, id the token id;
-     - `Actor::of` maps `Principal::Scim { token_id, .. }` (C1b adds the variant; this arm compiles once C1b lands);
      - `TargetKind::ScimToken` → `scim_token`.
    - `audit/tests.rs`: samples of every new variant; the `scim` prefix in the group map.
+
+7. `ee/scim/mod.rs` (SPDX header), final form:
+
+   ```rust
+   //! SCIM 2.0 provisioning (track EA M5, D-EA-12 to D-EA-19).
+   pub(crate) mod domains;
+   pub(crate) mod error;
+   pub(crate) mod filter;
+   pub(crate) mod patch;
+   pub(crate) mod schema;
+   pub(crate) mod settings;
+   pub(crate) mod store;
+   pub(crate) mod users;
+
+   /// The `/scim/v2` routes and the Provisioning API routes.
+   pub(crate) fn routes() -> Vec<crate::http::access::RouteDef> {
+       let mut routes = users::routes();
+       routes.extend(settings::routes());
+       routes
+   }
+
+   /// D-EA-18: SCIM is on and entitled for `org`. Read outside a write; pass the bool in.
+   pub(crate) async fn locks(state: &AppState, org: OrgId) -> Result<bool, MetaError> {
+       Ok(store::org_scim(state.meta.reader(), org).await?.enabled
+           && crate::entitlements::of(state, org).allows(Feature::Scim))
+   }
+   ```
+
+   `domains`, `error`, `filter`, `patch`, `schema`, `settings` and `users` are created by C2, C3 and C4. The tree compiles once they are committed.
 
 **Tests** (in the files above):
 - store: `org_scim_defaults_when_missing`, `a_third_live_token_is_refused`, `revoking_returns_the_hash_once`, `token_lookup_needs_an_active_org`, `user_name_and_external_id_are_unique_per_org`, `list_users_pages_and_filters`, `is_managed_only_for_active_rows`, `org_delete_cascades`.
@@ -250,12 +285,13 @@ C3 + C4 + C5 ────────── C7 (docs)
 
 **Goal:** a `scim-cetra-` bearer resolves to `Principal::Scim`, which only `Access::Scim` routes accept.
 
-**Edit:** `crates/server/src/auth/principal.rs`, `crates/server/src/auth/cache.rs` (only if a type alias is needed), `crates/server/src/auth/last_used.rs`, `crates/server/src/auth/limits.rs`, `crates/server/src/http/access.rs`, `crates/server/src/http/access_suite.rs`, `crates/server/src/http/mod.rs` (`AppInner` fields and the fallback), `crates/server/src/serve.rs` (`AppInner` construction, last-used flush), `crates/server/src/test_support/mod.rs` (`AppInner` construction, `license_key` callers untouched), and the one-arm matches in `crates/server/src/routes/annotation_queues.rs`, `routes/datasets.rs`, `routes/deletions.rs`, `routes/me.rs`, `routes/saved_views.rs`, `routes/scores.rs`, `routes/streams.rs` (facts §1 list).
+**Edit:** `crates/server/src/audit/mod.rs` (`Actor::of`'s `Principal::Scim` arm only), `crates/server/src/auth/principal.rs`, `crates/server/src/auth/cache.rs` (only if a type alias is needed), `crates/server/src/auth/last_used.rs`, `crates/server/src/auth/limits.rs`, `crates/server/src/http/access.rs`, `crates/server/src/http/access_suite.rs`, `crates/server/src/http/mod.rs` (`AppInner` fields and the fallback), `crates/server/src/serve.rs` (`AppInner` construction, last-used flush), `crates/server/src/test_support/mod.rs` (`AppInner` construction, `license_key` callers untouched), and the one-arm matches in `crates/server/src/routes/annotation_queues.rs`, `routes/datasets.rs`, `routes/deletions.rs`, `routes/me.rs`, `routes/saved_views.rs`, `routes/scores.rs`, `routes/streams.rs` (facts §1 list).
 
 **Steps:**
 1. **`Principal::Scim { org_id: OrgId, token_id: Uuid }`.**
    - The hand-written `Debug` prints both ids.
    - `session_user` answers `Forbidden` for it.
+   - `audit::Actor::of` maps it to `Actor::Scim { token_id }`.
    - Each listed exhaustive match gets a `Principal::Scim { .. }` arm that answers like its `ControlPlane` arm. Copy that arm's result exactly, whether `NotFound`, `Forbidden` or `None`.
 2. **`bearer_principal`:**
    - after `parse_key`, when `kind == KeyKind::Scim`, return `scim_principal(state, &hash, now)`;
@@ -302,18 +338,27 @@ C3 + C4 + C5 ────────── C7 (docs)
    /// which the caller evicts from `pat_cache` after commit (D-EA-16, D-P-39).
    pub(crate) async fn revoke_access_tx(conn: &mut SqliteConnection, user: Uuid, now: i64) -> Result<Vec<String>, MetaError>;
 
-   /// D-P-66: an account whose email is not proven loses its sessions, PATs, password and
-   /// pending resets before an IdP links it, and its email becomes proven via `idp`.
+   /// D-P-66: an account whose email is not proven loses its sessions, PATs and password
+   /// before an IdP links it, and its email becomes proven via `idp`.
    /// Returns the revoked PAT hashes. A proven account is untouched (empty vec).
    pub(crate) async fn reset_unproven_tx(conn: &mut SqliteConnection, user: &UserRow, now: i64) -> Result<Vec<String>, MetaError>;
    ```
 
    - `revoke_access_tx` is `web_sessions::delete_user_sessions(conn, user, None)` then `personal_tokens::revoke_user_tokens(conn, user, now)`.
-   - `reset_unproven_tx` holds exactly the body of the block at `ee/org_sso/login.rs:~505-512`: sessions, tokens, `set_password_hash(None)`, `set_email_verified(.., EmailVerifiedVia::Idp)`. Add deleting pending password resets, if the existing block does it; otherwise do not add it.
+   - `reset_unproven_tx` holds exactly the body of the block at `ee/org_sso/login.rs:~505-512`: sessions, tokens, `set_password_hash(None)`, `set_email_verified(.., EmailVerifiedVia::Idp)`. Nothing more.
+   - Also add:
+
+     ```rust
+     /// Changes a user's email (SCIM userName change, D-EA-13). A taken address is
+     /// `MetaError::Conflict("uniqueness")`. Identities keep the email they were linked with.
+     pub(crate) async fn set_email_tx(conn: &mut SqliteConnection, user: Uuid, email: &str, now: i64) -> Result<(), MetaError>;
+     ```
+
+     It runs `UPDATE users SET email = ?, updated_at = ? WHERE id = ?`, mapping a unique violation the way `insert_user` does, with the message `"uniqueness"`. The email must be normalized by the caller (`debug_assert` as `insert_user` does).
 2. `routes/internal_users.rs` `revoke_access`: replace its two calls with `users::revoke_access_tx`. The disable logic and the audit record stay.
 3. `ee/org_sso/login.rs` `admit`: replace the inline block with `users::reset_unproven_tx(conn, &user, now)`.
 
-**Tests:** `meta/users.rs`: `revoke_access_removes_sessions_and_tokens`, `reset_unproven_leaves_a_proven_account`, `reset_unproven_clears_password_sessions_and_tokens`. The existing org SSO and control-plane tests keep passing.
+**Tests:** `meta/users.rs`: `set_email_changes_and_refuses_a_taken_address`, `revoke_access_removes_sessions_and_tokens`, `reset_unproven_leaves_a_proven_account`, `reset_unproven_clears_password_sessions_and_tokens`. The existing org SSO and control-plane tests keep passing.
 
 **Done when:** committed.
 
@@ -325,7 +370,7 @@ C3 + C4 + C5 ────────── C7 (docs)
 
 **Goal:** SCIM errors and responses, the error rewrite layer, the filter parser, the PATCH normalizer and the resource representations. These are pure code with unit tests.
 
-**Edit:** `crates/server/src/ee/scim/error.rs`, `filter.rs`, `patch.rs`, `schema.rs` (all new), and the `mod` lines in `crates/server/src/ee/scim/mod.rs`. Do not edit `store.rs`: `UserFilter` is C1a's.
+**Edit:** `crates/server/src/ee/scim/error.rs`, `filter.rs`, `patch.rs`, `schema.rs` (all new). `mod.rs` is C1a's; `UserFilter` and `ScimUserRow` are in C1a's `store.rs`. Each new file starts with `#![cfg_attr(not(test), allow(dead_code))]` (C3 removes the attribute from the four files once it calls them).
 
 **Steps:**
 
@@ -336,7 +381,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    pub(crate) const CONTENT_TYPE: &str = "application/scim+json";
 
    #[derive(Debug)]
-   pub(crate) struct ScimError { pub(crate) status: StatusCode, pub(crate) scim_type: Option<&'static str>, pub(crate) detail: &'static str }
+   pub(crate) struct ScimError { pub(crate) status: StatusCode, pub(crate) scim_type: Option<&'static str>, pub(crate) detail: &'static str, pub(crate) retry_after_s: Option<u64> }
    impl ScimError {
        pub(crate) fn invalid_filter() -> Self;   // 400, "invalidFilter", "Only eq filters on userName, externalId and emails are supported."
        pub(crate) fn invalid_value(detail: &'static str) -> Self; // 400, "invalidValue"
@@ -347,10 +392,11 @@ C3 + C4 + C5 ────────── C7 (docs)
        pub(crate) fn conflict(detail: &'static str) -> Self; // 409, None
        pub(crate) fn forbidden(detail: &'static str) -> Self; // 403, None
        pub(crate) fn internal() -> Self;         // 500, None, "Internal error."
+       pub(crate) fn rate_limited(retry_after_s: u64) -> Self; // 429, None, "Too many requests.", with Retry-After
    }
-   impl IntoResponse for ScimError { /* body below, header Content-Type: application/scim+json */ }
+   impl IntoResponse for ScimError { /* body below, header Content-Type: application/scim+json, and Retry-After when retry_after_s is Some */ }
    impl From<MetaError> for ScimError { /* Conflict("uniqueness") -> uniqueness(); Conflict("an org needs an owner") -> conflict("An org needs an owner."); other Conflict -> conflict("Conflict."); NotFound -> not_found(); else internal() with tracing::error!(error = %error, "scim request failed") */ }
-   impl From<ApiError> for ScimError { /* PlanRequired -> forbidden("SCIM provisioning needs the Enterprise plan or licence."); PlanLimit -> forbidden("The org has no seat left."); RateLimited -> 429 with Retry-After kept via a separate response path, see layer; NotFound -> not_found(); others -> by status with detail "Request refused." */ }
+   impl From<ApiError> for ScimError { /* PlanRequired -> forbidden("SCIM provisioning needs the Enterprise plan or licence."); PlanLimit -> forbidden("The org has no seat left."); RateLimited { retry_after_s } -> rate_limited(retry_after_s); NotFound -> not_found(); others -> by status with detail "Request refused." */ }
    ```
 
    Body, with `status` a **string**, as RFC 7644 § 3.12 requires:
@@ -391,7 +437,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    - `parses_user_name_eq`, `parses_external_id_eq`, `parses_emails_value_and_work_filter`;
    - `attribute_names_are_case_insensitive`, `escaped_quotes_in_values`;
    - `refuses_other_operators` (`co`, `sw`, `pr`, `gt`), `refuses_and_or_not`, `refuses_unknown_attributes`, `refuses_unquoted_values`, `refuses_trailing_garbage`.
-   - A property test (proptest is in dev-deps if `cargo tree` shows it; else a 200-case loop over random strings): `the_parser_never_panics`.
+   - `the_parser_never_panics`: 2,000 random strings of 0 to 80 characters drawn from the characters of `userName eq "x" []().\` with `rand` and a fixed seed (`StdRng::seed_from_u64(7)`, using the API of the workspace's `rand` version), each parsed without a panic.
 3. **`patch.rs`.** Turns a PATCH body into a list of normalized changes:
 
    ```rust
@@ -436,7 +482,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    pub(crate) const USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
    pub(crate) const LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
    pub(crate) fn user_resource(row: &ScimUserRow, base_url: &str) -> serde_json::Value;
-   pub(crate) fn list_response(total: u64, start_index: u32, resources: Vec<serde_json::Value>) -> serde_json::Value;
+   pub(crate) fn list_response(total: u64, start_index: u32, resources: Vec<serde_json::Value>) -> serde_json::Value; // {schemas:[LIST_SCHEMA], totalResults, startIndex, itemsPerPage: resources.len(), Resources}
    pub(crate) fn service_provider_config(base_url: &str) -> serde_json::Value;
    pub(crate) fn resource_types(base_url: &str) -> serde_json::Value;   // a ListResponse of the User type only in M5
    pub(crate) fn schemas() -> serde_json::Value;                        // a ListResponse of the core User and enterprise User schemas, attributes as supported
@@ -453,7 +499,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    ```
 
    - Absent optional values are omitted (no nulls). The enterprise object is omitted when both of its values are absent, and its schema URN is then not listed.
-   - Times are formatted with the crate's existing RFC 3339 helper (find the one the API DTOs use for `time_serde`).
+   - Times are formatted with `chrono`: `chrono::DateTime::from_timestamp(secs, nanos)` from the `i64` ns value, then `.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)`, as `backup.rs:~549` does.
    - `service_provider_config`:
 
      ```json
@@ -476,7 +522,7 @@ C3 + C4 + C5 ────────── C7 (docs)
 
 **Goal:** `/scim/v2` serves discovery and the Users resource with D-EA-13, D-EA-16 and D-EA-19.
 
-**Edit:** `crates/server/src/ee/scim/mod.rs` (`routes()`), `crates/server/src/ee/scim/users.rs` (new), `crates/server/src/ee/scim/domains.rs` (new), `crates/server/src/http/access.rs` (one line: `routes.extend(crate::ee::scim::routes())`), `crates/server/src/http/mod.rs` (install `scim_errors` in `finish`).
+**Edit:** `crates/server/src/ee/scim/users.rs` (new, with `pub(crate) fn routes()`), `crates/server/src/ee/scim/domains.rs` (new), `crates/server/src/meta/users.rs` (`ensure_member_tx`, step 6), the four C2 files (removing their `allow(dead_code)` line only), `crates/server/src/http/access.rs` (one line: `routes.extend(crate::ee::scim::routes())`), `crates/server/src/http/mod.rs` (install `scim_errors` in `finish`).
 
 **Steps:**
 
@@ -486,7 +532,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    - `GET /scim/v2/Users/{id}`, `PUT /scim/v2/Users/{id}`, `PATCH /scim/v2/Users/{id}`, `DELETE /scim/v2/Users/{id}`.
 2. **Every handler starts with `admit(&state, &principal) -> Result<(OrgId, Uuid), ScimError>`**:
    1. Take `Principal::Scim { org_id, token_id }`.
-   2. Run `state.limits.scim.check(&token_id, now)`. On refusal, return a 429 SCIM error with `Retry-After`.
+   2. Run `state.limits.scim.check(&token_id, now)`. On refusal, return `ScimError::rate_limited(retry.0.as_secs().max(1))`.
    3. Load `store::org_scim` and require `enabled` (else `forbidden("SCIM is turned off for this organization.")`).
 
    Entitlement is checked per operation (step 6), not here, so a lapsed org still deprovisions. `base_url` = `config.public_url` + `/scim/v2`, without a trailing slash.
@@ -518,24 +564,32 @@ C3 + C4 + C5 ────────── C7 (docs)
       2. A SCIM row with that `user_name` or `external_id` already in the org: `uniqueness()`.
       3. **Link or create:**
          - `users::user_by_email_tx`. When the account exists and is disabled and SCIM did not disable it: `conflict("This account is disabled.")`.
-         - When it exists, call `reset_unproven_tx(conn, &user, now)` and keep the revoked hashes.
+         - When it exists and is **not** an instance admin, call `reset_unproven_tx(conn, &user, now)` and keep the revoked hashes. An instance admin is linked without any credential change (P-6).
          - When there is no account, `insert_user(NewUser { email, name: display name per step 7, password_hash: None, email_verified_at: Some(now), email_verified_via: Some(EmailVerifiedVia::Idp), is_instance_admin: false })`.
-      4. **Membership:**
-         - When already a member, keep the role (P-5).
-         - Otherwise, if `active`, check seats. Seats are needed only for `member` or `admin` roles: `default_role = member` → `seat_members_tx + seat_invites_tx`, `over_limit(max_seats, seats, 1)` → `forbidden("The org has no seat left.")`. Then `add_org_member(conn, org, user, default_role, now)`, and remove any pending invite of the org for that email (`pending_invite_for_tx` + `delete_invite`).
-         - When `active` is false, no membership is created.
+      4. **Membership**, when `active`: `ensure_member_tx(conn, org, user_id, default_role, max_seats, now)`, a new function in `meta/users.rs`:
+
+         ```rust
+         /// Adds `user` to `org` with `role` unless already a member (the role then stays, P-5),
+         /// within `max_seats` for a non-viewer role, and removes the org's pending invite for
+         /// the user's email. `Ok(None)` = already a member; `Ok(Some(role))` = added;
+         /// `Err(MetaError::Conflict("seat limit"))` = no seat.
+         pub(crate) async fn ensure_member_tx(conn: &mut SqliteConnection, org: OrgId, user: Uuid, role: OrgRole, max_seats: Option<u64>, now: i64) -> Result<Option<OrgRole>, MetaError>;
+         ```
+
+         The seat check is `seat_members_tx + seat_invites_tx` with `over_limit(max_seats, seats, 1)`, only when `role != Viewer`. The invite removal is `invites::pending_invite_for_tx` + `delete_invite`. `max_seats` comes from `state.entitlements.resolve(org, now).limits.max_seats`, read before the write. The SCIM handler maps `Conflict("seat limit")` to `forbidden("The org has no seat left.")`. Reactivation (step 8) calls the same function.
+         When `active` is false, no membership is created, and an existing membership is removed by the deactivation of step 10 (P-7).
       5. `store::insert_user(..)`, with `active` from the body.
       6. Record `ScimAction::UserProvisioned { scim_user_id, role, linked }`, `.org(org)`, target `(User, user_id)`, ctx with `Actor::Scim { token_id }` (the extractor's ctx gives it once C1a's arm exists).
    4. After commit, evict the revoked hashes from `pat_cache`.
 7. **Name rule** (D-EA-13): `users.name` is set from `displayName`, else `"<givenName> <familyName>"` trimmed, else unchanged. It is set only when the user belongs to no other org (`SELECT COUNT(*) FROM org_members WHERE user_id = ? AND org_id != ?` = 0). This applies on create, PUT and PATCH.
 8. **`PUT /Users/{id}`** replaces the attributes (absent optional attributes are cleared). **`PATCH`** applies `user_changes`. Both, in one `meta.write`:
    1. **Load the row (404).**
-   2. **`userName` change:**
+   2. **`userName` or `Email` change:** a `UserChange::Email` alone is a userName change. An `Email` and a `UserName` in the same request that differ after normalization are `invalid_value("emails must match userName")`. For PUT, the same rule applies to the body's `emails` and `userName`.
       - normalize, then require both the old and new emails in `scim_domains_tx`, the new one free (`user_by_email_tx` is none, and no SCIM row has it), and no other org membership;
       - else `mutability("userName can only change within the organization's verified domains")` (400);
       - then `users::set_email` (find the existing function that changes a user's email; if none exists, stop and report: do not write raw SQL on `users` here).
-   3. **`active` false → true** (reactivation): requires the `scim` feature (else `forbidden`). Re-add the membership with `default_role` within seats (as POST). Re-enable the account (`users::set_disabled(conn, user, None, now)`) only when `disabled_account` is set. Record `UserReactivated`.
-   4. **`active` true → false** (deactivation): run step 10's deactivation.
+   3. **`active` false → true** (reactivation): requires the `scim` feature (else `forbidden`), and the row's `user_name` still in `scim_domains_tx` (else `invalid_value("userName is not in a verified domain of this organization")`). Re-add the membership with `ensure_member_tx`. Re-enable the account (`users::set_disabled(conn, user, None, now)`) only when `disabled_account` is set. Record `UserReactivated`.
+   4. **`active` true → false** (deactivation, from PATCH or from a PUT whose body has `active: false`): run step 10's deactivation.
    5. **Other attributes:** `store::update_user`; the name rule; record `UserUpdated { fields }` with the changed SCIM attribute names (`userName`, `externalId`, `name.givenName`, `name.familyName`, `displayName`, `department`, `employeeNumber`).
    6. **Lapse:** without the `scim` feature, any change other than `active: false` is `forbidden(...)`. Deactivation always works.
 
@@ -548,8 +602,8 @@ C3 + C4 + C5 ────────── C7 (docs)
    Works when lapsed.
 10. **Deactivation**, one shared `async fn deactivate(conn, state_bits, org, row, now) -> Result<(Vec<String>, bool), ScimError>`:
     1. When the user is a member, take their role. An `owner` who is the org's last active owner: `conflict("An org needs an owner.")`, which rolls back. Then `members::remove_org_member` (which clears overrides), and the last-owner check after removal, as `routes/members.rs` does.
-    2. When the user is an instance admin: stop here (D-P-58). Record `UserDeactivated { account_disabled: false }`.
-    3. Otherwise `users::revoke_access_tx`, which gives the hashes.
+    2. When the user is an instance admin, skip steps 3 and 4 (D-P-58, P-6).
+    3. When the row was active before this request, `users::revoke_access_tx`, which gives the hashes. This is instance-wide, so it ends the user's sessions in other orgs too (D-EA-16); the docs say so. A row that was already inactive revokes nothing.
     4. When the user now has no membership (`SELECT COUNT(*) FROM org_members WHERE user_id = ?` = 0) and is not disabled: `users::set_disabled(Some(now))`, `disabled_account = true`.
     5. `store::set_user_active(false, disabled_account)`.
     6. Record `UserDeactivated { account_disabled }`.
@@ -570,7 +624,11 @@ C3 + C4 + C5 ────────── C7 (docs)
 - `patch_entra_deactivate_revokes_sessions_and_disables_a_single_org_account`.
 - `deactivating_a_multi_org_user_keeps_the_account`.
 - `deactivating_the_last_owner_is_409_and_changes_nothing`.
-- `deactivating_an_instance_admin_only_removes_membership`.
+- `deactivating_an_instance_admin_only_removes_membership` (the row becomes inactive, the account and sessions stay).
+- `create_for_an_instance_admin_links_without_touching_credentials`.
+- `post_inactive_for_an_existing_member_removes_the_membership`.
+- `reactivating_after_the_domain_lapsed_is_invalid_value`.
+- `email_only_patch_changes_the_user_name`.
 - `reactivate_restores_membership_and_reenables`.
 - `reactivate_when_lapsed_is_refused`; `deactivate_when_lapsed_works`.
 - `delete_deactivates_then_removes_the_row`.
@@ -591,13 +649,13 @@ C3 + C4 + C5 ────────── C7 (docs)
 **Goal:** owners manage SCIM, managed members are locked, and JIT is off while SCIM is on.
 
 **Edit:**
-- `crates/server/src/ee/scim/settings.rs` (new) and its `mod` and `routes()` lines in `crates/server/src/ee/scim/mod.rs`;
+- `crates/server/src/ee/scim/settings.rs` (new, with `pub(crate) fn routes()`);
+- `crates/server/src/api_examples.rs` (examples for the four Provisioning operations, following `get_org_sso`'s entries, ~807);
 - `crates/server/src/auth/roles.rs` (`OrgPerm::ManageProvisioning`);
 - `crates/server/src/api/scim.rs` (new DTOs) and `crates/server/src/api/mod.rs`;
 - `crates/server/src/api/openapi.rs`;
 - `crates/server/src/api/members.rs` (`scim_managed` on `OrgMember`);
 - `crates/server/src/routes/members.rs`, `crates/server/src/routes/invites.rs`, `crates/server/src/ee/project_roles.rs`, `crates/server/src/ee/org_sso/login.rs`;
-- `crates/server/src/meta/members.rs` (only if the member list needs the managed flag: add a function, do not change existing ones).
 
 **Steps:**
 
@@ -621,18 +679,14 @@ C3 + C4 + C5 ────────── C7 (docs)
      - in one write: `put_org_scim`, then record `ScimAction::Enabled`, `Disabled` or `DefaultRoleChanged`;
      - `default_role` must be `viewer` or `member` (`400` field error otherwise).
    - **`POST /api/v1/orgs/{org}/scim/tokens`** (201):
-     - needs `Feature::Scim`; name 1–100 characters (reuse `routes/tokens.rs` `checked_name` if it is `pub(crate)`, else copy its rule);
+     - needs `Feature::Scim`;
+     - the name is checked inline: trimmed, 1 to 100 characters, else `field_error("name", "must be 1 to 100 characters")` (the rule of `routes/tokens.rs` `checked_name`, which is private);
      - `secret::new_key(KeyKind::Scim)`, `store::insert_token`. The third live token is `409 conflict` "Revoke a token first.";
      - record `TokenCreated`.
    - **`DELETE /api/v1/orgs/{org}/scim/tokens/{id}`** (204): always allowed. `store::revoke_token`, record `TokenRevoked`, then `state.scim_cache.evict(&hash)`.
 
    Add the four paths and the DTOs to `api/openapi.rs` the way the org SSO paths are added (security `session`).
-4. **Lock helper** in `ee/scim/mod.rs`:
-
-   ```rust
-   /// D-EA-18: SCIM is on and entitled for `org`. Read outside a write; pass the bool in.
-   pub(crate) async fn locks(state: &AppState, org: OrgId) -> Result<bool, MetaError>; // store::org_scim(..).enabled && entitlements::of(state, org).allows(Feature::Scim)
-   ```
+4. **Locks:** `ee::scim::locks` (C1a's `mod.rs`).
 
 5. **Guards**, each computing `let locks = ee::scim::locks(&state, org).await?;` before the write and, inside the closure, when `locks && store::is_managed_tx(conn, org, target).await?`, returning a new outcome variant mapped to `ApiError::ScimManaged`:
    - `routes/members.rs` `update_org_member`: after `target_role` is read.
@@ -641,9 +695,9 @@ C3 + C4 + C5 ────────── C7 (docs)
    - `routes/invites.rs` `create_invite`: when `locks` and the normalized email is in `scim_domains_tx` → `ScimManaged`.
    - `routes/invites.rs` `accept_invite`: the same check on the invite's email, before `add_org_member`.
 6. **JIT off:** in `ee/org_sso/login.rs` `finish`, the `jit:` value of `Admit` becomes `None` when `ee::scim::locks(state, org)` is true.
-7. **`OrgMember.scim_managed: bool`** (`api/members.rs`): `routes/members.rs` sets it from one query of the org's active SCIM user ids (`SELECT user_id FROM scim_users WHERE org_id = ? AND active = 1`, run once per list) when `locks` is true, else false. Use a new `store::managed_user_ids(pool, org) -> Result<HashSet<Uuid>, MetaError>`, added to `ee/scim/store.rs` in this phase (C4 may edit `store.rs` for this one function).
+7. **`OrgMember.scim_managed: bool`** (`api/members.rs`): `routes/members.rs` sets it from C1a's `store::managed_user_ids(pool, org)`, run once per list, when `locks` is true; false otherwise. Update every `OrgMember` literal in the crate (search `OrgMember {`).
 
-**Tests:**
+**Tests** (some call C3's `/scim/v2` endpoints; C3 runs at the same time and the tests run at the end):
 - `settings_require_owner_session` (admin → 403, PAT → 403);
 - `enabling_needs_the_feature_and_a_domain`;
 - `disabling_works_when_lapsed`;
@@ -689,16 +743,19 @@ C3 + C4 + C5 ────────── C7 (docs)
 
 **Goal:** owners manage SCIM in the UI. Managed members show as managed, with their controls disabled.
 
-**Prerequisite:** the coordinating session has run `just openapi` after C4, so `schema.gen.ts` has the SCIM types and `scim_managed`, and has regenerated `fixtures/api` with `just api-examples` (if the manifest needs the new operations).
+**Prerequisite:** the coordinating session has run `just openapi` and `just api-examples` after C4, so `schema.gen.ts` has the SCIM types and `scim_managed`, and `fixtures/api` has the Provisioning responses.
 
 **Edit:**
 - `web/src/routes/$org/settings/provisioning.tsx` (new) and `provisioning.test.tsx` (new);
 - `web/src/ee/scim/provisioning-settings.tsx`, `web/src/ee/scim/tokens-section.tsx` (new, SPDX Elastic-2.0);
 - `web/src/api/queries-settings.ts` (`orgScimQuery`);
 - `web/src/components/settings/settings-nav.ts` and its test;
-- `web/src/routes/$org/settings/members.tsx` and `members.test.tsx`;
+- `web/src/components/settings/org-members.tsx` and its test (the role select and Remove live there), and `web/src/routes/$org/settings/members.test.tsx` if the member tests are there;
 - `web/src/ee/project-roles/member-access-panel.tsx`;
-- `fixtures/api/static/org-scim.json` (new) and `fixtures/api/manifest.json` (one entry, if hand-written entries exist for static files; follow `get_org_sso`'s entry).
+- `web/src/components/plan/feature-label.ts` (`featureOffer` is an exhaustive switch over `Feature`: add `scim`);
+- `web/src/ee/license-card.tsx` (`FEATURE_NAMES`).
+
+`fixtures/api` is generated by the coordinator (`just api-examples`) from C4's examples; C6 does not edit it.
 
 **Steps:**
 
@@ -714,7 +771,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    - when `member.scim_managed`, the role select and Remove are disabled with "Managed by your identity provider" (`DisabledReason`);
    - the member access panel disables override changes for managed members;
    - a `scim_managed` 409 from the server shows its message.
-5. Add `"scim"` to `FEATURE_NAMES` in `web/src/ee/license-card.tsx`, if that list names features for display (add `web/src/ee/license-card.tsx` to the edits).
+5. Add `"scim"` to `FEATURE_NAMES` in `web/src/ee/license-card.tsx`, and a `scim` case to `featureOffer` in `feature-label.ts` ("SCIM provisioning is part of the Enterprise plan and the self-hosted licence.").
 
 **Tests** (`vitest`, MSW `server.use` overrides):
 - `provisioning.test.tsx`:
@@ -749,7 +806,7 @@ C3 + C4 + C5 ────────── C7 (docs)
    - what SCIM does in cetra; prerequisites (a verified domain on the Single sign-on page, the Enterprise plan or the licence);
    - enabling it and creating a token;
    - the base URL; the supported attributes and filters;
-   - deprovisioning behaviour (D-EA-16), the locks (D-EA-18) and lapses (D-EA-19);
+   - deprovisioning behaviour (D-EA-16), including that it ends the person's sessions in every org of the instance; the locks (D-EA-18), which apply to changes by hand, not to the control plane's member API; and lapses (D-EA-19);
    - "Groups and role mappings, and step-by-step Okta and Entra ID guides, are coming next" is **not** written: describe only what exists.
 
    Code blocks are marked untested per `check-samples.mjs`'s convention for HTTP examples.
