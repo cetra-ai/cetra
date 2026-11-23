@@ -1,6 +1,12 @@
 {
   "callback_url": "http://localhost:8080/api/auth/callback/sso",
+  "saml_sp": {
+    "entity_id": "http://localhost:8080/api/auth/saml/01900000-0000-7000-8000-000000000010",
+    "acs_url": "http://localhost:8080/api/auth/saml/01900000-0000-7000-8000-000000000010/acs",
+    "start_url": "http://localhost:8080/api/auth/saml/01900000-0000-7000-8000-000000000010/start"
+  },
   "provider": {
+    "protocol": "oidc",
     "display_name": "Acme Okta",
     "issuer": "https://acme.okta.com",
     "client_id": "0oa1b2c3d4",

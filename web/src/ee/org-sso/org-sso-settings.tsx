@@ -39,7 +39,9 @@ export function OrgSsoSettings({ org }: { org: string }) {
       />
       <DomainsSection org={org} sso={sso} locked={locked} />
       <StatusSection org={org} sso={sso} locked={locked} />
-      {sso.provider ? <ProviderRemoval org={org} issuer={sso.provider.issuer} /> : null}
+      {sso.provider ? (
+        <ProviderRemoval org={org} issuer={sso.provider.issuer ?? sso.provider.display_name} />
+      ) : null}
     </div>
   );
 }
