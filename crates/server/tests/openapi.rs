@@ -99,7 +99,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "/api/v1/orgs/{org}/scim/tokens/{id}",
         "revoke_org_scim_token",
     ),
-    ("get", "/api/v1/orgs/{org}/scim/groups", "list_org_scim_groups"),
+    (
+        "get",
+        "/api/v1/orgs/{org}/scim/groups",
+        "list_org_scim_groups",
+    ),
     (
         "put",
         "/api/v1/orgs/{org}/scim/groups/{id}/mapping",
