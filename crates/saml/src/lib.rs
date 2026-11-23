@@ -5,6 +5,10 @@
 //! The server (M2) and the control plane (by git) share it.
 
 mod cert;
+#[cfg(any(test, fuzzing))]
+pub mod fuzz_entry;
+#[cfg(test)]
+mod hostile_tests;
 mod metadata;
 mod request;
 mod response;
