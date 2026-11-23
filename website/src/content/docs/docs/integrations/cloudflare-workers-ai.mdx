@@ -86,7 +86,7 @@ await client.chat.completions.create({
 
 ## Limits
 
-- Cloudflare AI Gateway is a different product with its own page later.
+- Cloudflare AI Gateway is a different product.
 - No spans of Cloudflare Workers AI are captured in the repository. cetra maps the host `api.cloudflare.com` to the provider `cloudflare`.
 - With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).

@@ -96,7 +96,7 @@ await client.chat.completions.create({
 
 - Sarvam authenticates with the `api-subscription-key` header.
 - No spans of Sarvam AI are captured in the repository. cetra maps the host `api.sarvam.ai` to the provider `sarvam`.
-- The built-in prices have no Sarvam AI rows, so cost is empty until you add a custom model price in Settings → Model prices.
+- The built-in prices have no row for `sarvam-105b` (only the older `sarvam-m`), so cost is empty until you add a custom model price in Settings → Model prices.
 - With plain OpenInference or the official OpenAI instrumentation in Python, the provider shows as `openai`: they do not record the endpoint. Use `cetra.init(instrument=["openai"])` or OpenLLMetry.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 

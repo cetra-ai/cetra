@@ -31,7 +31,9 @@ export function checkIndex(indexText, pages, caseOrigin) {
     if (!m) return;
     const slug = m[2];
     const lineNo = i + 1;
-    rows.set(slug, (rows.get(slug) ?? 0) + 1);
+    const seen = rows.get(slug) ?? 0;
+    rows.set(slug, seen + 1);
+    if (seen > 0) findings.push(`index.mdx:${lineNo}: duplicate row for ${slug}`);
     const tierText = m[3]
       .split("|")
       .map((c) => c.trim())
@@ -44,6 +46,8 @@ export function checkIndex(indexText, pages, caseOrigin) {
     const pageBoxes = boxes(page);
     const fixtures = pageBoxes.flatMap((b) => b.fixtures);
     const tests = pageBoxes.flatMap((b) => b.tests);
+    const origins = fixtures.map((f) => caseOrigin(f));
+    const declared = new Set();
     for (const part of tierText.split(", ")) {
       const t = part.match(TIER);
       if (!t) {
@@ -51,7 +55,7 @@ export function checkIndex(indexText, pages, caseOrigin) {
         continue;
       }
       const tier = t[1];
-      const origins = fixtures.map((f) => caseOrigin(f));
+      declared.add(tier);
       let ok;
       if (tier === "captured") ok = origins.includes("captured");
       else if (tier === "hand-written") ok = origins.includes("hand_written");
@@ -61,10 +65,23 @@ export function checkIndex(indexText, pages, caseOrigin) {
         findings.push(`index.mdx:${lineNo}: ${slug} is "${tier}" but its page does not show that`);
       }
     }
+    // A page with a captured fixture must say captured; a page with only hand-written fixtures
+    // must say hand-written.
+    if (origins.includes("captured")) {
+      if (!declared.has("captured")) {
+        findings.push(
+          `index.mdx:${lineNo}: page has captured fixtures but the row does not say captured`,
+        );
+      }
+    } else if (origins.includes("hand_written") && !declared.has("hand-written")) {
+      findings.push(
+        `index.mdx:${lineNo}: page has hand_written fixtures but the row does not say hand-written`,
+      );
+    }
   });
   for (const slug of Object.keys(pages)) {
     const n = rows.get(slug) ?? 0;
-    if (n !== 1) findings.push(`${slug}.mdx:1: has ${n} rows in the index, expected 1`);
+    if (n === 0) findings.push(`${slug}.mdx:1: has ${n} rows in the index, expected 1`);
   }
   return findings;
 }

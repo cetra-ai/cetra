@@ -42,6 +42,7 @@ CARGO_TARGET_DIR=/home/sebastien/travaux/llm-observer/target
    - Azure uses `cetra_runtime(["openai"])`, which enables OpenInference's `OpenAIInstrumentor` itself, so no class is named in the program.
    - Vertex uses `from openinference.instrumentation.google_genai import GoogleGenAIInstrumentor`, then `GoogleGenAIInstrumentor().instrument(tracer_provider=provider)`.
    - The other five use the classes of IN2.3's table, from the same modules.
+9. **Azure AI Foundry host (after the code review).** `*.services.ai.azure.com` maps to `azure.ai.inference` (commit 3dd8ff1): that endpoint serves several publishers' models, which the built-in prices list under `azure.ai.inference`. `*.cognitiveservices.azure.com` stays `azure.ai.openai`.
 
 ## What it is, and what it is not
 

@@ -41,13 +41,12 @@ Replace `<SK_CETRA_KEY>` with your `sk-cetra-` API key. See [Send OpenTelemetry]
 
 ## What you get
 
-- The OpenLLMetry watsonx instrumentation records model calls with the provider `ibm.watsonx.ai`.
+- Model calls are recorded by the OpenLLMetry watsonx instrumentation.
 - No built-in price: add a custom model price in Settings → Model prices to get a cost.
 
 ## Limits
 
-- Setup only: calling watsonx needs an IBM Cloud account, and no spans are captured.
-- No spans of IBM watsonx.ai are captured in the repository. cetra's host table has no watsonx host; the provider `ibm.watsonx.ai` comes from the OpenLLMetry instrumentation.
+- Setup only: calling watsonx.ai needs an IBM Cloud account, and no spans of it are captured in the repository. The provider shown is whatever the OpenLLMetry instrumentation records; cetra's host table has no watsonx host.
 - The built-in prices have no IBM watsonx.ai rows, so cost is empty until you add a custom model price in Settings → Model prices.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).
 
