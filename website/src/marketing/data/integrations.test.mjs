@@ -10,9 +10,9 @@ test("parses the real page", () => {
   const items = loadIntegrations();
   assert.ok(items.length >= 1);
   assert.deepEqual(groups(items), [
-    "Coding agents",
     "Providers",
     "Frameworks",
+    "Coding agents",
     "Instrumentation libraries",
     MIGRATING_GROUP,
   ]);
@@ -54,8 +54,8 @@ test("every href has a docs page", () => {
 
 test("order follows the page", () => {
   const items = loadIntegrations();
-  assert.equal(items[0].title, "Claude Code");
-  assert.equal(items.at(-1).title, "From Laminar");
+  assert.equal(items[0].title, "Amazon Bedrock");
+  assert.equal(items.at(-1).title, "From Langfuse");
 });
 
 test("a hand-written test cell is parsed", () => {
@@ -121,4 +121,23 @@ test("an unknown tested wording throws", () => {
   assert.throws(() => parseIntegrations(mdx), /unknown test wording "verified" at line 2/);
   const bad = `${card("/docs/integrations/x/")}\n${row("/docs/integrations/x/", "captured (Go)")}\n`;
   assert.throws(() => parseIntegrations(bad), /unknown test wording "captured \(Go\)"/);
+});
+
+test("a setup-only row without a card is left out", () => {
+  const mdx = `${card("/docs/integrations/x/")}\n${row("/docs/integrations/x/")}\n${row("/docs/integrations/y/", "setup only")}\n`;
+  const items = parseIntegrations(mdx);
+  assert.deepEqual(
+    items.map((item) => item.href),
+    ["/docs/integrations/x/"],
+  );
+});
+
+test("a card on a setup-only row throws", () => {
+  const mdx = `${card("/docs/integrations/y/")}\n${row("/docs/integrations/y/", "setup only")}\n`;
+  assert.throws(() => parseIntegrations(mdx), /card for setup-only row \/docs\/integrations\/y\//);
+});
+
+test("a tested row without a card throws", () => {
+  const mdx = `${row("/docs/integrations/z/", "SDK test")}\n`;
+  assert.throws(() => parseIntegrations(mdx), /no card for table row \/docs\/integrations\/z\//);
 });

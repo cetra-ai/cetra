@@ -7,33 +7,99 @@ import { CardGrid, LinkCard } from "@astrojs/starlight/components";
 
 Use this page to find how to connect your framework, provider or instrumentation library to cetra.
 
+## Providers
+
 | Integration | Python | TypeScript | How | Tested against |
 |---|---|---|---|---|
-| [OpenAI](/docs/integrations/openai/) | ✓ | ✓ | `instrument=["openai"]` or `openai(OpenAI)` | captured |
-| [Anthropic](/docs/integrations/anthropic/) | ✓ | ✓ | `instrument=["anthropic"]` or `anthropic(Anthropic)` | captured |
-| [Google Gen AI](/docs/integrations/google-genai/) | ✓ | — | `instrument=["google-genai"]` | captured |
 | [Amazon Bedrock](/docs/integrations/bedrock/) | ✓ | — | `instrument=["bedrock"]` | SDK test |
+| [Anthropic](/docs/integrations/anthropic/) | ✓ | ✓ | `instrument=["anthropic"]` or `anthropic(Anthropic)` | captured |
+| [Azure OpenAI](/docs/integrations/azure-openai/) | ✓ | ✓ | `instrument=["openai"]` | captured |
+| [Baidu Qianfan](/docs/integrations/qianfan/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Baseten](/docs/integrations/baseten/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [BytePlus ModelArk](/docs/integrations/byteplus/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Cerebras](/docs/integrations/cerebras/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Cloudflare Workers AI](/docs/integrations/cloudflare-workers-ai/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Cohere](/docs/integrations/cohere/) | ✓ | — | `instrument=["cohere"]` | captured |
+| [CometAPI](/docs/integrations/cometapi/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Databricks](/docs/integrations/databricks/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [DeepInfra](/docs/integrations/deepinfra/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [DeepSeek](/docs/integrations/deepseek/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Doubleword](/docs/integrations/doubleword/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Fireworks AI](/docs/integrations/fireworks/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Google Gen AI](/docs/integrations/google-genai/) | ✓ | — | `instrument=["google-genai"]` | captured |
+| [Groq](/docs/integrations/groq/) | ✓ | — | `instrument=["groq"]` | captured |
+| [Hugging Face Inference Providers](/docs/integrations/hugging-face/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Hyperbolic](/docs/integrations/hyperbolic/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [IBM watsonx.ai](/docs/integrations/watsonx/) | ✓ | — | OpenLLMetry watsonx instrumentation | setup only |
 | [LiteLLM](/docs/integrations/litellm/) | ✓ | — | `instrument=["litellm"]` | SDK test |
-| [LangChain and LangGraph](/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
-| [LlamaIndex](/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
-| [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
-| [OpenAI Agents SDK](/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [MiniMax](/docs/integrations/minimax/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Mistral AI](/docs/integrations/mistral/) | ✓ | — | `instrument=["mistralai"]` | captured |
+| [Moonshot AI (Kimi)](/docs/integrations/moonshot/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Nebius AI Studio](/docs/integrations/nebius/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Novita AI](/docs/integrations/novita/) | ✓ | ✓ | OpenAI client with the provider's base URL | captured |
+| [NVIDIA NIM](/docs/integrations/nvidia-nim/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Ollama](/docs/integrations/ollama/) | ✓ | — | `instrument=["ollama"]` | captured |
+| [OpenAI](/docs/integrations/openai/) | ✓ | ✓ | `instrument=["openai"]` or `openai(OpenAI)` | captured |
+| [OpenRouter](/docs/integrations/openrouter/) | ✓ | ✓ | OpenAI client with the provider's base URL | captured |
+| [Perplexity](/docs/integrations/perplexity/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Qwen (Alibaba Cloud Model Studio)](/docs/integrations/qwen/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [SambaNova](/docs/integrations/sambanova/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Sarvam AI](/docs/integrations/sarvam/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Together AI](/docs/integrations/together/) | ✓ | — | `instrument=["together"]` | captured |
+| [Vertex AI](/docs/integrations/vertex-ai/) | ✓ | — | `instrument=["google-genai"]` | captured |
+| [vLLM](/docs/integrations/vllm/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Volcengine Ark](/docs/integrations/volcengine/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [xAI](/docs/integrations/xai/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+| [Z.ai (GLM)](/docs/integrations/z-ai/) | ✓ | ✓ | OpenAI client with the provider's base URL | setup only |
+
+<CardGrid>
+  <LinkCard title="Amazon Bedrock" description="Bedrock calls from Python." href="/docs/integrations/bedrock/" />
+  <LinkCard title="Anthropic" description="Messages, streaming, thinking and cache tokens." href="/docs/integrations/anthropic/" />
+  <LinkCard title="Azure OpenAI" description="Azure OpenAI through the OpenAI SDK." href="/docs/integrations/azure-openai/" />
+  <LinkCard title="Cohere" description="Cohere v2 chat from Python." href="/docs/integrations/cohere/" />
+  <LinkCard title="Google Gen AI" description="Gemini through the Google Gen AI SDK." href="/docs/integrations/google-genai/" />
+  <LinkCard title="Groq" description="Groq SDK and the OpenAI client." href="/docs/integrations/groq/" />
+  <LinkCard title="LiteLLM" description="LiteLLM calls from Python." href="/docs/integrations/litellm/" />
+  <LinkCard title="Mistral AI" description="Mistral AI from Python." href="/docs/integrations/mistral/" />
+  <LinkCard title="Novita AI" description="Novita through the OpenAI client." href="/docs/integrations/novita/" />
+  <LinkCard title="Ollama" description="Local models through the Ollama SDK." href="/docs/integrations/ollama/" />
+  <LinkCard title="OpenAI" description="Chat, Responses API and embeddings." href="/docs/integrations/openai/" />
+  <LinkCard title="OpenRouter" description="Any model through OpenRouter, priced by its publisher." href="/docs/integrations/openrouter/" />
+  <LinkCard title="Together AI" description="Together SDK and the OpenAI client." href="/docs/integrations/together/" />
+  <LinkCard title="Vertex AI" description="Gemini on Vertex AI." href="/docs/integrations/vertex-ai/" />
+</CardGrid>
+
+## Frameworks
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [aisuite](/docs/integrations/aisuite/) | ✓ | — | the instrumentation of each provider SDK | setup only |
 | [CrewAI](/docs/integrations/crewai/) | ✓ | — | `instrument=["crewai"]` | SDK test |
 | [DSPy](/docs/integrations/dspy/) | ✓ | — | `instrument=["dspy"]` | SDK test |
 | [Google ADK](/docs/integrations/google-adk/) | ✓ | — | ADK's own OpenTelemetry spans | captured |
-| [OpenInference](/docs/integrations/openinference/) | ✓ | ✓ | point its exporter at cetra | captured |
-| [OpenLLMetry (Traceloop)](/docs/integrations/openllmetry/) | ✓ | ✓ | point its exporter at cetra | captured |
-| [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | ✓ | ✓ | the official `opentelemetry-instrumentation-*` packages | captured |
-| [From Langfuse](/docs/integrations/from-langfuse/) | ✓ | — | keep the Langfuse SDK, export its spans to cetra | captured |
-| [From Laminar](/docs/integrations/from-laminar/) | ✓ | — | keep the Laminar SDK, export its spans to cetra | captured |
+| [LangChain and LangGraph](/docs/integrations/langchain/) | ✓ | ✓ | `instrument=["langchain"]` or `langchain(…)` | captured (Python), SDK test (TypeScript) |
+| [LlamaIndex](/docs/integrations/llama-index/) | ✓ | — | `instrument=["llama-index"]` | SDK test |
+| [OpenAI Agents SDK](/docs/integrations/openai-agents/) | ✓ | — | `instrument=["openai-agents"]` | captured |
+| [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
+
+<CardGrid>
+  <LinkCard title="CrewAI" description="CrewAI from Python." href="/docs/integrations/crewai/" />
+  <LinkCard title="DSPy" description="DSPy from Python." href="/docs/integrations/dspy/" />
+  <LinkCard title="Google ADK" description="Agent Development Kit runs." href="/docs/integrations/google-adk/" />
+  <LinkCard title="LangChain and LangGraph" description="Chains, agents, models and tools." href="/docs/integrations/langchain/" />
+  <LinkCard title="LlamaIndex" description="LlamaIndex from Python." href="/docs/integrations/llama-index/" />
+  <LinkCard title="OpenAI Agents SDK" description="Agent runs and function tools." href="/docs/integrations/openai-agents/" />
+  <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
+</CardGrid>
+
+## Coding agents
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
 | [Claude Code](/docs/integrations/claude-code/) | — | — | `cetra agents setup claude-code` | captured |
 | [Codex CLI](/docs/integrations/codex/) | — | — | `cetra agents setup codex` | captured |
 | [Gemini CLI](/docs/integrations/gemini-cli/) | — | — | `cetra agents setup gemini-cli` | captured |
 | [GitHub Copilot](/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
-
-"Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans for it. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/).
-
-## Coding agents
 
 <CardGrid>
   <LinkCard title="Claude Code" description="Prompts, model calls and tools, with the Claude Agent SDK." href="/docs/integrations/claude-code/" />
@@ -42,29 +108,13 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="GitHub Copilot" description="Copilot CLI and VS Code Copilot Chat." href="/docs/integrations/copilot/" />
 </CardGrid>
 
-## Providers
-
-<CardGrid>
-  <LinkCard title="OpenAI" description="Chat, Responses API and embeddings." href="/docs/integrations/openai/" />
-  <LinkCard title="Anthropic" description="Messages, streaming, thinking and cache tokens." href="/docs/integrations/anthropic/" />
-  <LinkCard title="Google Gen AI" description="Gemini through the Google Gen AI SDK." href="/docs/integrations/google-genai/" />
-  <LinkCard title="Amazon Bedrock" description="Bedrock calls from Python." href="/docs/integrations/bedrock/" />
-  <LinkCard title="LiteLLM" description="LiteLLM calls from Python." href="/docs/integrations/litellm/" />
-</CardGrid>
-
-## Frameworks
-
-<CardGrid>
-  <LinkCard title="LangChain and LangGraph" description="Chains, agents, models and tools." href="/docs/integrations/langchain/" />
-  <LinkCard title="LlamaIndex" description="LlamaIndex from Python." href="/docs/integrations/llama-index/" />
-  <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
-  <LinkCard title="OpenAI Agents SDK" description="Agent runs and function tools." href="/docs/integrations/openai-agents/" />
-  <LinkCard title="CrewAI" description="CrewAI from Python." href="/docs/integrations/crewai/" />
-  <LinkCard title="DSPy" description="DSPy from Python." href="/docs/integrations/dspy/" />
-  <LinkCard title="Google ADK" description="Agent Development Kit runs." href="/docs/integrations/google-adk/" />
-</CardGrid>
-
 ## Instrumentation libraries
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [OpenInference](/docs/integrations/openinference/) | ✓ | ✓ | point its exporter at cetra | captured |
+| [OpenLLMetry (Traceloop)](/docs/integrations/openllmetry/) | ✓ | ✓ | point its exporter at cetra | captured |
+| [OpenTelemetry GenAI](/docs/integrations/opentelemetry-genai/) | ✓ | ✓ | the official `opentelemetry-instrumentation-*` packages | captured |
 
 <CardGrid>
   <LinkCard title="OpenInference" description="Arize's instrumentation, with any exporter." href="/docs/integrations/openinference/" />
@@ -74,9 +124,16 @@ Use this page to find how to connect your framework, provider or instrumentation
 
 ## Migrating
 
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [From Laminar](/docs/integrations/from-laminar/) | ✓ | — | keep the Laminar SDK, export its spans to cetra | captured |
+| [From Langfuse](/docs/integrations/from-langfuse/) | ✓ | — | keep the Langfuse SDK, export its spans to cetra | captured |
+
 <CardGrid>
-  <LinkCard title="From Langfuse" description="Keep the Langfuse SDK and send its spans to cetra." href="/docs/integrations/from-langfuse/" />
   <LinkCard title="From Laminar" description="Keep the Laminar SDK and send its spans to cetra." href="/docs/integrations/from-laminar/" />
+  <LinkCard title="From Langfuse" description="Keep the Langfuse SDK and send its spans to cetra." href="/docs/integrations/from-langfuse/" />
 </CardGrid>
+
+"Captured" means the repository holds spans recorded from the real library, and a test checks how cetra reads them. "Hand-written" means the spans in the repository were written from the vendor's attribute reference. "SDK test" means an SDK test checks the helper, and the repository holds no recorded spans. "Setup only" means the page shows the setup; nothing in the repository records this integration's spans. A ✓ for TypeScript means a helper in `@cetra-ai/sdk`, or a TypeScript library whose spans are captured. A — means no helper or captured run exists for that language: you can still use the library's own OpenTelemetry instrumentation with [Send OpenTelemetry](/docs/get-started/opentelemetry/).
 
 Anything else that speaks OpenTelemetry works through [Send OpenTelemetry](/docs/get-started/opentelemetry/).
