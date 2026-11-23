@@ -22,6 +22,9 @@ use cetra_core::ids::ProjectId;
 use cetra_core::time_serde::parse_rfc3339;
 use cetra_storage as storage;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::convert;
 use crate::api::dashboards::{
@@ -428,6 +431,11 @@ async fn create_dashboard(
         })
         .await?;
     tracing::info!(project_id = %project, dashboard_id = %row.info.id, "dashboard created");
+    record(
+        &state,
+        &Event::DashboardCreated,
+        &Actor::project(&principal, &access),
+    );
     Ok((StatusCode::CREATED, error::Json(Dashboard::from(row))).into_response())
 }
 
@@ -477,6 +485,11 @@ async fn update_dashboard(
     match outcome {
         UpdateOutcome::Updated(row) => {
             tracing::info!(project_id = %project, dashboard_id = %id, "dashboard updated");
+            record(
+                &state,
+                &Event::DashboardEdited,
+                &Actor::project(&principal, &access),
+            );
             Ok(error::Json(Dashboard::from(row)))
         }
         UpdateOutcome::Stale(current) => Err(ApiError::StaleVersion {
@@ -553,6 +566,11 @@ async fn save_overview(
             } else {
                 StatusCode::OK
             };
+            record(
+                &state,
+                &Event::DashboardEdited,
+                &Actor::project(&principal, &access),
+            );
             Ok((status, error::Json(Dashboard::from(row))).into_response())
         }
         OverviewSave::Stale(current) => Err(ApiError::StaleVersion {
@@ -1544,6 +1562,14 @@ mod tests {
         assert_eq!(missing.status, StatusCode::NOT_FOUND);
         let again = send(&app, Method::DELETE, &item, &seeded.cookie, None).await;
         assert_eq!(again.status, StatusCode::NOT_FOUND);
+        assert!(
+            app.state.analytics.counters.get("dashboard.created") >= 1,
+            "dashboard.created not counted"
+        );
+        assert!(
+            app.state.analytics.counters.get("dashboard.edited") >= 1,
+            "dashboard.edited not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2735,6 +2761,10 @@ mod tests {
         assert_eq!(updated.status, StatusCode::OK, "{:?}", updated.body);
         let updated: Dashboard = updated.json();
         assert_eq!(updated.version, 2);
+        assert!(
+            app.state.analytics.counters.get("dashboard.edited") >= 1,
+            "dashboard.edited not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -18,6 +18,9 @@ use uuid::Uuid;
 
 use cetra_core::ids::{OrgId, ProjectId, SpanId, TraceId};
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::annotation_queues::{
     AddQueueItems, AddedQueueItems, AnnotationQueue, AnnotationQueueItem,
     AnnotationQueueItemListParams, AnnotationQueueListParams, CreateAnnotationQueue, NextQueueItem,
@@ -391,6 +394,13 @@ async fn create_queue(
         QueueCreate::Created(row) => {
             tracing::info!(project_id = %project, queue_id = %row.id, "annotation queue created");
             let json = queue_json(&row, None);
+            record(
+                &state,
+                &Event::AnnotationQueueCreated {
+                    target: body.target,
+                },
+                &Actor::project(&principal, &access),
+            );
             Ok((StatusCode::CREATED, error::Json(json)).into_response())
         }
         QueueCreate::OverPlanLimit(limit) => Err(crate::entitlements::plan_limit(
@@ -1328,7 +1338,13 @@ async fn complete_item(
     Extension(access): Extension<ProjectAccess>,
     error::Path(path): error::Path<ItemPath>,
 ) -> Result<error::Json<AnnotationQueueItem>, ApiError> {
-    finish(&state, &principal, &access, path, store::Finish::Complete).await
+    let item = finish(&state, &principal, &access, path, store::Finish::Complete).await?;
+    record(
+        &state,
+        &Event::AnnotationQueueItemCompleted,
+        &Actor::project(&principal, &access),
+    );
+    Ok(item)
 }
 
 /// `POST /annotation-queues/{id}/items/{item_id}/skip`: skips a pending item, with an optional
@@ -1729,6 +1745,10 @@ mod tests {
         assert_eq!(gone.status, StatusCode::NOT_FOUND);
         let again = send(&app, Method::DELETE, &path, &seeded.cookie, None).await;
         assert_eq!(again.status, StatusCode::NOT_FOUND);
+        assert!(
+            app.state.analytics.counters.get("annotation_queue.created") >= 1,
+            "annotation_queue.created not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2883,6 +2903,14 @@ mod tests {
         let skipped: AnnotationQueueItem = skipped.json();
         assert_eq!(skipped.status, QueueItemStatus::Skipped);
         assert_eq!(skipped.skip_reason.as_deref(), Some("off topic"));
+        assert!(
+            app.state
+                .analytics
+                .counters
+                .get("annotation_queue.item_completed")
+                >= 1,
+            "annotation_queue.item_completed not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

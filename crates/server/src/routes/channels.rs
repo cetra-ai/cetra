@@ -11,6 +11,9 @@ use uuid::Uuid;
 use crate::alerts::channel::{ChannelConfig, open_config, seal_config};
 use crate::alerts::deliver::{Outgoing, send_to_channel};
 use crate::alerts::message::{self, MessageKind, Notice};
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::alerts::{
     AlertMetric, AlertWindow, ChannelDelivery, ChannelKind, ChannelTestResult, Comparator,
     CreateChannelRequest, DeliveryStatus, NotificationChannel, UpdateChannelRequest,
@@ -161,6 +164,11 @@ async fn create_channel(
         user_id = %user_id,
         kind = row.kind.as_str(),
         "alert channel created"
+    );
+    record(
+        &state,
+        &Event::ChannelCreated { kind },
+        &Actor::project(&principal, &access),
     );
     Ok((
         StatusCode::CREATED,
@@ -723,6 +731,10 @@ mod tests {
         assert_eq!(page.data[1].header_names, ["X-Team"]);
         assert_eq!(page.data[2].target_hint, "hooks.slack.com/…/abcd");
         assert!(page.next_cursor.is_none());
+        assert!(
+            app.state.analytics.counters.get("channel.created") >= 1,
+            "channel.created not counted"
+        );
     }
 
     #[tokio::test]

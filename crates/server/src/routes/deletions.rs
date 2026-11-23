@@ -13,6 +13,9 @@ use cetra_storage::{FilterDeletionRequest, QueryContext, TimeWindow, filter_trac
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::api::deletions::{
     CreateDeletion, Deletion, DeletionActor, DeletionActorKind, DeletionFailure, DeletionFilter,
@@ -385,6 +388,11 @@ async fn create_deletion(
         actor_kind = actor_kind.as_str(),
         actor_id = %actor_id,
         "deletion requested"
+    );
+    record(
+        &state,
+        &Event::DeletionRequested,
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
@@ -775,6 +783,10 @@ mod tests {
             .json();
         assert_eq!(got["status"], "pending");
         assert_eq!(got["trace_count"], 2);
+        assert!(
+            app.state.analytics.counters.get("deletion.requested") >= 1,
+            "deletion.requested not counted"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

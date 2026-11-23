@@ -18,6 +18,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::SqliteConnection;
 use uuid::Uuid;
 
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::issues::{
     CreateIssueSourceRequest, Issue, IssueCandidateCounts, IssueDay, IssueEvent, IssueEventPage,
@@ -316,6 +319,7 @@ async fn create_issue_source(
     let org = access.project.org_id;
     let now = state.clock.now_ns();
     let requested_channels = body.channel_ids.clone();
+    let kind = body.kind;
     let errors = unused(source_kind(body.kind), &create_given(&body));
     let row = created_row(body, project, user.id, now);
     validate(&state, org, project, &row, errors, now).await?;
@@ -341,6 +345,11 @@ async fn create_issue_source(
             reload_score_rules(&state).await;
             state.issues_wake();
             let figures = llm_figures(&state, &row, now).await?;
+            record(
+                &state,
+                &Event::IssueSourceCreated { kind },
+                &Actor::project(&principal, &access),
+            );
             Ok((
                 StatusCode::CREATED,
                 error::Json(source_json(&row, 0, channels, figures.as_ref())),
@@ -2007,6 +2016,10 @@ mod tests {
             .send()
             .await;
         assert_eq!(gone.status, 404, "{}", text(&gone));
+        assert!(
+            app.state.analytics.counters.get("issue_source.created") >= 1,
+            "issue_source.created not counted"
+        );
     }
 
     #[tokio::test]

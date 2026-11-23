@@ -15,6 +15,9 @@ use uuid::Uuid;
 
 use crate::alerts::condition::normalize_condition;
 use crate::alerts::quota;
+use crate::analytics::actor::Actor;
+use crate::analytics::catalog::Event;
+use crate::analytics::record;
 use crate::api::alerts::{
     AlertCondition, AlertDelivery, AlertEvent, AlertRule, CreateAlertRuleRequest,
     UpdateAlertRuleRequest,
@@ -183,6 +186,11 @@ async fn create_rule(
         user_id = %user_id,
         metric = row.condition.metric.as_str(),
         "alert rule created"
+    );
+    record(
+        &state,
+        &Event::AlertRuleCreated,
+        &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(rule_json(&row))))
 }
@@ -707,6 +715,10 @@ mod tests {
         assert_eq!(loaded.status, 200);
         let loaded: AlertRule = loaded.json();
         assert_eq!(loaded, created);
+        assert!(
+            app.state.analytics.counters.get("alert_rule.created") >= 1,
+            "alert_rule.created not counted"
+        );
     }
 
     #[tokio::test]
