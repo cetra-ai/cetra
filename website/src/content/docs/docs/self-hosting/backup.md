@@ -20,7 +20,7 @@ What a backup contains:
 - the encryption key, if you set `CETRA_ENCRYPTION_KEY` instead of using `secret.key`: store it
   with the backup. A backup can only be read with the key that was current when it was taken.
 
-`tmp/` (query spill files) and `LOCK` can be left out.
+`tmp/` (query spill files), `LOCK` and `telemetry/` (unsent [crash reports](/docs/self-hosting/telemetry/#crash-reports)) can be left out.
 
 An online backup holds `meta.db`, `catalog.db`, `secret.key`, `manifest.json` and, without S3, the
 objects it lists. It has no WAL: it is taken right after a flush, so the WAL holds nothing it needs.

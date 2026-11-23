@@ -7,6 +7,8 @@ This page lists what a self-hosted cetra sends to us and how to turn it off.
 
 cetra sends one anonymous heartbeat a day to `telemetry.cetra.sh`. It tells us which versions run, on which platforms, at what scale, and which features are in use. It carries no names, emails, domains, URLs, host names, licence data or exact counts.
 
+cetra can also send crash reports. They are off unless you turn them on: see [Crash reports](#crash-reports).
+
 ## Turn it off
 
 Any one of these turns the heartbeat off:
@@ -18,6 +20,8 @@ Any one of these turns the heartbeat off:
 | `telemetry.heartbeat = false` | `CETRA_TELEMETRY__HEARTBEAT=false` |
 
 Any other value of `CETRA_TELEMETRY` stops cetra at startup with an error, so a typo never leaves the heartbeat on. An empty value is ignored. `CETRA_TELEMETRY` is not the environment form of a setting: `CETRA_TELEMETRY=on` is an error too.
+
+`CETRA_TELEMETRY=off` and `DO_NOT_TRACK` turn crash reports off too.
 
 With Docker Compose, add `CETRA_TELEMETRY=off` to `cetra.env`. With the Helm chart, add it to `env` in your values:
 
@@ -39,7 +43,7 @@ Turning the heartbeat off changes nothing else, and licences never turn it on or
 
 ## The startup line
 
-At every start, cetra logs one line, at `info` with the target `cetra_server::observability::notice`, that says whether the heartbeat is on. It shows even when `log.level` is `warn`. When the heartbeat is on, the line gives the instance id and a link to this page. When it is off, its `reason` field says why: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, `restore_mode`, `ci`, `debug_build` or `config`.
+At every start, cetra logs two lines, at `info` with the target `cetra_server::observability::notice`: one says whether the heartbeat is on, the other whether crash reports are on. They show even when `log.level` is `warn`. When the heartbeat is on, its line gives the instance id and a link to this page. When something is off, the line's `reason` field says why: `CETRA_TELEMETRY`, `DO_NOT_TRACK`, `restore_mode`, `ci`, `debug_build` or `config`. Crash reports are never off for `ci` or `debug_build`.
 
 ## When it is sent
 
@@ -67,6 +71,7 @@ The request is `POST https://telemetry.cetra.sh/v1/heartbeat` with a JSON body a
 | `features.github_sign_in`, `features.google_sign_in`, `features.oidc_sign_in` | `true`, `false` | Sign-in with GitHub, Google or an OIDC provider is configured. |
 | `features.alert_rules`, `features.online_rules`, `features.datasets`, `features.prompts`, `features.annotation_queues` | `true`, `false` | At least one alert rule, online rule, dataset, prompt or annotation queue exists. |
 | `features.self_monitoring` | `true`, `false` | cetra exports its own logs or traces to an OTLP endpoint of yours. |
+| `features.crash_reports_on` | `true`, `false` | Crash reports are on. |
 
 An example:
 
@@ -96,7 +101,8 @@ An example:
     "datasets": false,
     "prompts": true,
     "annotation_queues": false,
-    "self_monitoring": false
+    "self_monitoring": false,
+    "crash_reports_on": false
   }
 }
 ```
@@ -105,4 +111,60 @@ It never contains emails, email domains, names of organizations, projects or any
 
 ## The instance id
 
-The instance id is a random UUID that cetra creates in `meta.db` the first time it sends a heartbeat. Nothing about your machine goes into it. A backup and its restore keep it, since they are the same instance; a copy of the data directory made by hand shares it with the original. The startup line shows it. To have us delete the heartbeats of an instance, write to `hello@cetra.sh` with its id.
+The instance id is a random UUID that cetra creates in `meta.db` the first time it sends a heartbeat or a crash report. Nothing about your machine goes into it. A backup and its restore keep it, since they are the same instance; a copy of the data directory made by hand shares it with the original. The startup line shows it. To have us delete the heartbeats and crash reports of an instance, write to `hello@cetra.sh` with its id.
+
+## Crash reports
+
+Crash reports are off unless you turn them on with `telemetry.crash_reports = true` (or `CETRA_TELEMETRY__CRASH_REPORTS=true`). Then cetra sends us a report for every panic and every error-level log event, so we can fix bugs you have not reported. A report names the place in the code where the problem happened. It never contains the error message, a value, or anything from your data.
+
+`CETRA_TELEMETRY=off`, `DO_NOT_TRACK` and restore mode turn crash reports off whatever the setting says. CI environments and debug builds do not, since crash reports only run when you ask for them.
+
+### What a report contains
+
+| Field | Example | Meaning |
+|---|---|---|
+| `schema` | `1` | The version of this format. |
+| `instance_id` | a random UUID | The [instance id](#the-instance-id), added when the report is sent. |
+| `version`, `target`, `profile`, `deployment` | `0.1.0`, `x86_64-unknown-linux-musl`, `release`, `docker` | As in the heartbeat. |
+| `uptime` | `<1h`, `1h-1d`, `1d-7d`, `7d-30d`, `30d+` | How long the server process had run. |
+| `kind` | `panic`, `error_event` | A panic, or an error-level log event. |
+| `location` | `crates/storage/src/wal.rs:412:9` | The file and line in cetra's code (a panic also has a column). A file of a dependency keeps only the part after Cargo's download directory (`arrow-55.0.0/src/array.rs`); any other file keeps only its name. |
+| `event_target`, `module` | `cetra_storage::wal` | The log event's target and module. Absent for a panic. |
+| `fields` | `["error", "project_id"]` | The names of the log event's fields, never their values. Empty for a panic. |
+| `backtrace` | `["cetra_storage::wal::Wal::sync", …]` | The names of the functions on the stack, at most 48, without file or line. The frames of Rust's own panic machinery above cetra's code are left out. |
+| `count` | `3` | How many times this happened. |
+| `first_hour`, `last_hour` | `490896` | The hours (since 1970, UTC) of the first and last time, never the exact time. |
+
+An example:
+
+```json
+{
+  "schema": 1,
+  "instance_id": "8f14e45f-ceea-4e7a-9d2b-1c3f5a6b7c8d",
+  "version": "0.1.0",
+  "target": "x86_64-unknown-linux-musl",
+  "profile": "release",
+  "deployment": "docker",
+  "uptime": "1h-1d",
+  "kind": "error_event",
+  "location": "crates/storage/src/wal.rs:412",
+  "event_target": "cetra_storage::wal",
+  "module": "cetra_storage::wal",
+  "fields": ["error", "project_id"],
+  "backtrace": ["cetra_storage::wal::Wal::sync", "cetra_storage::flush::run"],
+  "count": 3,
+  "first_hour": 490896,
+  "last_hour": 490897
+}
+```
+
+A report never contains the panic or error message, field values, error texts, thread names, host names, file paths outside cetra's code and its dependencies, environment variables, configuration, or exact times. Rust panic messages can quote data (an `unwrap` prints the error it found), so cetra drops the message whole rather than trying to clean it.
+
+### How reports are sent
+
+- The same place in the code is reported at most once an hour; later occurrences are counted and sent as one report after the hour. At most 20 reports go out an hour.
+- cetra writes each report to `<data_dir>/telemetry/spool/` the moment it happens, so a panic that stops the server is sent at the next start. The spool holds at most 50 reports; the oldest go first.
+- Every minute, cetra sends the spooled reports to `https://telemetry.cetra.sh/v1/crash` (or [`telemetry.endpoint`](/docs/self-hosting/configuration-reference/#telemetry)`/v1/crash`) and deletes each one the relay accepts or refuses. A report that cannot be sent (the relay is down, busy or rate-limiting) waits for the next try and is deleted unsent after 7 days. Requests follow no redirect and give up after 10 seconds; failures are logged at `debug` only.
+- Writing a report takes a moment the first time in a process, while cetra reads its own function names. Error-level events of libraries that log through the `log` crate are not reported, since they carry no code location, and neither are errors of the HTTP stack that exports cetra's own logs to your OTLP endpoint (a down endpoint is not a cetra bug).
+- Turning crash reports off deletes the spool at the next start. Backups do not include it.
+
