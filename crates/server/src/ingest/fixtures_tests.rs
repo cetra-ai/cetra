@@ -36,7 +36,8 @@ use tokio::net::TcpStream;
 use crate::clock::Clock;
 use crate::config::{
     AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
-    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig,
+    SelfMonitoringConfig, ServerConfig,
 };
 use crate::ingest::environment::rewrite_reserved_environment;
 use crate::meta::MetaDb;
@@ -475,6 +476,7 @@ fn serve_config(data_dir: &Path) -> ServerConfig {
         email_from: None,
         init: InitConfig::default(),
         log: LogConfig::default(),
+        self_monitoring: SelfMonitoringConfig::default(),
     };
     config.init = serde_json::from_value(serde_json::json!({
         "admin_email": "ada@example.com",

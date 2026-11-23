@@ -48,7 +48,8 @@ use crate::auth::session::{SessionOrigin, start_session};
 use crate::clock::Clock;
 use crate::config::{
     AlertsConfig, AuthSettings, DemoConfig, EntitlementsConfig, EvalConfig, IngestConfig,
-    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, ServerConfig,
+    InitConfig, LogConfig, MediaConfig, OrgsConfig, PublicUrl, SecurityConfig, SelfMonitoringConfig,
+    ServerConfig,
 };
 use crate::http::access::RouteDef;
 use crate::http::{AppInner, AppState, router, router_with, serve_router};
@@ -1301,6 +1302,7 @@ fn default_config(data_dir: &std::path::Path) -> ServerConfig {
         email_from: None,
         init: InitConfig::default(),
         log: LogConfig::default(),
+        self_monitoring: SelfMonitoringConfig::default(),
     }
 }
 
@@ -1852,6 +1854,7 @@ pub(crate) fn config(data_dir: &std::path::Path) -> ServerConfig {
         email_from: None,
         init: InitConfig::default(),
         log: LogConfig::default(),
+        self_monitoring: SelfMonitoringConfig::default(),
     }
 }
 

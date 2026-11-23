@@ -20,7 +20,7 @@ For how to choose values, see [Configuration](/docs/self-hosting/configuration/)
 | `grpc_addr` | `CETRA_GRPC_ADDR` | address | `0.0.0.0:4317` | Listen address of OTLP/gRPC. An empty string disables it. |
 | `metrics_addr` | `CETRA_METRICS_ADDR` | address | unset (off) | Listen address of the Prometheus `/metrics` endpoint. It has no authentication: bind it to a private address. |
 | `trusted_proxies` | `CETRA_TRUSTED_PROXIES` | list of CIDRs | empty | Proxies whose `X-Forwarded-For` header cetra trusts. |
-| `restore_mode` | | boolean | `false` | Serve reads and run no outbound work (alert deliveries, webhooks, judges, email, identity providers). For restore drills. |
+| `restore_mode` | | boolean | `false` | Serve reads and run no outbound work (alert deliveries, webhooks, judges, email, identity providers). For restore drills. The self-monitoring export still runs: it goes to your own endpoint. |
 | `encryption_key` | `CETRA_ENCRYPTION_KEY` | secret | unset | 32 bytes in standard base64 that encrypt stored secrets. Unset: cetra reads `<data_dir>/secret.key` and generates it on the first start of a new data directory. |
 | `license_key` | `CETRA_LICENSE_KEY` | secret | unset | The licence key that unlocks enterprise features. Unset: an installed key applies, else they stay locked. When set, it wins over a key installed from the admin settings. |
 | `smtp_url` | `CETRA_SMTP_URL` | secret URL | unset (email off) | `smtp://` (STARTTLS required), `smtps://` (TLS from the first byte) or `smtp://host?tls=none` (a local relay), with optional `user:password@`. Needs `email_from`. |
@@ -202,3 +202,15 @@ These settings create the first admin, organization and project on a database th
 |---|---|---|---|---|
 | `log.format` | | string | `pretty` on a terminal, `json` otherwise | `pretty` or `json`. |
 | `log.level` | `CETRA_LOG` | string | `"info"` | A log filter such as `info` or `cetra_server=debug,warn`. |
+
+## `[self_monitoring]`
+
+Export cetra's own logs to an OTLP/HTTP endpoint you choose (Sentry, Grafana Cloud, an OpenTelemetry Collector). Off while `otlp_endpoint` is unset. See [Monitoring](/docs/self-hosting/monitoring/#export-logs-over-otlp).
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `self_monitoring.otlp_endpoint` | | URL | unset (off) | Base URL of the OTLP/HTTP endpoint, `http` or `https`, without user info, query or fragment. cetra posts protobuf, gzip-compressed, to the URL followed by `/v1/logs`; a URL that already ends in `/v1/logs` or `/v1/traces` is refused. |
+| `self_monitoring.otlp_headers` | | secret | unset | Request headers, `name=value` pairs separated by commas, as in `OTEL_EXPORTER_OTLP_HEADERS`. Values may be percent-encoded (`Basic%20…`). At most 32 headers and 8192 bytes; `content-type`, `content-encoding`, `content-length`, `host` and `user-agent` are set by cetra. |
+| `self_monitoring.logs` | | boolean | `true` | Export log records. |
+| `self_monitoring.level` | | string | `"warn"` | A log filter for the exported events, like `log.level`. `rmcp` is capped at `warn`. |
+| `self_monitoring.resource` | | string | `""` | Extra resource attributes, `key=value` pairs separated by commas, as in `OTEL_RESOURCE_ATTRIBUTES`. Values may be percent-encoded (`%2C` for a comma). At most 32 attributes and 8192 bytes. They are added after cetra's own (`service.name`, `service.version`, `service.instance.id`, `host.arch`, `os.type`) and replace one of the same key. |

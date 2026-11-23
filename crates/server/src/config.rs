@@ -398,6 +398,85 @@ impl Default for LogConfig {
     }
 }
 
+/// `self_monitoring.otlp_endpoint` (track TL, D-TL-1): an `http` or `https` base URL without
+/// user info, query or fragment. Its path is kept and `/v1/logs` is appended to it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpEndpoint {
+    /// The URL without a trailing `/`, for example `https://otlp.example.com/otlp`.
+    base: String,
+    /// The host as written in the URL (IPv6 in brackets), for logs.
+    host: String,
+}
+
+impl OtlpEndpoint {
+    /// The URL log records are posted to: the base followed by `/v1/logs`.
+    pub fn logs_url(&self) -> String {
+        format!("{}/v1/logs", self.base)
+    }
+
+    /// The endpoint's host, the only part of it cetra logs.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+}
+
+/// Prints the host only: some vendors put a token in the path.
+impl fmt::Debug for OtlpEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OtlpEndpoint")
+            .field("host", &self.host)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `[self_monitoring]`: export of cetra's own logs to the operator's OTLP/HTTP endpoint
+/// (track TL, D-TL-1, D-TL-3). Off while `otlp_endpoint` is unset.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SelfMonitoringConfig {
+    /// Base URL of the OTLP/HTTP endpoint. Unset or blank: no export.
+    #[serde(default, deserialize_with = "deserialize_otlp_endpoint")]
+    pub otlp_endpoint: Option<OtlpEndpoint>,
+    /// Request headers, `name=value,name=value` (the `OTEL_EXPORTER_OTLP_HEADERS` syntax).
+    #[serde(default)]
+    pub otlp_headers: Option<Secret<String>>,
+    /// Whether log records are exported. Defaults to `true`.
+    #[serde(default = "default_self_monitoring_logs")]
+    pub logs: bool,
+    /// `EnvFilter` directive of the exported events. Defaults to `warn`. The subscriber
+    /// checks it and caps `rmcp` at `warn`, as for stdout.
+    #[serde(default = "default_self_monitoring_level")]
+    pub level: String,
+    /// Extra resource attributes, `key=value,key=value` (the `OTEL_RESOURCE_ATTRIBUTES` syntax).
+    #[serde(default)]
+    pub resource: String,
+}
+
+impl Default for SelfMonitoringConfig {
+    fn default() -> Self {
+        Self {
+            otlp_endpoint: None,
+            otlp_headers: None,
+            logs: default_self_monitoring_logs(),
+            level: default_self_monitoring_level(),
+            resource: String::new(),
+        }
+    }
+}
+
+impl SelfMonitoringConfig {
+    /// The endpoint, when log records are exported: `otlp_endpoint` is set and `logs` is true.
+    pub fn logs_endpoint(&self) -> Option<&OtlpEndpoint> {
+        self.otlp_endpoint.as_ref().filter(|_| self.logs)
+    }
+
+    /// Whether anything is exported. M1 exports logs only; M2 adds traces here.
+    pub fn exports(&self) -> bool {
+        self.logs_endpoint().is_some()
+    }
+}
+
 /// How an SMTP connection is encrypted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tls {
@@ -755,6 +834,9 @@ pub struct ServerConfig {
     /// Log format and level.
     #[serde(default)]
     pub log: LogConfig,
+    /// `[self_monitoring]`: export of cetra's own logs over OTLP/HTTP (track TL, D-TL-1).
+    #[serde(default)]
+    pub self_monitoring: SelfMonitoringConfig,
 }
 
 impl ServerConfig {
@@ -872,7 +954,20 @@ fn default_log_level() -> String {
     "info".to_owned()
 }
 
-fn load_from(toml: Option<&str>, env: &[(&str, &str)]) -> Result<ServerConfig, ConfigError> {
+fn default_self_monitoring_logs() -> bool {
+    true
+}
+
+fn default_self_monitoring_level() -> String {
+    "warn".to_owned()
+}
+
+/// Defaults, then `toml`, then `env`, validated. Also used by tests outside this module to
+/// build a config from TOML.
+pub(crate) fn load_from(
+    toml: Option<&str>,
+    env: &[(&str, &str)],
+) -> Result<ServerConfig, ConfigError> {
     let mut figment = Figment::new();
     if let Some(toml) = toml {
         figment = figment.merge(Toml::string(toml));
@@ -1017,6 +1112,9 @@ fn secret_key(path: &[String]) -> Option<&'static str> {
         {
             Some("auth.google.client_secret")
         }
+        [parent, key] if parent == "self_monitoring" && key == "otlp_headers" => {
+            Some("self_monitoring.otlp_headers")
+        }
         [..] if path.last().is_some_and(|key| key == "client_secret") => {
             Some("auth.oidc.client_secret")
         }
@@ -1049,6 +1147,7 @@ fn validate(config: &mut ServerConfig) -> Result<(), ConfigError> {
     }
     validate_auth(&mut config.auth)?;
     validate_init(&config.init)?;
+    validate_self_monitoring(&config.self_monitoring)?;
     if config
         .otlp_http_addr
         .is_some_and(|addr| same_listener(addr, config.http_addr))
@@ -1749,6 +1848,165 @@ fn parse_public_url(raw: &str) -> Result<PublicUrl, &'static str> {
     })
 }
 
+/// Most entries in `self_monitoring.otlp_headers` or `self_monitoring.resource`.
+pub(crate) const MAX_PAIRS: usize = 32;
+
+/// Longest `self_monitoring.otlp_headers` or `self_monitoring.resource` value, in bytes.
+pub(crate) const MAX_PAIRS_BYTES: usize = 8192;
+
+/// Headers cetra sets itself on every export request.
+const RESERVED_HEADERS: &[&str] = &[
+    "content-type",
+    "content-encoding",
+    "content-length",
+    "host",
+    "user-agent",
+];
+
+/// Why a reserved header is refused.
+const RESERVED_HEADER_REASON: &str =
+    "content-type, content-encoding, content-length, host and user-agent are set by cetra";
+
+/// Checks `self_monitoring.otlp_endpoint`. The reasons never quote the input.
+pub(crate) fn parse_otlp_endpoint(raw: &str) -> Result<OtlpEndpoint, &'static str> {
+    let raw = raw.trim();
+    if !is_http_url(raw) {
+        return Err("must be an http or https URL");
+    }
+    let url = url::Url::parse(raw).map_err(|_| "must be an http or https URL")?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("must not contain user info");
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("must not have a query or fragment");
+    }
+    let path = url.path().trim_end_matches('/');
+    if path.ends_with("/v1/logs") || path.ends_with("/v1/traces") {
+        return Err("must be the base URL, without /v1/logs or /v1/traces");
+    }
+    let Some(host) = url.host_str() else {
+        return Err("must have a host");
+    };
+    Ok(OtlpEndpoint {
+        host: host.to_owned(),
+        // No query or fragment, so the serialization ends with the path.
+        base: url.as_str().trim_end_matches('/').to_owned(),
+    })
+}
+
+/// `name=value` entries separated by `,` (the `OTEL_EXPORTER_OTLP_HEADERS` and
+/// `OTEL_RESOURCE_ATTRIBUTES` syntax). Each entry is split at its first `=`. Names and values
+/// are trimmed, and values are percent-decoded (`%20` is a space; `+` stays `+`, as in
+/// base64). Empty entries are skipped. The reasons never quote the input.
+fn parse_pairs(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    if raw.len() > MAX_PAIRS_BYTES {
+        return Err("at most 8192 bytes");
+    }
+    let mut pairs = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = entry.split_once('=') else {
+            return Err("entries must be name=value");
+        };
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a name is empty");
+        }
+        let value = percent_decode(value.trim()).ok_or("a value is not valid percent-encoding")?;
+        pairs.push((name.to_owned(), value));
+    }
+    if pairs.len() > MAX_PAIRS {
+        return Err("at most 32 entries");
+    }
+    Ok(pairs)
+}
+
+/// `%XX` sequences decoded; any other byte kept. `None` for a bad sequence or a result that
+/// is not UTF-8.
+fn percent_decode(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while let Some(&byte) = bytes.get(index) {
+        if byte == b'%' {
+            let high = bytes
+                .get(index + 1)
+                .and_then(|b| char::from(*b).to_digit(16))?;
+            let low = bytes
+                .get(index + 2)
+                .and_then(|b| char::from(*b).to_digit(16))?;
+            decoded.push(u8::try_from(high * 16 + low).ok()?);
+            index += 3;
+        } else {
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+/// `self_monitoring.otlp_headers` as `(lower-case name, value)` pairs, in order.
+pub(crate) fn parse_otlp_headers(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    let mut headers = parse_pairs(raw)?;
+    let mut seen = BTreeSet::new();
+    for (name, value) in &mut headers {
+        if !name.bytes().all(is_token_byte) {
+            return Err("a header name is not a valid HTTP token");
+        }
+        name.make_ascii_lowercase();
+        if RESERVED_HEADERS.contains(&name.as_str()) {
+            return Err(RESERVED_HEADER_REASON);
+        }
+        if !seen.insert(name.clone()) {
+            return Err("a name is listed twice");
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte == b'\t' || (b' '..=b'~').contains(&byte))
+        {
+            return Err("a header value has a character HTTP does not allow");
+        }
+    }
+    Ok(headers)
+}
+
+/// RFC 9110 `tchar`.
+fn is_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte)
+}
+
+/// `self_monitoring.resource` as `(key, value)` pairs, in order.
+pub(crate) fn parse_resource(raw: &str) -> Result<Vec<(String, String)>, &'static str> {
+    let pairs = parse_pairs(raw)?;
+    let mut seen = BTreeSet::new();
+    for (key, _) in &pairs {
+        if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("a key has whitespace or a control character");
+        }
+        if !seen.insert(key.as_str()) {
+            return Err("a name is listed twice");
+        }
+    }
+    Ok(pairs)
+}
+
+fn validate_self_monitoring(monitoring: &SelfMonitoringConfig) -> Result<(), ConfigError> {
+    if let Some(headers) = &monitoring.otlp_headers {
+        parse_otlp_headers(headers.expose()).map_err(|reason| ConfigError::Invalid {
+            key: "self_monitoring.otlp_headers",
+            reason,
+        })?;
+    }
+    parse_resource(&monitoring.resource).map_err(|reason| ConfigError::Invalid {
+        key: "self_monitoring.resource",
+        reason,
+    })?;
+    Ok(())
+}
+
 fn deserialize_socket_addr<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<SocketAddr, D::Error> {
@@ -1770,6 +2028,21 @@ fn deserialize_optional_socket_addr<'de, D: Deserializer<'de>>(
         .parse()
         .map(Some)
         .map_err(|_error| de::Error::custom("invalid socket address"))
+}
+
+/// A blank string is `None` (no export), so `CETRA_SELF_MONITORING__OTLP_ENDPOINT=` unsets it.
+fn deserialize_otlp_endpoint<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<OtlpEndpoint>, D::Error> {
+    let Some(raw) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    if raw.trim().is_empty() {
+        return Ok(None);
+    }
+    parse_otlp_endpoint(&raw)
+        .map(Some)
+        .map_err(de::Error::custom)
 }
 
 fn deserialize_proxies<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<IpNet>, D::Error> {
@@ -1904,6 +2177,7 @@ fn is_secret_path(dotted: &str) -> bool {
             | "init.admin_password"
             | "init.secret_key"
             | "init.read_key"
+            | "self_monitoring.otlp_headers"
     ) || dotted.ends_with(".client_secret")
 }
 
@@ -1952,8 +2226,9 @@ mod tests {
 
     use super::{
         ALIASES, AlertsConfig, ConfigError, DemoConfig, EmailRecipients, IngestConfig, LogFormat,
-        MediaConfig, OrgsConfig, Secret, ServerConfig, SmtpUrl, Tls, issuer_problem, load_from,
-        oidc_env_name,
+        MediaConfig, OrgsConfig, Secret, SelfMonitoringConfig, ServerConfig, SmtpUrl, Tls,
+        issuer_problem, load_from, oidc_env_name, parse_otlp_endpoint, parse_otlp_headers,
+        parse_resource,
     };
     use crate::api::account::SignupPolicy;
 
@@ -2002,6 +2277,7 @@ mod tests {
         assert!(config.init.secret_key.is_none());
         assert!(config.log.format.is_none());
         assert_eq!(config.log.level, "info");
+        assert_eq!(config.self_monitoring, SelfMonitoringConfig::default());
 
         let storage = config.storage_config();
         assert_eq!(storage.data_dir, config.data_dir);
@@ -2061,6 +2337,262 @@ mod tests {
         assert_eq!(config.auth.signup, SignupPolicy::Disabled);
         assert_eq!(config.log.level, "debug");
         assert_eq!(config.log.format, Some(LogFormat::Json));
+    }
+
+    #[test]
+    fn self_monitoring_defaults() {
+        let config = load_from(None, &[]).unwrap();
+        let monitoring = &config.self_monitoring;
+        assert!(monitoring.otlp_endpoint.is_none());
+        assert!(monitoring.otlp_headers.is_none());
+        assert!(monitoring.logs);
+        assert_eq!(monitoring.level, "warn");
+        assert_eq!(monitoring.resource, "");
+        assert!(monitoring.logs_endpoint().is_none());
+        assert!(!monitoring.exports());
+    }
+
+    #[test]
+    fn self_monitoring_loads_from_toml_and_env() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://otlp.example.com/otlp/\"\n";
+        let env = [
+            (
+                "CETRA_SELF_MONITORING__OTLP_HEADERS",
+                "authorization=Basic%20abc",
+            ),
+            ("CETRA_SELF_MONITORING__LOGS", "false"),
+            ("CETRA_SELF_MONITORING__LEVEL", "info"),
+            (
+                "CETRA_SELF_MONITORING__RESOURCE",
+                "deployment.environment=prod,cetra.cell=eu1",
+            ),
+        ];
+        let config = load_from(Some(toml), &env).unwrap();
+        let monitoring = &config.self_monitoring;
+        let endpoint = monitoring.otlp_endpoint.as_ref().unwrap();
+        assert_eq!(endpoint.logs_url(), "https://otlp.example.com/otlp/v1/logs");
+        assert_eq!(endpoint.host(), "otlp.example.com");
+        assert!(!monitoring.logs);
+        assert!(monitoring.logs_endpoint().is_none());
+        assert!(!monitoring.exports());
+        assert_eq!(monitoring.level, "info");
+        assert_eq!(
+            monitoring.resource,
+            "deployment.environment=prod,cetra.cell=eu1"
+        );
+        assert_eq!(
+            format!("{:?}", monitoring.otlp_headers.as_ref().unwrap()),
+            "Secret(***)"
+        );
+
+        // The same file without the env overrides exports logs.
+        let config = load_from(Some(toml), &[]).unwrap();
+        assert!(config.self_monitoring.logs);
+        assert!(config.self_monitoring.exports());
+    }
+
+    #[test]
+    fn otlp_endpoint_rules() {
+        let accepted = [
+            (
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp",
+                "https://o1.ingest.de.sentry.io/api/2/integration/otlp/v1/logs",
+            ),
+            ("http://collector:4318", "http://collector:4318/v1/logs"),
+            ("http://collector:4318/", "http://collector:4318/v1/logs"),
+            (
+                "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp//",
+                "https://otlp-gateway-prod-eu-west-2.grafana.net/otlp/v1/logs",
+            ),
+            ("http://[::1]:4318", "http://[::1]:4318/v1/logs"),
+        ];
+        for (raw, logs_url) in accepted {
+            let endpoint = parse_otlp_endpoint(raw).unwrap();
+            assert_eq!(endpoint.logs_url(), logs_url, "{raw}");
+        }
+        assert_eq!(
+            parse_otlp_endpoint("http://[::1]:4318").unwrap().host(),
+            "[::1]"
+        );
+        let secret = parse_otlp_endpoint("https://x/api/s3cr3t/otlp").unwrap();
+        assert_eq!(format!("{secret:?}"), "OtlpEndpoint { host: \"x\", .. }");
+
+        let refused = [
+            ("ftp://x", "must be an http or https URL"),
+            ("not a url", "must be an http or https URL"),
+            ("https:///x", "must be an http or https URL"),
+            ("https://user:pw@x", "must not contain user info"),
+            (
+                "https://x/otlp?token=1",
+                "must not have a query or fragment",
+            ),
+            ("https://x/otlp#f", "must not have a query or fragment"),
+            (
+                "https://x/otlp/v1/logs",
+                "must be the base URL, without /v1/logs or /v1/traces",
+            ),
+            (
+                "https://x/v1/traces/",
+                "must be the base URL, without /v1/logs or /v1/traces",
+            ),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_otlp_endpoint(raw).unwrap_err(), reason, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_blank_otlp_endpoint_is_unset() {
+        for blank in ["", "   "] {
+            let config =
+                load_from(None, &[("CETRA_SELF_MONITORING__OTLP_ENDPOINT", blank)]).unwrap();
+            assert!(config.self_monitoring.otlp_endpoint.is_none());
+        }
+    }
+
+    #[test]
+    fn an_invalid_otlp_endpoint_names_the_rule_not_the_value() {
+        let toml = "[self_monitoring]\notlp_endpoint = \"https://user:hunter2@x\"\n";
+        let text = load_from(Some(toml), &[]).err().unwrap().to_string();
+        assert!(text.contains("must not contain user info"), "{text}");
+        assert!(text.contains("otlp_endpoint"), "{text}");
+        assert!(!text.contains("hunter2"), "{text}");
+    }
+
+    #[test]
+    fn otlp_headers_rules() {
+        fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+            items
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect()
+        }
+        let accepted = [
+            (
+                "authorization=Basic%20abc",
+                vec![("authorization", "Basic abc")],
+            ),
+            (
+                "x-sentry-auth=sentry sentry_key=abc",
+                vec![("x-sentry-auth", "sentry sentry_key=abc")],
+            ),
+            (" A = b , ,c=d ", vec![("a", "b"), ("c", "d")]),
+            ("a=", vec![("a", "")]),
+            ("", vec![]),
+            ("k=YWJj+/9=", vec![("k", "YWJj+/9=")]),
+        ];
+        for (raw, expected) in accepted {
+            assert_eq!(parse_otlp_headers(raw).unwrap(), pairs(&expected), "{raw}");
+        }
+
+        let refused = [
+            ("novalue", "entries must be name=value"),
+            ("=v", "a name is empty"),
+            ("bad name=v", "a header name is not a valid HTTP token"),
+            ("a=%zz", "a value is not valid percent-encoding"),
+            ("a=%4", "a value is not valid percent-encoding"),
+            ("a=%FF", "a value is not valid percent-encoding"),
+            (
+                "a=%0A",
+                "a header value has a character HTTP does not allow",
+            ),
+            ("a=1,A=2", "a name is listed twice"),
+            (
+                "Content-Type=x",
+                "content-type, content-encoding, content-length, host and user-agent are set by cetra",
+            ),
+            (
+                "user-agent=x",
+                "content-type, content-encoding, content-length, host and user-agent are set by cetra",
+            ),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_otlp_headers(raw).unwrap_err(), reason, "{raw}");
+        }
+
+        let many: Vec<String> = (0..33).map(|index| format!("h{index}=v")).collect();
+        assert_eq!(
+            parse_otlp_headers(&many.join(",")).unwrap_err(),
+            "at most 32 entries"
+        );
+        let long = format!("a={}", "x".repeat(8191));
+        assert_eq!(long.len(), 8193);
+        assert_eq!(parse_otlp_headers(&long).unwrap_err(), "at most 8192 bytes");
+    }
+
+    #[test]
+    fn resource_rules() {
+        assert_eq!(
+            parse_resource("deployment.environment=prod,cetra.cell=eu1").unwrap(),
+            vec![
+                ("deployment.environment".to_owned(), "prod".to_owned()),
+                ("cetra.cell".to_owned(), "eu1".to_owned()),
+            ]
+        );
+        assert_eq!(
+            parse_resource("k=v%2Cw").unwrap(),
+            vec![("k".to_owned(), "v,w".to_owned())]
+        );
+        assert_eq!(
+            parse_resource("Service.Name=x").unwrap(),
+            vec![("Service.Name".to_owned(), "x".to_owned())]
+        );
+
+        let refused = [
+            ("k v=1", "a key has whitespace or a control character"),
+            ("=1", "a name is empty"),
+            ("k=1,k=2", "a name is listed twice"),
+            ("k=%FF", "a value is not valid percent-encoding"),
+        ];
+        for (raw, reason) in refused {
+            assert_eq!(parse_resource(raw).unwrap_err(), reason, "{raw}");
+        }
+    }
+
+    #[test]
+    fn invalid_otlp_headers_never_reach_the_error() {
+        let error = load_from(None, &[("CETRA_SELF_MONITORING__OTLP_HEADERS", "12345")])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.otlp_headers",
+                reason: "entries must be name=value",
+            }
+        ));
+        assert!(!error.to_string().contains("12345"));
+
+        let error = load_from(Some("[self_monitoring]\notlp_headers = 5\n"), &[])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.otlp_headers",
+                reason: "expected a string",
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_resource_is_refused() {
+        let error = load_from(None, &[("CETRA_SELF_MONITORING__RESOURCE", "nokey")])
+            .err()
+            .unwrap();
+        assert!(matches!(
+            error,
+            ConfigError::Invalid {
+                key: "self_monitoring.resource",
+                reason: "entries must be name=value",
+            }
+        ));
+    }
+
+    #[test]
+    fn unknown_self_monitoring_key_is_refused() {
+        // `traces` is M2's key, so M1 refuses it.
+        assert!(load_from(Some("[self_monitoring]\ntraces = true\n"), &[]).is_err());
     }
 
     #[test]
