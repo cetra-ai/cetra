@@ -1467,7 +1467,7 @@ mod tests {
             &[Convention::Voltagent],
             &mut warnings,
         );
-        assert_eq!(counts, super::Usage::default());
+        assert_eq!(counts, Usage::default());
         assert_eq!(bag.state("llm.usage.prompt_tokens"), Some(Use::Unread));
         // An empty count is absent.
         let mut warnings = Warnings::default();

@@ -55,29 +55,41 @@ pub(crate) const PAYLOAD_KEYS: &[(Field, KeyPattern)] = &[
 
 pub(crate) fn read(ctx: &mut ReadContext<'_, '_>) -> Io {
     let mut io = Io::default();
-    read_messages(ctx, &mut io, INPUT_MESSAGES, "messages:genai:input", true);
+    let mut legacy = Vec::new();
+    read_messages(
+        ctx,
+        &mut io,
+        INPUT_MESSAGES,
+        "messages:genai:input",
+        true,
+        &mut legacy,
+    );
     read_messages(
         ctx,
         &mut io,
         OUTPUT_MESSAGES,
         "messages:genai:output",
         false,
+        &mut legacy,
     );
     if io.system_instructions.is_none() {
         io.system_instructions = instruction(ctx, SYSTEM);
     }
     io.tool_definitions = definitions(ctx);
     fill_finish_reasons(ctx, &mut io);
-    io.events = payload_events(ctx);
+    io.events = payload_events(ctx, &legacy);
     io
 }
 
+/// `legacy` collects the indices of the legacy events a reader read (Strands
+/// spans only; see [`payload_events`]).
 fn read_messages(
     ctx: &mut ReadContext<'_, '_>,
     io: &mut Io,
     key: &str,
     error: &'static str,
     input: bool,
+    legacy: &mut Vec<usize>,
 ) {
     let found = if let Some(found) = span_messages(ctx, key) {
         Some(found)
@@ -85,7 +97,7 @@ fn read_messages(
         Some(found)
     } else if let Some(found) = framework_payload(ctx, input) {
         Some(found)
-    } else if let Some(found) = legacy_messages(ctx, input) {
+    } else if let Some(found) = legacy_messages(ctx, input, legacy) {
         Some(found)
     } else if ctx.kind == SpanKind::Tool {
         tool_payload(ctx, input)
@@ -264,27 +276,36 @@ fn attribute_payload(
     })
 }
 
-fn legacy_messages(ctx: &mut ReadContext<'_, '_>, input: bool) -> Option<(Payload, bool)> {
+fn legacy_messages(
+    ctx: &mut ReadContext<'_, '_>,
+    input: bool,
+    legacy: &mut Vec<usize>,
+) -> Option<(Payload, bool)> {
     if ctx.scope.starts_with("strands") {
-        return strands_messages(ctx, input);
+        return strands_messages(ctx, input, legacy);
     }
     generic_legacy_messages(ctx.events, ctx.warnings, input)
 }
 
 /// Strands' default (legacy) events, which carry Bedrock Converse blocks. The
-/// span's operation places each event (amendment K); an event the table does
-/// not place on the span is not read, and the generic path does not run.
-fn strands_messages(ctx: &mut ReadContext<'_, '_>, input: bool) -> Option<(Payload, bool)> {
+/// span's operation picks the reader (amendment K). Each reader pushes the
+/// indices of the events it read onto `legacy`; an event no reader reads stays
+/// in the span's events.
+fn strands_messages(
+    ctx: &mut ReadContext<'_, '_>,
+    input: bool,
+    legacy: &mut Vec<usize>,
+) -> Option<(Payload, bool)> {
     let events = ctx.events;
     match ctx.bag.get(OPERATION).and_then(as_str) {
         Some("chat" | "execute_event_loop_cycle") => {
-            strands_conversation(events, ctx.warnings, input)
+            strands_conversation(events, ctx.warnings, input, legacy)
         }
         // An agent span's input is its system and user messages, read as on a
         // `chat` span. Its output stays the plain-string choice (row 6).
-        Some("invoke_agent") if input => strands_conversation(events, ctx.warnings, input),
-        Some("invoke_agent") => strands_agent(events),
-        Some("execute_tool") => strands_tool(events, ctx.warnings, input),
+        Some("invoke_agent") if input => strands_conversation(events, ctx.warnings, input, legacy),
+        Some("invoke_agent") => strands_agent(events, legacy),
+        Some("execute_tool") => strands_tool(events, ctx.warnings, input, legacy),
         _ => None,
     }
 }
@@ -292,43 +313,44 @@ fn strands_messages(ctx: &mut ReadContext<'_, '_>, input: bool) -> Option<(Paylo
 /// Rows 1 to 3: the conversation events of `chat` and cycle spans. `content`
 /// (or the choice's `message`) is an array of Converse blocks; a block none of
 /// the converter's three keys matches follows the failure path, as does
-/// content that is not such an array.
+/// content that is not such an array. Every event it places is read, so each
+/// one is pushed onto `legacy`.
 fn strands_conversation(
     events: &[Event],
     warnings: &mut Warnings,
     input: bool,
+    legacy: &mut Vec<usize>,
 ) -> Option<(Payload, bool)> {
-    let relevant: Vec<(&Event, &str)> = events
-        .iter()
-        .filter_map(|event| {
-            let role = if input {
-                event_role(event.name.as_str())
-            } else if event.name == CHOICE {
-                Some("assistant")
-            } else {
-                None
-            };
-            role.map(|role| (event, role))
-        })
-        .collect();
+    let mut relevant: Vec<(&Event, &str)> = Vec::new();
+    for (index, event) in events.iter().enumerate() {
+        let role = if input {
+            event_role(event.name.as_str())
+        } else if event.name == CHOICE {
+            Some("assistant")
+        } else {
+            None
+        };
+        if let Some(role) = role {
+            relevant.push((event, role));
+            legacy.push(index);
+        }
+    }
     if relevant.is_empty() {
         return None;
     }
-    // The raw value the failure path stores.
-    let raw = event_objects(&relevant, warnings);
     let mut messages = Vec::with_capacity(relevant.len());
-    for (event, role) in relevant {
+    for &(event, role) in &relevant {
         let key = if input { "content" } else { "message" };
         let Some(decoded) =
             event_attr(event, key).and_then(|value| decode_json_text(value, warnings))
         else {
-            return Some((Payload::Json(raw), true));
+            return Some((Payload::Json(event_objects(&relevant, warnings)), true));
         };
         let Some(blocks) = decoded.as_array() else {
-            return Some((Payload::Json(raw), true));
+            return Some((Payload::Json(event_objects(&relevant, warnings)), true));
         };
         let Ok(mut message) = converse_message(Role::from(role), blocks) else {
-            return Some((Payload::Json(raw), true));
+            return Some((Payload::Json(event_objects(&relevant, warnings)), true));
         };
         if !input && let Some(reason) = event_attr(event, "finish_reason").and_then(as_str) {
             message.finish_reason = Some(reason.to_owned());
@@ -338,35 +360,45 @@ fn strands_conversation(
     Some((Payload::Messages(messages), false))
 }
 
-/// Rows 4 and 5: an `execute_tool` span reads its arguments from
-/// `gen_ai.tool.message` and the joined text of its choice's blocks.
-fn strands_tool(events: &[Event], warnings: &mut Warnings, input: bool) -> Option<(Payload, bool)> {
+/// Rows 4 and 5: an `execute_tool` span reads its arguments from the first
+/// `gen_ai.tool.message` event that has `content`, and the joined text of its
+/// first choice's blocks. Only the event it reads is pushed onto `legacy`.
+fn strands_tool(
+    events: &[Event],
+    warnings: &mut Warnings,
+    input: bool,
+    legacy: &mut Vec<usize>,
+) -> Option<(Payload, bool)> {
     if input {
-        let value = find_event(events, "gen_ai.tool.message")
-            .and_then(|event| event_attr(event, "content"))?;
+        let index = position_of(events, "gen_ai.tool.message")?;
+        let value = event_attr(&events[index], "content")?;
+        legacy.push(index);
         return Some((non_message_payload(value, warnings), false));
     }
-    let blocks = choice_blocks(events, warnings)?;
+    let index = position_of(events, CHOICE)?;
+    let blocks = choice_blocks(&events[index], warnings)?;
     let text = converse_text(&blocks)?;
+    legacy.push(index);
     Some((Payload::Text(text), false))
 }
 
-/// Row 6: an `invoke_agent` span reads its choice's plain-string message as
-/// its output, as is.
-fn strands_agent(events: &[Event]) -> Option<(Payload, bool)> {
-    let text = find_event(events, CHOICE)
-        .and_then(|event| event_attr(event, "message"))
-        .and_then(as_str)?;
+/// Row 6: an `invoke_agent` span reads its first choice's plain-string message
+/// as its output, as is.
+fn strands_agent(events: &[Event], legacy: &mut Vec<usize>) -> Option<(Payload, bool)> {
+    let index = position_of(events, CHOICE)?;
+    let text = event_attr(&events[index], "message").and_then(as_str)?;
+    legacy.push(index);
     Some((Payload::Text(text.to_owned()), false))
 }
 
-/// The `message` blocks of the first `gen_ai.choice` event, decoded.
-fn choice_blocks(events: &[Event], warnings: &mut Warnings) -> Option<Vec<Json>> {
-    let value = find_event(events, CHOICE).and_then(|event| event_attr(event, "message"))?;
+/// The `message` blocks of a `gen_ai.choice` event, decoded.
+fn choice_blocks(event: &Event, warnings: &mut Warnings) -> Option<Vec<Json>> {
+    let value = event_attr(event, "message")?;
     decode_json_text(value, warnings)?.as_array().cloned()
 }
 
-/// The events as JSON objects, the raw value the failure path stores.
+/// The events as JSON objects, the raw value the failure path stores. Called
+/// only on the failure branches.
 fn event_objects(events: &[(&Event, &str)], warnings: &mut Warnings) -> Json {
     Json::Array(
         events
@@ -376,8 +408,8 @@ fn event_objects(events: &[(&Event, &str)], warnings: &mut Warnings) -> Json {
     )
 }
 
-fn find_event<'a>(events: &'a [Event], name: &str) -> Option<&'a Event> {
-    events.iter().find(|event| event.name == name)
+fn position_of(events: &[Event], name: &str) -> Option<usize> {
+    events.iter().position(|event| event.name == name)
 }
 
 fn event_attr<'a>(event: &'a Event, key: &str) -> Option<&'a AnyValue> {
@@ -435,6 +467,14 @@ fn event_message(event: &Event, role: &str, warnings: &mut Warnings) -> Json {
         let Some(value) = attribute.value.as_ref() else {
             continue;
         };
+        // A finish reason is text: a message's `finish_reason` must be a
+        // string, so a JSON-looking value stays the text it was sent as.
+        if attribute.key == "finish_reason" {
+            if let Some(text) = as_str(value).filter(|text| !text.is_empty()) {
+                object.insert(attribute.key.clone(), Json::String(text.to_owned()));
+            }
+            continue;
+        }
         if let Some(json) = present_json(value, warnings) {
             object.insert(attribute.key.clone(), json);
         }
@@ -486,38 +526,24 @@ fn reason_list(value: &AnyValue, warnings: &mut Warnings) -> Option<Vec<Option<S
 }
 
 /// The events consumed as payload sources: the details events and the legacy
-/// events. On a Strands span those are the ones the table places on its
-/// operation (amendment K); an event it does not place stays in `events`.
-fn payload_events(ctx: &ReadContext<'_, '_>) -> Vec<usize> {
-    let operation = ctx
-        .scope
-        .starts_with("strands")
-        .then(|| ctx.bag.get(OPERATION).and_then(as_str))
-        .flatten();
+/// events. On a Strands span only the legacy events a reader read (`legacy`)
+/// are consumed; an event no reader read stays in `events`. Other spans keep
+/// every legacy event.
+fn payload_events(ctx: &ReadContext<'_, '_>, legacy: &[usize]) -> Vec<usize> {
+    let strands = ctx.scope.starts_with("strands");
     ctx.events
         .iter()
         .enumerate()
-        .filter(|(_, event)| {
+        .filter(|(index, event)| {
             event.name == DETAILS
-                || match operation {
-                    Some(operation) => strands_places(operation, &event.name),
-                    None => event.name == CHOICE || event_role(event.name.as_str()).is_some(),
+                || if strands {
+                    legacy.contains(index)
+                } else {
+                    event.name == CHOICE || event_role(event.name.as_str()).is_some()
                 }
         })
         .map(|(index, _)| index)
         .collect()
-}
-
-/// Whether the table places the legacy event `name` on a Strands span of this
-/// `operation`.
-fn strands_places(operation: &str, name: &str) -> bool {
-    match operation {
-        "chat" | "execute_event_loop_cycle" | "invoke_agent" => {
-            event_role(name).is_some() || name == CHOICE
-        }
-        "execute_tool" => name == "gen_ai.tool.message" || name == CHOICE,
-        _ => false,
-    }
 }
 
 /// R5: each key is read from the first `gen_ai.client.inference.operation.details`
@@ -545,7 +571,7 @@ mod tests {
     use cetra_core::enums::SpanKind;
     use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
-    use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
     use opentelemetry_proto::tonic::trace::v1::span::Event;
     use serde_json::json;
 
@@ -935,6 +961,89 @@ mod tests {
             messages_to_json(&messages),
             r#"[{"role":"user","parts":[{"text":"hi"}]}]"#
         );
+    }
+
+    #[test]
+    fn a_strands_span_without_an_operation_reads_and_consumes_nothing() {
+        let events = [
+            event("gen_ai.user.message", &[("content", r#"[{"text": "hi"}]"#)]),
+            event("gen_ai.choice", &[("message", r#"[{"text": "hello"}]"#)]),
+        ];
+        let io = read_in_scope(TRACER, &[], &events, SpanKind::Llm);
+        assert_eq!(io.input, None);
+        assert_eq!(io.output, None);
+        assert!(io.events.is_empty());
+    }
+
+    #[test]
+    fn an_execute_tool_choice_without_a_text_block_stays_in_the_events() {
+        let attrs = [string_attr("gen_ai.operation.name", "execute_tool")];
+        let events = [event(
+            "gen_ai.choice",
+            &[("message", r#"[{"json": {"temp": 18}}]"#)],
+        )];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Tool);
+        assert_eq!(io.output, None);
+        assert!(io.events.is_empty());
+    }
+
+    #[test]
+    fn an_execute_tool_choice_that_is_not_an_array_stays_in_the_events() {
+        let attrs = [string_attr("gen_ai.operation.name", "execute_tool")];
+        let events = [event("gen_ai.choice", &[("message", "18C sunny")])];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Tool);
+        assert_eq!(io.output, None);
+        assert!(io.events.is_empty());
+    }
+
+    #[test]
+    fn an_invoke_agent_choice_that_is_not_a_string_stays_in_the_events() {
+        // The choice's `message` is an OTLP array of blocks, not a string.
+        let attrs = [string_attr("gen_ai.operation.name", "invoke_agent")];
+        let blocks = AnyValue {
+            value: Some(Value::ArrayValue(ArrayValue {
+                values: vec![AnyValue {
+                    value: Some(Value::StringValue("18C".to_owned())),
+                }],
+            })),
+        };
+        let events = [Event {
+            name: "gen_ai.choice".to_owned(),
+            attributes: vec![KeyValue {
+                key: "message".to_owned(),
+                value: Some(blocks),
+                key_strindex: 0,
+            }],
+            ..Event::default()
+        }];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Agent);
+        assert_eq!(io.output, None);
+        assert!(io.events.is_empty());
+    }
+
+    #[test]
+    fn an_execute_tool_message_without_content_stays_in_the_events() {
+        let attrs = [string_attr("gen_ai.operation.name", "execute_tool")];
+        let events = [event("gen_ai.tool.message", &[("id", "call_1")])];
+        let io = read_in_scope(TRACER, &attrs, &events, SpanKind::Tool);
+        assert_eq!(io.input, None);
+        assert!(io.events.is_empty());
+    }
+
+    #[test]
+    fn a_legacy_event_finish_reason_stays_text_even_when_it_looks_like_json() {
+        // The generic path (no Strands scope): the value is text, not an object.
+        let events = [event(
+            "gen_ai.choice",
+            &[("message", "hi"), ("finish_reason", r#"{"a":1}"#)],
+        )];
+        let io = read_span(&[], &events, SpanKind::Llm);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("expected messages");
+        };
+        let value: serde_json::Value =
+            serde_json::from_str(&messages_to_json(&messages)).expect("json");
+        assert_eq!(value[0]["finish_reason"], r#"{"a":1}"#);
     }
 
     #[test]

@@ -248,6 +248,7 @@ fn text_at(ctx: &ReadContext<'_, '_>, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use cetra_core::enums::SpanKind;
+    use cetra_core::message::messages_to_json;
     use opentelemetry_proto::tonic::common::v1::any_value::Value;
     use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
     use serde_json::json;
@@ -333,5 +334,40 @@ mod tests {
         ]);
         assert_eq!(io.output, Some(Payload::Json(json!(3))));
         assert!(io.errors.is_empty());
+    }
+
+    #[test]
+    fn a_function_message_among_others_keeps_the_order_and_becomes_one_tool_message() {
+        // R8 through `read`: a user message, a function message with two
+        // entries, and an assistant message, in that order.
+        let io = read_span(&[
+            string_attr("llm.input_messages.0.message.role", "user"),
+            string_attr("llm.input_messages.0.message.content", "Weather and time?"),
+            string_attr("llm.input_messages.1.message.role", "function"),
+            string_attr(
+                "llm.input_messages.1.function.0",
+                r#"{"name":"get_weather","content":"18C","call_id":"call_1","is_error":false}"#,
+            ),
+            string_attr(
+                "llm.input_messages.1.function.1",
+                r#"{"name":"get_time","content":"12:00","call_id":"call_2","is_error":false}"#,
+            ),
+            string_attr("llm.input_messages.2.message.role", "assistant"),
+            string_attr("llm.input_messages.2.message.content", "Done."),
+        ]);
+        let Some(Payload::Messages(messages)) = io.input else {
+            panic!("expected messages, got {:?}", io.input);
+        };
+        assert!(io.errors.is_empty());
+        let value: serde_json::Value =
+            serde_json::from_str(&messages_to_json(&messages)).expect("json");
+        let items = value.as_array().expect("array");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0]["role"], "user");
+        assert_eq!(items[1]["role"], "tool");
+        assert_eq!(items[1]["parts"].as_array().map(Vec::len), Some(2));
+        assert_eq!(items[1]["parts"][0]["id"], "call_1");
+        assert_eq!(items[1]["parts"][1]["id"], "call_2");
+        assert_eq!(items[2]["role"], "assistant");
     }
 }
