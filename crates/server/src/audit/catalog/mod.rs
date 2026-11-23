@@ -25,6 +25,7 @@ mod org;
 mod pat;
 mod project;
 mod prompt;
+mod scim;
 mod score_definition;
 mod sql;
 mod sso;
@@ -52,6 +53,7 @@ pub(crate) use org::OrgAction;
 pub(crate) use pat::PatAction;
 pub(crate) use project::ProjectAction;
 pub(crate) use prompt::PromptAction;
+pub(crate) use scim::ScimAction;
 pub(crate) use score_definition::ScoreDefinitionAction;
 pub(crate) use sql::SqlAction;
 pub(crate) use sso::SsoAction;
@@ -69,6 +71,7 @@ pub(crate) enum Action {
     ApiKey(ApiKeyAction),
     Pat(PatAction),
     Sso(SsoAction),
+    Scim(ScimAction),
     User(UserAction),
     Instance(InstanceAction),
     Deletion(DeletionAction),
@@ -134,6 +137,12 @@ impl From<PatAction> for Action {
 impl From<SsoAction> for Action {
     fn from(action: SsoAction) -> Self {
         Self::Sso(action)
+    }
+}
+
+impl From<ScimAction> for Action {
+    fn from(action: ScimAction) -> Self {
+        Self::Scim(action)
     }
 }
 

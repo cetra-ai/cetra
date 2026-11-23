@@ -15,7 +15,7 @@ const NAME: &str = cetra_core::names::PRODUCT;
 
 const BASE62: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// A project API key or a personal access token.
+/// A project API key, a personal access token, or a SCIM bearer token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KeyKind {
     /// `sk-cetra-` and 32 base62 characters.
@@ -24,6 +24,8 @@ pub(crate) enum KeyKind {
     Public,
     /// `pat-cetra-` and 32 base62 characters.
     Personal,
+    /// `scim-cetra-` and 32 base62 characters (track EA M5, D-EA-15). Never an API key.
+    Scim,
 }
 
 /// A newly minted key. `prefix` is what the UI stores and shows.
@@ -161,12 +163,13 @@ fn tag(kind: KeyKind) -> &'static str {
         KeyKind::Secret => "sk",
         KeyKind::Public => "pk",
         KeyKind::Personal => "pat",
+        KeyKind::Scim => "scim",
     }
 }
 
 fn tail_len(kind: KeyKind) -> usize {
     match kind {
-        KeyKind::Secret | KeyKind::Personal => 32,
+        KeyKind::Secret | KeyKind::Personal | KeyKind::Scim => 32,
         KeyKind::Public => 24,
     }
 }
@@ -177,6 +180,7 @@ fn prefix_len(kind: KeyKind) -> usize {
 
 fn split_tail(bearer: &str) -> Option<(KeyKind, &str)> {
     let (kind, rest) = [
+        (KeyKind::Scim, "scim-"),
         (KeyKind::Personal, "pat-"),
         (KeyKind::Secret, "sk-"),
         (KeyKind::Public, "pk-"),
@@ -233,6 +237,32 @@ mod tests {
         assert_eq!(parse_key(&format!("xx-{NAME}-{}", "a".repeat(32))), None);
         assert_eq!(parse_key(&format!("pat-{NAME}-{}", "a".repeat(24))), None);
         assert_eq!(display_prefix("sk-cetra-a1B2c3…"), "sk-cetra-a1B2c3");
+    }
+
+    #[test]
+    fn scim_keys_round_trip_and_parse() {
+        for _ in 0..100 {
+            let key = new_key(KeyKind::Scim).unwrap();
+            assert!(key.plaintext.starts_with(&format!("scim-{NAME}-")));
+            assert_eq!(key.plaintext.len(), "scim-".len() + NAME.len() + 1 + 32);
+            assert_eq!(parse_key(&key.plaintext), Some(KeyKind::Scim));
+            assert_eq!(key.prefix, display_prefix(&key.plaintext));
+            assert_eq!(key.prefix.len(), prefix_len(KeyKind::Scim) + 6);
+            assert_eq!(key.hash, hash_token(&key.plaintext));
+        }
+        assert_eq!(display_prefix("scim-cetra-a1B2c3…"), "scim-cetra-a1B2c3");
+        let key = new_key(KeyKind::Scim).unwrap();
+        assert_eq!(parse_key(&key.plaintext[..key.plaintext.len() - 1]), None);
+        assert_eq!(parse_key(&format!("scim-{NAME}-{}", "a".repeat(24))), None);
+    }
+
+    #[test]
+    fn a_scim_key_is_not_an_api_key() {
+        let key = new_key(KeyKind::Scim).unwrap();
+        assert_eq!(parse_key(&key.plaintext), Some(KeyKind::Scim));
+        assert_ne!(parse_key(&key.plaintext), Some(KeyKind::Secret));
+        assert_ne!(parse_key(&key.plaintext), Some(KeyKind::Public));
+        assert_ne!(parse_key(&key.plaintext), Some(KeyKind::Personal));
     }
 
     #[test]

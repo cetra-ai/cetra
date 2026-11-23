@@ -571,6 +571,8 @@ mod tests {
         );
         assert_eq!(Feature::from_name("org_sso"), Some(Feature::OrgSso));
         assert!(Feature::OrgSso.is_ee());
+        assert_eq!(Feature::from_name("scim"), Some(Feature::Scim));
+        assert!(Feature::Scim.is_ee());
         assert_eq!(Feature::from_name("audit_logs"), None);
         assert!(Feature::ALL.len() <= 32);
     }

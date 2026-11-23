@@ -264,7 +264,7 @@ fn kind_name(kind: KeyKind) -> &'static str {
     match kind {
         KeyKind::Secret => "secret",
         KeyKind::Public => "public",
-        KeyKind::Personal => "personal",
+        KeyKind::Personal | KeyKind::Scim => "personal",
     }
 }
 
@@ -272,7 +272,7 @@ fn api_key_json(row: &ApiKeyRow) -> Result<ApiKey, ApiError> {
     let kind = match api_keys::stored_kind(&row.kind)? {
         KeyKind::Secret => ApiKeyKind::Secret,
         KeyKind::Public => ApiKeyKind::Public,
-        KeyKind::Personal => {
+        KeyKind::Personal | KeyKind::Scim => {
             return Err(ApiError::Internal(Box::new(std::io::Error::other(
                 "corrupt api_keys.kind",
             ))));

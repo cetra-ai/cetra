@@ -19,15 +19,18 @@ pub enum Feature {
     SsoEnforcement,
     /// Per-org OIDC providers, domains and enforcement (M5): Teams add-on or an enterprise licence.
     OrgSso,
+    /// SCIM 2.0 provisioning (track EA M5): Enterprise or an enterprise licence.
+    Scim,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::RetentionManagement,
         Self::ProjectRoles,
         Self::SsoEnforcement,
         Self::OrgSso,
+        Self::Scim,
     ];
 
     /// The wire name.
@@ -37,6 +40,7 @@ impl Feature {
             Self::ProjectRoles => "project_roles",
             Self::SsoEnforcement => "sso_enforcement",
             Self::OrgSso => "org_sso",
+            Self::Scim => "scim",
         }
     }
 
@@ -44,7 +48,7 @@ impl Feature {
     pub fn is_ee(self) -> bool {
         matches!(
             self,
-            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso
+            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso | Self::Scim
         )
     }
 
@@ -63,6 +67,9 @@ impl Feature {
             Self::SsoEnforcement => "SSO enforcement needs an enterprise licence.",
             Self::OrgSso => {
                 "Single sign-on for an organization needs the Teams add-on or an enterprise licence."
+            }
+            Self::Scim => {
+                "SCIM provisioning is part of the Enterprise plan and the self-hosted licence."
             }
         }
     }

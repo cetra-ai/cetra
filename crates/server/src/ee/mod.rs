@@ -5,4 +5,5 @@
 pub(crate) mod license;
 pub(crate) mod org_sso;
 pub(crate) mod project_roles;
+pub(crate) mod scim;
 pub(crate) mod sso_enforcement;

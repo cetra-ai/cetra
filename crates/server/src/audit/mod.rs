@@ -51,6 +51,8 @@ pub(crate) enum Actor {
     ApiKey { key_id: uuid::Uuid },
     /// The control plane, by its token id.
     ControlPlane { token_id: String },
+    /// A SCIM bearer token of an org (track EA M5), by its token id.
+    Scim { token_id: uuid::Uuid },
     /// `cetra admin` on the server's host.
     Cli,
     /// The server itself: workers, startup, retention.
@@ -66,6 +68,7 @@ impl Actor {
             Self::User { .. } => "user",
             Self::ApiKey { .. } => "api_key",
             Self::ControlPlane { .. } => "control_plane",
+            Self::Scim { .. } => "scim_token",
             Self::Cli => "cli",
             Self::System => "system",
             Self::Anonymous => "anonymous",
@@ -78,6 +81,7 @@ impl Actor {
             Self::User { id, .. } => Some(id.to_string()),
             Self::ApiKey { key_id } => Some(key_id.to_string()),
             Self::ControlPlane { token_id } => Some(token_id.clone()),
+            Self::Scim { token_id } => Some(token_id.to_string()),
             Self::Cli | Self::System | Self::Anonymous => None,
         }
     }
@@ -245,6 +249,7 @@ pub(crate) enum TargetKind {
     Invite,
     ApiKey,
     Pat,
+    ScimToken,
     Project,
     Org,
     SsoProvider,
@@ -266,15 +271,17 @@ pub(crate) enum TargetKind {
 }
 
 impl TargetKind {
-    /// user | invite | api_key | pat | project | org | sso_provider | sso_domain | deletion | license
-    /// | evaluator | online_rule | score_definition | alert_rule | alert_channel | llm_connection
-    /// | model_price | prompt | dataset | issue_source | dashboard | annotation_queue
+    /// user | invite | api_key | pat | scim_token | project | org | sso_provider | sso_domain
+    /// | deletion | license | evaluator | online_rule | score_definition | alert_rule
+    /// | alert_channel | llm_connection | model_price | prompt | dataset | issue_source
+    /// | dashboard | annotation_queue
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
             Self::Invite => "invite",
             Self::ApiKey => "api_key",
             Self::Pat => "pat",
+            Self::ScimToken => "scim_token",
             Self::Project => "project",
             Self::Org => "org",
             Self::SsoProvider => "sso_provider",

@@ -15,7 +15,8 @@ use super::catalog::{
     AuthAction, DashboardAction, DatasetAction, DeletionAction, EvaluatorAction, InstanceAction,
     InviteAction, IssueSourceAction, JoinVia, LlmConnectionAction, LoginMethod, McpAction,
     MemberAction, ModelPriceAction, OnlineRuleAction, OrgAction, PatAction, ProjectAction,
-    PromptAction, ScoreDefinitionAction, SignupMethod, SqlAction, SsoAction, UserAction,
+    PromptAction, ScimAction, ScoreDefinitionAction, SignupMethod, SqlAction, SsoAction,
+    UserAction,
 };
 use super::{
     Action, Actor, Ctx, Event, LOGIN_FAILED_WINDOW_NS, TargetKind, Via, record, record_alone,
@@ -145,6 +146,33 @@ fn samples() -> Vec<Action> {
         SsoAction::DomainRemoved.into(),
         SsoAction::DomainLapsed.into(),
         SsoAction::Disabled.into(),
+        ScimAction::Enabled.into(),
+        ScimAction::Disabled.into(),
+        ScimAction::DefaultRoleChanged {
+            old_role: "viewer",
+            new_role: "member",
+        }
+        .into(),
+        ScimAction::TokenCreated.into(),
+        ScimAction::TokenRevoked.into(),
+        ScimAction::UserProvisioned {
+            scim_user_id: uuid,
+            role: "viewer",
+            linked: true,
+        }
+        .into(),
+        ScimAction::UserUpdated {
+            scim_user_id: uuid,
+            fields: vec!["department", "active"],
+        }
+        .into(),
+        ScimAction::UserDeactivated {
+            scim_user_id: uuid,
+            account_disabled: false,
+        }
+        .into(),
+        ScimAction::UserReactivated { scim_user_id: uuid }.into(),
+        ScimAction::UserDeleted { scim_user_id: uuid }.into(),
         UserAction::Created {
             instance_admin: false,
         }
@@ -309,6 +337,7 @@ fn group(action: &Action) -> &'static str {
         Action::ApiKey(_) => "api_key",
         Action::Pat(_) => "pat",
         Action::Sso(_) => "sso",
+        Action::Scim(_) => "scim",
         Action::User(_) => "user",
         Action::Instance(_) => "instance",
         Action::Deletion(_) => "deletion",
@@ -504,6 +533,17 @@ fn every_action_name_is_group_dot_snake() {
         );
         assert_eq!(prefix, group(&action), "{name} is in the wrong group");
     }
+}
+
+#[test]
+fn a_scim_token_is_the_actor_and_the_target_kind() {
+    let token = Uuid::now_v7();
+    let actor = Actor::Scim { token_id: token };
+    assert_eq!(actor.kind(), "scim_token");
+    assert_eq!(actor.id(), Some(token.to_string()));
+    assert_eq!(actor.via(), None);
+    assert_eq!(actor.credential_id(), None);
+    assert_eq!(TargetKind::ScimToken.as_str(), "scim_token");
 }
 
 #[test]
