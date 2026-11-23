@@ -1,5 +1,5 @@
 import { Bar, BarChart, CartesianGrid, Cell, Tooltip, XAxis, YAxis } from "recharts";
-import { AXIS_TICK } from "@/components/charts/plot-helpers";
+import { AXIS_TICK, BAR_RADIUS } from "@/components/charts/plot-helpers";
 import { type ChartConfig, ChartContainer } from "@/components/ui/chart";
 import { axisTicks, formatValue } from "@/lib/dashboards/format";
 import type { TablePlot } from "@/lib/dashboards/plot";
@@ -70,7 +70,7 @@ export function WidgetBarH({
             />
           )}
         />
-        <Bar dataKey="value" isAnimationActive={false}>
+        <Bar dataKey="value" isAnimationActive={false} radius={[0, BAR_RADIUS, BAR_RADIUS, 0]}>
           {rows.map((row, index) => (
             // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional; names can repeat
             <Cell key={index} fill={row.color} />

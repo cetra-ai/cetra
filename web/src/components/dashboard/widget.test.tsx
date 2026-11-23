@@ -145,9 +145,9 @@ describe("time charts", () => {
       ),
     );
     await screen.findByRole("group", { name: /^Test\./ });
-    const opacities = [...container.querySelectorAll(".recharts-bar-rectangle rect")].map((rect) =>
-      rect.getAttribute("fill-opacity"),
-    );
+    const opacities = [
+      ...container.querySelectorAll(".recharts-bar-rectangle rect, .recharts-bar-rectangle path"),
+    ].map((rect) => rect.getAttribute("fill-opacity"));
     expect(opacities).toContain("0.35");
     expect(opacities).toContain(null);
   });

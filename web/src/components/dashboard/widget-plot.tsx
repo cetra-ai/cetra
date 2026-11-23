@@ -29,6 +29,7 @@ import {
   formatTick,
   largestValue,
   lineDot,
+  roundsTop,
   solitary,
   tickBudget,
   xAxisTicks,
@@ -251,6 +252,11 @@ export function WidgetPlot({
                       onBucket={openBucket}
                       fadeKey={fadeKey(column)}
                       fadeBelow={fadeBelow}
+                      roundTop={roundsTop(
+                        props.payload,
+                        column.key,
+                        stacked ? columns.map((c) => c.key) : undefined,
+                      )}
                     />
                   )}
                 />
