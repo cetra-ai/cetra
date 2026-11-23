@@ -21,6 +21,7 @@ use super::domains::{in_domains, scim_domains_tx};
 use super::error::{ScimError, ScimJson};
 use super::filter::parse_user_filter;
 use super::patch::{UserChange, map_changes, user_changes};
+use super::recompute::{self, RecomputeScope};
 use super::schema::{
     list_response, resource_types, schemas, service_provider_config, user_resource,
 };
@@ -65,7 +66,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     ]
 }
 
-fn route(method: Method, path: &'static str, handler: MethodRouter<AppState>) -> RouteDef {
+pub(crate) fn route(method: Method, path: &'static str, handler: MethodRouter<AppState>) -> RouteDef {
     RouteDef {
         method,
         path,
@@ -78,7 +79,7 @@ fn route(method: Method, path: &'static str, handler: MethodRouter<AppState>) ->
 /// The checks every SCIM handler starts with: the token's rate limit (D-EA-15) and SCIM being on
 /// for the org. Returns the org and its default role (P-4). The entitlement is checked per
 /// operation, so a lapsed org still deprovisions (D-EA-19).
-async fn admit(state: &AppState, principal: &Principal) -> Result<(OrgId, OrgRole), ScimError> {
+pub(crate) async fn admit(state: &AppState, principal: &Principal) -> Result<(OrgId, OrgRole), ScimError> {
     let Principal::Scim { org_id, token_id } = principal else {
         return Err(ScimError::forbidden(
             "SCIM is turned off for this organization.",
@@ -101,15 +102,32 @@ async fn admit(state: &AppState, principal: &Principal) -> Result<(OrgId, OrgRol
 
 /// The per-request values a write needs, read before the transaction.
 #[derive(Clone, Copy)]
-struct Scope {
-    org: OrgId,
-    now: i64,
-    default_role: OrgRole,
-    max_seats: Option<u64>,
-    entitled: bool,
+pub(crate) struct Scope {
+    pub(crate) org: OrgId,
+    pub(crate) now: i64,
+    pub(crate) default_role: OrgRole,
+    pub(crate) max_seats: Option<u64>,
+    /// `scim` is entitled (D-EA-19).
+    pub(crate) entitled: bool,
+    /// `project_roles` is entitled (P-5).
+    pub(crate) project_roles: bool,
 }
 
-fn scope_of(state: &AppState, org: OrgId, default_role: OrgRole) -> Scope {
+impl Scope {
+    /// The recompute inputs of this request (P-2).
+    pub(crate) fn recompute(self) -> RecomputeScope {
+        RecomputeScope {
+            org: self.org,
+            now: self.now,
+            default_role: self.default_role,
+            max_seats: self.max_seats,
+            scim: self.entitled,
+            project_roles: self.project_roles,
+        }
+    }
+}
+
+pub(crate) fn scope_of(state: &AppState, org: OrgId, default_role: OrgRole) -> Scope {
     let now = state.clock.now_ns();
     Scope {
         org,
@@ -117,20 +135,21 @@ fn scope_of(state: &AppState, org: OrgId, default_role: OrgRole) -> Scope {
         default_role,
         max_seats: state.entitlements.resolve(org, now).limits.max_seats,
         entitled: crate::entitlements::of(state, org).allows(Feature::Scim),
+        project_roles: crate::entitlements::of(state, org).allows(Feature::ProjectRoles),
     }
 }
 
 /// `<public_url>/scim/v2`, without a trailing slash.
-fn base_url(state: &AppState) -> String {
+pub(crate) fn base_url(state: &AppState) -> String {
     state.config.public_url.join("/scim/v2")
 }
 
-fn parse_id(id: &str) -> Result<Uuid, ScimError> {
+pub(crate) fn parse_id(id: &str) -> Result<Uuid, ScimError> {
     Uuid::parse_str(id).map_err(|_| ScimError::not_found())
 }
 
 /// A request body that is a JSON object. Anything else is `invalidSyntax`.
-fn json_object(body: &[u8]) -> Result<Value, ScimError> {
+pub(crate) fn json_object(body: &[u8]) -> Result<Value, ScimError> {
     match serde_json::from_slice::<Value>(body) {
         Ok(value @ Value::Object(_)) => Ok(value),
         _ => Err(ScimError::invalid_syntax()),
@@ -147,7 +166,7 @@ fn require_user_name(body: &Value) -> Result<(), ScimError> {
 }
 
 /// Maps a write's `MetaError` to the SCIM error. The seat conflict is a refusal by the plan.
-fn write_error(error: MetaError) -> ScimError {
+pub(crate) fn write_error(error: MetaError) -> ScimError {
     match error {
         MetaError::Conflict("seat limit") => ScimError::forbidden("The org has no seat left."),
         other => ScimError::from(other),
@@ -155,7 +174,7 @@ fn write_error(error: MetaError) -> ScimError {
 }
 
 /// Drops the revoked PAT hashes from the cache after the commit.
-fn evict(state: &AppState, hashes: &[String]) {
+pub(crate) fn evict(state: &AppState, hashes: &[String]) {
     for hash in hashes {
         state.pat_cache.evict(hash);
     }
@@ -464,19 +483,26 @@ async fn create_tx(
             }
         };
 
-    // Membership: an active user gets one with the default role, or keeps the role they hold
-    // (P-5). An inactive user gets none (P-7).
+    // Membership (P-7). An active user new to the org gets the default role. An active user who
+    // already is a member is recomputed from its groups once its SCIM row exists (P-2). An
+    // inactive user gets no membership.
     let was_member = members::org_role_tx(conn, org, user_id).await?.is_some();
-    let role = if attrs.active {
+    let (role, already_member) = if attrs.active {
         match users::ensure_member_tx(conn, org, user_id, default_role, max_seats, now).await? {
-            Some(role) => Some(role),
-            None => members::org_role_tx(conn, org, user_id).await?,
+            Some(role) => (Some(role), false),
+            None => (members::org_role_tx(conn, org, user_id).await?, true),
         }
     } else {
-        None
+        (None, false)
     };
     sync_name_tx(conn, org, user_id, &attrs, now).await?;
     let row = scim_store::insert_user(conn, org, user_id, &attrs.fields(), now).await?;
+    let role = if already_member {
+        recompute::recompute_tx(conn, ctx, &scope.recompute(), &[row.id]).await?;
+        members::org_role_tx(conn, org, user_id).await?
+    } else {
+        role
+    };
     audit::record(
         conn,
         ctx,
@@ -531,6 +557,7 @@ async fn update_tx(
         default_role,
         max_seats,
         entitled,
+        ..
     } = scope;
     let Some(row) = scim_store::user_tx(conn, org, update.id).await? else {
         return Ok(Err(ScimError::not_found()));
@@ -617,12 +644,18 @@ async fn update_tx(
         users::set_email_tx(conn, row.user_id, &attrs.user_name, now).await?;
     }
     if reactivating {
-        users::ensure_member_tx(conn, org, row.user_id, default_role, max_seats, now).await?;
+        // The row is active first, so the recompute sees it. The membership takes the role of the
+        // user's groups (D-EA-14), so a user mapped to viewer is not added at a higher default.
+        scim_store::set_user_active(conn, org, row.id, true, now).await?;
+        let mappings = scim_store::mappings_tx(conn, org).await?;
+        let groups = scim_store::groups_of_user_tx(conn, row.id).await?;
+        let target = recompute::target_org_role(&groups, &mappings, default_role);
+        users::ensure_member_tx(conn, org, row.user_id, target, max_seats, now).await?;
+        recompute::recompute_tx(conn, ctx, &scope.recompute(), &[row.id]).await?;
         if scim_store::is_scim_disabled_tx(conn, row.user_id).await? {
             scim_store::clear_scim_disabled(conn, row.user_id).await?;
             users::set_disabled(conn, row.user_id, None, now).await?;
         }
-        scim_store::set_user_active(conn, org, row.id, true, now).await?;
         audit::record(
             conn,
             ctx,
@@ -710,19 +743,17 @@ async fn schemas_doc(
 /// The `GET /Users` query. Every value is read as text, so a malformed value gets a default
 /// rather than a non-SCIM rejection.
 #[derive(Deserialize)]
-struct ListQuery {
-    filter: Option<String>,
+pub(crate) struct ListQuery {
+    pub(crate) filter: Option<String>,
     #[serde(rename = "startIndex")]
-    start_index: Option<String>,
-    count: Option<String>,
+    pub(crate) start_index: Option<String>,
+    pub(crate) count: Option<String>,
 }
 
-async fn list_users(
-    State(state): State<AppState>,
-    Extension(principal): Extension<Principal>,
-    Query(query): Query<ListQuery>,
-) -> Result<Response, ScimError> {
-    let (org, _) = admit(&state, &principal).await?;
+/// The `startIndex` and `count` of a list query, as `(start, count)` (RFC 7644 § 3.4.2.4).
+/// `startIndex` is at least 1 and defaults to 1; `count` is clamped to 0 to 200 and defaults to
+/// 100. A malformed value gets the default.
+pub(crate) fn page(query: &ListQuery) -> (u32, u32) {
     let start_index = query
         .start_index
         .as_deref()
@@ -735,14 +766,25 @@ async fn list_users(
         .and_then(|value| value.parse::<i64>().ok())
         .unwrap_or(100)
         .clamp(0, 200);
+    (
+        u32::try_from(start_index).unwrap_or(u32::MAX),
+        u32::try_from(count).unwrap_or(0),
+    )
+}
+
+async fn list_users(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Query(query): Query<ListQuery>,
+) -> Result<Response, ScimError> {
+    let (org, _) = admit(&state, &principal).await?;
+    let (start, count) = page(&query);
     let filter = query
         .filter
         .as_deref()
         .map(parse_user_filter)
         .transpose()?
         .map(normalize_filter);
-    let start = u32::try_from(start_index).unwrap_or(u32::MAX);
-    let count = u32::try_from(count).unwrap_or(0);
     let (total, rows) =
         scim_store::list_users(state.meta.reader(), org, filter.as_ref(), start, count).await?;
     let base = base_url(&state);
@@ -898,10 +940,8 @@ mod tests {
     use super::super::error::{CONTENT_TYPE, ERROR_SCHEMA};
     use super::super::schema::USER_SCHEMA;
     use crate::auth::OrgRole;
-    use crate::auth::secret::{self, KeyKind};
-    use crate::ee::org_sso::store::{DomainRow, insert_domain};
     use crate::ee::scim::store::{self as scim_store, ScimUserFields};
-    use crate::ee::scim::store::{insert_token, put_org_scim};
+    use crate::ee::scim::test_helpers::{bearer, create_user, scim_org, scim_org_in};
     use crate::meta::members::add_org_member;
     use crate::meta::users::{
         EmailVerifiedVia, NewUser, insert_user as insert_account, set_disabled,
@@ -909,67 +949,6 @@ mod tests {
     use crate::test_support::{Seeded, TestApp, make_instance_admin, second_org, set_limits};
 
     const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
-
-    /// SCIM on for the seeded org, `domain` verified, and a live SCIM token. Returns the token.
-    async fn scim_org(app: &TestApp, seeded: &Seeded, domain: &str) -> String {
-        scim_org_in(app, seeded.org_id, seeded.user_id, domain, OrgRole::Viewer).await
-    }
-
-    /// SCIM on for `org` with `default_role`, `domain` verified, and a live SCIM token created
-    /// by `owner`. Returns the token.
-    async fn scim_org_in(
-        app: &TestApp,
-        org: OrgId,
-        owner: Uuid,
-        domain: &str,
-        default_role: OrgRole,
-    ) -> String {
-        let now = app.state.clock.now_ns();
-        let key = secret::new_key(KeyKind::Scim).unwrap();
-        let (prefix, hash, plaintext) =
-            (key.prefix.clone(), key.hash.clone(), key.plaintext.clone());
-        let domain = domain.to_owned();
-        app.state
-            .meta
-            .write(move |conn| {
-                Box::pin(async move {
-                    put_org_scim(conn, org, true, default_role, now).await?;
-                    insert_token(conn, org, "test", &prefix, &hash, owner, now).await?;
-                    insert_domain(
-                        conn,
-                        &DomainRow {
-                            id: Uuid::now_v7(),
-                            org_id: org,
-                            domain,
-                            token: "token".to_owned(),
-                            verified_at: Some(now),
-                            last_checked_at: Some(now),
-                            created_at: now,
-                        },
-                    )
-                    .await
-                })
-            })
-            .await
-            .unwrap();
-        plaintext
-    }
-
-    fn bearer(token: &str) -> String {
-        format!("Bearer {token}")
-    }
-
-    async fn create(
-        app: &TestApp,
-        token: &str,
-        user_name: &str,
-    ) -> crate::test_support::TestResponse {
-        app.request(Method::POST, "/scim/v2/Users")
-            .header("authorization", &bearer(token))
-            .json(&json!({"schemas": [USER_SCHEMA], "userName": user_name}))
-            .send()
-            .await
-    }
 
     async fn scalar_text(app: &TestApp, sql: &'static str, value: &str) -> String {
         sqlx::query_scalar::<_, String>(sql)
@@ -983,7 +962,7 @@ mod tests {
     async fn discovery_documents_are_scim_json() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let response = app
             .request(Method::GET, "/scim/v2/ServiceProviderConfig")
             .header("authorization", &bearer(&token))
@@ -999,8 +978,8 @@ mod tests {
     async fn create_provisions_a_new_viewer_without_password() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
-        let response = create(&app, &token, "Grace@Example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
+        let response = create_user(&app, &token, "Grace@Example.com").await;
         assert_eq!(response.status, StatusCode::CREATED);
         assert!(
             response
@@ -1028,8 +1007,8 @@ mod tests {
     async fn create_outside_verified_domains_is_invalid_value() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
-        let response = create(&app, &token, "x@other.org").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
+        let response = create_user(&app, &token, "x@other.org").await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         let body: Value = response.json();
         assert_eq!(body["scimType"], "invalidValue");
@@ -1040,12 +1019,12 @@ mod tests {
     async fn create_duplicate_user_name_is_uniqueness_409() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
-        let response = create(&app, &token, "a@example.com").await;
+        let response = create_user(&app, &token, "a@example.com").await;
         assert_eq!(response.status, StatusCode::CONFLICT);
         let body: Value = response.json();
         assert_eq!(body["scimType"], "uniqueness");
@@ -1055,8 +1034,8 @@ mod tests {
     async fn create_when_lapsed_is_403_scim_error() {
         let app = TestApp::with_license(&["org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
-        let response = create(&app, &token, "a@example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
+        let response = create_user(&app, &token, "a@example.com").await;
         assert_eq!(response.status, StatusCode::FORBIDDEN);
         let body: Value = response.json();
         assert_eq!(body["schemas"][0], ERROR_SCHEMA);
@@ -1067,13 +1046,13 @@ mod tests {
     async fn list_filters_by_user_name_and_count_zero_returns_only_the_total() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
         assert_eq!(
-            create(&app, &token, "b@example.com").await.status,
+            create_user(&app, &token, "b@example.com").await.status,
             StatusCode::CREATED
         );
 
@@ -1102,7 +1081,7 @@ mod tests {
     async fn unsupported_filter_is_invalid_filter() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let response = app
             .request(Method::GET, "/scim/v2/Users?filter=userName%20co%20%22a%22")
             .header("authorization", &bearer(&token))
@@ -1117,9 +1096,9 @@ mod tests {
     async fn entra_deactivate_disables_a_single_org_account_and_removes_membership() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
         let body = json!({
@@ -1166,10 +1145,10 @@ mod tests {
     async fn deactivating_the_last_owner_is_409_and_changes_nothing() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         // The seeded owner is ada@example.com, the only owner of the org.
         assert_eq!(
-            create(&app, &token, "ada@example.com").await.status,
+            create_user(&app, &token, "ada@example.com").await.status,
             StatusCode::CREATED
         );
         let listed: Value = app
@@ -1200,9 +1179,9 @@ mod tests {
     async fn delete_deactivates_then_removes_the_row() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
         let listed: Value = app
@@ -1332,7 +1311,7 @@ mod tests {
     async fn another_orgs_user_is_404() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let (globex, globex_owner) = second_org(&app, "globex", "owner@globex.test").await;
         let other = scim_org_in(
             &app,
@@ -1343,7 +1322,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "a@example.com").await;
@@ -1366,7 +1345,7 @@ mod tests {
     async fn a_scim_disabled_org_is_403() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let org = seeded.org_id;
         let now = app.state.clock.now_ns();
         app.state
@@ -1391,7 +1370,7 @@ mod tests {
     async fn the_limiter_answers_429_with_retry_after() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         for _ in 0..600 {
             let response = app
                 .request(Method::GET, "/scim/v2/Users?count=0")
@@ -1415,7 +1394,7 @@ mod tests {
     async fn create_links_an_unproven_account_and_resets_it() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let now = app.state.clock.now_ns();
         app.state
             .meta
@@ -1440,7 +1419,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         let password = scalar_text(
@@ -1463,7 +1442,7 @@ mod tests {
     async fn create_for_an_instance_admin_leaves_credentials() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let now = app.state.clock.now_ns();
         app.state
             .meta
@@ -1488,7 +1467,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            create(&app, &token, "root@example.com").await.status,
+            create_user(&app, &token, "root@example.com").await.status,
             StatusCode::CREATED
         );
         let password = scalar_text(
@@ -1516,8 +1495,8 @@ mod tests {
         })
         .await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "claimed.test").await;
-        let response = create(&app, &token, "x@claimed.test").await;
+        let token = scim_org(&app, &seeded, "claimed.test", OrgRole::Viewer).await;
+        let response = create_user(&app, &token, "x@claimed.test").await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
         let body: Value = response.json();
         assert_eq!(body["scimType"], "invalidValue");
@@ -1541,7 +1520,7 @@ mod tests {
             OrgRole::Member,
         )
         .await;
-        let refused = create(&app, &member_token, "a@example.com").await;
+        let refused = create_user(&app, &member_token, "a@example.com").await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         let body: Value = refused.json();
         assert_eq!(body["schemas"][0], ERROR_SCHEMA);
@@ -1557,9 +1536,9 @@ mod tests {
             "2026-01-01T00:00:00Z",
             &json!({"max_seats": 1}),
         );
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
     }
@@ -1568,9 +1547,9 @@ mod tests {
     async fn every_operation_writes_an_audit_row_with_the_scim_token_actor() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "a@example.com").await.status,
+            create_user(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "a@example.com").await;
@@ -1596,7 +1575,7 @@ mod tests {
     async fn an_upn_and_a_mail_that_differ_are_accepted() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let response = app
             .request(Method::POST, "/scim/v2/Users")
             .header("authorization", &bearer(&token))
@@ -1617,9 +1596,9 @@ mod tests {
     async fn emails_never_rename_a_user_on_patch() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "grace@example.com").await;
@@ -1643,9 +1622,9 @@ mod tests {
     async fn the_user_name_filter_is_normalized() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "ada@example.com").await.status,
+            create_user(&app, &token, "ada@example.com").await.status,
             StatusCode::CREATED
         );
         let listed: Value = app
@@ -1664,13 +1643,13 @@ mod tests {
     async fn a_taken_user_name_on_update_is_uniqueness() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         assert_eq!(
-            create(&app, &token, "lin@example.com").await.status,
+            create_user(&app, &token, "lin@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "grace@example.com").await;
@@ -1690,7 +1669,7 @@ mod tests {
     async fn an_instance_admin_user_name_cannot_change() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let (_, user) = provisioned(&app, seeded.org_id, "grace@example.com").await;
         make_instance_admin(&app, user).await;
         let id = scim_id_of(&app, &token, "grace@example.com").await;
@@ -1710,9 +1689,9 @@ mod tests {
     async fn put_without_active_keeps_the_state() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "grace@example.com").await;
@@ -1731,7 +1710,7 @@ mod tests {
     async fn lapsed_deactivate_via_put_works() {
         let app = TestApp::with_license(&["org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let (id, _) = provisioned(&app, seeded.org_id, "grace@example.com").await;
         let response = app
             .request(Method::PUT, &format!("/scim/v2/Users/{id}"))
@@ -1761,7 +1740,7 @@ mod tests {
     async fn lapsed_no_op_active_true_works_and_reactivation_is_refused() {
         let app = TestApp::with_license(&["org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let (id, _) = provisioned(&app, seeded.org_id, "grace@example.com").await;
         let noop = patch(
             &app,
@@ -1795,7 +1774,7 @@ mod tests {
     async fn post_inactive_for_an_existing_member_removes_the_membership() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let _grace = app
             .add_member(&seeded, "grace@example.com", OrgRole::Member)
             .await;
@@ -1821,7 +1800,7 @@ mod tests {
     async fn post_inactive_for_a_new_user_adds_no_membership() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let response = app
             .request(Method::POST, "/scim/v2/Users")
             .header("authorization", &bearer(&token))
@@ -1853,9 +1832,9 @@ mod tests {
     async fn deleted_then_reprovisioned_account_is_reenabled() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         let id = scim_id_of(&app, &token, "grace@example.com").await;
@@ -1873,7 +1852,7 @@ mod tests {
         .await;
         assert_eq!(disabled, "yes");
         assert_eq!(
-            create(&app, &token, "grace@example.com").await.status,
+            create_user(&app, &token, "grace@example.com").await.status,
             StatusCode::CREATED
         );
         let enabled = scalar_text(
@@ -1889,7 +1868,7 @@ mod tests {
     async fn admin_disabled_account_is_refused() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        let token = scim_org(&app, &seeded, "example.com").await;
+        let token = scim_org(&app, &seeded, "example.com", OrgRole::Viewer).await;
         let now = app.state.clock.now_ns();
         app.state
             .meta
@@ -1914,7 +1893,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let response = create(&app, &token, "grace@example.com").await;
+        let response = create_user(&app, &token, "grace@example.com").await;
         assert_eq!(response.status, StatusCode::CONFLICT);
         let body: Value = response.json();
         assert_eq!(body["detail"], "This account is disabled.");

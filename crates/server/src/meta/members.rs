@@ -371,6 +371,37 @@ pub(crate) async fn project_overrides(
         .collect()
 }
 
+/// The project overrides of `user` on the projects of `org`, read inside the caller's
+/// transaction (track EA M6: the recompute reads them before it changes them).
+///
+/// # Errors
+///
+/// Returns [`MetaError::Corrupt`] when a stored id or role does not decode, and
+/// [`MetaError::Db`] when the query fails.
+pub(crate) async fn project_overrides_of_user_tx(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    user: Uuid,
+) -> Result<Vec<(ProjectId, ProjectOverride)>, MetaError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT pm.project_id, pm.role FROM project_members pm \
+         JOIN projects p ON p.id = pm.project_id WHERE p.org_id = ? AND pm.user_id = ?",
+    )
+    .bind(org.to_string())
+    .bind(user.to_string())
+    .fetch_all(&mut *conn)
+    .await?;
+    rows.into_iter()
+        .map(|(project, role)| {
+            let project = Uuid::parse_str(&project).map_err(|_| MetaError::Corrupt {
+                table: "project_members",
+                column: "project_id",
+            })?;
+            Ok((ProjectId::from_uuid(project), decode_override(&role)?))
+        })
+        .collect()
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct MemberRecord {
     id: String,

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::domains;
+use super::recompute::{self, RecomputeScope};
 use super::store::{self, ScimTokenRow};
 use crate::api::account::OrgRole;
 use crate::api::common::FieldError;
@@ -160,6 +161,13 @@ async fn update_scim(
                         new_role: roles::org_role_str(default_role),
                     };
                     audit::record(conn, &ctx, Event::new(action).org(org), now).await?;
+                    // P-3: the managed members the new default reaches are recomputed in this
+                    // transaction, but only while SCIM is on (P-6).
+                    if enabled {
+                        let scope = RecomputeScope::of(&domains_state, org, default_role);
+                        let user_ids = store::active_user_ids_tx(conn, org).await?;
+                        recompute::recompute_tx(conn, &ctx, &scope, &user_ids).await?;
+                    }
                 }
                 Ok(Update::Done)
             })
