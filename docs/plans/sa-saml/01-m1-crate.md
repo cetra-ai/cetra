@@ -86,7 +86,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
 - **No checks while implementing (the user, 2026-11-20).** Do not run `cargo build`, `cargo test`, `cargo clippy` or `just check`. Write the code and tests, commit with the phase's subject, and stop. The coordinating session runs the full checks once, in SA1.8, and fixes what fails. `cargo fetch` and `cargo info` are allowed. In SA1.1, `cargo metadata --format-version 1 > /dev/null` updates `Cargo.lock` without compiling.
 - Every `.rs` file under `crates/saml/` starts with exactly `// SPDX-License-Identifier: Elastic-2.0` as its first line (`just check-ee`).
 - No `unwrap()` / `expect()` outside `#[cfg(test)]` code and the `test_idp` module, unless a comment next to it states the invariant. `test_idp` is test support: it starts with `#![allow(clippy::expect_used, clippy::unwrap_used)] // test support, never built in release` as its first attribute after the header and doc comment.
-- **Privacy.** No error message or `Debug` output contains a NameID, an email, an attribute value, an IdP entity ID or URL, or certificate bytes. The SP's own entity ID and ACS URL (cetra's URLs, not payload) may appear in `Debug` of `AuthnRequest` and `ExpectedResponse`. Errors are unit variants with static messages. Types that hold such values implement `Debug` by hand, printing only lengths, counts or the certificate's SHA-256 hex.
+- **Privacy.** No error message or `Debug` output contains a NameID, an email, an attribute value, an IdP entity ID or URL, or certificate bytes. The SP's own entity ID and ACS URL (cetra's URLs, not payload) may appear in `Debug` of `ExpectedResponse`. `test_idp::ResponseOptions` derives `Debug` with test NameIDs and attributes; that is acceptable for test support only. Errors are unit variants with static messages. Types that hold such values implement `Debug` by hand, printing only lengths, counts or the certificate's SHA-256 hex.
 - Namespaces and URIs are spelled out once, as the constants of SA1.1. No other spelling appears in the code.
 - Public items get a one-line doc comment. `unreachable_pub` is a workspace lint: items used only inside the crate are `pub(crate)`.
 - Times are `i64` nanoseconds since the Unix epoch, UTC (`AGENTS.md` § Data conventions).
@@ -374,7 +374,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
       - `"RSA"`: take `key.data.to_spki_der()` (`None` is `Certificate`), `rsa::PublicKey::from_public_key_der(&spki)` (trait `rsa::pkcs8::DecodePublicKey`; in rsa 0.10 the type is `PublicKey`, and `RsaPublicKey` is a deprecated alias that clippy refuses; an error, including a key above 8192 bits, is `Certificate`), and require `rsa::traits::PublicKeyParts::size(&public) >= 256` bytes, else `WeakKey`.
       - `"EC-P256"` | `"EC-P384"`: accepted.
       - Anything else is `WeakKey`.
-   5. `sha256` = `sha2::Sha256::digest(der)`.
+   5. `sha256` = `sha2::Sha256::digest(der).into()` (with `use sha2::Digest;`).
 
    `from_pem` steps:
    1. Trim ASCII whitespace.
@@ -500,7 +500,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
 
    /// The inputs of one SP-initiated login (D-SA-12). The caller makes `request_id` from 16 random
    /// bytes as `_` + lowercase hex, and remembers it with its pending entry (D-SA-10).
-   #[derive(Debug, Clone, Copy)]
+   #[derive(Clone, Copy)]
    pub struct AuthnRequest<'a> {
        pub sp_entity_id: &'a str,
        pub acs_url: &'a str,
@@ -520,7 +520,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
    /// The SP metadata XML served at the SP entity ID (D-SA-12).
    pub fn sp_metadata_xml(sp_entity_id: &str, acs_url: &str) -> String;
    ```
-   (`#[derive(Debug)]` on `AuthnRequest` is acceptable: it holds the SP's own URLs and a request ID, no user data.)
+   `AuthnRequest` does not derive `Debug`. It has a manual `Debug` printing `request_id` and `sso_url_len` only, because `sso_url` is the IdP's URL.
 3. Escaping uses `xml::escape_attr` and `xml::escape_text` (SA1.1).
 4. `authn_request_redirect_url` steps:
    1. `is_valid_request_id(request.request_id)` else `RequestId`.
@@ -841,7 +841,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
       - `let ctx = bergshamra::DsigContext::new(keys)`. Its defaults are `trusted_keys_only` and `strict_verification`; do **not** change any field.
       - `bergshamra::dsig::verify::verify_all_document(&ctx, &doc)`. Any `Err` (duplicate IDs among them) → `SignatureInvalid`.
       - The result vector must have exactly `signatures.len()` entries, all `VerifyResult::Valid`. For each: `signature_node` is one of `signatures`, `references.len() == 1`, `references[0].digest_verified`, and `references[0].resolved_node == Some(parent of signature_node)`. Any failure → `SignatureInvalid`.
-      - From here on, everything is read from `root` and `assertion` only. Both are covered: a Response signature covers its only Assertion.
+      - From here on, everything is read from `root` and `assertion` only. When only the Assertion is signed, the Response-level values (Status, Destination, InResponseTo, Issuer, IssueInstant) are unsigned. Those checks can only add failures. No success path may depend on Response-level values alone: the signed Assertion carries Issuer, IssueInstant and the bearer confirmation's Recipient and `InResponseTo` (step 12), which is what binds the request. Write this as a comment above step 9's code.
    9. **Response attributes:**
       - `Destination`, if present, must equal `expected.acs_url` (rule 11, else `Destination`).
       - `InResponseTo` is required and must equal `expected.request_id` (rule 13, else `InResponseTo`).
@@ -865,7 +865,7 @@ The phases run **in order**: each one builds on the previous phase's modules, an
    13. **Conditions (rules 12, 16):**
        - `only_child(assertion, NS_ASSERTION, "Conditions")` is required (else `Conditions`).
        - Its `NotBefore`, when present, must parse with `now_ns + SKEW_NS >= not_before`. Its `NotOnOrAfter`, when present, must parse with `now_ns < not_on_or_after + SKEW_NS`. Otherwise `Conditions`.
-       - Its `AudienceRestriction` children: at least one, and **every** one must have an `Audience` child whose `strict_text` equals `expected.sp_entity_id` (restrictions are ANDed in SAML). Otherwise `Audience`, including when `strict_text` is `None`.
+       - Its `AudienceRestriction` children: at least one, and **every** one must pass `audience_matches(doc, restriction, sp_entity_id)`. That private helper reads each `Audience` child with `strict_text`, skips a `None`, and passes when any child equals `sp_entity_id` (restrictions are ANDed in SAML). Otherwise `Audience`.
    14. **Attributes (D-SA-6):**
        - Collect `Attribute` elements of every `AttributeStatement` child of `assertion`, as (`Name` attribute, first `AttributeValue` child).
        - For a name list, the first name in list order that has an attribute wins. When several `Attribute` elements share that name, the first in document order wins. Its value is `strict_text` of that `AttributeValue` (`None` → `ValueContent`), trimmed of ASCII whitespace. Empty counts as absent.
@@ -894,7 +894,7 @@ Accepted:
 - `the_next_certificate_is_accepted_during_rotation`: `key: IdpNext`, with metadata of `[Idp, IdpNext]`.
 - `base64_with_line_breaks_is_accepted`: the base64 wrapped every 76 characters with `\r\n`.
 - `skew_within_60_seconds_is_accepted`, two cases:
-  - Set `issue_instant_ns = NOW_NS + 300 s`, `not_on_or_after_ns = confirmation_not_on_or_after_ns = NOW_NS + 300 s`, and validate at `now = NOW_NS + 359 s`. The issue instant is 59 s old, within the window.
+  - Set `issue_instant_ns = NOW_NS + 300 s`, `not_on_or_after_ns = confirmation_not_on_or_after_ns = NOW_NS + 300 s`, and validate at `now = NOW_NS + 359 s`. This tests the 59 s grace on `NotOnOrAfter`; the issue instant moves only so that it stays in its window.
   - Keep `now = NOW_NS` and set `not_before_ns = NOW_NS + 59 s`.
 - `the_email_falls_back_to_an_email_name_id`: no email attribute.
 - `first_and_last_name_make_the_display_name`.
@@ -907,14 +907,15 @@ Refused, one test per error (each named after its cause):
 - `oversized_input_is_too_large`; `bad_base64_is_refused`; `non_utf8_is_refused`; `a_non_response_root_is_refused` (an `AuthnRequest` document).
 - `version_1_1_is_refused`; `a_failure_status_is_refused` (`…:status:Requester`); `an_unsigned_response_is_refused` (`Signing::None` → `SignatureMissing`).
 - `the_attacker_key_is_refused` (`key: Attacker`, `key_info: true` → `SignatureInvalid`); `a_rotated_out_certificate_is_refused` (`key: IdpNext`, metadata `[Idp]` → `SignatureInvalid`).
-- `a_wrong_destination_is_refused`; `a_missing_response_in_response_to_is_refused`; `a_wrong_response_in_response_to_is_refused`; `a_wrong_confirmation_in_response_to_is_refused` (→ `SubjectConfirmation`).
-- `a_wrong_recipient_is_refused`; `an_expired_confirmation_is_refused`.
-- `a_wrong_response_issuer_is_refused`; `a_wrong_assertion_issuer_is_refused`.
+- `a_wrong_destination_is_refused` (`destination: Some("https://cetra.test/other/acs")` → `Destination`); `a_missing_response_in_response_to_is_refused` (`response_in_response_to: None` → `InResponseTo`); `a_wrong_response_in_response_to_is_refused` (`Some("_ffffffffffffffffffffffffffffffff")` → `InResponseTo`); `a_wrong_confirmation_in_response_to_is_refused` (`confirmation_in_response_to: Some("_ffffffffffffffffffffffffffffffff")` → `SubjectConfirmation`).
+- `a_wrong_recipient_is_refused` (`recipient: "https://cetra.test/other/acs"` → `SubjectConfirmation`); `an_expired_confirmation_is_refused` (`confirmation_not_on_or_after_ns = NOW_NS − 61 s` → `SubjectConfirmation`; at exactly −60 s it still passes).
+- `a_wrong_response_issuer_is_refused` (`response_issuer: Some("https://evil.test")`); `a_wrong_assertion_issuer_is_refused` (`assertion_issuer: "https://evil.test"`). Both → `Issuer`.
 - `an_old_issue_instant_is_refused` (NOW − 6 min − 1 s); `a_future_issue_instant_is_refused` (NOW + 61 s).
-- `missing_conditions_are_refused`; `not_yet_valid_conditions_are_refused`; `expired_conditions_are_refused`.
-- `a_wrong_audience_is_refused`; `no_audience_restriction_is_refused`.
-- `a_transient_name_id_is_refused`; `an_empty_name_id_is_refused`.
-- `an_overlong_name_id_is_refused` (1025 bytes → `ValueContent`); `an_overlong_email_is_refused`.
+- `missing_conditions_are_refused` (`conditions: false`); `not_yet_valid_conditions_are_refused` (`not_before_ns = NOW_NS + 61 s`); `expired_conditions_are_refused` (`not_on_or_after_ns = NOW_NS − 61 s`, confirmation left at its default). All three → `Conditions`.
+- `a_wrong_audience_is_refused` (`audiences: vec!["https://other.test/sp"]`); `no_audience_restriction_is_refused` (`audiences: vec![]`). Both → `Audience`.
+- `a_commented_other_audience_is_ignored`: a unit test of the private `audience_matches(doc, restriction, sp)` on a hand-written, unsigned `<saml:AudienceRestriction xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:Audience>x<!---->y</saml:Audience><saml:Audience>{SP_ENTITY_ID}</saml:Audience></saml:AudienceRestriction>` parsed with `xml::parse_strict` → `true`. Editing a signed response would break its signature, so this case is tested on the helper.
+- `a_transient_name_id_is_refused` (`name_id_format: Some("urn:oasis:names:tc:SAML:2.0:nameid-format:transient")` → `NameIdTransient`); `an_empty_name_id_is_refused` (`name_id: ""` → `NameIdMissing`).
+- `an_overlong_name_id_is_refused` (1025 bytes → `ValueContent`); `an_overlong_email_is_refused` (the `email` attribute 321 bytes long → `ValueContent`).
 - `an_invalid_request_id_never_matches`: `expected.request_id = "x"` → `InResponseTo`.
 - `debug_hides_the_payload`: `format!("{:?}", assertion)` and `format!("{:?}", received)` contain neither `ada@example.com` nor `Ada`.
 
@@ -935,7 +936,7 @@ Refused, one test per error (each named after its cause):
 1. `lib.rs`: `#[cfg(test)] mod hostile_tests;`.
 2. `hostile_tests.rs`:
    - It starts with the SPDX header and `//! The hostile corpus of D-SA-15: signature wrapping, comment injection, DTDs, KeyInfo substitution, weak algorithms (track SA M1).`
-   - It defines `fn check(xml: &str) -> Result<Assertion, ResponseError>`, which base64-encodes, decodes and validates against `expected()`. It also defines `expected()` here, copied from SA1.5's tests (tests do not share private helpers across modules).
+   - It defines `fn check_with(xml: &str, request_id: &str) -> Result<Assertion, ResponseError>`. It builds locals `let idp = test_idp::idp_metadata(); let names = AttributeNames::default();`, then `ExpectedResponse { sp_entity_id: SP_ENTITY_ID, acs_url: ACS_URL, idp: &idp, request_id, now_ns: NOW_NS, attributes: &names }`, base64-encodes `xml`, calls `decode_response`, then `validate_response`. It also defines `fn check(xml: &str) -> Result<Assertion, ResponseError>` = `check_with(xml, REQUEST_ID)`.
    - Each case starts from `test_idp::response_xml(&options)` and alters the string with `str::replacen` / `insert_str` at a fixed marker. A case whose marker is not found fails with `assert!(xml.contains(marker))` first, so the test never passes vacuously.
 3. The cases. Names and expected errors are exact. "Signed" means the default `Signing::Assertion` unless noted.
 
@@ -956,7 +957,7 @@ Refused, one test per error (each named after its cause):
 | `comment_injected_after_signing` | Replace `>ada@example.com</saml:NameID>` by `>ada@example.com<!---->.evil.test</saml:NameID>` | `SignatureInvalid` (the canonical text becomes `ada@example.com.evil.test`, which the IdP did not sign) |
 | `comment_signed_by_the_idp` | `name_id: "ada@example.com.evil.test"` signed, then insert `<!---->` after `ada@example.com` | `ValueContent` |
 | `comment_in_the_email_attribute` | Insert `<!---->` inside the `email` AttributeValue | `ValueContent` |
-| `cdata_name_id_is_plain_text` | Replace `>ada@example.com</saml:NameID>` by `><![CDATA[ada@example.com]]></saml:NameID>` | accepted, `name_id == "ada@example.com"` (CDATA is text in c14n; no signature change) |
+| `cdata_name_id_is_plain_text` | Replace `>ada@example.com</saml:NameID>` by `><![CDATA[ada@example.com]]></saml:NameID>` | accepted, `name_id == "ada@example.com"` (CDATA is text in c14n; no signature change). If SA1.8 sees `SignatureInvalid` here, record a bergshamra gap in the review instead of weakening the test. |
 | `doctype_entity_expansion` | Prepend `<!DOCTYPE r [<!ENTITY x "admin">]>` | `Doctype` |
 | `billion_laughs` | Prepend the classic 10-level `lol` entity DTD | `Doctype` |
 | `external_entity` | Prepend `<!DOCTYPE r [<!ENTITY x SYSTEM "file:///etc/passwd">]>` | `Doctype` |
@@ -972,7 +973,7 @@ Refused, one test per error (each named after its cause):
 | `both_signed_one_broken` | `Signing::Both`; in the Response's `SignatureValue`, replace the character at index `len / 2` with a different base64 letter (`A` ↔ `B`), away from the `=` padding | `SignatureInvalid` |
 | `id_copied_onto_another_element` | Add `ID="{ASSERTION_ID}"` to the `<saml:Subject>` start tag (a duplicate ID outside any second Assertion) | `SignatureInvalid` (bergshamra refuses duplicate IDs) |
 | `namespace_confusion` | Replace `<saml:Assertion ID=` by `<saml:Assertion xmlns:saml="urn:evil" ID=` | `AssertionCount` (zero assertions in the SAML namespace) |
-| `replayed_response_for_another_request` | Default response, validated with `request_id = "_ffffffffffffffffffffffffffffffff"` | `InResponseTo` |
+| `replayed_response_for_another_request` | Default response, `check_with(xml, "_ffffffffffffffffffffffffffffffff")` | `InResponseTo` |
 
 4. The binding checks D-SA-15 also names (audience, recipient, destination, issuer, transient NameID, times) are covered by SA1.5's refused tests; this table does not repeat them.
 5. Every evil Assertion string is built by a helper `evil_assertion(id: &str, name_id: &str) -> String`. It returns the exact unsigned Assertion that `test_idp` would write for `ResponseOptions { name_id, signing: Signing::None, .. }`, cut out of `response_xml` between `<saml:Assertion` and `</saml:Assertion>` inclusive, with `ID="{ASSERTION_ID}"` replaced by `ID="{id}"`.
@@ -1011,14 +1012,15 @@ Refused, one test per error (each named after its cause):
    - Copy `replay` and `sorted_files` from `crates/otel/src/fuzz_entry.rs` § tests, the same bodies.
    - `saml_response_corpus_replays`, `saml_metadata_corpus_replays`.
    - `#[test] #[ignore] fn write_seed_corpus()` writes into `fuzz/corpus/saml_response/` the files below, as decoded XML (not base64), using `crate::test_idp::response_xml`. The test is at the path `fuzz_entry::tests::write_seed_corpus`, which `just fuzz-seed` runs.
-     - `seed-valid-assertion`, `seed-valid-response`, `seed-valid-both`, `seed-ec`;
-     - `seed-unsigned`;
-     - `seed-wrong-audience`;
-     - `seed-two-assertions`, which uses the default response with its Assertion duplicated before `</samlp:Response>`.
+     The `write` closure (copied from otel) names a file `seed-<name>`; the names below are without that prefix.
+     - `valid-assertion`, `valid-response`, `valid-both`, `ec`;
+     - `unsigned`;
+     - `wrong-audience`;
+     - `two-assertions`, which uses the default response with its Assertion duplicated before `</samlp:Response>`.
 
      And into `fuzz/corpus/saml_metadata/`:
-     - `seed-one-cert`, `seed-two-certs` (`test_idp::metadata_xml`);
-     - `seed-no-redirect`, which is `seed-one-cert` with `HTTP-Redirect` replaced by `HTTP-Artifact`.
+     - `one-cert`, `two-certs` (`test_idp::metadata_xml`);
+     - `no-redirect`, which is `one-cert` with `HTTP-Redirect` replaced by `HTTP-Artifact`.
 4. `fuzz/Cargo.toml`: add `cetra-saml = { path = "../crates/saml" }` under `[dependencies]`, and two `[[bin]]` entries, the same shape as the others: `saml_response` → `fuzz_targets/saml_response.rs`, `saml_metadata` → `fuzz_targets/saml_metadata.rs` (`test = false`, `doc = false`, `bench = false`).
 5. `fuzz/fuzz_targets/saml_response.rs`:
    ```rust

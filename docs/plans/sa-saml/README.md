@@ -215,7 +215,7 @@ Each decision is also in `docs/mvp-decisions.md` § Track SA.
 5. At most two `Signature` elements, one on the Response and one on the Assertion, each with exactly one `Reference`. Any Signature present must verify. Either one is enough when it covers the Assertion: a Response signature covers its only Assertion.
 
 **Signatures**
-6. Signatures are checked only against the org's trusted certificates. Each trusted key is tried in turn. The certificate in the message's `KeyInfo` is never used, not even to choose a key.
+6. Signatures are checked only against the org's trusted certificates. Each trusted key is tried in turn. `KeyInfo` in the message never adds a key: it may only reorder the trusted ones.
 7. bergshamra's strict reference mode is used. The reference resolves, by node identity, to the element whose content is then read, and nothing is read from outside the signed element.
 8. Transforms are only enveloped-signature and exclusive c14n, with or without comments.
 9. Signature algorithms are RSA-SHA256/384/512 and ECDSA-SHA256/384, with digests SHA-256 and above. SHA-1 and MD5 are refused.
