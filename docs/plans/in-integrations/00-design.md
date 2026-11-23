@@ -209,7 +209,7 @@ Counts are how many of the seven competitors list the integration. "Route" is wh
 | Haystack | 5 | M3 | `openinference-instrumentation-haystack` | — |
 | smolagents | 5 | M3 | `openinference-instrumentation-smolagents` | — |
 | BeeAI (Python) | 4 | M3 | OpenInference (Python) | — |
-| Temporal (with the OpenAI Agents SDK) | 4 | M3 | `temporalio-openai-agents`' `OpenAIAgentsPlugin(use_otel_instrumentation=True)`; setup only until a pinned dev-server binary exists | Temporal's own spans stay `span` |
+| Temporal (with the OpenAI Agents SDK) | 4 | M3 | `temporalio-openai-agents`' `OpenAIAgentsPlugin(use_otel_instrumentation=True)`; setup only until a pinned dev-server binary exists | Temporal's own spans are not sent by cetra's default export filter; with `export_filter` they arrive as `span` |
 | DeepAgents | 3 | M3 | OpenInference LangChain | — |
 | LangGraph | 2+ | M3 | OpenInference LangChain | own page; the LangChain page is retitled "LangChain" and links it |
 | Guardrails AI | 2 | M3 | Guardrails' own spans, plus `instrument=["openai"]` | — |
