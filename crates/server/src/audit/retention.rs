@@ -3,6 +3,7 @@
 
 use cetra_core::ids::OrgId;
 
+use crate::ee::audit::stream_store;
 use crate::http::AppState;
 use crate::meta::{MetaDb, MetaError};
 
@@ -45,8 +46,7 @@ pub(crate) async fn purge(state: &AppState, now: i64) -> Result<u64, MetaError> 
             Some(0) => 0,
             Some(days) => u32::try_from(days.max(MIN_RETENTION_DAYS)).unwrap_or(u32::MAX),
         };
-        let org = org.to_string();
-        removed += purge_scope(meta, Covered::Org(&org), days, now).await?;
+        removed += purge_scope(meta, Covered::Org(org), days, now).await?;
     }
     // Records of an org that no longer exists (a drop that did not finish) are kept at the
     // instance's days too, so they do not outlive the instance log's limit.
@@ -57,17 +57,17 @@ pub(crate) async fn purge(state: &AppState, now: i64) -> Result<u64, MetaError> 
 /// The records a purge covers (D-EA-7): the instance log, one org's records, or the records
 /// whose org has no `orgs` row.
 #[derive(Clone, Copy)]
-enum Covered<'a> {
+enum Covered {
     Instance,
-    Org(&'a str),
+    Org(OrgId),
     Orphans,
 }
 
-impl<'a> Covered<'a> {
+impl Covered {
     /// The org id the statements bind first, if any.
-    fn bind(self) -> Option<&'a str> {
+    fn bind(self) -> Option<String> {
         match self {
-            Covered::Org(org) => Some(org),
+            Covered::Org(org) => Some(org.to_string()),
             Covered::Instance | Covered::Orphans => None,
         }
     }
@@ -87,21 +87,36 @@ impl<'a> Covered<'a> {
         }
     }
 
-    /// The batched delete. It binds [`Covered::bind`] first, then the cutoff and the batch size.
+    /// The batch's seqs, oldest first (plan E2 step 5). It binds [`Covered::bind`] first, then
+    /// the cutoff and the batch size.
+    fn select_sql(self) -> &'static str {
+        match self {
+            Covered::Instance => {
+                "SELECT seq FROM audit_events WHERE org_id IS NULL AND at < ? \
+                 ORDER BY seq LIMIT ?"
+            }
+            Covered::Org(_) => {
+                "SELECT seq FROM audit_events WHERE org_id = ? AND at < ? \
+                 ORDER BY seq LIMIT ?"
+            }
+            Covered::Orphans => {
+                "SELECT seq FROM audit_events WHERE org_id IS NOT NULL \
+                 AND org_id NOT IN (SELECT id FROM orgs) AND at < ? ORDER BY seq LIMIT ?"
+            }
+        }
+    }
+
+    /// Deletes the batch: every covered record older than the cutoff up to the batch's last
+    /// seq. It binds [`Covered::bind`] first, then the cutoff and that seq.
     fn delete_sql(self) -> &'static str {
         match self {
             Covered::Instance => {
-                "DELETE FROM audit_events WHERE seq IN \
-                 (SELECT seq FROM audit_events WHERE org_id IS NULL AND at < ? LIMIT ?)"
+                "DELETE FROM audit_events WHERE org_id IS NULL AND at < ? AND seq <= ?"
             }
-            Covered::Org(_) => {
-                "DELETE FROM audit_events WHERE seq IN \
-                 (SELECT seq FROM audit_events WHERE org_id = ? AND at < ? LIMIT ?)"
-            }
+            Covered::Org(_) => "DELETE FROM audit_events WHERE org_id = ? AND at < ? AND seq <= ?",
             Covered::Orphans => {
-                "DELETE FROM audit_events WHERE seq IN \
-                 (SELECT seq FROM audit_events WHERE org_id IS NOT NULL \
-                 AND org_id NOT IN (SELECT id FROM orgs) AND at < ? LIMIT ?)"
+                "DELETE FROM audit_events WHERE org_id IS NOT NULL \
+                 AND org_id NOT IN (SELECT id FROM orgs) AND at < ? AND seq <= ?"
             }
         }
     }
@@ -113,7 +128,7 @@ impl<'a> Covered<'a> {
 /// with nothing to delete takes no write.
 async fn purge_scope(
     meta: &MetaDb,
-    covered: Covered<'_>,
+    covered: Covered,
     days: u32,
     now: i64,
 ) -> Result<u64, MetaError> {
@@ -121,7 +136,7 @@ async fn purge_scope(
         return Ok(0);
     }
     let cutoff = now.saturating_sub(i64::from(days).saturating_mul(DAY_NS));
-    let bind = covered.bind().map(str::to_owned);
+    let bind = covered.bind();
     let mut exists = sqlx::query(covered.exists_sql());
     if let Some(bind) = &bind {
         exists = exists.bind(bind);
@@ -134,33 +149,62 @@ async fn purge_scope(
     if exists.is_none() {
         return Ok(0);
     }
-    let delete_sql = covered.delete_sql();
     let mut removed = 0;
     loop {
         let bind = bind.clone();
         let deleted = meta
             .write(move |conn| {
-                Box::pin(async move {
-                    let mut query = sqlx::query(delete_sql);
-                    if let Some(bind) = &bind {
-                        query = query.bind(bind);
-                    }
-                    let result = query
-                        .bind(cutoff)
-                        .bind(PURGE_BATCH)
-                        .execute(&mut *conn)
-                        .await
-                        .map_err(MetaError::from)?;
-                    Ok(result.rows_affected())
-                })
+                Box::pin(async move { purge_batch(conn, covered, bind, cutoff).await })
             })
             .await?;
-        removed += deleted;
-        // A batch that deleted fewer than PURGE_BATCH rows was the last one.
-        if i64::try_from(deleted).is_ok_and(|deleted| deleted < PURGE_BATCH) {
+        // An empty batch means nothing covered is left.
+        if deleted == 0 {
             return Ok(removed);
         }
+        removed += deleted;
     }
+}
+
+/// Deletes one batch of the covered records older than `cutoff`, in the caller's write
+/// transaction (plan E2 step 5): the batch is the first [`PURGE_BATCH`] such records by `seq`,
+/// deleted by `seq <= last`. Records of the org scope and the instance scope then flag their
+/// destinations whose cursor is below `last` (plan P-5); orphans have no destination left.
+/// Returns the count deleted, `0` when the batch was empty.
+async fn purge_batch(
+    conn: &mut sqlx::SqliteConnection,
+    covered: Covered,
+    bind: Option<String>,
+    cutoff: i64,
+) -> Result<u64, MetaError> {
+    let mut select = sqlx::query_scalar::<_, i64>(covered.select_sql());
+    if let Some(bind) = &bind {
+        select = select.bind(bind);
+    }
+    let seqs: Vec<i64> = select
+        .bind(cutoff)
+        .bind(PURGE_BATCH)
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(MetaError::from)?;
+    let Some(&last) = seqs.last() else {
+        return Ok(0);
+    };
+    let mut delete = sqlx::query(covered.delete_sql());
+    if let Some(bind) = &bind {
+        delete = delete.bind(bind);
+    }
+    let result = delete
+        .bind(cutoff)
+        .bind(last)
+        .execute(&mut *conn)
+        .await
+        .map_err(MetaError::from)?;
+    match covered {
+        Covered::Instance => stream_store::flag_lost(&mut *conn, None, last).await?,
+        Covered::Org(org) => stream_store::flag_lost(&mut *conn, Some(org), last).await?,
+        Covered::Orphans => {}
+    }
+    Ok(result.rows_affected())
 }
 
 /// Deletes every record of `org` (an applied org drop, D-EA-7). Records without an org

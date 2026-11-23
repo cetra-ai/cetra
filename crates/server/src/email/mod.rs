@@ -63,6 +63,14 @@ const TEMPLATES: &[(&str, &str)] = &[
         "usage_notice.html",
         include_str!("templates/usage_notice.html"),
     ),
+    (
+        "audit_stream_failing.txt",
+        include_str!("templates/audit_stream_failing.txt"),
+    ),
+    (
+        "audit_stream_failing.html",
+        include_str!("templates/audit_stream_failing.html"),
+    ),
 ];
 
 /// One transactional message. The `url` is the link the later phase built.
@@ -128,6 +136,18 @@ pub(crate) enum Email {
         /// The plan bills units past `included` (no cap, or a cap above it).
         paid: bool,
         /// `<public_url>/<org slug>/settings/plan`.
+        url: String,
+    },
+    /// An audit stream destination has failed for 24 hours (D-EA-11), sent to the org's owners
+    /// or to the instance admins.
+    AuditStreamFailing {
+        /// Org display name, or "this cetra instance".
+        scope_name: String,
+        /// The endpoint's host. Never the URL.
+        url_host: String,
+        /// Whole hours since the first failure of the run.
+        since_hours: u64,
+        /// `<public_url>/<org slug>/settings/audit-log`, or `<public_url>/admin/audit-log`.
         url: String,
     },
 }
@@ -362,6 +382,21 @@ impl Mailer {
                 context! { url => url },
             ),
             Email::Test => ("test.txt", "test.html", context! {}),
+            Email::AuditStreamFailing {
+                scope_name,
+                url_host,
+                since_hours,
+                url,
+            } => (
+                "audit_stream_failing.txt",
+                "audit_stream_failing.html",
+                context! {
+                    scope_name => scope_name,
+                    url_host => url_host,
+                    since_hours => *since_hours,
+                    url => url,
+                },
+            ),
             Email::UsageNotice {
                 org_name,
                 threshold,
@@ -647,6 +682,9 @@ fn subject(email: &Email) -> String {
         Email::PasswordReset { .. } => format!("Reset your {PRODUCT} password"),
         Email::VerifyEmail { .. } => format!("Verify your email for {PRODUCT}"),
         Email::Test => format!("{PRODUCT} test email"),
+        Email::AuditStreamFailing { scope_name, .. } => {
+            format!("Audit stream failing for {scope_name}")
+        }
         Email::UsageNotice {
             org_name,
             threshold,
@@ -673,6 +711,7 @@ fn template_name(email: &Email) -> &'static str {
         Email::Alert { .. } => "alert",
         Email::Issues { .. } => "issue_notification",
         Email::UsageNotice { .. } => "usage_notice",
+        Email::AuditStreamFailing { .. } => "audit_stream_failing",
     }
 }
 
@@ -974,6 +1013,29 @@ mod tests {
                 rendered.html
             );
         }
+    }
+
+    #[test]
+    fn audit_stream_failing_names_the_host_not_the_url() {
+        let rendered = mailer()
+            .render(&Email::AuditStreamFailing {
+                scope_name: "Acme".to_owned(),
+                url_host: "siem.example.com".to_owned(),
+                since_hours: 25,
+                url: "https://example.com/acme/settings/audit-log".to_owned(),
+            })
+            .unwrap();
+        assert_eq!(rendered.subject, "Audit stream failing for Acme");
+        assert!(rendered.text.contains("siem.example.com"), "{}", rendered.text);
+        assert!(rendered.text.contains("25 hours"), "{}", rendered.text);
+        assert!(
+            rendered
+                .text
+                .ends_with("https://example.com/acme/settings/audit-log"),
+            "{}",
+            rendered.text
+        );
+        assert!(rendered.html.contains("siem.example.com"), "{}", rendered.html);
     }
 
     #[tokio::test]

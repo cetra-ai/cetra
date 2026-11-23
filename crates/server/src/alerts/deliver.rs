@@ -147,7 +147,7 @@ fn header_value(text: &str) -> Result<HeaderValue, SendError> {
 }
 
 /// One POST through the egress client. A 2xx is a success.
-async fn post(
+pub(crate) async fn post(
     state: &AppState,
     url: &str,
     headers: Vec<(HeaderName, HeaderValue)>,
@@ -176,7 +176,7 @@ async fn post(
     })
 }
 
-fn egress_error(error: &EgressError) -> SendError {
+pub(crate) fn egress_error(error: &EgressError) -> SendError {
     let (retry, message) = match error {
         EgressError::Timeout => (true, "the request timed out"),
         EgressError::Connect => (true, "could not connect"),

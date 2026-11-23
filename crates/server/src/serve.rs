@@ -108,6 +108,9 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// How often each audit stream destination's due records are sent (D-EA-11).
+const AUDIT_STREAM_EVERY: Duration = Duration::from_secs(10);
+
 /// How often org SSO routing is reloaded from `meta.db` (D-P-62).
 const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
 /// How often verified domains due for their daily re-proof are checked (D-P-72).
@@ -616,6 +619,7 @@ pub async fn bind(config: ServerConfig, ui: Option<axum::Router>) -> Result<Runn
         tasks.push(spawn_notices(state.clone()));
         tasks.push(spawn_org_sso_recheck(state.clone()));
         tasks.push(spawn_audit_purge(state.clone()));
+        tasks.push(spawn_audit_stream(state.clone()));
     }
     tasks.push(spawn_org_sso(state.clone()));
     if state.config.restore_mode {
@@ -791,6 +795,21 @@ fn spawn_audit_purge(state: AppState) -> JoinHandle<()> {
                 Err(error) => {
                     tracing::error!(error = %error, "audit purge failed");
                 }
+            }
+        }
+    })
+}
+
+fn spawn_audit_stream(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUDIT_STREAM_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = state.clock.now_ns();
+            if let Err(error) = crate::ee::audit::stream::deliver_once(&state, now).await {
+                tracing::error!(error = %error, "audit stream delivery failed");
             }
         }
     })
@@ -1222,10 +1241,11 @@ mod tests {
         ));
     }
 
-    /// Restore mode starts five fewer loops in `Running.tasks`: the two alert loops that send
-    /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS) and the audit
-    /// purge (a restored copy keeps its records unchanged). The eval dispatcher and backfill
-    /// runner live in `eval_tasks`, which is not counted here.
+    /// Restore mode starts six fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS), the audit
+    /// purge (a restored copy keeps its records unchanged) and the audit stream (outbound
+    /// records). The eval dispatcher and backfill runner live in `eval_tasks`, which is not
+    /// counted here.
     #[tokio::test]
     async fn restore_mode_skips_the_sending_and_dns_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -1237,7 +1257,7 @@ mod tests {
         let restored = bind(restore, None).await.unwrap();
         let restore_tasks = restored.tasks.len();
         restored.shutdown().await.unwrap();
-        assert_eq!(normal_tasks - restore_tasks, 5);
+        assert_eq!(normal_tasks - restore_tasks, 6);
     }
 
     #[tokio::test]
