@@ -428,41 +428,41 @@ async fn create_tx(
     // Link or create. An existing account is linked, and an unproven one is reset first (D-P-66).
     // An account that is disabled is refused, unless SCIM disabled it: then it is enabled again
     // (D-EA-16). An instance admin is linked without any credential change (P-6).
-    let (user_id, linked, mut hashes) = match users::user_by_email_tx(conn, &attrs.user_name).await?
-    {
-        Some(user) => {
-            let scim_disabled = scim_store::is_scim_disabled_tx(conn, user.id).await?;
-            if user.disabled_at.is_some() && !scim_disabled {
-                return Ok(Err(ScimError::conflict("This account is disabled.")));
+    let (user_id, linked, mut hashes) =
+        match users::user_by_email_tx(conn, &attrs.user_name).await? {
+            Some(user) => {
+                let scim_disabled = scim_store::is_scim_disabled_tx(conn, user.id).await?;
+                if user.disabled_at.is_some() && !scim_disabled {
+                    return Ok(Err(ScimError::conflict("This account is disabled.")));
+                }
+                if scim_disabled {
+                    scim_store::clear_scim_disabled(conn, user.id).await?;
+                    users::set_disabled(conn, user.id, None, now).await?;
+                }
+                let hashes = if user.is_instance_admin {
+                    Vec::new()
+                } else {
+                    users::reset_unproven_tx(conn, &user, now).await?
+                };
+                (user.id, true, hashes)
             }
-            if scim_disabled {
-                scim_store::clear_scim_disabled(conn, user.id).await?;
-                users::set_disabled(conn, user.id, None, now).await?;
+            None => {
+                let user = users::insert_user(
+                    conn,
+                    NewUser {
+                        email: attrs.user_name.clone(),
+                        name: None,
+                        password_hash: None,
+                        email_verified_at: Some(now),
+                        email_verified_via: Some(EmailVerifiedVia::Idp),
+                        is_instance_admin: false,
+                    },
+                    now,
+                )
+                .await?;
+                (user.id, false, Vec::new())
             }
-            let hashes = if user.is_instance_admin {
-                Vec::new()
-            } else {
-                users::reset_unproven_tx(conn, &user, now).await?
-            };
-            (user.id, true, hashes)
-        }
-        None => {
-            let user = users::insert_user(
-                conn,
-                NewUser {
-                    email: attrs.user_name.clone(),
-                    name: None,
-                    password_hash: None,
-                    email_verified_at: Some(now),
-                    email_verified_via: Some(EmailVerifiedVia::Idp),
-                    is_instance_admin: false,
-                },
-                now,
-            )
-            .await?;
-            (user.id, false, Vec::new())
-        }
-    };
+        };
 
     // Membership: an active user gets one with the default role, or keeps the role they hold
     // (P-5). An inactive user gets none (P-7).
@@ -897,16 +897,16 @@ mod tests {
 
     use super::super::error::{CONTENT_TYPE, ERROR_SCHEMA};
     use super::super::schema::USER_SCHEMA;
-    use crate::ee::scim::store::{self as scim_store, ScimUserFields};
     use crate::auth::OrgRole;
     use crate::auth::secret::{self, KeyKind};
     use crate::ee::org_sso::store::{DomainRow, insert_domain};
+    use crate::ee::scim::store::{self as scim_store, ScimUserFields};
     use crate::ee::scim::store::{insert_token, put_org_scim};
     use crate::meta::members::add_org_member;
-    use crate::meta::users::{EmailVerifiedVia, NewUser, insert_user as insert_account, set_disabled};
-    use crate::test_support::{
-        Seeded, TestApp, make_instance_admin, second_org, set_limits,
+    use crate::meta::users::{
+        EmailVerifiedVia, NewUser, insert_user as insert_account, set_disabled,
     };
+    use crate::test_support::{Seeded, TestApp, make_instance_admin, second_org, set_limits};
 
     const PATCH_OP: &str = "urn:ietf:params:scim:api:messages:2.0:PatchOp";
 
@@ -1308,7 +1308,12 @@ mod tests {
         listed["Resources"][0]["id"].as_str().unwrap().to_owned()
     }
 
-    async fn patch(app: &TestApp, token: &str, id: &str, body: &Value) -> crate::test_support::TestResponse {
+    async fn patch(
+        app: &TestApp,
+        token: &str,
+        id: &str,
+        body: &Value,
+    ) -> crate::test_support::TestResponse {
         app.request(Method::PATCH, &format!("/scim/v2/Users/{id}"))
             .header("authorization", &bearer(token))
             .json(body)
@@ -1329,7 +1334,14 @@ mod tests {
         let seeded = app.seed().await;
         let token = scim_org(&app, &seeded, "example.com").await;
         let (globex, globex_owner) = second_org(&app, "globex", "owner@globex.test").await;
-        let other = scim_org_in(&app, globex, globex_owner.id, "globex.test", OrgRole::Viewer).await;
+        let other = scim_org_in(
+            &app,
+            globex,
+            globex_owner.id,
+            "globex.test",
+            OrgRole::Viewer,
+        )
+        .await;
         assert_eq!(
             create(&app, &token, "a@example.com").await.status,
             StatusCode::CREATED
@@ -1515,8 +1527,20 @@ mod tests {
     async fn create_at_the_seat_limit_with_member_default_is_refused() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        set_limits(&app, seeded.org_id, "2026-01-01T00:00:00Z", &json!({"max_seats": 1}));
-        let member_token = scim_org_in(&app, seeded.org_id, seeded.user_id, "example.com", OrgRole::Member).await;
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_seats": 1}),
+        );
+        let member_token = scim_org_in(
+            &app,
+            seeded.org_id,
+            seeded.user_id,
+            "example.com",
+            OrgRole::Member,
+        )
+        .await;
         let refused = create(&app, &member_token, "a@example.com").await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         let body: Value = refused.json();
@@ -1527,7 +1551,12 @@ mod tests {
     async fn viewer_default_ignores_the_seat_limit() {
         let app = TestApp::with_license(&["scim", "org_sso"]).await;
         let seeded = app.seed().await;
-        set_limits(&app, seeded.org_id, "2026-01-01T00:00:00Z", &json!({"max_seats": 1}));
+        set_limits(
+            &app,
+            seeded.org_id,
+            "2026-01-01T00:00:00Z",
+            &json!({"max_seats": 1}),
+        );
         let token = scim_org(&app, &seeded, "example.com").await;
         assert_eq!(
             create(&app, &token, "a@example.com").await.status,
@@ -1549,7 +1578,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": false}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"active": false}}]}),
         )
         .await;
         assert_eq!(deactivated.status, StatusCode::OK);
@@ -1598,7 +1627,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"schemas": [PATCH_OP], "Operations": [{
+            &json!({"schemas": [PATCH_OP], "Operations":[{
                 "op": "replace",
                 "path": "emails[type eq \"work\"].value",
                 "value": "other@example.com"
@@ -1649,7 +1678,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"userName": "lin@example.com"}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"userName": "lin@example.com"}}]}),
         )
         .await;
         assert_eq!(response.status, StatusCode::CONFLICT);
@@ -1669,7 +1698,7 @@ mod tests {
             &app,
             &token,
             &id,
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"userName": "grace2@example.com"}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"userName": "grace2@example.com"}}]}),
         )
         .await;
         assert_eq!(response.status, StatusCode::BAD_REQUEST);
@@ -1738,7 +1767,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": true}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
         assert_eq!(noop.status, StatusCode::OK);
@@ -1746,7 +1775,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": false}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"active": false}}]}),
         )
         .await;
         assert_eq!(off.status, StatusCode::OK);
@@ -1754,7 +1783,7 @@ mod tests {
             &app,
             &token,
             &id.to_string(),
-            &json!({"schemas": [PATCH_OP], "Operations": [{"op": "replace", "value": {"active": true}}]}),
+            &json!({"schemas": [PATCH_OP], "Operations":[{"op": "replace", "value": {"active": true}}]}),
         )
         .await;
         assert_eq!(back.status, StatusCode::FORBIDDEN);
@@ -1796,7 +1825,9 @@ mod tests {
         let response = app
             .request(Method::POST, "/scim/v2/Users")
             .header("authorization", &bearer(&token))
-            .json(&json!({"schemas": [USER_SCHEMA], "userName": "new@example.com", "active": false}))
+            .json(
+                &json!({"schemas": [USER_SCHEMA], "userName": "new@example.com", "active": false}),
+            )
             .send()
             .await;
         assert_eq!(response.status, StatusCode::CREATED);
