@@ -26,7 +26,7 @@ use ::datafusion::catalog::Session;
 use ::datafusion::common::stats::Precision;
 use ::datafusion::common::tree_node::TreeNodeRecursion;
 use ::datafusion::common::utils::project_schema;
-use ::datafusion::common::{DataFusionError, ScalarValue, Statistics};
+use ::datafusion::common::{ColumnStatistics, DataFusionError, ScalarValue, Statistics};
 use ::datafusion::datasource::TableProvider;
 use ::datafusion::error::Result as DfResult;
 use ::datafusion::execution::TaskContext;
@@ -223,13 +223,13 @@ fn reads_payload(files: &[Arc<StrataFile>], projection: &[usize]) -> bool {
 /// Fewest rows in one partition's range when a file is split.
 const MIN_PARTITION_ROWS: u64 = 65_536;
 
-/// Splits each file into about `target / files` contiguous row ranges of at least
-/// `MIN_PARTITION_ROWS` rows. A file that is not split reads all its rows (`None`).
+/// Splits each file into contiguous row ranges of at least `MIN_PARTITION_ROWS` rows. A file
+/// that is not split reads all its rows (`None`).
 pub(crate) fn split_files(
     files: &[Arc<StrataFile>],
     target: usize,
 ) -> Vec<(usize, Option<Range<u32>>)> {
-    let per_file = target.div_ceil(files.len().max(1)).max(1) as u64;
+    let per_file = ranges_per_file(files.len(), target) as u64;
     let mut parts = Vec::new();
     for (index, file) in files.iter().enumerate() {
         for rows in split_rows(file.row_count(), per_file) {
@@ -237,6 +237,19 @@ pub(crate) fn split_files(
         }
     }
     parts
+}
+
+/// How many row ranges each of `files` files is split into for `target` partitions: about
+/// `target / files`, raised (to at most four times that) until the ranges are a multiple of
+/// `target`. Partitions run one per core, so 5 files on 8 cores as 10 ranges would run 8, then
+/// 2 alone; as 40 ranges they keep every core busy to the end.
+fn ranges_per_file(files: usize, target: usize) -> usize {
+    let files = files.max(1);
+    let target = target.max(1);
+    let base = target.div_ceil(files);
+    (base..=base * 4)
+        .find(|per| (files * per).is_multiple_of(target))
+        .unwrap_or(base * 4)
 }
 
 /// The row ranges of one file of `rows` rows split into at most `parts` ranges of at least
@@ -252,6 +265,39 @@ fn split_rows(rows: u64, parts: u64) -> Vec<Option<Range<u32>>> {
             .collect(),
         _ => vec![None],
     }
+}
+
+/// Most rows one scan call of a partition reads (see [`pieces`]). Tests use small pieces, so
+/// their scans of a few thousand rows go through the pieces too.
+#[cfg(not(test))]
+const PIECE_ROWS: u32 = 1 << 20;
+#[cfg(test)]
+const PIECE_ROWS: u32 = 1_000;
+
+/// The row ranges of a partition (`None`: the whole file of `rows` rows) cut into pieces of at
+/// most `PIECE_ROWS` rows, in order. Empty when the rows do not fit a `u32`.
+fn pieces(ranges: Option<&[Range<u32>]>, rows: u64) -> Vec<Range<u32>> {
+    let whole;
+    let ranges = match ranges {
+        Some(ranges) => ranges,
+        None => match u32::try_from(rows) {
+            Ok(end) => {
+                whole = 0..end;
+                std::slice::from_ref(&whole)
+            }
+            Err(_) => return Vec::new(),
+        },
+    };
+    let mut out = Vec::new();
+    for range in ranges {
+        let mut start = range.start;
+        while start < range.end {
+            let end = start.saturating_add(PIECE_ROWS).min(range.end);
+            out.push(start..end);
+            start = end;
+        }
+    }
+    out
 }
 
 /// Maps a Strata error to DataFusion's external error.
@@ -725,10 +771,70 @@ impl TableProvider for StrataTable {
             .unwrap_or_else(|| (0..self.schema.fields().len()).collect());
         let schema = project_schema(&self.schema, projection)?;
         let target = state.config().target_partitions();
-        Ok(Arc::new(StrataExec::new(
-            files, indexes, predicate, lookup, limit, schema, target,
-        )))
+        let mut column_stats = Vec::with_capacity(indexes.len());
+        for (&column, field) in indexes.iter().zip(schema.fields()) {
+            column_stats.push(column_statistics(&files, column, field.data_type()).await?);
+        }
+        let mut exec = StrataExec::new(files, indexes, predicate, lookup, limit, schema, target);
+        exec.column_stats = column_stats;
+        exec.selectivity = state.config_options().optimizer.default_filter_selectivity;
+        Ok(Arc::new(exec))
     }
+}
+
+/// The statistics of `column` over `files`: for a signed integer or timestamp column, the
+/// minimum and maximum of its chunk zones ([`StrataFile::int_range`]) and a null count of 0
+/// when no chunk has a null; unknown otherwise. DataFusion derives a join key's distinct count
+/// from its range, and without it estimates a join's output as its smaller input's row count,
+/// so it builds hash tables on joins of millions of rows (TPC-DS query 72 used 64 GB).
+async fn column_statistics(
+    files: &[Arc<StrataFile>],
+    column: usize,
+    data_type: &DataType,
+) -> DfResult<ColumnStatistics> {
+    let mut range: Option<(i64, i64)> = None;
+    let mut nulls = false;
+    for file in files {
+        let Some((lo, hi, has_nulls)) = file.int_range(column).await.map_err(df)? else {
+            return Ok(ColumnStatistics::new_unknown());
+        };
+        nulls |= has_nulls;
+        range = Some(match range {
+            None => (lo, hi),
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+        });
+    }
+    let Some((lo, hi)) = range else {
+        return Ok(ColumnStatistics::new_unknown());
+    };
+    let (Some(min), Some(max)) = (int_scalar(data_type, lo), int_scalar(data_type, hi)) else {
+        return Ok(ColumnStatistics::new_unknown());
+    };
+    let mut stats = ColumnStatistics::new_unknown()
+        .with_min_value(Precision::Exact(min))
+        .with_max_value(Precision::Exact(max));
+    if !nulls {
+        stats = stats.with_null_count(Precision::Exact(0));
+    }
+    Ok(stats)
+}
+
+/// `v` as a scalar of the signed integer or timestamp type `data_type`, or `None` for another
+/// type or a value out of its range.
+fn int_scalar(data_type: &DataType, v: i64) -> Option<ScalarValue> {
+    Some(match data_type {
+        DataType::Int8 => ScalarValue::Int8(Some(i8::try_from(v).ok()?)),
+        DataType::Int16 => ScalarValue::Int16(Some(i16::try_from(v).ok()?)),
+        DataType::Int32 => ScalarValue::Int32(Some(i32::try_from(v).ok()?)),
+        DataType::Int64 => ScalarValue::Int64(Some(v)),
+        DataType::Timestamp(unit, tz) => match unit {
+            TimeUnit::Second => ScalarValue::TimestampSecond(Some(v), tz.clone()),
+            TimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(v), tz.clone()),
+            TimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(v), tz.clone()),
+            TimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(v), tz.clone()),
+        },
+        _ => return None,
+    })
 }
 
 /// The files, projection and predicate of a plain scan ([`StrataExec::plain_scan`]).
@@ -754,6 +860,14 @@ pub struct StrataExec {
     /// or a timestamp.
     staged: bool,
     schema: SchemaRef,
+    /// Statistics of the output columns: the minimum and maximum of integer and timestamp
+    /// columns from their chunk zones, unknown for the others ([`column_statistics`]).
+    column_stats: Vec<ColumnStatistics>,
+    /// Percent of the rows a predicate or a lookup is estimated to keep: DataFusion's
+    /// `default_filter_selectivity`, which a `FilterExec` above a plain scan would apply. Without
+    /// it a filtered scan reports every row, and a small filtered table loses its place as the
+    /// build side of a join (JOB query 56 ran out of memory).
+    selectivity: u8,
     props: Arc<PlanProperties>,
     metrics: ExecutionPlanMetricsSet,
 }
@@ -1021,6 +1135,8 @@ impl StrataExec {
             order: None,
             fetch: None,
             staged: false,
+            column_stats: Statistics::unknown_column(&schema),
+            selectivity: 100,
             schema,
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
@@ -1062,6 +1178,8 @@ impl StrataExec {
             order: Some(order),
             fetch,
             staged,
+            column_stats: self.column_stats.clone(),
+            selectivity: self.selectivity,
             schema: Arc::clone(&self.schema),
             props: Arc::new(props),
             metrics: ExecutionPlanMetricsSet::new(),
@@ -1127,7 +1245,8 @@ impl ExecutionPlan for StrataExec {
 
     /// The row count, from the files' postscripts: exact for a plain scan, so DataFusion
     /// answers `count(*)` without reading a column; an estimate with a predicate, a lookup or a
-    /// limit. Column statistics are unknown.
+    /// limit. Column statistics: the zone ranges of [`column_statistics`], inexact when rows
+    /// are filtered out.
     fn statistics_from_inputs(
         &self,
         _input_stats: &[Arc<Statistics>],
@@ -1146,7 +1265,13 @@ impl ExecutionPlan for StrataExec {
         let mut rows = usize::try_from(rows).unwrap_or(usize::MAX);
         // How a limit splits across partitions is not modelled: it only caps the estimate.
         let cap = self.limit.or(self.fetch);
-        let filtered = self.predicate.is_some() || self.lookup.is_some() || cap.is_some();
+        let selected = self.predicate.is_some() || self.lookup.is_some();
+        let filtered = selected || cap.is_some();
+        if selected && rows > 0 {
+            let kept = rows as f64 * f64::from(self.selectivity.min(100)) / 100.0;
+            // `kept` is at most `rows`, so the cast back cannot overflow.
+            rows = (kept.ceil() as usize).max(1);
+        }
         if let Some(limit) = cap {
             rows = rows.min(limit);
         }
@@ -1155,9 +1280,18 @@ impl ExecutionPlan for StrataExec {
         } else {
             Precision::Exact(rows)
         };
-        Ok(Arc::new(
-            Statistics::new_unknown(&self.schema).with_num_rows(rows),
-        ))
+        let mut stats = Statistics::new_unknown(&self.schema).with_num_rows(rows);
+        if self.column_stats.len() == stats.column_statistics.len() {
+            stats.column_statistics = if filtered {
+                self.column_stats
+                    .iter()
+                    .map(|c| c.clone().to_inexact())
+                    .collect()
+            } else {
+                self.column_stats.clone()
+            };
+        }
+        Ok(Arc::new(stats))
     }
 
     /// A sort whose first key is a narrow column of every file, and whose other keys are
@@ -1319,13 +1453,61 @@ impl ExecutionPlan for StrataExec {
         // cheap batches over a channel cost more than it saved (`real-data.md` § Payload scans).
         let payload = reads_payload(&self.files, &self.projection);
         type Batches = Box<dyn Iterator<Item = Result<RecordBatch>> + Send>;
+        /// A partition's batches: built by one scan (and maybe ahead), or streamed from scans of
+        /// its rows in pieces ([`pieces`]).
+        enum Out {
+            Built(Batches, bool),
+            Pieces(futures::stream::BoxStream<'static, DfResult<RecordBatch>>),
+        }
         let fut = async move {
             let Some(file) = file else {
-                return Ok::<(Batches, bool), DataFusionError>((
-                    Box::new(std::iter::empty()),
-                    false,
-                ));
+                return Ok::<Out, DataFusionError>(Out::Built(Box::new(std::iter::empty()), false));
             };
+            // A plain scan of many rows reads them in pieces: the partition holds one piece's
+            // values at a time, and DataFusion gets the first batches while it reads the rest.
+            // The next piece's reads run while the current one's batches are built, so on an
+            // object store a partition does not wait a round trip between pieces.
+            let plain =
+                lookup.is_none() && keys.is_none() && limit.is_none() && top.is_none() && !payload;
+            let ranges = if plain {
+                pieces(row_ranges.as_deref(), file.row_count())
+            } else {
+                Vec::new()
+            };
+            if ranges.len() > 1 {
+                let stream = futures::stream::iter(ranges)
+                    .map(move |range| {
+                        let file = Arc::clone(&file);
+                        let request = ScanRequest {
+                            projection: projection.clone(),
+                            predicate: predicate.clone(),
+                            row_ranges: Some(vec![range]),
+                            limit: None,
+                            kind: ScanKind::Scan,
+                            views: true,
+                            top: None,
+                        };
+                        let (bytes, requests, waves) =
+                            (bytes.clone(), requests.clone(), waves.clone());
+                        async move {
+                            let before = file.io_stats();
+                            let scanned = file.scan_batches(&request, threads).await.map_err(df)?;
+                            let after = file.io_stats();
+                            let delta = |a: u64, b: u64| usize::try_from(a.saturating_sub(b));
+                            bytes.add(delta(after.bytes, before.bytes).unwrap_or(usize::MAX));
+                            requests
+                                .add(delta(after.requests, before.requests).unwrap_or(usize::MAX));
+                            waves.add(delta(after.waves, before.waves).unwrap_or(usize::MAX));
+                            Ok::<_, DataFusionError>(futures::stream::iter(
+                                scanned.map(|batch| batch.map_err(df)),
+                            ))
+                        }
+                    })
+                    .buffered(2)
+                    .try_flatten()
+                    .boxed();
+                return Ok(Out::Pieces(stream));
+            }
             let before = file.io_stats();
             // Whether the batches are built ahead: a payload scan with more than one step of
             // batches left; the others are built already, in one step, or cheap.
@@ -1382,23 +1564,25 @@ impl ExecutionPlan for StrataExec {
             );
             // The batches are built as DataFusion asks for them, so a partition holds a few
             // batches and the frames they share, not the whole file's values.
-            Ok((batches, ahead))
+            Ok(Out::Built(batches, ahead))
         };
         let stream = futures::stream::once(fut)
-            .map_ok(move |(batches, ahead)| {
+            .map_ok(move |out| {
                 // `map_ok` takes an `FnMut`; it runs once.
                 let (elapsed, output_rows, schema) =
                     (elapsed.clone(), output_rows.clone(), Arc::clone(&schema));
-                let batches = if ahead {
-                    built_ahead(batches, threads).boxed()
-                } else {
-                    futures::stream::iter(batches).boxed()
+                let batches = match out {
+                    Out::Built(batches, true) => built_ahead(batches, threads)
+                        .map(|batch| batch.map_err(df))
+                        .boxed(),
+                    Out::Built(batches, false) => {
+                        futures::stream::iter(batches.map(|batch| batch.map_err(df))).boxed()
+                    }
+                    Out::Pieces(stream) => stream,
                 };
                 batches.map(move |batch| {
                     let _timer = elapsed.timer();
-                    let batch = batch
-                        .and_then(|b| to_table_batch(&b, &schema))
-                        .map_err(df)?;
+                    let batch = to_table_batch(&batch?, &schema).map_err(df)?;
                     output_rows.add(batch.num_rows());
                     Ok(batch)
                 })
@@ -1708,6 +1892,116 @@ mod tests {
                     .all(|r| u64::from(r.end - r.start) >= MIN_PARTITION_ROWS)
             );
         }
+    }
+
+    /// A plan's statistics as DataFusion's join selection computes them.
+    fn stats_of(plan: &dyn ExecutionPlan) -> Arc<Statistics> {
+        ::datafusion::physical_plan::statistics::StatisticsContext::new()
+            .compute(plan, &StatisticsArgs::new())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn scans_report_the_zone_range_of_integer_columns() {
+        let table = payload_table().await;
+        let start = index(&table, "start_time");
+        let body = index(&table, "body");
+        let ctx = ::datafusion::prelude::SessionContext::new();
+        let state = ctx.state();
+        let ns = |v: i64| Sv::TimestampNanosecond(Some(v), Some("UTC".into()));
+
+        let plan = table
+            .scan(&state, Some(&vec![start, body]), &[], None)
+            .await
+            .unwrap();
+        let stats = stats_of(plan.as_ref());
+        assert_eq!(stats.num_rows, Precision::Exact(200));
+        let time = &stats.column_statistics[0];
+        assert_eq!(time.min_value, Precision::Exact(ns(0)));
+        assert_eq!(time.max_value, Precision::Exact(ns(199_000)));
+        assert_eq!(time.null_count, Precision::Exact(0));
+        // A string column has no zone range.
+        assert_eq!(stats.column_statistics[1], ColumnStatistics::new_unknown());
+
+        // With a pushed filter the rows are an estimate, and so are the bounds.
+        let filter = col("start_time").gt(lit(ns(100_000)));
+        let plan = table
+            .scan(&state, Some(&vec![start]), &[filter], None)
+            .await
+            .unwrap();
+        let stats = stats_of(plan.as_ref());
+        // DataFusion's default selectivity, 20 %, of the rows the scan reads.
+        let Precision::Inexact(kept) = stats.num_rows else {
+            panic!(
+                "a filtered scan's rows are an estimate: {:?}",
+                stats.num_rows
+            )
+        };
+        assert!((1..=40).contains(&kept), "{kept}");
+        assert_eq!(
+            stats.column_statistics[0].min_value,
+            Precision::Inexact(ns(0))
+        );
+        assert_eq!(
+            stats.column_statistics[0].max_value,
+            Precision::Inexact(ns(199_000))
+        );
+
+        // The session's selectivity is the one applied.
+        let mut config = ::datafusion::prelude::SessionConfig::new();
+        config.options_mut().optimizer.default_filter_selectivity = 100;
+        let all = ::datafusion::prelude::SessionContext::new_with_config(config).state();
+        let filter = col("start_time").gt(lit(ns(100_000)));
+        let plan = table
+            .scan(&all, Some(&vec![start]), &[filter], None)
+            .await
+            .unwrap();
+        let Precision::Inexact(read) = stats_of(plan.as_ref()).num_rows else {
+            panic!("a filtered scan's rows are an estimate")
+        };
+        assert_eq!(kept, read.div_ceil(5).max(1));
+    }
+
+    #[test]
+    fn files_split_into_a_multiple_of_the_partitions_when_they_can() {
+        assert_eq!(ranges_per_file(1, 8), 8);
+        assert_eq!(ranges_per_file(5, 8), 8); // 40 ranges
+        assert_eq!(ranges_per_file(3, 8), 8); // 24 ranges
+        assert_eq!(ranges_per_file(4, 8), 2);
+        assert_eq!(ranges_per_file(16, 8), 1);
+        assert_eq!(ranges_per_file(10, 8), 4); // 40 ranges
+        assert_eq!(ranges_per_file(7, 1), 1);
+        assert_eq!(ranges_per_file(0, 0), 1);
+        // No multiple within four times the base: the most ranges.
+        assert_eq!(ranges_per_file(7, 64), 40);
+    }
+
+    #[test]
+    fn partitions_read_their_rows_in_pieces() {
+        let p = PIECE_ROWS;
+        assert_eq!(pieces(None, 0), Vec::<Range<u32>>::new());
+        assert_eq!(pieces(None, 10), vec![0..10]);
+        assert_eq!(pieces(None, u64::from(p) + 1), vec![0..p, p..p + 1]);
+        assert_eq!(
+            pieces(Some(&[5..5 + 2 * p, 9 * p..9 * p + 3]), 0),
+            vec![5..5 + p, 5 + p..5 + 2 * p, 9 * p..9 * p + 3]
+        );
+        assert_eq!(
+            pieces(Some(std::slice::from_ref(&(4..4))), 100),
+            Vec::<Range<u32>>::new()
+        );
+        assert_eq!(pieces(None, u64::MAX), Vec::<Range<u32>>::new());
+    }
+
+    #[test]
+    fn int_scalars_keep_the_column_type_and_reject_out_of_range_values() {
+        assert_eq!(int_scalar(&DataType::Int32, -5), Some(Sv::Int32(Some(-5))));
+        assert_eq!(int_scalar(&DataType::Int8, 300), None);
+        assert_eq!(int_scalar(&DataType::Utf8, 1), None);
+        assert_eq!(
+            int_scalar(&DataType::Timestamp(TimeUnit::Millisecond, None), 7),
+            Some(Sv::TimestampMillisecond(Some(7), None))
+        );
     }
 
     /// Rows of one `count(*)`-style query and the bytes the table's files fetched for it.

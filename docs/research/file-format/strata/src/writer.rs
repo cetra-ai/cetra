@@ -1175,7 +1175,12 @@ mod tests {
                 .encoding_counts
         };
         let (runs, small) = (counts("runs"), counts("small"));
-        assert!(runs[Encoding::Plain as usize] > 0, "{runs:?}");
+        // Runs of equal values far apart: zstd on plain values, or steps between them, beat
+        // bit-packing their range.
+        assert!(
+            runs[Encoding::Plain as usize] + runs[Encoding::ForDelta as usize] > 0,
+            "{runs:?}"
+        );
         assert_eq!(runs[Encoding::ForBitpack as usize], 0, "{runs:?}");
         assert!(small[Encoding::ForBitpack as usize] > 0, "{small:?}");
         assert_eq!(small[Encoding::Plain as usize], 0, "{small:?}");
@@ -1396,9 +1401,9 @@ mod tests {
     }
 
     /// xxh3_64 of the file written from `wide_batch(20_000)` with `Config::default()`.
-    /// Recorded after the metadata section moved before the hot tail. A change to this value
+    /// Recorded after integer chunks gained the `ForDelta` candidate. A change to this value
     /// means the output changed.
-    const GOLDEN: u64 = 0xa6a1_e620_9675_b523;
+    const GOLDEN: u64 = 0x6220_0835_a970_221e;
 
     #[test]
     fn golden_output_hash() {

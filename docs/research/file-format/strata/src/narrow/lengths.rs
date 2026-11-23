@@ -2,13 +2,15 @@
 //! `LIST_DICT` and `MAP` store their lengths this way instead of cumulative offsets, so the
 //! bodies hold small repeated bit patterns that zstd compresses well.
 
-use super::bitpack::{pack, unpack, width_for};
+use super::bitpack::width_for;
+use super::lanes::{Packer, unpack_block};
 use crate::error::{Result, StrataError};
 use crate::format::Cursor;
 
-/// Appends a lengths block for `lens`: `u32 base · u8 width · packed (len − base)`. `lens`
-/// has its null slots set to 0 already, so the base is 0 whenever there is a null.
-pub(crate) fn encode_lengths(lens: &[u32], out: &mut Vec<u8>) {
+/// Appends a lengths block for `lens`: `u32 base · u8 width · packed (len − base)`, packed by
+/// `packer` (in lanes where they fit). `lens` has its null slots set to 0 already, so the base
+/// is 0 whenever there is a null.
+pub(crate) fn encode_lengths(lens: &[u32], out: &mut Vec<u8>, packer: &Packer) {
     let base = lens.iter().copied().min().unwrap_or(0);
     let relative: Vec<u64> = lens
         .iter()
@@ -17,12 +19,18 @@ pub(crate) fn encode_lengths(lens: &[u32], out: &mut Vec<u8>) {
     let width = width_for(relative.iter().copied().max().unwrap_or(0));
     out.extend_from_slice(&base.to_le_bytes());
     out.push(width);
-    pack(&relative, width, out);
+    packer.pack(&relative, width, out);
 }
 
-/// Reads a lengths block of `n` lengths. The packed bytes are checked against the body before
-/// anything is allocated, and every failure is `Corrupt` at `at`.
-pub(crate) fn decode_lengths(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Vec<u32>> {
+/// Reads a lengths block of `n` lengths, in lanes where they fit when the chunk carries
+/// `flags::LANES` (`lanes`). The packed bytes are checked against the body before anything is
+/// allocated, and every failure is `Corrupt` at `at`.
+pub(crate) fn decode_lengths(
+    c: &mut Cursor<'_>,
+    n: usize,
+    at: u64,
+    lanes: bool,
+) -> Result<Vec<u32>> {
     let corrupt = || StrataError::Corrupt {
         what: "lengths",
         offset: at,
@@ -38,7 +46,7 @@ pub(crate) fn decode_lengths(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Ve
         .and_then(|words| words.checked_mul(8))
         .ok_or_else(corrupt)?;
     let bytes = c.bytes(packed, "lengths")?;
-    let relative = unpack(bytes, n, width).map_err(|_| corrupt())?;
+    let relative = unpack_block(bytes, n, width, lanes).map_err(|_| corrupt())?;
     relative
         .into_iter()
         .map(|r| {
@@ -88,9 +96,9 @@ mod tests {
 
     fn round_trip(lens: &[u32]) {
         let mut body = Vec::new();
-        encode_lengths(lens, &mut body);
+        encode_lengths(lens, &mut body, &Packer::new(false));
         let mut c = Cursor::new(&body, 0);
-        assert_eq!(decode_lengths(&mut c, lens.len(), 0).unwrap(), lens);
+        assert_eq!(decode_lengths(&mut c, lens.len(), 0, false).unwrap(), lens);
         assert_eq!(c.remaining(), 0);
     }
 
@@ -105,7 +113,7 @@ mod tests {
     #[test]
     fn an_empty_list_is_five_bytes() {
         let mut body = Vec::new();
-        encode_lengths(&[], &mut body);
+        encode_lengths(&[], &mut body, &Packer::new(false));
         assert_eq!(body, vec![0, 0, 0, 0, 0]);
     }
 
@@ -115,7 +123,7 @@ mod tests {
         body.extend_from_slice(&[0u8; 16]);
         let mut c = Cursor::new(&body, 0);
         assert!(matches!(
-            decode_lengths(&mut c, 2, 0),
+            decode_lengths(&mut c, 2, 0, false),
             Err(StrataError::Corrupt {
                 what: "lengths",
                 ..
@@ -126,11 +134,11 @@ mod tests {
     #[test]
     fn a_short_body_is_corrupt() {
         let mut body = Vec::new();
-        encode_lengths(&[1, 2, 3, 4_000], &mut body);
+        encode_lengths(&[1, 2, 3, 4_000], &mut body, &Packer::new(false));
         body.pop();
         let mut c = Cursor::new(&body, 0);
         assert!(matches!(
-            decode_lengths(&mut c, 4, 0),
+            decode_lengths(&mut c, 4, 0, false),
             Err(StrataError::Corrupt { .. })
         ));
     }
@@ -153,7 +161,29 @@ mod tests {
             body in proptest::collection::vec(any::<u8>(), 0..512),
         ) {
             let mut c = Cursor::new(&body, 0);
-            let _ = decode_lengths(&mut c, n, 0);
+            let _ = decode_lengths(&mut c, n, 0, false);
         }
+    }
+
+    #[test]
+    fn lengths_in_lanes_round_trip_in_the_same_bytes() {
+        let lens: Vec<u32> = (0..2_048u32).map(|i| (i * 37) % 300 + 5).collect();
+        let (mut lanes, mut in_order) = (Vec::new(), Vec::new());
+        let packer = Packer::new(true);
+        encode_lengths(&lens, &mut lanes, &packer);
+        assert!(packer.used());
+        encode_lengths(&lens, &mut in_order, &Packer::new(false));
+        assert_eq!(lanes.len(), in_order.len());
+        assert_ne!(lanes, in_order);
+        let mut c = Cursor::new(&lanes, 0);
+        assert_eq!(decode_lengths(&mut c, lens.len(), 0, true).unwrap(), lens);
+        // A block that does not fit lanes is in order even in a chunk with the flag.
+        let short = &lens[..1_000];
+        let mut body = Vec::new();
+        let packer = Packer::new(true);
+        encode_lengths(short, &mut body, &packer);
+        assert!(!packer.used());
+        let mut c = Cursor::new(&body, 0);
+        assert_eq!(decode_lengths(&mut c, short.len(), 0, true).unwrap(), short);
     }
 }

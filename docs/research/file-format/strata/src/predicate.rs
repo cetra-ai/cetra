@@ -10,6 +10,7 @@ use arrow::array::{
     Float64Array, Int64Array, MapArray, Scalar, StringArray, UInt32Array, UInt64Array,
     new_null_array,
 };
+use arrow::buffer::BooleanBuffer;
 use arrow::compute::kernels::cmp::{eq, gt, gt_eq, lt, lt_eq, neq};
 use arrow::compute::{
     CastOptions, and_kleene, cast, cast_with_options, is_not_null, is_null, not, or_kleene,
@@ -423,6 +424,16 @@ fn column_of(columns: &[Option<ArrayRef>], column: usize) -> Result<&ArrayRef> {
 /// rows of every column `b` references; `masks` holds the masks of the [`Bound::Mask`] leaves,
 /// in the order of [`bind`]. A row is selected only where the mask is valid and true: a null is
 /// not a match.
+/// A mask of `rows` rows, all `value`, without nulls: a bitmap, not a vector of booleans.
+fn constant_mask(value: bool, rows: usize) -> BooleanArray {
+    let bits = if value {
+        BooleanBuffer::new_set(rows)
+    } else {
+        BooleanBuffer::new_unset(rows)
+    };
+    BooleanArray::new(bits, None)
+}
+
 pub(crate) fn evaluate(
     b: &Bound,
     columns: &[Option<ArrayRef>],
@@ -430,17 +441,24 @@ pub(crate) fn evaluate(
     rows: usize,
 ) -> Result<BooleanArray> {
     match b {
+        // The first term's mask starts the fold; no term is TRUE for `And` and FALSE for `Or`.
         Bound::And(terms) => {
-            let mut acc = BooleanArray::from(vec![true; rows]);
-            for term in terms {
+            let Some((first, rest)) = terms.split_first() else {
+                return Ok(constant_mask(true, rows));
+            };
+            let mut acc = evaluate(first, columns, masks, rows)?;
+            for term in rest {
                 let mask = evaluate(term, columns, masks, rows)?;
                 acc = and_kleene(&acc, &mask)?;
             }
             Ok(acc)
         }
         Bound::Or(terms) => {
-            let mut acc = BooleanArray::from(vec![false; rows]);
-            for term in terms {
+            let Some((first, rest)) = terms.split_first() else {
+                return Ok(constant_mask(false, rows));
+            };
+            let mut acc = evaluate(first, columns, masks, rows)?;
+            for term in rest {
                 let mask = evaluate(term, columns, masks, rows)?;
                 acc = or_kleene(&acc, &mask)?;
             }
@@ -778,6 +796,122 @@ fn may_hold<T: PartialOrd + ?Sized>(op: CmpOp, min: &T, max: &T, v: &T) -> bool 
     }
 }
 
+/// Whether a range `[min, max]` proves `x op v` TRUE for every value `x` in it.
+fn must_hold<T: PartialOrd + ?Sized>(op: CmpOp, min: &T, max: &T, v: &T) -> bool {
+    match op {
+        CmpOp::Eq => min == v && max == v,
+        CmpOp::NotEq => v < min || v > max,
+        CmpOp::Lt => max < v,
+        CmpOp::LtEq => max <= v,
+        CmpOp::Gt => min > v,
+        CmpOp::GtEq => min >= v,
+    }
+}
+
+/// Whether the zone of chunk `entry` proves that every row satisfies `term`, an integer
+/// comparison or `IS NOT NULL` on the chunk's column (`field`). Only a chunk with a zone and
+/// without nulls proves anything; any other term proves nothing.
+pub(crate) fn chunk_must_match(term: &Bound, entry: &BlockEntry, field: &Field) -> bool {
+    let no_nulls = entry.flags & (flags::HAS_NULLS | flags::ALL_NULL) == 0
+        && entry.encoding != Encoding::ConstNull;
+    match term {
+        Bound::IsNotNull(_) => no_nulls,
+        Bound::Cmp(_, op, lit) => {
+            if !no_nulls || entry.flags & flags::HAS_ZONE == 0 || lit.is_null(0) {
+                return false;
+            }
+            let int = matches!(
+                field.data_type(),
+                DataType::Int8
+                    | DataType::Int16
+                    | DataType::Int32
+                    | DataType::Int64
+                    | DataType::UInt8
+                    | DataType::UInt16
+                    | DataType::UInt32
+                    | DataType::Date32
+                    | DataType::Date64
+                    | DataType::Timestamp(_, _)
+            );
+            match (
+                int,
+                read_back_i64(lit),
+                zone_i64(&entry.min),
+                zone_i64(&entry.max),
+            ) {
+                (true, Some(v), Some(min), Some(max)) => must_hold(*op, &min, &max, &v),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+/// The conjuncts of `b` (`b` itself when it is not an `And`) with the column of each, when
+/// every one is a comparison or `IS NOT NULL` on one column: the predicates whose matching rows
+/// the chunk zones can prove ([`chunk_must_match`]). `None` for any other predicate.
+pub(crate) fn provable_conjuncts(b: &Bound) -> Option<Vec<(usize, &Bound)>> {
+    let terms: Vec<&Bound> = match b {
+        Bound::And(terms) => terms.iter().collect(),
+        other => vec![other],
+    };
+    terms
+        .into_iter()
+        .map(|term| match term {
+            Bound::Cmp(column, _, _) | Bound::IsNotNull(column) => Some((*column, term)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The column and the values `lo..=hi` that `b` keeps, when `b` is one comparison or a
+/// conjunction of comparisons other than `!=` on one integer column (a range filter): its rows
+/// can be found from packed values ([`crate::narrow::range_mask`]). `None` for anything else.
+/// The bounds may be empty (`lo > hi`): no row matches.
+pub(crate) fn int_interval(b: &Bound) -> Option<(usize, i128, i128)> {
+    let conjuncts = provable_conjuncts(b)?;
+    let (mut lo, mut hi) = (i128::MIN, i128::MAX);
+    let mut column = None;
+    for (c, term) in conjuncts {
+        let Bound::Cmp(_, op, lit) = term else {
+            return None;
+        };
+        if column.is_some_and(|other| other != c) {
+            return None;
+        }
+        column = Some(c);
+        let int = matches!(
+            lit.data_type(),
+            DataType::Int8
+                | DataType::Int16
+                | DataType::Int32
+                | DataType::Int64
+                | DataType::UInt8
+                | DataType::UInt16
+                | DataType::UInt32
+                | DataType::Date32
+                | DataType::Date64
+                | DataType::Timestamp(_, _)
+        );
+        if !int || lit.is_null(0) {
+            return None;
+        }
+        let v = i128::from(read_back_i64(lit)?);
+        match op {
+            CmpOp::Eq => {
+                lo = lo.max(v);
+                hi = hi.min(v);
+            }
+            CmpOp::Lt => hi = hi.min(v - 1),
+            CmpOp::LtEq => hi = hi.min(v),
+            CmpOp::Gt => lo = lo.max(v + 1),
+            CmpOp::GtEq => lo = lo.max(v),
+            CmpOp::NotEq => return None,
+        }
+    }
+    column.map(|c| (c, lo, hi))
+}
+
 /// Whether a chunk may hold a row for which the term `value op lit` is TRUE, by its zone.
 /// A null literal never matches, and a chunk without a zone may match.
 fn term_may_match(entry: &BlockEntry, field: &Field, op: CmpOp, lit: &ArrayRef) -> Result<bool> {
@@ -1007,6 +1141,51 @@ pub(crate) fn chunk_may_match(
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn must_hold_proves_only_ranges_that_satisfy_the_whole_comparison() {
+        // Zone [10, 20].
+        assert!(must_hold(CmpOp::Eq, &10, &10, &10));
+        assert!(!must_hold(CmpOp::Eq, &10, &20, &10));
+        assert!(must_hold(CmpOp::NotEq, &10, &20, &9));
+        assert!(must_hold(CmpOp::NotEq, &10, &20, &21));
+        assert!(!must_hold(CmpOp::NotEq, &10, &20, &15));
+        assert!(must_hold(CmpOp::Lt, &10, &20, &21));
+        assert!(!must_hold(CmpOp::Lt, &10, &20, &20));
+        assert!(must_hold(CmpOp::LtEq, &10, &20, &20));
+        assert!(!must_hold(CmpOp::LtEq, &10, &20, &19));
+        assert!(must_hold(CmpOp::Gt, &10, &20, &9));
+        assert!(!must_hold(CmpOp::Gt, &10, &20, &10));
+        assert!(must_hold(CmpOp::GtEq, &10, &20, &10));
+        assert!(!must_hold(CmpOp::GtEq, &10, &20, &11));
+        // Every value a proof accepts satisfies the comparison, for every zone and literal.
+        for op in [
+            CmpOp::Eq,
+            CmpOp::NotEq,
+            CmpOp::Lt,
+            CmpOp::LtEq,
+            CmpOp::Gt,
+            CmpOp::GtEq,
+        ] {
+            for (lo, hi) in [(0, 0), (0, 5), (3, 8), (5, 5)] {
+                for v in -1..10 {
+                    if must_hold(op, &lo, &hi, &v) {
+                        for x in lo..=hi {
+                            let holds = match op {
+                                CmpOp::Eq => x == v,
+                                CmpOp::NotEq => x != v,
+                                CmpOp::Lt => x < v,
+                                CmpOp::LtEq => x <= v,
+                                CmpOp::Gt => x > v,
+                                CmpOp::GtEq => x >= v,
+                            };
+                            assert!(holds, "{op:?} {x} {v} in [{lo}, {hi}]");
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn may_hold_matches_the_pruning_table() {

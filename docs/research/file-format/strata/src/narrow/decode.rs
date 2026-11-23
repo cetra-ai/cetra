@@ -9,7 +9,11 @@ use arrow::array::{
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
 use arrow::datatypes::{ArrowNativeType, DataType, Field, UInt32Type};
 
-use super::bitpack::{for_each_packed, unpack, unpack_u32};
+use super::bitpack::{extend_packed, pick_packed};
+use super::lanes::{
+    BLOCK, LaneOut, extend_lanes, extend_lanes_plus, fits_lanes, pick_lanes, range_words,
+    unpack_block, unpack_block_u32,
+};
 use super::lengths::{decode_lengths, offsets_of, total_of};
 use super::{
     BlockEntry, Class, Dictionary, Encoding, Numeric, fits, flags, is_utf8_map, numeric_of,
@@ -53,6 +57,7 @@ pub fn decode_chunk(
     } else {
         None
     };
+    let lanes = entry.flags & flags::LANES != 0;
     match dt {
         DataType::Utf8 if entry.encoding == Encoding::Varbin => {
             decode_varbin(entry, &mut c, n, nulls, dt, at)
@@ -66,7 +71,7 @@ pub fn decode_chunk(
             if entry.encoding != Encoding::Map || !is_utf8_map(dt) {
                 return Err(corrupt("encoding for type"));
             }
-            decode_map(&mut c, n, nulls, dt, at)
+            decode_map(&mut c, n, nulls, dt, at, lanes)
         }
         DataType::Boolean => {
             if entry.encoding != Encoding::Bool {
@@ -81,13 +86,166 @@ pub fn decode_chunk(
             decode_fsb(entry, &mut c, n, width, nulls, dt, at)
         }
         DataType::Float64 if entry.encoding == Encoding::FloatDict => {
-            decode_float_dict(&mut c, n, nulls, dict, dt, at)
+            decode_float_dict(&mut c, n, nulls, dict, dt, at, lanes)
         }
         _ => {
             let num = numeric_of(dt).ok_or_else(|| corrupt("encoding for type"))?;
             decode_numeric(entry, num, &mut c, n, nulls, dt, at)
         }
     }
+}
+
+/// The rows `rows` (positions in the chunk, each below its row count) of a bit-packed integer
+/// chunk without nulls whose range proves every value fits, read straight from the packed
+/// values: a scan that keeps a few rows of a chunk does not decode the others. `None` for any
+/// other chunk, which the caller decodes whole.
+pub fn pick_chunk(
+    entry: &BlockEntry,
+    body: &[u8],
+    field: &Field,
+    rows: &[u32],
+) -> Result<Option<ArrayRef>> {
+    let at = entry.segment_offset;
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    let dt = field.data_type();
+    let Some(num) = numeric_of(dt) else {
+        return Ok(None);
+    };
+    if entry.encoding != Encoding::ForBitpack
+        || num.class != Class::Int
+        || entry.flags & flags::HAS_NULLS != 0
+        || entry.flags & flags::HAS_ZONE == 0
+        || entry.n_rows > MAX_CHUNK_ROWS
+    {
+        return Ok(None);
+    }
+    let n = entry.n_rows as usize;
+    let Some(base) = entry.min.get(..8).and_then(le_u64) else {
+        return Ok(None);
+    };
+    let mut c = Cursor::new(body, at);
+    let width = c.u8("bitpack width")?;
+    let packing = packing_of(entry, n, width);
+    let rest = c.remaining();
+    let packed = c.bytes(rest, "bitpack values")?;
+    expect_end(&c, at)?;
+    if !range_fits(base, width, num.width, num.signed) {
+        return Ok(None);
+    }
+    let picked = |cast: &dyn Fn(u64) -> u64| -> Result<Vec<u64>> {
+        let mut values = Vec::with_capacity(rows.len());
+        match packing {
+            Packing::Plain => pick_packed(&mut values, packed, n, width, rows, cast)?,
+            Packing::Lanes => pick_lanes(&mut values, packed, n, width, rows, cast)?,
+        }
+        Ok(values)
+    };
+    // As in `decode_numeric`, each cast keeps the low bytes of the value.
+    let wide = picked(&|d| base.wrapping_add(d)).map_err(|_| corrupt("bitpack values"))?;
+    let values = match num.width {
+        1 => Buffer::from_vec(wide.into_iter().map(|v| v as u8).collect::<Vec<_>>()),
+        2 => Buffer::from_vec(wide.into_iter().map(|v| v as u16).collect::<Vec<_>>()),
+        4 => Buffer::from_vec(wide.into_iter().map(|v| v as u32).collect::<Vec<_>>()),
+        8 => Buffer::from_vec(wide),
+        _ => return Err(corrupt("numeric width")),
+    };
+    build_array(dt, rows.len(), None, values, at).map(Some)
+}
+
+/// Which rows of a bit-packed integer chunk without nulls hold a value in `lo..=hi`, found on
+/// the packed values: each value is `base + delta`, so the test is `lo - base <= delta <= hi -
+/// base`, one subtraction and one comparison per value, with no array of the column's type.
+/// A chunk whose width rules every value in or out is decided without unpacking. `None` for
+/// any other chunk, which the caller decodes and evaluates.
+pub fn range_mask(
+    entry: &BlockEntry,
+    body: &[u8],
+    field: &Field,
+    lo: i128,
+    hi: i128,
+) -> Result<Option<BooleanBuffer>> {
+    let at = entry.segment_offset;
+    let Some(num) = numeric_of(field.data_type()) else {
+        return Ok(None);
+    };
+    if entry.encoding != Encoding::ForBitpack
+        || num.class != Class::Int
+        || entry.flags & flags::HAS_NULLS != 0
+        || entry.flags & flags::HAS_ZONE == 0
+        || entry.n_rows > MAX_CHUNK_ROWS
+    {
+        return Ok(None);
+    }
+    let n = entry.n_rows as usize;
+    let Some(base) = entry.min.get(..8).and_then(le_u64) else {
+        return Ok(None);
+    };
+    let mut c = Cursor::new(body, at);
+    let width = c.u8("bitpack width")?;
+    let packing = packing_of(entry, n, width);
+    let rest = c.remaining();
+    let packed = c.bytes(rest, "bitpack values")?;
+    expect_end(&c, at)?;
+    if !range_fits(base, width, num.width, num.signed) {
+        return Ok(None);
+    }
+    let start = if num.signed {
+        i128::from(base as i64)
+    } else {
+        i128::from(base)
+    };
+    let span = if width >= 64 {
+        i128::from(u64::MAX)
+    } else {
+        (1i128 << width) - 1
+    };
+    // An open bound is `i128::MIN` or `MAX`: the subtractions saturate instead of wrapping.
+    let (dlo, dhi) = (
+        lo.saturating_sub(start).max(0),
+        hi.saturating_sub(start).min(span),
+    );
+    if dlo > dhi {
+        return Ok(Some(BooleanBuffer::new_unset(n)));
+    }
+    if dlo == 0 && dhi == span {
+        return Ok(Some(BooleanBuffer::new_set(n)));
+    }
+    let corrupt = || StrataError::Corrupt {
+        what: "bitpack values",
+        offset: at,
+    };
+    // `0 <= dlo <= dhi <= span`, which fits the width, so both casts keep the value.
+    let (len, dlo) = ((dhi - dlo) as u64, dlo as u64);
+    if packing == Packing::Lanes {
+        // In lanes, the kernel tests the deltas as it unpacks them, 32 rows to a word. `width`
+        // is at most 32 in lanes, so the bounds fit a `u32`.
+        let words = range_words(packed, n, width, dlo as u32, len as u32).map_err(|_| corrupt())?;
+        return Ok(Some(BooleanBuffer::new(Buffer::from_vec(words), 0, n)));
+    }
+    let words = if width <= 32 {
+        let mut deltas: Vec<u32> = Vec::with_capacity(n);
+        extend_packed(&mut deltas, packed, n, width, |d| d as u32).map_err(|_| corrupt())?;
+        let (dlo, len) = (dlo as u32, len as u32);
+        mask_words(&deltas, |d| d.wrapping_sub(dlo) <= len)
+    } else {
+        let mut deltas: Vec<u64> = Vec::with_capacity(n);
+        extend_packed(&mut deltas, packed, n, width, |d| d).map_err(|_| corrupt())?;
+        mask_words(&deltas, |d| d.wrapping_sub(dlo) <= len)
+    };
+    Ok(Some(BooleanBuffer::new(Buffer::from_vec(words), 0, n)))
+}
+
+/// The bits of `test` on each value, 64 values to a word, little-endian bit order.
+fn mask_words<T: Copy>(values: &[T], test: impl Fn(T) -> bool) -> Vec<u64> {
+    values
+        .chunks(64)
+        .map(|block| {
+            block
+                .iter()
+                .enumerate()
+                .fold(0u64, |word, (j, &v)| word | (u64::from(test(v)) << j))
+        })
+        .collect()
 }
 
 /// An `IPC` chunk: an Arrow IPC stream of one batch holding one column of `field`'s type
@@ -130,7 +288,7 @@ fn decode_varbin(
     if entry.encoding != Encoding::Varbin {
         return Err(corrupt("encoding for type"));
     }
-    let lens = decode_lengths(c, n, at)?;
+    let lens = decode_lengths(c, n, at, entry.flags & flags::LANES != 0)?;
     check_null_lengths(&lens, nulls.as_ref(), at)?;
     // The bytes are taken before the offsets are built, so the offsets are bounded by the body.
     let total = total_of(&lens, "varbin bytes", at)?;
@@ -210,6 +368,129 @@ fn expect_end(c: &Cursor<'_>, at: u64) -> Result<()> {
 }
 
 /// Builds the array from its value buffer, checking the buffer's length against the type.
+/// An integer of a column's width, for the wrapping sums of [`decode_delta`].
+trait Wrapping: ArrowNativeType + Copy + Default {
+    /// The low bytes of `v`.
+    fn low(v: u64) -> Self;
+    fn plus(self, other: Self) -> Self;
+    /// The `n` steps of `width` bits (1 to 32) in lanes in `packed`, each plus `reference`, at
+    /// this width.
+    fn steps(packed: &[u8], n: usize, width: u8, reference: Self) -> Result<Vec<Self>>;
+}
+
+macro_rules! wrapping {
+    ($($t:ty => $steps:expr;)*) => {$(
+        impl Wrapping for $t {
+            #[inline(always)]
+            fn low(v: u64) -> Self {
+                v as $t
+            }
+            #[inline(always)]
+            fn plus(self, other: Self) -> Self {
+                self.wrapping_add(other)
+            }
+            fn steps(packed: &[u8], n: usize, width: u8, reference: Self) -> Result<Vec<Self>> {
+                $steps(packed, n, width, reference)
+            }
+        }
+    )*};
+}
+
+/// Steps unpacked by the lanes kernel with the reference added, for 32- and 64-bit columns.
+fn kernel_steps<O: LaneOut>(packed: &[u8], n: usize, width: u8, reference: O) -> Result<Vec<O>> {
+    let mut out = Vec::with_capacity(n);
+    extend_lanes_plus(&mut out, packed, n, width, reference)?;
+    Ok(out)
+}
+
+/// Steps of an 8- or 16-bit column: through `u32`, then the low bytes.
+fn narrow_steps<T: Wrapping>(packed: &[u8], n: usize, width: u8, reference: T) -> Result<Vec<T>> {
+    let wide = kernel_steps::<u32>(packed, n, width, 0)?;
+    Ok(wide
+        .into_iter()
+        .map(|s| T::low(u64::from(s)).plus(reference))
+        .collect())
+}
+
+wrapping! {
+    u8 => narrow_steps::<u8>;
+    u16 => narrow_steps::<u16>;
+    u32 => kernel_steps::<u32>;
+    u64 => kernel_steps::<u64>;
+}
+
+/// The `n` values of a `ForDelta` body (`encode.rs`, `encode_delta`) whose first values are
+/// offsets from `base`, at the width of `T`. The sums wrap at that width, which is the
+/// arithmetic the writer's 64-bit sums reduce to. Every length, width and patch row is checked
+/// before it is used, and every failure is `Corrupt` at `at`.
+fn decode_delta<T: Wrapping>(c: &mut Cursor<'_>, n: usize, base: u64, at: u64) -> Result<Vec<T>> {
+    let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
+    if n < BLOCK || !n.is_multiple_of(BLOCK) {
+        return Err(corrupt("delta rows"));
+    }
+    let width = c.u8("delta width")?;
+    if width > 32 {
+        return Err(corrupt("delta width"));
+    }
+    let reference = c.u64("delta reference")?;
+    let first_width = c.u8("delta first width")?;
+    if first_width > 64 {
+        return Err(corrupt("delta first width"));
+    }
+    let first_len = (32 * usize::from(first_width)).div_ceil(64) * 8;
+    let firsts = unpack_block(
+        c.bytes(first_len, "delta first values")?,
+        32,
+        first_width,
+        false,
+    )
+    .map_err(|_| corrupt("delta first values"))?;
+    // The steps at the column's width, the reference already added.
+    let reference_t = T::low(reference);
+    let mut steps: Vec<T> = if width == 0 {
+        vec![reference_t; n]
+    } else {
+        let packed = c.bytes(n / 8 * usize::from(width), "delta steps")?;
+        T::steps(packed, n, width, reference_t).map_err(|_| corrupt("delta steps"))?
+    };
+    let count = c.u32("delta patches")? as usize;
+    if count > n {
+        return Err(corrupt("delta patches"));
+    }
+    let rows = c.bytes(count * 2, "delta patch rows")?;
+    let values = c.bytes(count * 8, "delta patch values")?;
+    for (row, value) in rows
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(values.as_chunks::<8>().0)
+    {
+        let row = usize::from(u16::from_le_bytes(*row));
+        let slot = steps
+            .get_mut(row)
+            .filter(|_| row >= 32)
+            .ok_or_else(|| corrupt("delta patch row"))?;
+        *slot = T::low(reference.wrapping_add(u64::from_le_bytes(*value)));
+    }
+    // In place: the first row becomes the first values, and each later row the sum of its steps
+    // and the row before, carried in a 32-lane accumulator the compiler keeps in registers.
+    let rows = steps.as_chunks_mut::<32>().0;
+    let Some((first, rest)) = rows.split_first_mut() else {
+        return Err(corrupt("delta rows"));
+    };
+    for (v, f) in first.iter_mut().zip(&firsts) {
+        *v = T::low(base.wrapping_add(*f));
+    }
+    let mut acc = *first;
+    for row in rest {
+        for (a, v) in acc.iter_mut().zip(row.iter_mut()) {
+            *a = a.plus(*v);
+            *v = *a;
+        }
+    }
+    Ok(steps)
+}
+
 fn build_array(
     dt: &DataType,
     n: usize,
@@ -231,14 +512,57 @@ fn build_array(
 
 /// Unpacks `n` values of `width` bits from `packed` into a buffer of `T`, one `cast` each.
 fn unpack_typed<T: ArrowNativeType>(
+    packing: Packing,
     packed: &[u8],
     n: usize,
     width: u8,
-    mut cast: impl FnMut(u64) -> T,
+    cast: impl FnMut(u64) -> T,
 ) -> Result<Buffer> {
     let mut values: Vec<T> = Vec::with_capacity(n);
-    for_each_packed(packed, n, width, |delta| values.push(cast(delta)))?;
+    match packing {
+        Packing::Plain => extend_packed(&mut values, packed, n, width, cast)?,
+        Packing::Lanes => extend_lanes(&mut values, packed, n, width, cast)?,
+    }
     Ok(Buffer::from_vec(values))
+}
+
+/// How the deltas of a frame-of-reference chunk are packed: one after another, or in lanes
+/// ([`flags::LANES`], when the deltas fit them).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packing {
+    Plain,
+    Lanes,
+}
+
+/// The packing of the `n` deltas of `width` bits of a `ForBitpack` chunk.
+fn packing_of(entry: &BlockEntry, n: usize, width: u8) -> Packing {
+    if entry.flags & flags::LANES != 0 && fits_lanes(n, width) {
+        Packing::Lanes
+    } else {
+        Packing::Plain
+    }
+}
+
+/// Whether every value `base + d` with `d` of `width` bits fits a `num_width`-byte integer,
+/// proved from the two ends of the range: then no value needs its own check. `false` when the
+/// range wraps or an end does not fit, though some chunks of such a range may still be valid.
+fn range_fits(base: u64, width: u8, num_width: usize, signed: bool) -> bool {
+    let span = if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    };
+    if signed {
+        let lo = i128::from(base as i64);
+        let hi = lo + i128::from(span);
+        let Ok(hi) = i64::try_from(hi) else {
+            return false;
+        };
+        fits(base, num_width, true) && fits(hi as u64, num_width, true)
+    } else {
+        base.checked_add(span)
+            .is_some_and(|hi| fits(hi, num_width, false))
+    }
 }
 
 /// Builds a numeric array from one physical value per row, checking that each value fits.
@@ -284,29 +608,81 @@ fn decode_numeric(
                 .and_then(le_u64)
                 .ok_or_else(|| corrupt("chunk zone"))?;
             let width = c.u8("bitpack width")?;
+            let packing = packing_of(entry, n, width);
             let rest = c.remaining();
             let packed = c.bytes(rest, "bitpack values")?;
             expect_end(c, at)?;
             // One pass: unpack, add the base, check the range, and write the value at its width.
+            // When the chunk's range proves every value fits, the pass skips the checks.
             let mut fits_all = true;
-            let mut check = |v: u64| {
-                fits_all &= fits(v, num.width, num.signed);
-                v
-            };
             // Each cast keeps the low bytes of the value, which is its little-endian encoding at
             // that width when the value fits.
-            let values = match num.width {
-                1 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u8),
-                2 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u16),
-                4 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d)) as u32),
-                8 => unpack_typed(packed, n, width, |d| check(base.wrapping_add(d))),
-                _ => return Err(corrupt("numeric width")),
+            let values = if range_fits(base, width, num.width, num.signed) {
+                match num.width {
+                    // In lanes, 32- and 64-bit values are unpacked with their base in one pass.
+                    4 if packing == Packing::Lanes => {
+                        let mut values: Vec<u32> = Vec::with_capacity(n);
+                        // The low 32 bits of the base: the cast keeps them for each value too.
+                        extend_lanes_plus(&mut values, packed, n, width, base as u32)
+                            .map(|()| Buffer::from_vec(values))
+                    }
+                    8 if packing == Packing::Lanes => {
+                        let mut values: Vec<u64> = Vec::with_capacity(n);
+                        extend_lanes_plus(&mut values, packed, n, width, base)
+                            .map(|()| Buffer::from_vec(values))
+                    }
+                    1 => unpack_typed(packing, packed, n, width, |d| base.wrapping_add(d) as u8),
+                    2 => unpack_typed(packing, packed, n, width, |d| base.wrapping_add(d) as u16),
+                    4 => unpack_typed(packing, packed, n, width, |d| base.wrapping_add(d) as u32),
+                    8 => unpack_typed(packing, packed, n, width, |d| base.wrapping_add(d)),
+                    _ => return Err(corrupt("numeric width")),
+                }
+            } else {
+                let mut check = |v: u64| {
+                    fits_all &= fits(v, num.width, num.signed);
+                    v
+                };
+                match num.width {
+                    1 => unpack_typed(packing, packed, n, width, |d| {
+                        check(base.wrapping_add(d)) as u8
+                    }),
+                    2 => unpack_typed(packing, packed, n, width, |d| {
+                        check(base.wrapping_add(d)) as u16
+                    }),
+                    4 => unpack_typed(packing, packed, n, width, |d| {
+                        check(base.wrapping_add(d)) as u32
+                    }),
+                    8 => unpack_typed(packing, packed, n, width, |d| check(base.wrapping_add(d))),
+                    _ => return Err(corrupt("numeric width")),
+                }
             }
             .map_err(|_| corrupt("bitpack values"))?;
             if !fits_all {
                 return Err(corrupt("value out of range"));
             }
             build_array(dt, n, nulls, values, at)
+        }
+        (Encoding::ForDelta, Class::Int) => {
+            // A delta chunk has no nulls, and its zone's min is the base of its first values.
+            if entry.flags & flags::HAS_ZONE == 0 || nulls.is_some() {
+                return Err(corrupt("chunk zone"));
+            }
+            let base = entry
+                .min
+                .get(..8)
+                .and_then(le_u64)
+                .ok_or_else(|| corrupt("chunk zone"))?;
+            // The sums run at the column's width, wrapping: every result is a value of the type,
+            // so no value needs a range check.
+            let buffer = match num.width {
+                1 => Buffer::from_vec(decode_delta::<u8>(c, n, base, at)?),
+                2 => Buffer::from_vec(decode_delta::<u16>(c, n, base, at)?),
+                4 => Buffer::from_vec(decode_delta::<u32>(c, n, base, at)?),
+                8 => Buffer::from_vec(decode_delta::<u64>(c, n, base, at)?),
+                _ => return Err(corrupt("numeric width")),
+            };
+            expect_end(c, at)?;
+            build_array(dt, n, None, buffer, at)
         }
         (Encoding::Plain, Class::Wide | Class::Float | Class::Int) => {
             // Plain values are stored at the type's width, little-endian: the bytes are the
@@ -447,7 +823,8 @@ pub fn decode_chunk_view(
         what: "dictionary codes",
         offset: at,
     };
-    let keys = unpack_u32(packed, n, width).map_err(|_| corrupt_codes())?;
+    let lanes = entry.flags & flags::LANES != 0;
+    let keys = unpack_block_u32(packed, n, width, lanes).map_err(|_| corrupt_codes())?;
     // Null rows carry a code too, which must be in the dictionary.
     if keys
         .iter()
@@ -476,6 +853,7 @@ fn decode_float_dict(
     dict: Option<&Dictionary>,
     dt: &DataType,
     at: u64,
+    lanes: bool,
 ) -> Result<ArrayRef> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
     let floats = require_dict(dict, at)?
@@ -485,7 +863,8 @@ fn decode_float_dict(
     let rest = c.remaining();
     let packed = c.bytes(rest, "dictionary codes")?;
     expect_end(c, at)?;
-    let codes = unpack_u32(packed, n, width).map_err(|_| corrupt("dictionary codes"))?;
+    let codes =
+        unpack_block_u32(packed, n, width, lanes).map_err(|_| corrupt("dictionary codes"))?;
     let mut values: Vec<u8> = Vec::with_capacity(n * 8);
     for code in codes {
         let value = floats
@@ -504,12 +883,13 @@ fn require_dict(dict: Option<&Dictionary>, at: u64) -> Result<&Dictionary> {
     })
 }
 
-/// Reads the packed codes: a width byte, then the codes of `n` values.
-fn read_codes(c: &mut Cursor<'_>, n: usize, at: u64) -> Result<Vec<u64>> {
+/// Reads the packed codes: a width byte, then the codes of `n` values, in lanes where they fit
+/// when the chunk carries `flags::LANES` (`lanes`).
+fn read_codes(c: &mut Cursor<'_>, n: usize, at: u64, lanes: bool) -> Result<Vec<u64>> {
     let width = c.u8("dictionary width")?;
     let rest = c.remaining();
     let packed = c.bytes(rest, "dictionary codes")?;
-    unpack(packed, n, width).map_err(|_| StrataError::Corrupt {
+    unpack_block(packed, n, width, lanes).map_err(|_| StrataError::Corrupt {
         what: "dictionary codes",
         offset: at,
     })
@@ -544,7 +924,7 @@ fn decode_utf8(
         });
     }
     let dict = require_dict(dict, at)?;
-    let codes = read_codes(c, n, at)?;
+    let codes = read_codes(c, n, at, entry.flags & flags::LANES != 0)?;
 
     // First pass: every code is in the dictionary, and the value bytes fit the output limit.
     // Nothing is allocated for the output before this passes.
@@ -598,14 +978,14 @@ fn decode_list_utf8(
     }
     let dict = require_dict(dict, at)?;
 
-    let counts = decode_lengths(c, n, at)?;
+    let counts = decode_lengths(c, n, at, entry.flags & flags::LANES != 0)?;
     check_null_lengths(&counts, nulls.as_ref(), at)?;
     let total = total_of(&counts, "list elements", at)?;
     if total > MAX_CHUNK_ELEMENTS {
         return Err(corrupt("list elements"));
     }
 
-    let codes = read_codes(c, total, at)?;
+    let codes = read_codes(c, total, at, entry.flags & flags::LANES != 0)?;
     // First pass: every code is in the dictionary, and the value bytes fit the output limit.
     let mut bytes = 0usize;
     for code in &codes {
@@ -640,6 +1020,7 @@ fn decode_map(
     nulls: Option<NullBuffer>,
     dt: &DataType,
     at: u64,
+    lanes: bool,
 ) -> Result<ArrayRef> {
     let corrupt = |what: &'static str| StrataError::Corrupt { what, offset: at };
     let DataType::Map(entries_field, sorted) = dt else {
@@ -649,14 +1030,14 @@ fn decode_map(
         return Err(corrupt("encoding for type"));
     };
 
-    let counts = decode_lengths(c, n, at)?;
+    let counts = decode_lengths(c, n, at, lanes)?;
     check_null_lengths(&counts, nulls.as_ref(), at)?;
     let entries = total_of(&counts, "map entries", at)?;
     if entries > MAX_CHUNK_ELEMENTS {
         return Err(corrupt("map entries"));
     }
 
-    let key_lens = decode_lengths(c, entries, at)?;
+    let key_lens = decode_lengths(c, entries, at, lanes)?;
     let key_total = total_of(&key_lens, "map keys", at)?;
     let key_bytes = c.bytes(key_total, "map keys")?;
 
@@ -673,7 +1054,7 @@ fn decode_map(
         }
         _ => return Err(corrupt("map value nulls")),
     };
-    let value_lens = decode_lengths(c, entries, at)?;
+    let value_lens = decode_lengths(c, entries, at, lanes)?;
     check_null_lengths(&value_lens, value_valid.as_ref(), at)?;
     let value_total = total_of(&value_lens, "map values", at)?;
     if key_total
@@ -818,6 +1199,8 @@ fn decode_const(
 mod tests {
     use super::*;
     use crate::config::Config;
+    use crate::narrow::ENCODINGS;
+    use crate::narrow::lanes::Packer;
     use crate::narrow::lengths::encode_lengths;
     use crate::narrow::{EncodedChunk, encode_chunk, for_column};
     use crate::testgen::{assert_same, batch, wide_batch};
@@ -829,6 +1212,95 @@ mod tests {
     use arrow::datatypes::{Fields, TimeUnit};
     use proptest::prelude::*;
     use std::sync::Arc;
+
+    #[test]
+    fn range_masks_on_packed_values_match_a_comparison_of_the_decoded_ones() {
+        let arrays: Vec<(ArrayRef, DataType)> = vec![
+            (
+                Arc::new(Int32Array::from_iter_values(
+                    (0..2048).map(|i| (i * 37) % 1000 - 300),
+                )),
+                DataType::Int32,
+            ),
+            (
+                Arc::new(Int64Array::from_iter_values(
+                    (0..2048).map(|i| i * 1_000_003 + 7),
+                )),
+                DataType::Int64,
+            ),
+            (
+                Arc::new(UInt8Array::from_iter_values(
+                    (0..2048).map(|i| (i % 100) as u8 + 40),
+                )),
+                DataType::UInt8,
+            ),
+            (
+                Arc::new(Int16Array::from_iter_values((0..100).map(|_| -5))),
+                DataType::Int16,
+            ),
+        ];
+        for (array, dt) in arrays {
+            let chunk = encode_chunk(&array, None, &Config::default()).unwrap();
+            // The 2,048-row chunks are in lanes.
+            if chunk.encoding != Encoding::ForBitpack {
+                continue;
+            }
+            let n = array.len();
+            let entry = entry_of(&chunk, n);
+            let field = Field::new("c", dt, false);
+            let body = chunk.body.as_deref().unwrap();
+            let values = arrow::compute::cast(&array, &DataType::Int64).unwrap();
+            let values = values.as_any().downcast_ref::<Int64Array>().unwrap();
+            let (min, max) = (
+                i128::from(arrow::compute::min(values).unwrap()),
+                i128::from(arrow::compute::max(values).unwrap()),
+            );
+            for (lo, hi) in [
+                (i128::MIN, i128::MAX),
+                (min, max),
+                (min + 1, max - 1),
+                (min - 10, min - 1),
+                (max + 1, max + 100),
+                (min, min),
+                ((min + max) / 2, (min + max) / 2 + 3),
+                (5, 4),
+                (-300, 0),
+                (0, 699),
+            ] {
+                let mask = range_mask(&entry, body, &field, lo, hi).unwrap().unwrap();
+                assert_eq!(mask.len(), n);
+                for i in 0..n {
+                    let v = i128::from(values.value(i));
+                    assert_eq!(mask.value(i), lo <= v && v <= hi, "{lo}..={hi} row {i}");
+                }
+            }
+        }
+        // A chunk of another encoding is left to the caller.
+        let strings: ArrayRef = Arc::new(StringArray::from(vec!["a", "b"]));
+        let chunk = encode_chunk(&strings, None, &Config::default()).unwrap();
+        let entry = entry_of(&chunk, 2);
+        let field = Field::new("c", DataType::Utf8, false);
+        let body = chunk.body.as_deref().unwrap_or_default();
+        assert!(range_mask(&entry, body, &field, 0, 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_chunk_range_proves_its_values_fit_or_asks_for_checks() {
+        // Unsigned: base 250 with 2 bits reaches 253, which fits a byte; with 3 bits, 257 does not.
+        assert!(range_fits(250, 2, 1, false));
+        assert!(!range_fits(250, 3, 1, false));
+        assert!(range_fits(u64::MAX, 0, 8, false));
+        assert!(!range_fits(u64::MAX, 1, 8, false)); // wraps
+        assert!(range_fits(0, 64, 8, false));
+        // Signed: -128 + 255 = 127 fits an i8; -127 + 255 does not.
+        assert!(range_fits(-128i64 as u64, 8, 1, true));
+        assert!(!range_fits(-127i64 as u64, 8, 1, true));
+        assert!(!range_fits(-129i64 as u64, 0, 1, true));
+        assert!(range_fits(i64::MIN as u64, 63, 8, true));
+        assert!(range_fits(i64::MIN as u64, 64, 8, true)); // ends at i64::MAX
+        assert!(!range_fits(i64::MIN as u64 + 1, 64, 8, true)); // passes it
+        assert!(range_fits(-5i64 as u64, 3, 4, true));
+    }
 
     /// The block entry of `chunk`, for `n` rows.
     fn entry_of(chunk: &EncodedChunk, n: usize) -> BlockEntry {
@@ -1192,7 +1664,11 @@ mod tests {
         let dict = dict_of(&sample).unwrap();
         // One list of MAX_CHUNK_ELEMENTS + 1 elements, with width 0 and no codes.
         let mut body = Vec::new();
-        encode_lengths(&[MAX_CHUNK_ELEMENTS as u32 + 1], &mut body);
+        encode_lengths(
+            &[MAX_CHUNK_ELEMENTS as u32 + 1],
+            &mut body,
+            &Packer::new(false),
+        );
         body.push(0);
         let entry = BlockEntry {
             first_row: 0,
@@ -1374,6 +1850,57 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_batch_columns_round_trip_in_lanes() {
+        // 2,048 rows: two blocks, so the packed blocks of every kind go in lanes.
+        let full = batch(2_048);
+        let mut lanes = Vec::new();
+        for (field, column) in full.schema().fields().iter().zip(full.columns()) {
+            let dict = dict_of(column);
+            let chunk = round_trip_with(Arc::clone(column), dict.as_ref());
+            if chunk.flags & flags::LANES != 0 {
+                lanes.push((field.name().clone(), chunk.encoding));
+                // The view decoder (dictionary arrays) reads the lanes too.
+                let entry = BlockEntry {
+                    first_row: 0,
+                    n_rows: column.len() as u32,
+                    segment_offset: 8,
+                    segment_len: chunk.body.as_ref().map_or(0, |b| b.len() as u32 + 16),
+                    encoding: chunk.encoding,
+                    flags: chunk.flags,
+                    const_len: chunk.const_len,
+                    min: chunk.min,
+                    max: chunk.max,
+                };
+                let f = Field::new("c", column.data_type().clone(), true);
+                let view =
+                    decode_chunk_view(&entry, chunk.body.as_deref(), &f, dict.as_ref()).unwrap();
+                let view = match view.data_type() {
+                    DataType::Dictionary(..) => {
+                        arrow::compute::cast(&view, column.data_type()).unwrap()
+                    }
+                    _ => view,
+                };
+                assert_same(view.as_ref(), column.as_ref());
+            }
+        }
+        let encodings: Vec<Encoding> = lanes.iter().map(|(_, e)| *e).collect();
+        for want in [Encoding::ForBitpack, Encoding::Dict, Encoding::ListDict] {
+            assert!(
+                encodings.contains(&want),
+                "{want:?} not in lanes: {lanes:?}"
+            );
+        }
+        // Strings without a dictionary: a `Varbin` chunk, whose lengths block goes in lanes.
+        let strings: ArrayRef =
+            Arc::new(StringArray::from_iter((0..2_048).map(|i| {
+                (i % 9 != 0).then(|| format!("value {i} {}", "x".repeat(i % 40)))
+            })));
+        let chunk = round_trip_with(strings, None);
+        assert_eq!(chunk.encoding, Encoding::Varbin);
+        assert_eq!(chunk.flags & flags::LANES, flags::LANES);
+    }
+
     proptest! {
         #[test]
         fn utf8_round_trips(
@@ -1457,7 +1984,7 @@ mod tests {
 
         #[test]
         fn random_entries_and_bodies_never_panic(
-            encoding in 0u8..=11,
+            encoding in 0u8..ENCODINGS as u8,
             n_rows in 0u32..70_000,
             const_len in 0u16..40,
             entry_flags in any::<u8>(),
@@ -1777,7 +2304,7 @@ mod tests {
     fn varbin_lengths_whose_sum_exceeds_the_bytes_are_corrupt() {
         // Two values of 3 bytes each, but only 3 bytes follow the lengths block.
         let mut body = Vec::new();
-        encode_lengths(&[3, 3], &mut body);
+        encode_lengths(&[3, 3], &mut body, &Packer::new(false));
         body.extend_from_slice(b"abc");
         let entry = BlockEntry {
             first_row: 0,
@@ -1801,7 +2328,7 @@ mod tests {
     fn varbin_null_slot_with_a_length_is_corrupt() {
         // Row 1 is null (bit 1 clear) but has length 1.
         let mut body = vec![0b01u8];
-        encode_lengths(&[3, 1], &mut body);
+        encode_lengths(&[3, 1], &mut body, &Packer::new(false));
         body.extend_from_slice(b"abcd");
         let entry = BlockEntry {
             first_row: 0,
@@ -1828,8 +2355,8 @@ mod tests {
     fn map_with_a_bad_value_nulls_byte_is_corrupt() {
         // One map with one entry ("k", null), then a value-nulls byte of 2.
         let mut body = Vec::new();
-        encode_lengths(&[1], &mut body);
-        encode_lengths(&[1], &mut body);
+        encode_lengths(&[1], &mut body, &Packer::new(false));
+        encode_lengths(&[1], &mut body, &Packer::new(false));
         body.push(b'k');
         body.push(2);
         let entry = BlockEntry {

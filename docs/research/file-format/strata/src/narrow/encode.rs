@@ -8,7 +8,8 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Float64Type, Schema};
 use arrow::ipc::writer::StreamWriter;
 
-use super::bitpack::{pack, width_for};
+use super::bitpack::width_for;
+use super::lanes::{BLOCK, Packer};
 use super::lengths::encode_lengths;
 use super::{
     Class, Dictionary, Encoding, Numeric, SHARED_PREFIX_MIN, SHARED_SUFFIX, flags, is_utf8_map,
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::config::Config;
 use crate::error::{Result, StrataError};
-use crate::format::{MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, le_u64};
+use crate::format::{MAX_CHUNK_ELEMENTS, MAX_CHUNK_OUTPUT, MAX_CHUNK_ROWS, le_u64};
 
 /// One chunk, encoded. `body` is `None` for `Const` and `ConstNull`, which write no
 /// segment.
@@ -50,11 +51,35 @@ impl EncodedChunk {
 }
 
 /// Encodes one chunk. `dict` is the column's dictionary, when it has one: Utf8 and
-/// List(Utf8) chunks use it. `_config` is unused: the writer applies zstd.
+/// List(Utf8) chunks use it. `_config` is unused: the writer applies zstd. Its bit-packed
+/// blocks are in lanes where they fit ([`flags::LANES`]).
 pub fn encode_chunk(
     array: &ArrayRef,
     dict: Option<&Dictionary>,
     _config: &Config,
+) -> Result<EncodedChunk> {
+    encode_chunk_with(array, dict, true)
+}
+
+/// [`encode_chunk`], with the bit-packed blocks in lanes where they fit when `lanes` is set,
+/// else all in order. The chunk carries `flags::LANES` when a block went in lanes.
+fn encode_chunk_with(
+    array: &ArrayRef,
+    dict: Option<&Dictionary>,
+    lanes: bool,
+) -> Result<EncodedChunk> {
+    let packer = Packer::new(lanes);
+    let mut chunk = encode_chunk_packed(array, dict, &packer)?;
+    if packer.used() {
+        chunk.flags |= flags::LANES;
+    }
+    Ok(chunk)
+}
+
+fn encode_chunk_packed(
+    array: &ArrayRef,
+    dict: Option<&Dictionary>,
+    packer: &Packer,
 ) -> Result<EncodedChunk> {
     if array.null_count() == array.len() {
         return Ok(EncodedChunk::bare(
@@ -71,14 +96,14 @@ pub fn encode_chunk(
             encode_fsb(values, width)
         }
         DataType::Utf8 => match dict {
-            Some(dict) => encode_utf8(values, dict),
-            None => encode_varbin(values),
+            Some(dict) => encode_utf8(values, dict, packer),
+            None => encode_varbin(values, packer),
         },
-        DataType::Binary => encode_varbin(values),
+        DataType::Binary => encode_varbin(values, packer),
         DataType::List(field) if field.data_type() == &DataType::Utf8 => {
             // A chunk with a null element inside a non-null list is `IPC`.
             let listed = match dict {
-                Some(dict) => encode_list_utf8(values, dict)?,
+                Some(dict) => encode_list_utf8(values, dict, packer)?,
                 None => None,
             };
             match listed {
@@ -86,10 +111,10 @@ pub fn encode_chunk(
                 None => encode_ipc(array),
             }
         }
-        DataType::Map(..) if is_utf8_map(dt) => encode_map(values),
-        DataType::Float64 if let Some(dict) = dict => encode_float_dict(values, dict),
+        DataType::Map(..) if is_utf8_map(dt) => encode_map(values, packer),
+        DataType::Float64 if let Some(dict) = dict => encode_float_dict(values, dict, packer),
         _ => match numeric_of(dt) {
-            Some(num) => encode_numeric(values, num),
+            Some(num) => encode_numeric(values, num, packer),
             None => encode_ipc(array),
         },
     }
@@ -99,7 +124,9 @@ pub fn encode_chunk(
 /// only when its stored segment is at least 30% smaller. An integer chunk has two: `ForBitpack`,
 /// and `Plain`, whose values zstd can still compress (bit-packing hides repeated values from
 /// it). A `FloatDict` chunk has `Plain` as its second, for a chunk whose values zstd compresses
-/// better than their codes. Every other chunk has the one [`encode_chunk`] gives.
+/// better than their codes. Every other chunk has the one [`encode_chunk`] gives. A chunk with a
+/// block in lanes ([`flags::LANES`]) has the same chunk packed in order right after it: lanes
+/// hide repeated values from zstd more than packing in order does.
 pub fn encode_chunk_candidates(
     array: &ArrayRef,
     dict: Option<&Dictionary>,
@@ -107,17 +134,25 @@ pub fn encode_chunk_candidates(
 ) -> Result<Vec<EncodedChunk>> {
     let chunk = encode_chunk(array, dict, config)?;
     let num = || numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()));
-    match chunk.encoding {
-        Encoding::ForBitpack => {
-            let plain = plain_int(array.as_ref(), num()?, &chunk)?;
-            Ok(vec![chunk, plain])
-        }
-        Encoding::FloatDict => {
-            let plain = encode_numeric(array.as_ref(), num()?)?;
-            Ok(vec![chunk, plain])
-        }
-        _ => Ok(vec![chunk]),
-    }
+    let last = match chunk.encoding {
+        Encoding::ForBitpack => Some(plain_int(array.as_ref(), num()?, &chunk)?),
+        Encoding::FloatDict => Some(encode_numeric(array.as_ref(), num()?, &Packer::new(false))?),
+        _ => None,
+    };
+    // A chunk of steps between nearby values: slower to decode than lanes, faster than zstd.
+    let delta = match chunk.encoding {
+        Encoding::ForBitpack => encode_delta(array.as_ref(), num()?)?,
+        _ => None,
+    };
+    let in_order = match chunk.flags & flags::LANES {
+        0 => None,
+        _ => Some(encode_chunk_with(array, dict, false)?),
+    };
+    Ok(std::iter::once(chunk)
+        .chain(delta)
+        .chain(in_order)
+        .chain(last)
+        .collect())
 }
 
 /// The `Plain` encoding of the integer chunk that `bitpacked` encodes: the same validity,
@@ -137,8 +172,10 @@ fn plain_int(array: &dyn Array, num: Numeric, bitpacked: &EncodedChunk) -> Resul
             body.extend(std::iter::repeat_n(0, row.len()));
         }
     }
+    // A plain chunk has no packed block, so no lanes.
     Ok(EncodedChunk {
         encoding: Encoding::Plain,
+        flags: bitpacked.flags & !flags::LANES,
         body: Some(body),
         ..*bitpacked
     })
@@ -267,7 +304,140 @@ fn constant_numeric(num: Numeric, value: u64) -> EncodedChunk {
     chunk
 }
 
-fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
+/// Bytes of one patch of a `ForDelta` chunk: a `u16` row and a `u64` value.
+const PATCH_BYTES: usize = 10;
+
+/// The `ForDelta` encoding of an integer chunk without nulls of a whole number of 1,024-value
+/// blocks, or `None` when it does not fit or is no smaller than `ForBitpack` in lanes. Each value
+/// from row 32 on is stored as its step from the value 32 rows earlier (the same lane), less a
+/// reference step, bit-packed in lanes; the steps that do not fit the width are patches.
+///
+/// Body: `u8 width · u64 reference · u8 first width · the first 32 values less the chunk's min,
+/// packed in order · n steps in lanes (none at width 0; the first 32 are 0) · u32 patch count ·
+/// u16 rows · u64 values`. A value is `value[i - 32] + reference + step[i]`, wrapping.
+fn encode_delta(array: &dyn Array, num: Numeric) -> Result<Option<EncodedChunk>> {
+    let n = array.len();
+    if num.class != Class::Int
+        || array.null_count() > 0
+        || n < BLOCK
+        || !n.is_multiple_of(BLOCK)
+        || n > MAX_CHUNK_ROWS as usize
+    {
+        return Ok(None);
+    }
+    let data = array.to_data();
+    let values: Vec<u64> =
+        row_bits(value_bytes_of(&data, array.data_type(), n, num.width)?, num).collect();
+    let (min, max) = values
+        .iter()
+        .map(|&b| b as i64)
+        .fold((i64::MAX, i64::MIN), |(lo, hi), x| (lo.min(x), hi.max(x)));
+    if min == max {
+        return Ok(None);
+    }
+    let steps: Vec<u64> = (0..n)
+        .map(|i| match i.checked_sub(32) {
+            Some(back) => values
+                .get(i)
+                .zip(values.get(back))
+                .map_or(0, |(v, b)| v.wrapping_sub(*b)),
+            None => 0,
+        })
+        .collect();
+    let (width, reference, patched) = best_delta_width(steps.get(32..).unwrap_or_default());
+    let lanes_bytes = n / 8 * usize::from(width);
+    let size = 1 + 8 + 1 + 32 + lanes_bytes + 4 + patched * PATCH_BYTES;
+    let bitpack_bytes = n / 8 * usize::from(width_for((max as u64).wrapping_sub(min as u64)));
+    if size >= bitpack_bytes {
+        return Ok(None);
+    }
+    let base = min as u64;
+    let firsts: Vec<u64> = values
+        .iter()
+        .take(32)
+        .map(|v| v.wrapping_sub(base))
+        .collect();
+    let first_width = width_for(firsts.iter().copied().max().unwrap_or(0));
+    let mask = if width == 0 {
+        0
+    } else {
+        u64::MAX >> (64 - u32::from(width))
+    };
+    let mut body = Vec::with_capacity(size);
+    body.push(width);
+    body.extend_from_slice(&reference.to_le_bytes());
+    body.push(first_width);
+    super::bitpack::pack(&firsts, first_width, &mut body);
+    let mut packed = Vec::with_capacity(n);
+    let mut patches: Vec<(u16, u64)> = Vec::with_capacity(patched);
+    for (i, step) in steps.iter().enumerate() {
+        let rest = step.wrapping_sub(reference);
+        if i < 32 {
+            packed.push(0);
+        } else if rest <= mask {
+            packed.push(rest);
+        } else {
+            packed.push(0);
+            // `i` is below the chunk's row count, at most 65,535.
+            patches.push((i as u16, rest));
+        }
+    }
+    if width > 0 {
+        Packer::new(true).pack(&packed, width, &mut body);
+    }
+    body.extend_from_slice(&(patches.len() as u32).to_le_bytes());
+    for (row, _) in &patches {
+        body.extend_from_slice(&row.to_le_bytes());
+    }
+    for (_, value) in &patches {
+        body.extend_from_slice(&value.to_le_bytes());
+    }
+    let mut chunk = EncodedChunk::bare(Encoding::ForDelta, flags::HAS_ZONE);
+    set_prefix(&mut chunk.min, &min.to_le_bytes());
+    set_prefix(&mut chunk.max, &max.to_le_bytes());
+    chunk.body = Some(body);
+    Ok(Some(chunk))
+}
+
+/// The width (0 to 32), reference step and patch count that store `steps` in the fewest bytes:
+/// for each width, the reference is the start of the window of `2^width` values that holds the
+/// most steps, and every step outside it is a patch. Steps are compared as signed numbers.
+fn best_delta_width(steps: &[u64]) -> (u8, u64, usize) {
+    let mut sorted: Vec<i64> = steps.iter().map(|&s| s as i64).collect();
+    sorted.sort_unstable();
+    let n = sorted.len();
+    let mut best = (
+        0u8,
+        sorted.first().copied().unwrap_or(0) as u64,
+        n,
+        usize::MAX,
+    );
+    for width in 0u8..=32 {
+        let span = (1i128 << width) - 1;
+        // The window starting at each step: the most steps within `span` of it.
+        let (mut end, mut covered, mut start) = (0usize, 0usize, 0i64);
+        for (i, &lo) in sorted.iter().enumerate() {
+            while sorted
+                .get(end)
+                .is_some_and(|&hi| i128::from(hi) - i128::from(lo) <= span)
+            {
+                end += 1;
+            }
+            if end - i > covered {
+                covered = end - i;
+                start = lo;
+            }
+        }
+        let patches = n - covered;
+        let bytes = (n + 32) / 8 * usize::from(width) + patches * PATCH_BYTES;
+        if bytes < best.3 {
+            best = (width, start as u64, patches, bytes);
+        }
+    }
+    (best.0, best.1, best.2)
+}
+
+fn encode_numeric(array: &dyn Array, num: Numeric, packer: &Packer) -> Result<EncodedChunk> {
     let data = array.to_data();
     let values = value_bytes_of(&data, array.data_type(), array.len(), num.width)?;
     let nulls = array.nulls();
@@ -307,11 +477,11 @@ fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
                 .map(|(i, b)| if is_valid(i) { b.wrapping_sub(base) } else { 0 })
                 .collect();
             body.push(width);
-            pack(&deltas, width, &mut body);
+            packer.pack(&deltas, width, &mut body);
+            chunk.encoding = Encoding::ForBitpack;
             set_prefix(&mut chunk.min, &min.to_le_bytes());
             set_prefix(&mut chunk.max, &max.to_le_bytes());
             chunk_flags |= flags::HAS_ZONE;
-            chunk.encoding = Encoding::ForBitpack;
         }
         Class::Wide => {
             for (i, b) in row_bits(values, num).enumerate() {
@@ -357,12 +527,16 @@ fn encode_numeric(array: &dyn Array, num: Numeric) -> Result<EncodedChunk> {
 /// A Float64 chunk with a dictionary: the `Const` chunk [`encode_numeric`] gives when every
 /// value is equal and non-null, else `FloatDict` with that function's validity, zone and flags,
 /// and one packed code per row. Null rows hold code 0.
-fn encode_float_dict(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
+fn encode_float_dict(
+    array: &dyn Array,
+    dict: &Dictionary,
+    packer: &Packer,
+) -> Result<EncodedChunk> {
     let floats = array
         .as_primitive_opt::<Float64Type>()
         .ok_or_else(|| unsupported(array.data_type()))?;
     let num = numeric_of(array.data_type()).ok_or_else(|| unsupported(array.data_type()))?;
-    let plain = encode_numeric(array, num)?;
+    let plain = encode_numeric(array, num, packer)?;
     if plain.encoding != Encoding::Plain {
         return Ok(plain);
     }
@@ -383,7 +557,7 @@ fn encode_float_dict(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChun
     }
     let width = width_for(u64::from(hi));
     body.push(width);
-    pack(&codes, width, &mut body);
+    packer.pack(&codes, width, &mut body);
     Ok(EncodedChunk {
         encoding: Encoding::FloatDict,
         flags: plain.flags,
@@ -548,7 +722,7 @@ fn add_output(total: usize, len: usize) -> Result<usize> {
 }
 
 /// A Utf8 chunk with a dictionary: `Const` when every value is the same, else `Dict`.
-fn encode_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
+fn encode_utf8(array: &dyn Array, dict: &Dictionary, packer: &Packer) -> Result<EncodedChunk> {
     let strings = array
         .as_string_opt::<i32>()
         .ok_or_else(|| unsupported(array.data_type()))?;
@@ -590,7 +764,7 @@ fn encode_utf8(array: &dyn Array, dict: &Dictionary) -> Result<EncodedChunk> {
     // Null rows hold code 0, so the largest code is the largest valid one.
     let width = width_for(u64::from(hi));
     body.push(width);
-    pack(&codes, width, &mut body);
+    packer.pack(&codes, width, &mut body);
     let mut chunk = EncodedChunk::bare(Encoding::Dict, chunk_flags);
     set_prefix(&mut chunk.min, &lo.to_le_bytes());
     set_prefix(&mut chunk.max, &hi.to_le_bytes());
@@ -641,7 +815,7 @@ fn varbin_rows(array: &dyn Array) -> Result<Vec<&[u8]>> {
 /// (null slots have length 0), then the bytes.
 ///
 /// A `Varbin` chunk has a zone from its lowest and highest valid value ([`set_varbin_zone`]).
-fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
+fn encode_varbin(array: &dyn Array, packer: &Packer) -> Result<EncodedChunk> {
     let rows = varbin_rows(array)?;
     let has_nulls = array.null_count() > 0;
     let first = rows.first().copied().unwrap_or_default();
@@ -663,7 +837,7 @@ fn encode_varbin(array: &dyn Array) -> Result<EncodedChunk> {
         .iter()
         .map(|row| u32::try_from(row.len()).map_err(|_| too_long()))
         .collect::<Result<Vec<u32>>>()?;
-    encode_lengths(&lens, &mut body);
+    encode_lengths(&lens, &mut body, packer);
     for row in &rows {
         body.extend_from_slice(row);
     }
@@ -733,7 +907,11 @@ fn encode_ipc(array: &ArrayRef) -> Result<EncodedChunk> {
 /// A List(Utf8) chunk with a dictionary, as `ListDict`: a lengths block of the element counts
 /// of the lists, then the packed codes of every element. Returns `None` when a non-null list
 /// holds a null element, which the caller stores as `IPC`.
-fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<EncodedChunk>> {
+fn encode_list_utf8(
+    array: &dyn Array,
+    dict: &Dictionary,
+    packer: &Packer,
+) -> Result<Option<EncodedChunk>> {
     let list = array
         .as_list_opt::<i32>()
         .ok_or_else(|| unsupported(array.data_type()))?;
@@ -789,10 +967,10 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
         chunk_flags |= flags::HAS_NULLS;
         body.extend(validity_bitmap(array));
     }
-    encode_lengths(&counts, &mut body);
+    encode_lengths(&counts, &mut body, packer);
     let width = width_for(codes.iter().copied().max().unwrap_or_default());
     body.push(width);
-    pack(&codes, width, &mut body);
+    packer.pack(&codes, width, &mut body);
     let mut chunk = EncodedChunk::bare(Encoding::ListDict, chunk_flags);
     chunk.body = Some(body);
     Ok(Some(chunk))
@@ -802,7 +980,7 @@ fn encode_list_utf8(array: &dyn Array, dict: &Dictionary) -> Result<Option<Encod
 /// block of the entry count of each map, a lengths block of the key lengths and the key bytes,
 /// then the value-validity byte with its bitmap when a value is null, a lengths block of the
 /// value lengths and the value bytes. Null maps have no entries, and null values have length 0.
-fn encode_map(array: &dyn Array) -> Result<EncodedChunk> {
+fn encode_map(array: &dyn Array, packer: &Packer) -> Result<EncodedChunk> {
     let dt = array.data_type();
     let map = array.as_map_opt().ok_or_else(|| unsupported(dt))?;
     let entries = map.entries();
@@ -866,8 +1044,8 @@ fn encode_map(array: &dyn Array) -> Result<EncodedChunk> {
         chunk_flags |= flags::HAS_NULLS;
         body.extend(validity_bitmap(array));
     }
-    encode_lengths(&counts, &mut body);
-    encode_lengths(&key_lens, &mut body);
+    encode_lengths(&counts, &mut body, packer);
+    encode_lengths(&key_lens, &mut body, packer);
     body.extend_from_slice(&key_bytes);
     let value_nulls = value_valid.iter().any(|valid| !valid);
     body.push(u8::from(value_nulls));
@@ -880,7 +1058,7 @@ fn encode_map(array: &dyn Array) -> Result<EncodedChunk> {
         }
         body.extend(bitmap);
     }
-    encode_lengths(&value_lens, &mut body);
+    encode_lengths(&value_lens, &mut body, packer);
     body.extend_from_slice(&value_bytes);
     let mut chunk = EncodedChunk::bare(Encoding::Map, chunk_flags);
     chunk.body = Some(body);
@@ -899,6 +1077,153 @@ mod tests {
     use crate::narrow::BlockEntry;
     use arrow::array::{Float32Array, Float64Array, Int64Array, new_null_array};
     use std::sync::Arc;
+
+    /// Decodes `chunk` as a column of `array`'s type and checks it against `array`.
+    fn decodes_to(chunk: &EncodedChunk, array: &ArrayRef) {
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: array.len() as u32,
+            segment_offset: 0,
+            segment_len: 1,
+            encoding: chunk.encoding,
+            flags: chunk.flags,
+            const_len: chunk.const_len,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = arrow::datatypes::Field::new("v", array.data_type().clone(), true);
+        let decoded =
+            crate::narrow::decode_chunk(&entry, chunk.body.as_deref(), &field, None).unwrap();
+        assert_eq!(decoded.as_ref(), array.as_ref(), "{:?}", chunk.encoding);
+    }
+
+    #[test]
+    fn delta_chunks_round_trip_with_their_patches() {
+        use arrow::array::{Int8Array, Int16Array, Int32Array, TimestampNanosecondArray};
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let arrays: Vec<ArrayRef> = vec![
+            // Counting with a wrap: steps of +32, and patches where the count wraps.
+            Arc::new(Int32Array::from_iter_values((0..2_048).map(|i| i % 1_000))),
+            // Timestamps a few milliseconds apart, with jitter and one long pause.
+            Arc::new(TimestampNanosecondArray::from_iter_values(
+                (0..4_096i64).map(|i| {
+                    1_700_000_000_000_000_000
+                        + i * 3_000_000
+                        + (noise() % 1_000_000) as i64
+                        + if i > 3_000 { 60_000_000_000 } else { 0 }
+                }),
+            )),
+            // Signed values going down, with rare outliers far away.
+            Arc::new(Int64Array::from_iter_values((0..2_048i64).map(|i| {
+                if i % 333 == 7 {
+                    i64::MIN + i
+                } else {
+                    5_000 - 3 * i
+                }
+            }))),
+            Arc::new(Int16Array::from_iter_values(
+                (0..1_024).map(|i| (i * 7 - 3_000) as i16),
+            )),
+            Arc::new(Int8Array::from_iter_values(
+                (0..1_024).map(|i| (i / 16 - 30) as i8),
+            )),
+        ];
+        for array in arrays {
+            let candidates = encode_chunk_candidates(&array, None, &Config::default()).unwrap();
+            let delta = candidates
+                .iter()
+                .find(|c| c.encoding == Encoding::ForDelta)
+                .unwrap_or_else(|| panic!("no delta candidate for {:?}", array.data_type()));
+            decodes_to(delta, &array);
+            for chunk in &candidates {
+                decodes_to(chunk, &array);
+            }
+        }
+    }
+
+    #[test]
+    fn a_count_with_wraps_is_mostly_patches_free_and_much_smaller() {
+        use arrow::array::Int32Array;
+        let array: ArrayRef = Arc::new(Int32Array::from_iter_values((0..2_048).map(|i| i % 1_000)));
+        let num = numeric_of(array.data_type()).unwrap();
+        let chunk = encode_delta(array.as_ref(), num).unwrap().unwrap();
+        let body = chunk.body.as_ref().unwrap();
+        // Width 0: every step is the reference, +32, except across the two wraps, where 32 rows
+        // each step down: 64 patches.
+        assert_eq!(body[0], 0);
+        assert_eq!(u64::from_le_bytes(body[1..9].try_into().unwrap()), 32);
+        let patches_at = body.len() - 64 * PATCH_BYTES - 4;
+        let count = u32::from_le_bytes(body[patches_at..patches_at + 4].try_into().unwrap());
+        assert_eq!(count, 64);
+        assert!(body.len() < 2_048 * 10 / 8 / 2, "{} bytes", body.len());
+    }
+
+    #[test]
+    fn no_delta_for_nulls_partial_blocks_or_random_values() {
+        use arrow::array::Int32Array;
+        let num = numeric_of(&DataType::Int32).unwrap();
+        let with_null: ArrayRef = Arc::new(Int32Array::from_iter(
+            (0..1_024).map(|i| (i != 5).then_some(i)),
+        ));
+        assert!(encode_delta(with_null.as_ref(), num).unwrap().is_none());
+        let short: ArrayRef = Arc::new(Int32Array::from_iter_values(0..1_000));
+        assert!(encode_delta(short.as_ref(), num).unwrap().is_none());
+        let mut x = 7u64;
+        let random: ArrayRef = Arc::new(Int32Array::from_iter_values((0..2_048).map(|_| {
+            x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (x >> 40) as i32
+        })));
+        assert!(encode_delta(random.as_ref(), num).unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_delta_bodies_are_errors() {
+        use arrow::array::Int32Array;
+        let array: ArrayRef = Arc::new(Int32Array::from_iter_values((0..2_048).map(|i| i % 1_000)));
+        let num = numeric_of(array.data_type()).unwrap();
+        let chunk = encode_delta(array.as_ref(), num).unwrap().unwrap();
+        let body = chunk.body.clone().unwrap();
+        let entry = BlockEntry {
+            first_row: 0,
+            n_rows: 2_048,
+            segment_offset: 0,
+            segment_len: 1,
+            encoding: Encoding::ForDelta,
+            flags: chunk.flags,
+            const_len: 0,
+            min: chunk.min,
+            max: chunk.max,
+        };
+        let field = arrow::datatypes::Field::new("v", DataType::Int32, false);
+        let decode = |body: &[u8]| crate::narrow::decode_chunk(&entry, Some(body), &field, None);
+        assert!(decode(&body).is_ok());
+        // Truncated anywhere, one byte too long, a width above 32, a patch row below 32.
+        for cut in [1, 9, 10, 20, body.len() - 1] {
+            assert!(decode(&body[..cut]).is_err(), "cut at {cut}");
+        }
+        let mut longer = body.clone();
+        longer.push(0);
+        assert!(decode(&longer).is_err());
+        let mut wide = body.clone();
+        wide[0] = 33;
+        assert!(decode(&wide).is_err());
+        let rows_at = body.len() - 64 * PATCH_BYTES;
+        let mut early = body.clone();
+        early[rows_at..rows_at + 2].copy_from_slice(&5u16.to_le_bytes());
+        assert!(decode(&early).is_err());
+        // Sums wrap at the column's width: a patch outside an Int32 still decodes to Int32s
+        // (the segment checksum, not the decoder, catches a corrupt body).
+        let mut big = body.clone();
+        let values_at = body.len() - 64 * 8;
+        big[values_at..values_at + 8].copy_from_slice(&(1u64 << 40).to_le_bytes());
+        assert!(decode(&big).is_ok());
+    }
 
     #[test]
     fn a_float_dict_chunk_has_a_plain_candidate() {
@@ -933,6 +1258,62 @@ mod tests {
             assert_eq!(
                 (plain.flags, plain.min, plain.max),
                 (bitpacked.flags, bitpacked.min, bitpacked.max)
+            );
+            let field = arrow::datatypes::Field::new("v", array.data_type().clone(), true);
+            for chunk in &candidates {
+                let entry = BlockEntry {
+                    first_row: 0,
+                    n_rows: array.len() as u32,
+                    segment_offset: 0,
+                    segment_len: 1,
+                    encoding: chunk.encoding,
+                    flags: chunk.flags,
+                    const_len: chunk.const_len,
+                    min: chunk.min,
+                    max: chunk.max,
+                };
+                let decoded =
+                    crate::narrow::decode_chunk(&entry, chunk.body.as_deref(), &field, None)
+                        .unwrap();
+                assert_eq!(decoded.as_ref(), array.as_ref(), "{:?}", chunk.encoding);
+            }
+        }
+    }
+
+    #[test]
+    fn a_chunk_in_lanes_has_in_order_and_plain_candidates_that_decode_alike() {
+        use arrow::array::Int32Array;
+        let arrays: [ArrayRef; 2] = [
+            Arc::new(Int64Array::from(
+                (0..2_048i64)
+                    .map(|i| (i % 7 != 3).then_some(i * 1_000_003 - 5))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Int32Array::from(
+                (0..2_048).map(|i| i % 1_000).collect::<Vec<_>>(),
+            )),
+        ];
+        for array in arrays {
+            let candidates = encode_chunk_candidates(&array, None, &Config::default()).unwrap();
+            // A delta candidate, when the values step evenly, comes right after the lanes chunk.
+            let candidates: Vec<EncodedChunk> = candidates
+                .into_iter()
+                .filter(|c| c.encoding != Encoding::ForDelta)
+                .collect();
+            let encodings: Vec<Encoding> = candidates.iter().map(|c| c.encoding).collect();
+            assert_eq!(
+                encodings,
+                vec![Encoding::ForBitpack, Encoding::ForBitpack, Encoding::Plain]
+            );
+            let (lanes, in_order) = (&candidates[0], &candidates[1]);
+            assert_eq!(lanes.flags & flags::LANES, flags::LANES);
+            assert_eq!(
+                (lanes.flags & !flags::LANES, lanes.min, lanes.max),
+                (in_order.flags, in_order.min, in_order.max)
+            );
+            assert_eq!(
+                lanes.body.as_ref().map(Vec::len),
+                in_order.body.as_ref().map(Vec::len)
             );
             let field = arrow::datatypes::Field::new("v", array.data_type().clone(), true);
             for chunk in &candidates {

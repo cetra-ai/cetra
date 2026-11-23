@@ -10,10 +10,11 @@ mod chunker;
 mod decode;
 mod dict;
 mod encode;
+mod lanes;
 mod lengths;
 
 pub use chunker::chunk_ranges;
-pub use decode::{decode_chunk, decode_chunk_view};
+pub use decode::{decode_chunk, decode_chunk_view, pick_chunk, range_mask};
 pub use dict::{DictKind, Dictionary, for_column};
 #[cfg(test)]
 pub use encode::encode_chunk;
@@ -57,10 +58,14 @@ pub enum Encoding {
     /// Codes into the column's Float64 dictionary: a width byte, then one packed code per row.
     /// The zone holds the float values, as a `Plain` chunk's does.
     FloatDict = 12,
+    /// Steps between values 32 rows apart, for integers without nulls in whole 1,024-value
+    /// blocks: the steps less a reference step, bit-packed in lanes, with the steps that do not
+    /// fit as patches (`encode.rs`, `encode_delta`).
+    ForDelta = 13,
 }
 
 /// The number of encodings, so `Encoding as usize` indexes an array of this length.
-pub const ENCODINGS: usize = 13;
+pub const ENCODINGS: usize = 14;
 
 impl Encoding {
     /// The encoding for a stored byte, or `None` if the value is unknown.
@@ -79,6 +84,7 @@ impl Encoding {
             10 => Some(Self::Ipc),
             11 => Some(Self::Map),
             12 => Some(Self::FloatDict),
+            13 => Some(Self::ForDelta),
             _ => None,
         }
     }
@@ -99,6 +105,10 @@ pub mod flags {
     /// `min[5..]` and `max[5..]` hold the next 11 bytes of the lowest and highest value,
     /// zero-padded.
     pub const SHARED_PREFIX: u8 = 16;
+    /// The chunk's bit-packed blocks (integer deltas, dictionary codes, lengths) are in the
+    /// lanes layout (`lanes.rs`) where they fit: a whole number of 1,024-value blocks of 1 to 32
+    /// bits. A block that does not fit is packed in order. Both take the same bytes.
+    pub const LANES: u8 = 32;
 }
 
 /// The shortest shared prefix stored in the shared-prefix form of a `Varbin` zone. A shorter
