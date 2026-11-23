@@ -309,6 +309,14 @@ js-install:
 check-web: js-install
     pnpm --dir web run check
 
+# The web checks without the tests (API types, Biome, types, production build); CI's `web` job
+check-web-static: js-install
+    pnpm --dir web run check:static
+
+# One shard of the web tests in CI (`shard` of `total`, vitest --shard; .github/CI.md § Web tests)
+test-web-shard shard total: js-install
+    pnpm --dir web run test --shard={{shard}}/{{total}}
+
 # Python SDK checks: format, lint, types, tests
 check-py:
     cd sdks/python && uv sync --locked && uv run ruff format --check && uv run ruff check && uv run mypy && uv run pytest

@@ -171,6 +171,19 @@ job. A PR that changes `cetra-server` recompiles its test binary on every
 shard, about 5 minutes. Add shards when a shard's test time grows past its
 compile time.
 
+## Web tests
+
+`just check-web` runs as five parallel jobs. `web` runs `just check-web-static`
+(the OpenAPI types check, Biome, `tsc`, the production build and its dist
+check), and `web-test (1/4)` to `web-test (4/4)` run `just test-web-shard <k> 4`,
+Vitest's `--shard=k/4` of the test files; `ci-ok` needs all five. Locally,
+`just check-web` still runs everything in one go.
+
+Vitest took 9 of the single job's 10 minutes, measured on PR #219: 363 files and
+3,739 tests, each file rendering in its own jsdom environment on a 4-CPU runner.
+The rest of the job takes about 40 seconds. A shard pays the install (about 30
+seconds) and a quarter of the tests.
+
 ## Release workflow
 
 `workflows/release.yml` runs on tags `v*` (D-N-14). Its `run:` steps call `just` recipes, except steps that only pass values between steps (reading the version, the image and chart names, `helm push`, `gh release create`), which stay inline. (docs/plans/n-packaging/README.md § Releasing, D-N-5–D-N-7). It uses no compiler cache. Its `publish` job runs in the GitHub environment `release` (create it under Settings → Environments, limited to tags `v*`; add a required reviewer to approve each publish) and is the only job with write permissions: `contents` (the GitHub release), `packages` (GHCR), `id-token` and `attestations` (build provenance). It needs no secret besides the workflow's own `GITHUB_TOKEN`.

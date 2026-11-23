@@ -12,7 +12,8 @@
     "test": "pnpm gen:routes && vitest run",
     "build": "vite build",
     "build:demo": "vite build --mode demo",
-    "check": "pnpm check:api && biome check . && pnpm typecheck && pnpm test && pnpm build && node scripts/check-dist.mjs"
+    "check": "pnpm check:static && pnpm test",
+    "check:static": "pnpm check:api && biome check . && pnpm typecheck && pnpm build && node scripts/check-dist.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "6.20.4",
