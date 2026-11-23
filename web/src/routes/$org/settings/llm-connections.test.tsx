@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { HttpResponse, http } from "msw";
 import { expect, it } from "vitest";
+import { MODEL_SUGGESTIONS } from "@/lib/llm-models";
 import { server } from "@/mocks/node";
 import { ORG_ID } from "@/test/fixtures";
 import { problemResponse } from "@/test/problem";
@@ -223,9 +224,9 @@ it("sends one extra header and the picked structured output mode", async () => {
   const { user, form } = await openCreate();
   await user.type(within(form).getByLabelText("Name"), "Prod");
   await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  await user.click(within(form).getByText("Advanced"));
   await user.click(within(form).getByRole("combobox", { name: "Structured output" }));
   await user.click(await screen.findByRole("option", { name: "Tool call" }));
-  await user.click(within(form).getByText("Advanced"));
   await user.click(within(form).getByRole("button", { name: "Add header" }));
   await user.type(within(form).getByLabelText("Header name 1"), "x-a");
   const headerValue = within(form).getByLabelText("Header value 1");
@@ -317,6 +318,7 @@ it("shows a server field error under its field", async () => {
 
   expect(await within(form).findByText(BASE_URL_MESSAGE)).toBeInTheDocument();
   expect(within(form).getByLabelText("Base URL")).toHaveAttribute("aria-invalid", "true");
+  expect(within(form).getByText("Advanced").closest("details")).toHaveAttribute("open");
 });
 
 it("shows field errors without a rendered field above the submit button", async () => {
@@ -624,4 +626,196 @@ it("a member sees the list and the details, but cannot manage", async () => {
   expect(screen.queryByRole("button", { name: "Test connection" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Delete…" })).toBeNull();
   expect(screen.getByText("••••WXYZ")).toBeInTheDocument();
+});
+
+/** Picks a provider choice in the form's Provider select. */
+async function pickProvider(
+  user: { click: (element: Element) => Promise<void> },
+  form: HTMLElement,
+  option: string,
+) {
+  await user.click(within(form).getByRole("combobox", { name: "Provider" }));
+  await user.click(await screen.findByRole("option", { name: option }));
+}
+
+/** The connection list with one connection whose base URL is set. */
+function withBaseUrl() {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [{ ...CONNECTION, base_url: "https://gw.example.com/v1" }],
+        next_cursor: null,
+      }),
+    ),
+  );
+}
+
+it("shows a saved connection without a base URL as OpenAI", async () => {
+  const { form } = await openConnection();
+
+  expect(within(form).getByRole("combobox", { name: "Provider" })).toHaveTextContent(/^OpenAI$/);
+  const baseUrl = within(form).getByLabelText("Base URL");
+  expect(baseUrl.closest("details")).not.toBeNull();
+  expect(baseUrl).toHaveAttribute("placeholder", "https://api.openai.com/v1");
+});
+
+it("shows a saved connection with a base URL as OpenAI-compatible", async () => {
+  withBaseUrl();
+  const { form } = await openConnection();
+
+  expect(within(form).getByRole("combobox", { name: "Provider" })).toHaveTextContent(
+    /^OpenAI-compatible$/,
+  );
+  const baseUrl = within(form).getByLabelText("Base URL");
+  expect(baseUrl).toHaveValue("https://gw.example.com/v1");
+  expect(baseUrl.closest("details")).toBeNull();
+  expect(baseUrl).toHaveAccessibleDescription(
+    "Any server with an OpenAI-style API: Azure OpenAI, vLLM, Ollama, OpenRouter, LiteLLM.",
+  );
+});
+
+it("requires a base URL for OpenAI-compatible", async () => {
+  let body: unknown;
+  server.use(
+    http.post("/api/v1/orgs/:org/llm-connections", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json({ ...CONNECTION, name: "Prod" }, { status: 201 });
+    }),
+  );
+
+  const { user, form } = await openCreate();
+  await pickProvider(user, form, "OpenAI-compatible");
+  await user.type(within(form).getByLabelText("Name"), "Prod");
+  await user.type(within(form).getByLabelText("API key"), "sk-secret");
+  const save = within(form).getByRole("button", { name: "Add connection" });
+  expect(save).toBeDisabled();
+
+  const baseUrl = within(form).getByLabelText("Base URL");
+  await user.type(baseUrl, "x");
+  await user.clear(baseUrl);
+  expect(await within(form).findByText("Enter the server's base URL.")).toBeInTheDocument();
+
+  await user.type(baseUrl, "https://gw.example.com/v1");
+  await user.click(within(form).getByRole("button", { name: "Add connection" }));
+  await waitFor(() =>
+    expect(body).toEqual({
+      name: "Prod",
+      adapter: "openai",
+      api_key: "sk-secret",
+      base_url: "https://gw.example.com/v1",
+    }),
+  );
+});
+
+it("switching to OpenAI clears the base URL in the PATCH body", async () => {
+  withBaseUrl();
+  let body: unknown;
+  server.use(
+    http.patch("/api/v1/orgs/:org/llm-connections/:id", async ({ request }) => {
+      body = await request.json();
+      return HttpResponse.json(CONNECTION);
+    }),
+  );
+
+  const { user, form } = await openConnection();
+  await pickProvider(user, form, "OpenAI");
+  const save = within(form).getByRole("button", { name: "Save" });
+  expect(save).toBeEnabled();
+  await user.click(save);
+
+  await waitFor(() => expect(body).toEqual({ base_url: "" }));
+});
+
+it("restores the saved base URL when the saved provider is picked again", async () => {
+  withBaseUrl();
+  const { user, form } = await openConnection();
+  await pickProvider(user, form, "Anthropic");
+  await pickProvider(user, form, "OpenAI-compatible");
+
+  expect(within(form).getByLabelText("Base URL")).toHaveValue("https://gw.example.com/v1");
+  expect(screen.queryByText("Unsaved changes")).toBeNull();
+});
+
+it("shows the saved key's last four characters as the placeholder", async () => {
+  const { form } = await openConnection();
+
+  const apiKey = within(form).getByLabelText("API key");
+  expect(apiKey).toHaveAttribute("placeholder", "••••WXYZ");
+  expect(apiKey).toHaveAccessibleDescription("Stored encrypted. Type a new key to replace it.");
+});
+
+it("shows a dots placeholder when the saved key has no hint", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/llm-connections", () =>
+      HttpResponse.json({
+        data: [{ ...CONNECTION, api_key_hint: "" }],
+        next_cursor: null,
+      }),
+    ),
+  );
+  const { form } = await openConnection();
+
+  expect(within(form).getByLabelText("API key")).toHaveAttribute("placeholder", "••••••••");
+});
+
+it("puts structured output and the Base URL of other providers in Advanced", async () => {
+  const { user, form } = await openConnection();
+
+  expect(
+    within(form).getByRole("combobox", { name: "Structured output" }).closest("details"),
+  ).not.toBeNull();
+  await pickProvider(user, form, "Anthropic");
+  expect(within(form).getByLabelText("Base URL")).toHaveAttribute(
+    "placeholder",
+    "https://api.anthropic.com",
+  );
+  await pickProvider(user, form, "Gemini");
+  expect(within(form).getByLabelText("Base URL")).toHaveAttribute(
+    "placeholder",
+    "https://generativelanguage.googleapis.com",
+  );
+});
+
+it("orders the fields Provider, Name, API key, Default model", async () => {
+  const { form } = await openCreate();
+  const controls = [
+    within(form).getByRole("combobox", { name: "Provider" }),
+    within(form).getByLabelText("Name"),
+    within(form).getByLabelText("API key"),
+    within(form).getByLabelText("Default model"),
+  ];
+
+  for (let index = 0; index < controls.length - 1; index += 1) {
+    const current = controls[index] as HTMLElement;
+    const next = controls[index + 1] as HTMLElement;
+    expect(current.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+  }
+});
+
+it("caps the form's fields at a readable width", async () => {
+  const { form } = await openCreate();
+
+  expect(within(form).getByLabelText("Name").closest(".max-w-xl")).not.toBeNull();
+});
+
+it("suggests model ids of the chosen provider", async () => {
+  const { user, form } = await openCreate();
+  const model = within(form).getByLabelText("Default model");
+  const suggested = () =>
+    Array.from(document.querySelectorAll("#connection-model-suggestions option")).map(
+      (option) => (option as HTMLOptionElement).value,
+    );
+
+  expect(model).toHaveAttribute("list", "connection-model-suggestions");
+  expect(suggested()).toEqual(MODEL_SUGGESTIONS.openai);
+
+  await pickProvider(user, form, "Anthropic");
+  expect(suggested()).toEqual(MODEL_SUGGESTIONS.anthropic);
+
+  await pickProvider(user, form, "Gemini");
+  expect(suggested()).toEqual(MODEL_SUGGESTIONS.gemini);
+
+  await pickProvider(user, form, "OpenAI-compatible");
+  expect(model).not.toHaveAttribute("list");
+  expect(document.querySelector("#connection-model-suggestions")).toBeNull();
 });

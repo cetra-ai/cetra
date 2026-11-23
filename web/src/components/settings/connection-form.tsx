@@ -18,14 +18,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { LLM_ADAPTER_LABELS } from "@/lib/llm-adapters";
+import {
+  adapterOf,
+  DEFAULT_BASE_URLS,
+  PROVIDER_CHOICES,
+  type ProviderChoice,
+  providerChoice,
+} from "@/lib/llm-adapters";
+import { MODEL_SUGGESTIONS } from "@/lib/llm-models";
 
 type Connection = Schema<"LlmConnection">;
 type StructuredMode = Schema<"StructuredOutputMode">;
-
-const PROVIDERS = (Object.entries(LLM_ADAPTER_LABELS) as [Schema<"LlmAdapter">, string][]).map(
-  ([value, label]) => ({ value, label }),
-);
 
 const STRUCTURED_OUTPUT_MODES: { value: StructuredMode; label: string }[] = [
   { value: "native", label: "Native (default)" },
@@ -75,8 +78,8 @@ function newHeaderRow(name: string): HeaderRow {
   return { id: headerRowId, name, value: "" };
 }
 
-function adapterValue(value: string): Schema<"LlmAdapter"> {
-  return value === "anthropic" || value === "gemini" ? value : "openai";
+function providerValue(value: string): ProviderChoice {
+  return PROVIDER_CHOICES.find((option) => option.value === value)?.value ?? "openai";
 }
 
 function structuredValue(value: string): StructuredMode | "" {
@@ -150,7 +153,10 @@ export function ConnectionForm({
   const { create, patch } = useConnectionMutations(org);
   const pending = connection === undefined ? create.isPending : patch.isPending;
   const [name, setName] = useState(connection?.name ?? "");
-  const [adapter, setAdapter] = useState<Schema<"LlmAdapter">>(connection?.adapter ?? "openai");
+  const [provider, setProvider] = useState<ProviderChoice>(
+    connection ? providerChoice(connection) : "openai",
+  );
+  const adapter = adapterOf(provider);
   const [apiKey, setApiKey] = useState("");
   const [baseUrl, setBaseUrl] = useState(connection?.base_url ?? "");
   const [defaultModel, setDefaultModel] = useState(connection?.default_model ?? "");
@@ -184,6 +190,9 @@ export function ConnectionForm({
   if (connection === undefined && apiKey.trim().length === 0) {
     clientErrors.api_key = "Enter the API key.";
   }
+  if (provider === "openai_compatible" && baseUrl.trim().length === 0) {
+    clientErrors.base_url = "Enter the server's base URL.";
+  }
   if (maxConcurrency.trim() !== "" && !isWholeNumberIn(maxConcurrency.trim(), 1, 64)) {
     clientErrors.max_concurrency = "Enter a whole number from 1 to 64.";
   }
@@ -195,6 +204,7 @@ export function ConnectionForm({
     clientErrors.headers = headerError;
   }
   const invalid = Object.keys(clientErrors).length > 0;
+  const suggestions = MODEL_SUGGESTIONS[provider];
 
   /** A client error shows once its field was touched; a server error shows until the next save. */
   function fieldError(field: FieldKey): string | undefined {
@@ -219,6 +229,17 @@ export function ConnectionForm({
       map[rowName] = row.value;
     }
     return map;
+  }
+
+  function chooseProvider(next: ProviderChoice) {
+    setProvider(next);
+    // Another provider's URL is wrong for this one; the saved choice gets its saved URL back.
+    setBaseUrl(
+      connection !== undefined && next === providerChoice(connection)
+        ? (connection.base_url ?? "")
+        : "",
+    );
+    touch("provider");
   }
 
   function createBody(): Schema<"CreateLlmConnectionRequest"> {
@@ -290,6 +311,7 @@ export function ConnectionForm({
   const dirty =
     body === undefined
       ? trimmedName.length > 0 ||
+        provider !== "openai" ||
         apiKey.length > 0 ||
         baseUrl.trim().length > 0 ||
         defaultModel.trim().length > 0 ||
@@ -371,6 +393,7 @@ export function ConnectionForm({
   }
 
   const advancedError =
+    (provider !== "openai_compatible" && fieldError("base_url") !== undefined) ||
     fieldError("max_concurrency") !== undefined ||
     fieldError("requests_per_minute") !== undefined ||
     fieldError("headers") !== undefined;
@@ -397,221 +420,247 @@ export function ConnectionForm({
         )
       }
     >
-      <TextField
-        id="connection-name"
-        label="Name"
-        value={name}
-        maxLength={100}
-        error={fieldError("name")}
-        disabled={pending}
-        onChange={(next) => {
-          setName(next);
-          touch("name");
-        }}
-      />
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="connection-provider">Provider</Label>
-        <Select
-          value={adapter}
-          onValueChange={(value) => {
-            setAdapter(adapterValue(value));
-            touch("adapter");
-          }}
-          disabled={pending}
-        >
-          <SelectTrigger
-            id="connection-provider"
-            aria-describedby="connection-provider-description"
-            className="w-fit"
+      <div className="flex max-w-xl flex-col gap-4">
+        <div className="flex flex-col gap-2">
+          <Label htmlFor="connection-provider">Provider</Label>
+          <Select
+            value={provider}
+            onValueChange={(value) => {
+              chooseProvider(providerValue(value));
+            }}
+            disabled={pending}
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {PROVIDERS.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <p id="connection-provider-description" className="text-caption text-muted-foreground">
-          OpenAI-compatible covers any server with an OpenAI-style API: Azure, vLLM, Ollama,
-          OpenRouter, LiteLLM.
-        </p>
-      </div>
-      <TextField
-        id="connection-api-key"
-        label="API key"
-        type="password"
-        autoComplete="new-password"
-        value={apiKey}
-        error={fieldError("api_key")}
-        disabled={pending}
-        description={
-          connection === undefined
-            ? "Stored encrypted, never shown again."
-            : "Stored encrypted. Leave empty to keep the current key."
-        }
-        onChange={(next) => {
-          setApiKey(next);
-          touch("api_key");
-        }}
-      />
-      <TextField
-        id="connection-base-url"
-        label="Base URL"
-        value={baseUrl}
-        error={fieldError("base_url")}
-        disabled={pending}
-        onChange={(next) => {
-          setBaseUrl(next);
-          touch("base_url");
-        }}
-        description="For OpenAI-compatible servers such as Azure, vLLM, Ollama, OpenRouter or LiteLLM. Local addresses need the server setting security.allow_private_network_egress."
-      />
-      <TextField
-        id="connection-model"
-        label="Default model"
-        value={defaultModel}
-        error={fieldError("default_model")}
-        disabled={pending}
-        onChange={(next) => {
-          setDefaultModel(next);
-          touch("default_model");
-        }}
-      />
-      <div className="flex flex-col gap-2">
-        <Label htmlFor="connection-structured-output">Structured output</Label>
-        <Select
-          value={structured}
-          onValueChange={(value) => {
-            setStructured(structuredValue(value));
-            touch("structured_output");
-          }}
+            <SelectTrigger id="connection-provider" className="w-fit">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {PROVIDER_CHOICES.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <TextField
+          id="connection-name"
+          label="Name"
+          value={name}
+          maxLength={100}
+          error={fieldError("name")}
           disabled={pending}
-        >
-          <SelectTrigger
-            id="connection-structured-output"
-            aria-describedby="connection-structured-output-description"
-            className="w-fit"
-          >
-            <SelectValue placeholder="Native (default)" />
-          </SelectTrigger>
-          <SelectContent>
-            {STRUCTURED_OUTPUT_MODES.map((option) => (
-              <SelectItem key={option.value} value={option.value}>
-                {option.label}
-              </SelectItem>
+          onChange={(next) => {
+            setName(next);
+            touch("name");
+          }}
+        />
+        <TextField
+          id="connection-api-key"
+          label="API key"
+          type="password"
+          autoComplete="new-password"
+          value={apiKey}
+          placeholder={
+            connection === undefined
+              ? undefined
+              : connection.api_key_hint
+                ? `••••${connection.api_key_hint}`
+                : "••••••••"
+          }
+          error={fieldError("api_key")}
+          disabled={pending}
+          description={
+            connection === undefined
+              ? "Stored encrypted, never shown again."
+              : "Stored encrypted. Type a new key to replace it."
+          }
+          onChange={(next) => {
+            setApiKey(next);
+            touch("api_key");
+          }}
+        />
+        {provider === "openai_compatible" ? (
+          <TextField
+            id="connection-base-url"
+            label="Base URL"
+            placeholder="https://my-gateway.example.com/v1"
+            value={baseUrl}
+            error={fieldError("base_url")}
+            disabled={pending}
+            onChange={(next) => {
+              setBaseUrl(next);
+              touch("base_url");
+            }}
+            description="Any server with an OpenAI-style API: Azure OpenAI, vLLM, Ollama, OpenRouter, LiteLLM."
+          />
+        ) : null}
+        <TextField
+          id="connection-model"
+          label="Default model"
+          value={defaultModel}
+          list={suggestions.length > 0 ? "connection-model-suggestions" : undefined}
+          error={fieldError("default_model")}
+          disabled={pending}
+          onChange={(next) => {
+            setDefaultModel(next);
+            touch("default_model");
+          }}
+        />
+        {suggestions.length > 0 ? (
+          <datalist id="connection-model-suggestions">
+            {suggestions.map((name) => (
+              <option key={name} value={name} />
             ))}
-          </SelectContent>
-        </Select>
-        <p
-          id="connection-structured-output-description"
-          className="text-caption text-muted-foreground"
+          </datalist>
+        ) : null}
+        <details
+          open={advancedOpen || advancedError}
+          onToggle={(event) => {
+            setAdvancedOpen(event.currentTarget.open);
+          }}
         >
-          Use Tool call or Prompt only if the provider rejects native structured output.
-        </p>
-      </div>
-      <details
-        open={advancedOpen || advancedError}
-        onToggle={(event) => {
-          setAdvancedOpen(event.currentTarget.open);
-        }}
-      >
-        <summary className="cursor-pointer text-body font-medium">Advanced</summary>
-        <div className="mt-4 flex flex-col gap-4">
-          <div className="flex flex-col gap-4 sm:flex-row">
-            <TextField
-              id="connection-max-concurrency"
-              type="number"
-              label="Max concurrency"
-              value={maxConcurrency}
-              placeholder="4"
-              unit="concurrent"
-              inputMode="numeric"
-              min={1}
-              max={64}
-              error={fieldError("max_concurrency")}
-              disabled={pending}
-              onChange={(next) => {
-                setMaxConcurrency(next);
-                touch("max_concurrency");
-              }}
-            />
-            <TextField
-              id="connection-requests-per-minute"
-              type="number"
-              label="Requests per minute"
-              value={requestsPerMinute}
-              placeholder="300"
-              unit="per minute"
-              inputMode="numeric"
-              min={1}
-              max={10000}
-              error={fieldError("requests_per_minute")}
-              disabled={pending}
-              onChange={(next) => {
-                setRequestsPerMinute(next);
-                touch("requests_per_minute");
-              }}
-            />
-          </div>
-          <fieldset className="flex flex-col gap-2">
-            <legend className="text-body leading-none font-medium">Extra headers</legend>
-            <div className="flex items-center justify-end gap-2">
-              {connection !== undefined ? (
-                <p className="mr-auto text-caption text-muted-foreground">
-                  Values are hidden. Set every header again to change them.
-                </p>
-              ) : null}
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
+          <summary className="cursor-pointer text-body font-medium">Advanced</summary>
+          <div className="mt-4 flex flex-col gap-4">
+            {provider !== "openai_compatible" ? (
+              <TextField
+                id="connection-base-url"
+                label="Base URL"
+                placeholder={DEFAULT_BASE_URLS[adapter]}
+                value={baseUrl}
+                error={fieldError("base_url")}
                 disabled={pending}
-                onClick={addHeaderRow}
+                onChange={(next) => {
+                  setBaseUrl(next);
+                  touch("base_url");
+                }}
+                description="Only for a proxy. Leave empty to use the provider's API."
+              />
+            ) : null}
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="connection-structured-output">Structured output</Label>
+              <Select
+                value={structured}
+                onValueChange={(value) => {
+                  setStructured(structuredValue(value));
+                  touch("structured_output");
+                }}
+                disabled={pending}
               >
-                Add header
-              </Button>
+                <SelectTrigger
+                  id="connection-structured-output"
+                  aria-describedby="connection-structured-output-description"
+                  className="w-fit"
+                >
+                  <SelectValue placeholder="Native (default)" />
+                </SelectTrigger>
+                <SelectContent>
+                  {STRUCTURED_OUTPUT_MODES.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p
+                id="connection-structured-output-description"
+                className="text-caption text-muted-foreground"
+              >
+                Use Tool call or Prompt only if the provider rejects native structured output.
+              </p>
             </div>
-            {rows.map((row, index) => (
-              <div key={row.id} className="flex items-center gap-2">
-                <Input
-                  aria-label={`Header name ${index + 1}`}
-                  aria-invalid={headersError ? true : undefined}
-                  value={row.name}
-                  disabled={pending}
-                  onChange={(event) => updateHeaderRow(row.id, { name: event.target.value })}
-                />
-                <Input
-                  aria-label={`Header value ${index + 1}`}
-                  aria-invalid={headersError ? true : undefined}
-                  type="password"
-                  autoComplete="off"
-                  value={row.value}
-                  disabled={pending}
-                  onChange={(event) => updateHeaderRow(row.id, { value: event.target.value })}
-                />
+            <div className="flex flex-col gap-4 sm:flex-row">
+              <TextField
+                id="connection-max-concurrency"
+                type="number"
+                label="Max concurrency"
+                value={maxConcurrency}
+                placeholder="4"
+                unit="concurrent"
+                inputMode="numeric"
+                min={1}
+                max={64}
+                error={fieldError("max_concurrency")}
+                disabled={pending}
+                onChange={(next) => {
+                  setMaxConcurrency(next);
+                  touch("max_concurrency");
+                }}
+              />
+              <TextField
+                id="connection-requests-per-minute"
+                type="number"
+                label="Requests per minute"
+                value={requestsPerMinute}
+                placeholder="300"
+                unit="per minute"
+                inputMode="numeric"
+                min={1}
+                max={10000}
+                error={fieldError("requests_per_minute")}
+                disabled={pending}
+                onChange={(next) => {
+                  setRequestsPerMinute(next);
+                  touch("requests_per_minute");
+                }}
+              />
+            </div>
+            <fieldset className="flex flex-col gap-2">
+              <legend className="text-body leading-none font-medium">Extra headers</legend>
+              <div className="flex items-center justify-end gap-2">
+                {connection !== undefined ? (
+                  <p className="mr-auto text-caption text-muted-foreground">
+                    Values are hidden. Set every header again to change them.
+                  </p>
+                ) : null}
                 <Button
                   type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Remove header ${index + 1}`}
+                  variant="outline"
+                  size="sm"
                   disabled={pending}
-                  onClick={() => removeHeaderRow(row.id)}
+                  onClick={addHeaderRow}
                 >
-                  <X />
+                  Add header
                 </Button>
               </div>
-            ))}
-            {headersError ? (
-              <p role="alert" className="text-caption text-destructive">
-                {headersError}
-              </p>
-            ) : null}
-          </fieldset>
-        </div>
-      </details>
+              {rows.map((row, index) => (
+                <div key={row.id} className="flex items-center gap-2">
+                  <Input
+                    aria-label={`Header name ${index + 1}`}
+                    aria-invalid={headersError ? true : undefined}
+                    value={row.name}
+                    disabled={pending}
+                    onChange={(event) => updateHeaderRow(row.id, { name: event.target.value })}
+                  />
+                  <Input
+                    aria-label={`Header value ${index + 1}`}
+                    aria-invalid={headersError ? true : undefined}
+                    type="password"
+                    autoComplete="off"
+                    value={row.value}
+                    disabled={pending}
+                    onChange={(event) => updateHeaderRow(row.id, { value: event.target.value })}
+                  />
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Remove header ${index + 1}`}
+                    disabled={pending}
+                    onClick={() => removeHeaderRow(row.id)}
+                  >
+                    <X />
+                  </Button>
+                </div>
+              ))}
+              {headersError ? (
+                <p role="alert" className="text-caption text-destructive">
+                  {headersError}
+                </p>
+              ) : null}
+            </fieldset>
+          </div>
+        </details>
+      </div>
     </SettingsFormCard>
   );
 }

@@ -1,12 +1,5 @@
 import type { Schema } from "@/api/types";
 
-/** LLM provider labels, shared by the connections table and the connection dialog (I1.7). */
-export const LLM_ADAPTER_LABELS: Record<Schema<"LlmAdapter">, string> = {
-  openai: "OpenAI-compatible",
-  anthropic: "Anthropic",
-  gemini: "Gemini",
-};
-
 /** The connection form's four provider choices over the three adapters (D-I-51). */
 export type ProviderChoice = "openai" | "openai_compatible" | "anthropic" | "gemini";
 
@@ -36,3 +29,15 @@ export function providerLabel(connection: {
   const choice = providerChoice(connection);
   return PROVIDER_CHOICES.find((option) => option.value === choice)?.label ?? choice;
 }
+
+/** The adapter a choice saves: OpenAI-compatible is `openai` with a base URL. */
+export function adapterOf(choice: ProviderChoice): Schema<"LlmAdapter"> {
+  return choice === "openai_compatible" ? "openai" : choice;
+}
+
+/** Each adapter's default base URL (`DEFAULT_BASE` in `crates/eval/src/chat/*.rs`). */
+export const DEFAULT_BASE_URLS: Record<Schema<"LlmAdapter">, string> = {
+  openai: "https://api.openai.com/v1",
+  anthropic: "https://api.anthropic.com",
+  gemini: "https://generativelanguage.googleapis.com",
+};
