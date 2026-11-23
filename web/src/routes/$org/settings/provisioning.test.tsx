@@ -25,7 +25,11 @@ async function openPage({
   role = "owner",
   locked = false,
   scim = {},
-}: { role?: string; locked?: boolean; scim?: Record<string, unknown> } = {}) {
+}: {
+  role?: string;
+  locked?: boolean;
+  scim?: Record<string, unknown>;
+} = {}) {
   const features = locked
     ? entitlementsFixture.features
     : [...entitlementsFixture.features, "scim"];
@@ -49,8 +53,6 @@ it("shows the locked state without the feature", async () => {
 });
 
 it("owner enables SCIM and copies the base URL", async () => {
-  const writeText = vi.fn().mockResolvedValue(undefined);
-  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   let patched: unknown;
   server.use(
     http.patch("/api/v1/orgs/:org/scim", async ({ request }) => {
@@ -60,6 +62,9 @@ it("owner enables SCIM and copies the base URL", async () => {
   );
 
   const { user } = await openPage({ scim: { enabled: false } });
+  // userEvent.setup() installs its own clipboard stub, so the stub goes in after it.
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
   await user.click(await screen.findByRole("switch", { name: "Enabled" }));
 
   await waitFor(() => {
@@ -109,10 +114,7 @@ it("create disabled at two tokens", async () => {
   const [token] = scimFixture.tokens;
   await openPage({
     scim: {
-      tokens: [
-        token,
-        { ...token, id: "01900000-0000-7000-8000-000000000803", name: "Entra ID" },
-      ],
+      tokens: [token, { ...token, id: "01900000-0000-7000-8000-000000000803", name: "Entra ID" }],
     },
   });
 

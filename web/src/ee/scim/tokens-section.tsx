@@ -126,10 +126,7 @@ export function TokensSection({ org, tokens }: { org: string; tokens: Token[] })
             onChange={setName}
           />
           <DisabledReason reason={createReason}>
-            <SubmitButton
-              pending={create.isPending}
-              disabled={full || name.trim() === ""}
-            >
+            <SubmitButton pending={create.isPending} disabled={full || name.trim() === ""}>
               Create token
             </SubmitButton>
           </DisabledReason>
@@ -159,7 +156,9 @@ export function TokensSection({ org, tokens }: { org: string; tokens: Token[] })
         inputLabel='Type "revoke" to confirm'
         confirmLabel="Revoke"
         pending={revoke.isPending}
-        error={revoke.error ? problemMessage(revoke.error, "Could not revoke the token.") : undefined}
+        error={
+          revoke.error ? problemMessage(revoke.error, "Could not revoke the token.") : undefined
+        }
         onConfirm={() => {
           if (revoking !== undefined) {
             revoke.mutate({ params: { path: { org, id: revoking.id } } });

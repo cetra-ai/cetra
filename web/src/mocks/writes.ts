@@ -49,9 +49,9 @@ import orgModelPricesDocument from "../../../fixtures/api/static/org-model-price
 import orgScimDocument from "../../../fixtures/api/static/org-scim.json";
 import orgSsoDocument from "../../../fixtures/api/static/org-sso.json";
 import personalTokenCreatedDocument from "../../../fixtures/api/static/personal-token-created.json";
-import scimTokenCreatedDocument from "../../../fixtures/api/static/scim-token-created.json";
 import projectDocument from "../../../fixtures/api/static/project.json";
 import projectMembersDocument from "../../../fixtures/api/static/project-members.json";
+import scimTokenCreatedDocument from "../../../fixtures/api/static/scim-token-created.json";
 import scoreDefinitionDocument from "../../../fixtures/api/static/score-definition.json";
 import setupResponseDocument from "../../../fixtures/api/static/setup-response.json";
 import signupResponseDocument from "../../../fixtures/api/static/signup-response.json";
