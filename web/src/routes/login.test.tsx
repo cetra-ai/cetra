@@ -571,6 +571,30 @@ it("shows the password form on password=1 under org SSO", async () => {
   expect(replaced).toEqual([]);
 });
 
+it("shows the password form after an org provider refused the link", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login?error=link_refused");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage("link_refused"));
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(replaced).toEqual([]);
+});
+
+it("shows the password form on link_refused when passwords are off", async () => {
+  signedOut();
+  onlyCloud({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login?error=link_refused");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(
+    screen.queryByRole("link", { name: "Instance admin? Sign in with a password" }),
+  ).toBeNull();
+  expect(replaced).toEqual([]);
+});
+
 it("keeps the buttons with two providers", async () => {
   signedOut();
   withConfig({ password_enabled: false });
