@@ -94,6 +94,36 @@ REGISTRY: dict[str, Instrumentor] = {
             module="openinference.instrumentation.dspy",
             cls="DSPyInstrumentor",
         ),
+        Instrumentor(
+            name="groq",
+            extra="groq",
+            module="openinference.instrumentation.groq",
+            cls="GroqInstrumentor",
+        ),
+        Instrumentor(
+            name="mistralai",
+            extra="mistralai",
+            module="openinference.instrumentation.mistralai",
+            cls="MistralAIInstrumentor",
+        ),
+        Instrumentor(
+            name="cohere",
+            extra="cohere",
+            module="openinference.instrumentation.cohere",
+            cls="CohereInstrumentor",
+        ),
+        Instrumentor(
+            name="ollama",
+            extra="ollama",
+            module="openinference.instrumentation.ollama",
+            cls="OllamaInstrumentor",
+        ),
+        Instrumentor(
+            name="together",
+            extra="together",
+            module="openinference.instrumentation.together",
+            cls="TogetherInstrumentor",
+        ),
     )
 }
 

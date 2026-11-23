@@ -235,7 +235,7 @@ OTHER_ENTRIES = [entry for entry in REGISTRY.values() if entry.name not in ("ope
 
 @pytest.mark.parametrize("entry", OTHER_ENTRIES, ids=[entry.name for entry in OTHER_ENTRIES])
 def test_other_registry_entries_import(entry: Instrumentor) -> None:
-    """The eight other names: module and class exist when the extra is installed."""
+    """The thirteen other names: module and class exist when the extra is installed."""
     module: Any = pytest.importorskip(
         entry.module, reason=f"cetra-sdk[{entry.extra}] not installed"
     )

@@ -36,6 +36,11 @@ Auto-instrumentation is optional, one extra per library:
 | `openai-agents` | `cetra-sdk[openai-agents]` |
 | `crewai` | `cetra-sdk[crewai]` |
 | `dspy` | `cetra-sdk[dspy]` |
+| `groq` | `cetra-sdk[groq]` |
+| `mistralai` | `cetra-sdk[mistralai]` |
+| `cohere` | `cetra-sdk[cohere]` |
+| `ollama` | `cetra-sdk[ollama]` |
+| `together` | `cetra-sdk[together]` |
 
 `cetra-sdk[all]` installs every instrumentor. The core package pulls in only `opentelemetry-api`, `opentelemetry-sdk`, `opentelemetry-exporter-otlp-proto-http` and `requests`.
 

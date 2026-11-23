@@ -175,7 +175,7 @@ Known, accepted differences that the fixtures do not cover. The SDK guides list 
 - **Exporter environment.** Python's `OTLPSpanExporter` also merges `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_TRACES_HEADERS` from the environment into its request headers, so headers meant for another OTLP backend are sent to cetra too; TypeScript sends only ours. The Python guide warns about it (https://cetra.sh/docs/reference/python/opentelemetry/#known-limits).
 - **Abandoned generators.** A half-consumed Python sync generator that is garbage-collected ends its span with status ok; TypeScript (no finalizer) and Python async generators leave it unexported.
 
-## Python API (`pip install cetra-sdk`; Python ≥ 3.11; extras `cetra-sdk[openai]`, `[anthropic]`, `[langchain]`, `[llama-index]`, `[litellm]`, `[google-genai]`, `[bedrock]`, `[openai-agents]`, `[crewai]`, `[dspy]`, `[all]`)
+## Python API (`pip install cetra-sdk`; Python ≥ 3.11; extras `cetra-sdk[openai]`, `[anthropic]`, `[langchain]`, `[llama-index]`, `[litellm]`, `[google-genai]`, `[bedrock]`, `[openai-agents]`, `[crewai]`, `[dspy]`, `[groq]`, `[mistralai]`, `[cohere]`, `[ollama]`, `[together]`, `[all]`)
 
 ```python
 import cetra
@@ -250,6 +250,11 @@ The SDK does not patch `threading` or executors. The Python guide (https://cetra
 | `openai-agents` | `cetra-sdk[openai-agents]` | `openinference.instrumentation.openai_agents` | `OpenAIAgentsInstrumentor` | `openinference-instrumentation-openai-agents>=2.7.1` |
 | `crewai` | `cetra-sdk[crewai]` | `openinference.instrumentation.crewai` | `CrewAIInstrumentor` | `openinference-instrumentation-crewai>=1.1.23` |
 | `dspy` | `cetra-sdk[dspy]` | `openinference.instrumentation.dspy` | `DSPyInstrumentor` | `openinference-instrumentation-dspy>=0.1.50` |
+| `groq` | `cetra-sdk[groq]` | `openinference.instrumentation.groq` | `GroqInstrumentor` | `openinference-instrumentation-groq>=0.1.40` |
+| `mistralai` | `cetra-sdk[mistralai]` | `openinference.instrumentation.mistralai` | `MistralAIInstrumentor` | `openinference-instrumentation-mistralai>=2.3.5` |
+| `cohere` | `cetra-sdk[cohere]` | `openinference.instrumentation.cohere` | `CohereInstrumentor` | `openinference-instrumentation-cohere>=0.1.22` |
+| `ollama` | `cetra-sdk[ollama]` | `openinference.instrumentation.ollama` | `OllamaInstrumentor` | `openinference-instrumentation-ollama>=0.1.20` |
+| `together` | `cetra-sdk[together]` | `openinference.instrumentation.together` | `TogetherInstrumentor` | `openinference-instrumentation-together>=0.1.20` |
 
 `cetra-sdk[all]` installs every one.
 
