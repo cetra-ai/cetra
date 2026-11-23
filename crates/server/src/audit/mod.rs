@@ -475,22 +475,24 @@ pub(crate) async fn record_login_failed(
     user_id: uuid::Uuid,
     now: i64,
 ) -> Result<(), MetaError> {
-    let ctx = ctx.clone();
     let since = now - LOGIN_FAILED_WINDOW_NS;
+    // The check runs on the reader, so a repeated failure does not wait for the writer.
+    // Two failures that race past the check can both write: a rare duplicate, accepted.
+    let recent = sqlx::query_scalar::<_, i32>(
+        "SELECT 1 FROM audit_events WHERE org_id IS NULL AND target_id = ? \
+         AND action = 'auth.login_failed' AND at >= ? LIMIT 1",
+    )
+    .bind(user_id.to_string())
+    .bind(since)
+    .fetch_optional(meta.reader())
+    .await
+    .map_err(MetaError::from)?;
+    if recent.is_some() {
+        return Ok(());
+    }
+    let ctx = ctx.clone();
     meta.write(move |conn| {
         Box::pin(async move {
-            let recent = sqlx::query_scalar::<_, i32>(
-                "SELECT 1 FROM audit_events WHERE org_id IS NULL AND target_id = ? \
-                 AND action = 'auth.login_failed' AND at >= ? LIMIT 1",
-            )
-            .bind(user_id.to_string())
-            .bind(since)
-            .fetch_optional(&mut *conn)
-            .await
-            .map_err(MetaError::from)?;
-            if recent.is_some() {
-                return Ok(());
-            }
             let event = Event::new(AuthAction::LoginFailed)
                 .target(TargetKind::User, user_id)
                 .failed();

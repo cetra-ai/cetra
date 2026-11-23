@@ -26,7 +26,7 @@ pub(crate) async fn purge(meta: &MetaDb, retention_days: u32, now: i64) -> Resul
                 Box::pin(async move {
                     let result = sqlx::query(
                         "DELETE FROM audit_events WHERE seq IN \
-                         (SELECT seq FROM audit_events WHERE at < ? ORDER BY seq LIMIT ?)",
+                         (SELECT seq FROM audit_events WHERE at < ? LIMIT ?)",
                     )
                     .bind(cutoff)
                     .bind(PURGE_BATCH)

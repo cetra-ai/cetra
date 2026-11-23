@@ -28,7 +28,7 @@ use crate::meta::deletions::{
     log_undecodable, mark_applied, mark_dropped, mark_failed, mark_handed_over, open_deletions,
     scope_projects, scope_sessions, scope_traces,
 };
-use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id};
+use crate::meta::orgs::{OrgRow, delete_org, mark_org_deleting, org_by_id, org_by_id_tx};
 use crate::meta::projects::{delete_project, project_by_id, project_ids_of_org};
 
 /// Time between two runs when nothing wakes the worker.
@@ -347,6 +347,10 @@ async fn fail(state: &AppState, row: &DeletionRow, reason: FailReason) {
                 if !mark_failed(conn, id, reason).await? {
                     return Ok(false);
                 }
+                // An org drop that already ran erased the org's records; none is written after it.
+                if org_by_id_tx(conn, org).await?.is_none() {
+                    return Ok(true);
+                }
                 let mut event = Event::new(DeletionAction::Failed {
                     kind: kind.as_str(),
                 })
@@ -379,14 +383,20 @@ async fn fail(state: &AppState, row: &DeletionRow, reason: FailReason) {
     }
 }
 
-/// Sets `row` applied at `at`. Logs the audit event when the row changed.
+/// Sets `row` applied at `at` (kept on the row as `applied_at`). Logs the audit event when the
+/// row changed, stamped with the write time.
 async fn applied_now(state: &AppState, row: &DeletionRow, at: i64) -> Result<(), MetaError> {
     let (id, kind, org, project) = (row.id, row.kind, row.org_id, row.project_id);
+    let now = state.clock.now_ns();
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
                 if !mark_applied(conn, id, at).await? {
+                    return Ok(());
+                }
+                // An org drop that already ran erased the org's records; none is written after it.
+                if org_by_id_tx(conn, org).await?.is_none() {
                     return Ok(());
                 }
                 let mut event = Event::new(DeletionAction::Applied {
@@ -397,7 +407,7 @@ async fn applied_now(state: &AppState, row: &DeletionRow, at: i64) -> Result<(),
                 if let Some(project) = project {
                     event = event.project(project);
                 }
-                audit::record(conn, &Ctx::system(), event, at).await
+                audit::record(conn, &Ctx::system(), event, now).await
             })
         })
         .await

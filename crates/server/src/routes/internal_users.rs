@@ -225,7 +225,8 @@ async fn delete(
                 // The audit rows the user acted in keep their id and lose ip and user agent (D-EA-3).
                 sqlx::query(
                     "UPDATE audit_events SET ip = NULL, user_agent = NULL \
-                     WHERE actor_kind = 'user' AND actor_id = ?",
+                     WHERE (actor_kind = 'user' AND actor_id = ?1) \
+                     OR (target_kind = 'user' AND target_id = ?1)",
                 )
                 .bind(user.to_string())
                 .execute(&mut *conn)
@@ -620,7 +621,8 @@ mod tests {
         .unwrap()
     }
 
-    /// Deleting a user clears the ip and user agent of the rows they acted in; the rows stay.
+    /// Deleting a user clears the ip and user agent of the rows they acted in or are the target
+    /// of; the rows stay.
     #[tokio::test]
     async fn deleting_a_user_clears_their_ip() {
         let app = TestApp::new().await;
@@ -647,6 +649,30 @@ mod tests {
         assert_eq!(before_ip.as_deref(), Some("203.0.113.7"));
         assert_eq!(before_agent.as_deref(), Some("Agent/1.0"));
 
+        // A failed login that names the user as its target (no actor) must lose its ip too.
+        let failed_ctx = crate::audit::Ctx {
+            actor: crate::audit::Actor::Anonymous,
+            ip: Some("203.0.113.9".parse().unwrap()),
+            user_agent: Some("Attacker/1.0".to_owned()),
+        };
+        crate::audit::record_login_failed(
+            &app.state.meta,
+            &failed_ctx,
+            user.id,
+            app.state.clock.now_ns(),
+        )
+        .await
+        .unwrap();
+        let (failed_id, failed_ip): (String, Option<String>) = sqlx::query_as(
+            "SELECT id, ip FROM audit_events \
+             WHERE action = 'auth.login_failed' AND target_id = ?",
+        )
+        .bind(user.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(failed_ip.as_deref(), Some("203.0.113.9"));
+
         let deleted = post_user(&app, "delete", "users", "sub-ip", "ip@example.com").await;
         assert_eq!(deleted.status, 200);
 
@@ -659,6 +685,19 @@ mod tests {
         assert_eq!(kept_id, login_id);
         assert_eq!(after_ip, None);
         assert_eq!(after_agent, None);
+
+        let (kept_failed_id, after_failed_ip, after_failed_agent): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as("SELECT id, ip, user_agent FROM audit_events WHERE id = ?")
+            .bind(&failed_id)
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(kept_failed_id, failed_id);
+        assert_eq!(after_failed_ip, None);
+        assert_eq!(after_failed_agent, None);
     }
 
     #[tokio::test]

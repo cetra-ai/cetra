@@ -392,15 +392,18 @@ async fn patch_org_sso(
                 } else {
                     (0, Vec::new())
                 };
-                let event = Event::new(SsoAction::SettingsChanged {
-                    enabled_before,
-                    enabled,
-                    enforced_before,
-                    enforced,
-                    revoked_users: users,
-                })
-                .org(org);
-                audit::record(conn, &ctx, event, now).await?;
+                // A patch that sets the flags they already have changes nothing, so it records nothing.
+                if enabled != enabled_before || enforced != enforced_before {
+                    let event = Event::new(SsoAction::SettingsChanged {
+                        enabled_before,
+                        enabled,
+                        enforced_before,
+                        enforced,
+                        revoked_users: users,
+                    })
+                    .org(org);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
                 Ok(Patch::Done(hashes))
             })
         })
@@ -1698,6 +1701,28 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_patch_that_changes_no_flag_records_nothing() {
+        let idp = MockIdp::start().await;
+        let (app, seeded, owner) = org_sso_app().await;
+        configure_org_sso(&app, seeded.org_id, &idp, "acme.test", true, false).await;
+
+        let same = patch_settings(
+            &app,
+            &owner.cookie,
+            &json!({"enabled": true, "enforced": false}),
+        )
+        .await;
+        assert_eq!(same.status, StatusCode::OK);
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_events WHERE action = 'sso.settings_changed'",
+        )
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[tokio::test]

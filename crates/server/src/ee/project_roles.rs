@@ -71,20 +71,25 @@ async fn set_project_override(
                 }
                 let old = members::project_override_tx(conn, project_id, target).await?;
                 members::set_project_override(conn, project_id, target, override_role).await?;
-                audit::record(
-                    conn,
-                    &ctx,
-                    Event::new(MemberAction::OverrideSet {
-                        project_id: project_id.as_uuid(),
-                        old_role: old.map(project_override_str),
-                        new_role: project_override_str(override_role),
-                    })
-                    .org(org_id)
-                    .project(project_id)
-                    .target(TargetKind::User, target),
-                    now,
-                )
-                .await?;
+                let old_role = old.map(project_override_str);
+                let new_role = project_override_str(override_role);
+                // Setting the override a member already has changes nothing, so it records nothing.
+                if old_role != Some(new_role) {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(MemberAction::OverrideSet {
+                            project_id: project_id.as_uuid(),
+                            old_role,
+                            new_role,
+                        })
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::User, target),
+                        now,
+                    )
+                    .await?;
+                }
                 Ok(MemberChange::Done)
             })
         })
@@ -424,6 +429,36 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn setting_the_same_override_records_nothing() {
+        let key = license_key_until(
+            &["project_roles"],
+            "2099-01-01T00:00:00Z",
+            "2099-02-01T00:00:00Z",
+        );
+        let app = TestApp::with_config(move |config| {
+            config.license_key = Some(Secret::new(key));
+        })
+        .await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+        let project = create_project(&app, &ada, "acme", "Support").await;
+        let path = format!("/api/v1/projects/{}/members/{member_id}", project.id);
+        let set = || {
+            app.request(Method::PUT, &path)
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "role": "viewer" }))
+                .send()
+        };
+
+        assert_eq!(set().await.status, 200);
+        assert_eq!(set().await.status, 200);
+
+        assert_eq!(audit_rows(&app, "member.override_set").await.len(), 1);
     }
 
     #[tokio::test]

@@ -169,18 +169,21 @@ async fn update_org_member(
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
-                audit::record(
-                    conn,
-                    &ctx,
-                    Event::new(MemberAction::RoleChanged {
-                        old_role: roles::org_role_str(target_role),
-                        new_role: roles::org_role_str(role),
-                    })
-                    .org(org_id)
-                    .target(TargetKind::User, target),
-                    now,
-                )
-                .await?;
+                // Setting the role a member already has changes nothing, so it records nothing.
+                if target_role != role {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(MemberAction::RoleChanged {
+                            old_role: roles::org_role_str(target_role),
+                            new_role: roles::org_role_str(role),
+                        })
+                        .org(org_id)
+                        .target(TargetKind::User, target),
+                        now,
+                    )
+                    .await?;
+                }
                 Ok(RoleChange::Done)
             })
         })
@@ -558,6 +561,27 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&promoted.body)
         );
+    }
+
+    #[tokio::test]
+    async fn setting_the_current_role_records_nothing() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+
+        let unchanged = app
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{member_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(unchanged.status, 200);
+        assert!(audit_rows(&app, "member.role_changed").await.is_empty());
     }
 
     #[tokio::test]

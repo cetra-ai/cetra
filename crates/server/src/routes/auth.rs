@@ -1349,6 +1349,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_second_failed_login_within_a_minute_writes_no_row() {
+        let app = TestApp::new().await;
+        insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;
+        let first = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", "not-the-password"))
+            .send()
+            .await;
+        assert_eq!(first.status, 401);
+        app.state.clock.advance(Duration::from_secs(10));
+        let second = app
+            .request(Method::POST, "/api/auth/login")
+            .json(&login_body("ada@example.com", "not-the-password"))
+            .send()
+            .await;
+        assert_eq!(second.status, 401);
+
+        let failures: Vec<String> = sqlx::query_scalar(
+            "SELECT outcome FROM audit_events WHERE action = 'auth.login_failed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(failures, vec!["failure".to_owned()]);
+    }
+
+    #[tokio::test]
     async fn failed_logins_answer_the_same_and_each_verifies_once() {
         let app = TestApp::new().await;
         insert_account(&app, "ada@example.com", Some(PASSWORD), true).await;

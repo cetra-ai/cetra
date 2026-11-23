@@ -564,7 +564,8 @@ async fn admit(
         let event = Event::new(AuthAction::Signup {
             method: SignupMethod::OrgProvider,
         })
-        .org(org);
+        .org(org)
+        .target(TargetKind::User, user_id);
         audit::record(conn, &actor, event, now).await?;
     }
     if let Some(role) = joined {

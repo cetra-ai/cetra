@@ -209,7 +209,6 @@ async fn update_project(
         None => None,
         Some(name) => Some(trimmed_name(&name)?),
     };
-    let name_changed = name.as_ref().is_some_and(|new| *new != access.project.name);
     let retention_days = match body.retention_days {
         None => None,
         Some(None) => Some(None),
@@ -226,17 +225,6 @@ async fn update_project(
         .trace_completion_timeout_s
         .map(checked_timeout)
         .transpose()?;
-    // The old and new value of each setting the request changes (plan: retention is
-    // `Option<Option<u32>>`, outer `None` = unchanged).
-    let retention_change = match retention_days {
-        Some(new) if new != access.project.retention_days => {
-            Some((access.project.retention_days, new))
-        }
-        _ => None,
-    };
-    let timeout_change = timeout
-        .filter(|new| Some(*new) != access.project.trace_completion_timeout_s)
-        .map(|new| (access.project.trace_completion_timeout_s, Some(new)));
     let org_id = access.project.org_id;
     let id = access.project.id;
     let role = access.role;
@@ -245,6 +233,39 @@ async fn update_project(
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The old values are read in this write transaction, so each record states the
+                // change this request made. The timeout is stored in `settings`, read as
+                // `project_by_id` reads it.
+                let old: Option<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+                    "SELECT name, retention_days, \
+                     CAST(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' \
+                     THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) \
+                     FROM projects WHERE id = ?",
+                )
+                .bind(id.to_string())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(crate::meta::MetaError::from)?;
+                // No row: the update would change nothing, so there is nothing to record.
+                let Some((old_name, old_retention, old_timeout)) = old else {
+                    return Ok(());
+                };
+                let old_retention = old_retention.and_then(|days| u32::try_from(days).ok());
+                let old_timeout = old_timeout
+                    .and_then(|seconds| u32::try_from(seconds).ok())
+                    .filter(|seconds| {
+                        (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(seconds)
+                    });
+                // The old and new value of each setting the request changes (retention is
+                // `Option<Option<u32>>`, outer `None` = unchanged).
+                let name_changed = name.as_ref().is_some_and(|new| *new != old_name);
+                let retention_change = match retention_days {
+                    Some(new) if new != old_retention => Some((old_retention, new)),
+                    _ => None,
+                };
+                let timeout_change = timeout
+                    .filter(|new| Some(*new) != old_timeout)
+                    .map(|new| (old_timeout, Some(new)));
                 projects::update_project(
                     conn,
                     id,
