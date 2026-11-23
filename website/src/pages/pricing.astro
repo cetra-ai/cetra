@@ -43,16 +43,6 @@ import { CONTACT_EMAIL } from "../marketing/site";
         <PlanCards />
       </Section>
 
-      <Section tone="raised" divider labelledby="calc-title">
-        <SectionHeading
-          eyebrow="Estimate"
-          title="What will it cost?"
-          id="calc-title"
-          lede="Enter your monthly spans and scores. The estimate is the list price; volume lowers it."
-        />
-        <Calculator />
-      </Section>
-
       <Section tone="ink" divider labelledby="every-title">
         <SectionHeading
           eyebrow="Every plan"
@@ -62,6 +52,16 @@ import { CONTACT_EMAIL } from "../marketing/site";
         />
         <FeatureTable id="cloud-features" caption="cetra Cloud plans compared" columns={CLOUD_COLUMNS} groups={groupsFor("cloud")} picker />
         <p class="muted table-note">{`Teams add-on: ${formatMoney(TEAMS_ADDON.priceMonthly)} a month on top of Pro. Prices in USD, excluding tax.`}</p>
+      </Section>
+
+      <Section tone="raised" divider labelledby="calc-title">
+        <SectionHeading
+          eyebrow="Estimate"
+          title="What will it cost?"
+          id="calc-title"
+          lede="Enter your monthly spans and scores. The estimate is the list price; volume lowers it."
+        />
+        <Calculator />
       </Section>
     </div>
     <div data-tab-panel>

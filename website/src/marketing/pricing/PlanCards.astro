@@ -27,7 +27,16 @@ import Price from "./Price.astro";
           </div>
           <ul class="points bullets">
             <li>{formatUnits(plan.includedUnits)} spans and scores a month</li>
-            <li>{plan.overage ? `Then ${formatMoney(OVERAGE_PER_100K)} per 100,000` : "Hard limit, no overage"}</li>
+            {plan.overage ? (
+              <li>
+                <span>
+                  Then {formatMoney(OVERAGE_PER_100K)} per 100,000
+                  <a class="calc-link" href="#calc-title">Price calculator</a>
+                </span>
+              </li>
+            ) : (
+              <li>Hard limit, no overage</li>
+            )}
             <li>{plan.dataAccess} of history</li>
             <li>{plan.seats}</li>
             {plan.projects && <li>{plan.projects}</li>}
@@ -98,6 +107,22 @@ import Price from "./Price.astro";
   }
   .points {
     margin: var(--space-5) 0 0;
+  }
+  /* A small pill under the overage price that jumps to the calculator. */
+  .calc-link {
+    display: block;
+    width: fit-content;
+    margin-top: var(--space-1);
+    padding: 0 var(--space-2);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    font-size: var(--text-xs);
+    color: var(--accent);
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .calc-link:hover {
+    border-color: var(--accent);
   }
   .note {
     font-size: var(--text-sm);
