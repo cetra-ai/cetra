@@ -246,7 +246,7 @@ Updated by hand: `rust-toolchain.toml`, `.node-version`, `packageManager`.
 
 ## Naming
 
-Crates are prefixed `cetra-`. The binary is `cetra`, env vars use the `CETRA_` prefix, and span attributes use the `cetra.*` namespace. API keys are `sk-cetra-…`, `pk-cetra-…` and `pat-cetra-…`.
+Crates are prefixed `cetra-`. The binary is `cetra`, env vars use the `CETRA_` prefix, and span attributes use the `cetra.*` namespace. API keys are `sk-cetra-…`, `pk-cetra-…`, `pat-cetra-…` and `scim-cetra-…`.
 
 The product was renamed from the working name `llmobs` to `cetra` mechanically (D46). Keep the name in as few places as practical, e.g. one constant for the attribute prefix.
 

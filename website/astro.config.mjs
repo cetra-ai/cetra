@@ -122,6 +122,7 @@ export default defineConfig({
                     { label: "API keys and tokens", link: "/docs/platform/api-keys/" },
                     { label: "Organizations and roles", link: "/docs/platform/organizations/" },
                     { label: "Single sign-on", link: "/docs/platform/sso/" },
+                    { label: "SCIM provisioning", link: "/docs/platform/scim/" },
                     {
                       label: "Deletion and retention",
                       link: "/docs/platform/deletion-and-retention/",

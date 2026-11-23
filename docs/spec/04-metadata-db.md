@@ -1089,6 +1089,54 @@ CREATE INDEX audit_events_at ON audit_events (at);
 - **Org drop.** When an org's drop is applied, its rows are deleted in the drop's transaction, and an instance record `org.dropped` is written.
 - **User deletion.** In the user's deletion transaction, the `ip` and `user_agent` of the rows whose actor is that user are cleared. The rows keep their ids.
 
+## SCIM provisioning (track EA M5, `ee`)
+
+Migration `0032_scim.sql` (D-EA-12 to D-EA-19). One row of `org_scim` per org; `scim_tokens` holds the SHA-256 of each `scim-cetra-…` token (at most two live per org, enforced in the write transaction). `scim_users` links an org's SCIM resource to the cetra user it provisions. Its `active` is the SCIM flag, and `disabled_account` records that SCIM disabled the account, so a reactivation can enable it again. No text column has a `CHECK` (D-R-34).
+
+```sql
+CREATE TABLE org_scim (
+    org_id TEXT PRIMARY KEY REFERENCES orgs(id) ON DELETE CASCADE,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    default_role TEXT NOT NULL DEFAULT 'viewer',   -- 'viewer' | 'member' (P-4)
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE scim_tokens (
+    id TEXT PRIMARY KEY,
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    prefix TEXT NOT NULL,               -- the type prefix plus 6 random characters (public)
+    token_hash TEXT NOT NULL UNIQUE,    -- SHA-256 of the token
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at INTEGER NOT NULL,
+    last_used_at INTEGER,
+    revoked_at INTEGER
+);
+CREATE INDEX scim_tokens_org ON scim_tokens (org_id);
+
+CREATE TABLE scim_users (
+    id TEXT PRIMARY KEY,                -- UUIDv7; the SCIM resource id, per org
+    org_id TEXT NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_name TEXT NOT NULL,            -- the email
+    external_id TEXT,
+    given_name TEXT,
+    family_name TEXT,
+    display_name TEXT,
+    department TEXT,                    -- enterprise extension
+    employee_number TEXT,               -- enterprise extension
+    active INTEGER NOT NULL DEFAULT 1,
+    disabled_account INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX scim_users_org_user_name ON scim_users (org_id, user_name);
+CREATE UNIQUE INDEX scim_users_org_external_id ON scim_users (org_id, external_id) WHERE external_id IS NOT NULL;
+CREATE UNIQUE INDEX scim_users_org_user ON scim_users (org_id, user_id);
+```
+
+A member is SCIM-managed while an active `scim_users` row links to them (spec 08 § SCIM). The `scim_groups` and `scim_group_mappings` tables come with M6.
+
 ## Encryption of secrets
 
 The key is 32 bytes in standard base64. Source order (D-I-1): the `encryption_key` config value (`CETRA_ENCRYPTION_KEY`) wins and the file is neither read nor written; otherwise `<data_dir>/secret.key`; otherwise the server generates a key, but only while `instance_settings` has no `encryption.check` — once a check value exists, a missing key fails startup. The file holds the base64 of the 32 key bytes plus one trailing newline, mode 0600, written through a `.tmp` file and a rename so a crash leaves either no file or a whole one; a mode readable by group or other is warned about and still used. `cetra admin rotate-encryption-key` re-encrypts every sealed column in one transaction, writing `secret.key.new` first; a start that finds a `secret.key.new` whose check value matches the stored one renames it over `secret.key`, finishing an interrupted rotation, and otherwise deletes it (D-I-3).

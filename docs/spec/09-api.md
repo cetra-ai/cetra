@@ -275,6 +275,28 @@ Errors use the usual problem document (§ Conventions). Issue JSON uses RFC 3339
 | `GET /deletions` · `GET /deletions/{id}` | newest first; status `resolving` → `pending` (hidden) → `applied`, or `failed` with `error` (D-M-3) |
 | `DELETE /api/v1/projects/{project}` · `DELETE /api/v1/orgs/{org}` | project/org erasure, see § Orgs and projects; session only (D-P-70) |
 
+### Provisioning and SCIM (track EA M5, `ee`)
+
+The Provisioning routes are cetra API, documented in OpenAPI. They need a session and `ManageProvisioning` (owner), and reject a PAT or an API key (D-EA-15).
+
+| Method & path |
+|---|
+| `GET /api/v1/orgs/{org}/scim` (readable without the `scim` feature) · `PATCH /api/v1/orgs/{org}/scim` (`{enabled?, default_role?}` with `default_role` `viewer` or `member`; enabling needs the `scim` feature and a verified domain, and on self-hosted `org_sso`; 403 `plan_required` or 409 when refused) |
+| `POST /api/v1/orgs/{org}/scim/tokens` (`{name}`; the secret `scim-cetra-…` is shown once; 409 when the org has two live tokens) · `DELETE /api/v1/orgs/{org}/scim/tokens/{id}` (revokes at once) |
+
+The SCIM surface is `<public_url>/scim/v2`, authenticated by a `scim-cetra-…` bearer token and outside OpenAPI, as RFC 7644 defines it (D-EA-12). It takes no CSRF token.
+
+| Method & path | Notes |
+|---|---|
+| `GET /scim/v2/ServiceProviderConfig`, `/ResourceTypes`, `/Schemas` | Static. `patch` and `filter` (max 200 results) are true; `bulk`, `sort`, `etag` and `changePassword` are false. |
+| `GET /scim/v2/Users` | `filter` (`userName eq`, `externalId eq`, `emails[type eq "work"].value eq`; other filters `400 invalidFilter`), `startIndex`, `count`. |
+| `POST /scim/v2/Users` | `201` with `Location` and `meta`. `409 uniqueness` for an existing `userName` or `externalId`. |
+| `GET`, `PUT`, `PATCH`, `DELETE /scim/v2/Users/{id}` | `{id}` is the `scim_users` row id. `PUT` and `PATCH` answer `200` with the resource, `DELETE` answers `204`. An unknown id is `404`. |
+
+Errors use `urn:ietf:params:scim:api:messages:2.0:Error` with `scimType` where SCIM defines one. A `/scim/v2` path that matches no route is a SCIM `404`, never the web app. Per token: 600 requests a minute, burst 600.
+
+Routes refused by a managed member's lock (D-EA-18) answer `409 scim_managed`: `PATCH /api/v1/orgs/{org}/members/{user}`, `DELETE /api/v1/orgs/{org}/members/{user}`, the org's invitation create and accept routes for verified-domain emails, and the project override routes for a managed member.
+
 ## Response shapes (observability read API)
 
 Field lists live in the Rust types (`cetra_server::api`) and the contract file; these are the rules behind them (D70, D73).
