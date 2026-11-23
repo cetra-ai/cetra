@@ -191,6 +191,14 @@ opentelemetry-proto = { version = "0.33.1", default-features = false, features =
     "metrics",
     "with-serde",
 ] }
+# cetra's own log export (track TL, D-TL-2). The API crate, for `KeyValue`. No default features:
+# `internal-logs` would send the SDK's own diagnostics through `tracing`.
+opentelemetry = { version = "0.33.1", default-features = false, features = ["logs"] }
+# Batch log processor, logger provider and resource (D-TL-2). Never `rt-tokio` or an
+# `experimental_*` async processor: the batch processor runs on its own thread.
+opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["logs"] }
+# `tracing` events to OTel log records (D-TL-2).
+opentelemetry-appender-tracing = { version = "0.33.1", default-features = false }
 # gRPC server for `TraceService/Export` (D-G-29). `router` is needed for `Server::builder().add_service`.
 # No `zstd`: tonic's pulls `zstd` 0.14 next to the workspace's 0.13, and spec 02 asks for gzip only.
 tonic = { version = "0.14.9", default-features = false, features = [

@@ -951,7 +951,10 @@ dependencies = [
  "minijinja",
  "oauth2",
  "openidconnect",
+ "opentelemetry",
+ "opentelemetry-appender-tracing",
  "opentelemetry-proto",
+ "opentelemetry_sdk",
  "prometheus-client",
  "prost",
  "rand 0.10.4",
@@ -4184,6 +4187,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry-appender-tracing"
+version = "0.33.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1f01f1c53c46ce80e5fd8cb7a646f13766fd8f315a8a5b75b9bad59a08d2c5c7"
+dependencies = [
+ "opentelemetry",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "opentelemetry-proto"
 version = "0.33.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6092,7 +6107,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
