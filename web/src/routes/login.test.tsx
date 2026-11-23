@@ -479,15 +479,18 @@ it("asks for an email before checking it", async () => {
   expect(bodies).toEqual([]);
 });
 
-it.each(["seat_limit", "sso_required", "sso_unavailable"] as const)(
-  "explains the %s error from the URL",
-  async (code) => {
-    signedOut();
-    withConfig({ sso_discovery: true });
-    await renderApp(`/login?error=${code}`);
-    expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
-  },
-);
+it.each([
+  "seat_limit",
+  "sso_required",
+  "sso_unavailable",
+  "saml_invalid",
+  "saml_unsupported",
+] as const)("explains the %s error from the URL", async (code) => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  await renderApp(`/login?error=${code}`);
+  expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage(code));
+});
 
 it("starts the only provider at once, keeping the redirect", async () => {
   signedOut();
@@ -568,6 +571,30 @@ it("shows the password form on password=1 under org SSO", async () => {
   expect(replaced).toEqual([]);
 });
 
+it("shows the password form after an org provider refused the link", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login?error=link_refused");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(await screen.findByRole("alert")).toHaveTextContent(oauthErrorMessage("link_refused"));
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(replaced).toEqual([]);
+});
+
+it("shows the password form on link_refused when passwords are off", async () => {
+  signedOut();
+  onlyCloud({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login?error=link_refused");
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  expect(
+    screen.queryByRole("link", { name: "Instance admin? Sign in with a password" }),
+  ).toBeNull();
+  expect(replaced).toEqual([]);
+});
+
 it("keeps the buttons with two providers", async () => {
   signedOut();
   withConfig({ password_enabled: false });
@@ -588,6 +615,41 @@ it("keeps the email step under org SSO", async () => {
   await renderApp("/login");
   expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
   expect(screen.getByLabelText("Email")).toBeInTheDocument();
+  expect(replaced).toEqual([]);
+});
+
+it("offers the password form from the email step", async () => {
+  signedOut();
+  withConfig({ sso_discovery: true });
+  const bodies = discoverAnswers(() => HttpResponse.json({ sso: true }));
+  const { replaced } = recordNavigation();
+  const { router, user } = await renderApp("/login?redirect=%2Facme");
+  await user.type(await screen.findByLabelText("Email"), "ada@acme.com");
+  await user.click(screen.getByRole("link", { name: "Sign in with a password instead" }));
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(screen.getByLabelText("Email")).toHaveValue("ada@acme.com");
+  expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+  await waitFor(() => {
+    expect(router.state.status).toBe("idle");
+    expect(router.state.resolvedLocation?.search).toEqual({
+      password: true,
+      redirect: "/acme",
+      email: "ada@acme.com",
+    });
+  });
+  expect(bodies).toEqual([]);
+  expect(replaced).toEqual([]);
+});
+
+it("offers instance admins the password form from the email step when passwords are off", async () => {
+  signedOut();
+  onlyCloud({ sso_discovery: true });
+  const { replaced } = recordNavigation();
+  await renderApp("/login");
+  expect(
+    await screen.findByRole("link", { name: "Instance admin? Sign in with a password" }),
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Sign in with a password instead" })).toBeNull();
   expect(replaced).toEqual([]);
 });
 

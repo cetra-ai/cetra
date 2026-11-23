@@ -199,10 +199,15 @@ test("Teams add-on rows match the licence", () => {
       row.cloud[3] === true &&
       row.selfHosted !== undefined,
   );
-  assert.equal(teamsRows.length, SELF_HOSTED.licence.features.length);
   for (const { row } of teamsRows) {
     assert.deepEqual(row.selfHosted, [false, true], `"${row.label}" licence cells`);
   }
+  // Every licence feature has a row, plus the support row (D197); SAML is licence-only, with
+  // no Teams cell (D-SA-3).
+  const licenceRows = allRows.filter(
+    ({ row }) => row.selfHosted?.[0] === false && row.selfHosted?.[1] === true,
+  );
+  assert.equal(licenceRows.length, SELF_HOSTED.licence.features.length + 1);
 });
 
 test("retention controls are Pro and up", () => {
@@ -215,7 +220,7 @@ test("retention controls are Pro and up", () => {
 test("each table has about 55 to 60 rows", () => {
   const count = (table) => groupsFor(table).reduce((sum, group) => sum + group.rows.length, 0);
   assert.equal(count("cloud"), 61);
-  assert.equal(count("selfHosted"), 58);
+  assert.equal(count("selfHosted"), 59);
 });
 
 test("groupsFor drops rows and empty groups", () => {

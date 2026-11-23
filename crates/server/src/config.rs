@@ -2793,7 +2793,12 @@ mod tests {
 
     #[test]
     fn defaults_refuse_ee_and_unknown_features() {
-        for features in ["[\"project_roles\"]", "[\"org_sso\"]", "[\"nope\"]"] {
+        for features in [
+            "[\"project_roles\"]",
+            "[\"org_sso\"]",
+            "[\"saml\"]",
+            "[\"nope\"]",
+        ] {
             let toml = format!("[entitlements.defaults]\nfeatures = {features}\n");
             let error = load_from(Some(&toml), &[]).unwrap_err();
             assert!(

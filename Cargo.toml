@@ -40,6 +40,7 @@ cetra-eval = { path = "crates/eval" }
 cetra-otel = { path = "crates/otel" }
 cetra-storage = { path = "crates/storage" }
 cetra-token = { path = "crates/token" }
+cetra-saml = { path = "crates/saml" }
 cetra-server = { path = "crates/server" }
 cetra-ui = { path = "crates/ui" }
 cetra-capture = { path = "tools/capture" }
@@ -206,6 +207,10 @@ sha2 = "0.11.1"
 # Licence keys and org entitlement tokens (D-P-5). Already in Cargo.lock through openidconnect.
 ed25519-dalek = "3.0.0"
 base64 = "0.23.1"
+# SAML 2.0 SP (track SA, D-SA-8): XML parser, exc-c14n and XML-DSig. Exact pin: a young crate.
+bergshamra = { version = "=0.12.0", default-features = false, features = ["rustcrypto"] }
+# Certificate validity dates for SAML IdP certificates (D-SA-11). Already in the graph via bergshamra.
+x509-cert = { version = "0.2.5", default-features = false }
 # Password hashing (D143). Defaults include `alloc`, `getrandom`, and `password-hash`.
 argon2 = "0.6.0"
 # OS CSPRNG for keys and salts (`SysRng`). Already resolved in `Cargo.lock`.

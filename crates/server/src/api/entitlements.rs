@@ -19,15 +19,18 @@ pub enum Feature {
     SsoEnforcement,
     /// Per-org OIDC providers, domains and enforcement (M5): Teams add-on or an enterprise licence.
     OrgSso,
+    /// SAML 2.0 single sign-on for an org's provider (track SA, ee).
+    Saml,
 }
 
 impl Feature {
     /// Every feature, in declaration order.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::RetentionManagement,
         Self::ProjectRoles,
         Self::SsoEnforcement,
         Self::OrgSso,
+        Self::Saml,
     ];
 
     /// The wire name.
@@ -37,6 +40,7 @@ impl Feature {
             Self::ProjectRoles => "project_roles",
             Self::SsoEnforcement => "sso_enforcement",
             Self::OrgSso => "org_sso",
+            Self::Saml => "saml",
         }
     }
 
@@ -44,7 +48,7 @@ impl Feature {
     pub fn is_ee(self) -> bool {
         matches!(
             self,
-            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso
+            Self::ProjectRoles | Self::SsoEnforcement | Self::OrgSso | Self::Saml
         )
     }
 
@@ -64,6 +68,7 @@ impl Feature {
             Self::OrgSso => {
                 "Single sign-on for an organization needs the Teams add-on or an enterprise licence."
             }
+            Self::Saml => "SAML single sign-on needs a licence or plan that includes it.",
         }
     }
 }

@@ -10,6 +10,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 ### Added
 
 - The organization home shows a card per project with its last 24 hours (traces, error rate, LLM cost, an hourly chart with errors, the last ingest time), a cards/table switch, a search box, and this month's usage against the plan. `GET /api/v1/orgs/{org}/projects/activity` serves the cards.
+- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
 - LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
 - The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
 
@@ -24,6 +25,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Fixed
 
+- When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
 - Selecting another member while the member panel is open no longer adds a second Role card.
 

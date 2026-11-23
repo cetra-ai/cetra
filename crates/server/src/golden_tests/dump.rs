@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{ConnectOptions, Connection, Row, TypeInfo, ValueRef};
@@ -882,29 +883,47 @@ async fn pending_section(world: &World<'_>) -> Value {
     Value::Object(map)
 }
 
-/// org_sso_providers and org_sso_domains: `org_sso::store::provider` and `domains`, by org slug.
-/// The sealed client secret is in `secrets`.
+/// org_sso_providers, org_sso_saml and org_sso_domains, by org slug: `org_sso::store::provider`,
+/// `saml` and `domains`. The sealed client secret is in `secrets`.
 async fn sso_section(world: &World<'_>) -> Value {
-    let provider = sso::provider(world.pool, world.org.id)
+    let saml_org = orgs::org_by_slug(world.pool, "golden-saml")
         .await
-        .expect("read the provider")
-        .map(|row| {
+        .expect("read the SAML org")
+        .expect("the golden SAML org");
+    json!({
+        "golden-org": org_sso_entry(world.pool, world.org.id).await,
+        "golden-saml": org_sso_entry(world.pool, saml_org.id).await,
+    })
+}
+
+/// One org's provider, with its SAML settings, and its domains, as `sso_section` dumps them.
+async fn org_sso_entry(pool: &SqlitePool, org: cetra_core::ids::OrgId) -> Value {
+    let provider = match sso::provider(pool, org).await.expect("read the provider") {
+        None => Value::Null,
+        Some(row) => {
+            let saml = sso::saml(pool, row.id)
+                .await
+                .expect("read the SAML settings")
+                .map(|saml| saml_json(&saml));
             json!({
+                "protocol": row.protocol.as_str(),
                 "display_name": row.display_name,
-                "issuer": row.issuer,
-                "client_id": row.client_id,
-                "has_secret": !row.client_secret_enc.is_empty(),
+                "issuer": row.oidc.as_ref().map(|oidc| oidc.issuer.clone()),
+                "client_id": row.oidc.as_ref().map(|oidc| oidc.client_id.clone()),
+                "has_secret": row
+                    .oidc
+                    .as_ref()
+                    .is_some_and(|oidc| !oidc.client_secret_enc.is_empty()),
                 "enabled": row.enabled,
                 "enforced": row.enforced,
                 "jit_role": ser(&row.jit_role),
                 "has_logged_in": row.last_login_at.is_some(),
+                "saml": saml,
             })
-        });
+        }
+    };
     let mut domains = Map::new();
-    for row in sso::domains(world.pool, world.org.id)
-        .await
-        .expect("read the domains")
-    {
+    for row in sso::domains(pool, org).await.expect("read the domains") {
         domains.insert(
             row.domain.clone(),
             json!({
@@ -914,7 +933,29 @@ async fn sso_section(world: &World<'_>) -> Value {
             }),
         );
     }
-    json!({ "golden-org": { "provider": provider, "domains": domains } })
+    json!({ "provider": provider, "domains": domains })
+}
+
+/// A SAML provider's settings. The certificates are hashed, as the contract shows them.
+fn saml_json(saml: &sso::SamlRow) -> Value {
+    json!({
+        "idp_entity_id": saml.idp_entity_id,
+        "sso_url": saml.sso_url,
+        "metadata_url": saml.metadata_url,
+        "attributes": {
+            "email": saml.attributes.email,
+            "display_name": saml.attributes.display_name,
+            "first_name": saml.attributes.first_name,
+            "last_name": saml.attributes.last_name,
+        },
+        "certificates": saml
+            .certificates
+            .iter()
+            .map(|der| hex::encode(Sha256::digest(der)))
+            .collect::<Vec<_>>(),
+        "refreshed": saml.refreshed_at.is_some(),
+        "refresh_error": saml.refresh_error,
+    })
 }
 
 /// org_entitlements: `meta::entitlements::all_tokens`, each verified by

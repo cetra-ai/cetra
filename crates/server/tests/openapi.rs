@@ -18,6 +18,9 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
     ("get", "/api/auth/callback/{provider}", "get_oauth_callback"),
     ("get", "/api/auth/sso/authorize", "get_sso_authorize"),
     ("post", "/api/auth/sso/discover", "post_sso_discover"),
+    ("get", "/api/auth/saml/{org_id}", "get_saml_metadata"),
+    ("get", "/api/auth/saml/{org_id}/start", "get_saml_start"),
+    ("post", "/api/auth/saml/{org_id}/acs", "post_saml_acs"),
     ("get", "/api/auth/config", "get_auth_config"),
     ("post", "/api/auth/setup", "post_setup"),
     ("post", "/api/auth/login", "post_login"),
@@ -92,6 +95,11 @@ const OPERATIONS: &[(&str, &str, &str)] = &[
         "put",
         "/api/v1/orgs/{org}/sso/provider",
         "put_org_sso_provider",
+    ),
+    (
+        "put",
+        "/api/v1/orgs/{org}/sso/saml",
+        "put_org_saml_provider",
     ),
     (
         "delete",
@@ -1252,6 +1260,9 @@ fn document_lint() {
                 | "get_oauth_authorize"
                 | "get_sso_authorize"
                 | "post_sso_discover"
+                | "get_saml_metadata"
+                | "get_saml_start"
+                | "post_saml_acs"
                 | "post_device_code"
                 | "post_device_token"
                 | "get_oauth_callback"
@@ -1294,6 +1305,7 @@ fn document_lint() {
                 | "post_admin_settings_test_email"
                 | "get_org_sso"
                 | "put_org_sso_provider"
+                | "put_org_saml_provider"
                 | "delete_org_sso_provider"
                 | "patch_org_sso"
                 | "post_org_sso_domain"
@@ -1339,6 +1351,12 @@ fn document_lint() {
             expected_errors.extend(["404"]);
         } else if *id == "get_sso_authorize" {
             expected_errors.extend(["429"]);
+        } else if *id == "get_saml_metadata" {
+            expected_errors.extend(["404"]);
+        } else if *id == "get_saml_start" {
+            expected_errors.extend(["429"]);
+        } else if *id == "post_saml_acs" {
+            expected_errors.extend(["404", "413", "429"]);
         } else if *id == "post_sso_discover" || *id == "post_device_code" {
             // `post_device_code` also documents a 503; the lint compares 4xx only.
             expected_errors.extend(["400", "429"]);
@@ -1452,6 +1470,7 @@ fn document_lint() {
             || *id == "create_alert_rule"
             || *id == "update_alert_rule"
             || *id == "put_org_sso_provider"
+            || *id == "put_org_saml_provider"
             || *id == "post_org_sso_domain"
             || *id == "patch_org_sso"
         {
@@ -1645,7 +1664,10 @@ fn document_lint() {
 
     for (name, schema) in schemas {
         assert!(is_pascal(name), "component {name}");
-        check_property_names(schema, name);
+        // The SAML form names are fixed by SAML (`SAMLResponse`, `RelayState`), not JSON fields.
+        if name != "SamlAcsForm" {
+            check_property_names(schema, name);
+        }
     }
 
     let pages = [

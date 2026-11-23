@@ -133,8 +133,9 @@ use super::online_rules::{
     RuleTarget, UpdateOnlineRuleRequest,
 };
 use super::org_sso::{
-    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoDomain, OrgSsoProvider, PatchOrgSso,
-    PutOrgSsoProvider, SsoDiscoverRequest, SsoDiscovery,
+    AddOrgSsoDomain, DomainStatus, JitRole, OrgSso, OrgSsoCertificate, OrgSsoDomain,
+    OrgSsoProvider, OrgSsoSaml, OrgSsoSamlSp, PatchOrgSso, PutOrgSamlProvider, PutOrgSsoProvider,
+    SamlAttributeNames, SamlRefreshError, SsoDiscoverRequest, SsoDiscovery, SsoProtocol,
 };
 use super::playground::{
     PlaygroundParams, PlaygroundResponseFormat, PlaygroundRunRequest, PlaygroundSource,
@@ -261,7 +262,15 @@ pub(crate) fn collect_schemas() -> SchemaSet {
     set.insert::<DomainStatus>();
     set.insert::<OrgSsoDomain>();
     set.insert::<OrgSso>();
+    set.insert::<SsoProtocol>();
+    set.insert::<OrgSsoSaml>();
+    set.insert::<OrgSsoCertificate>();
+    set.insert::<SamlAttributeNames>();
+    set.insert::<SamlRefreshError>();
+    set.insert::<OrgSsoSamlSp>();
     set.insert::<PutOrgSsoProvider>();
+    set.insert::<PutOrgSamlProvider>();
+    set.insert::<SamlAcsForm>();
     set.insert::<AddOrgSsoDomain>();
     set.insert::<PatchOrgSso>();
     set.insert::<SsoDiscoverRequest>();
@@ -1211,7 +1220,7 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         "Clears the login cookie. Success sets the session cookie and redirects to the saved \
          relative path. Failure redirects to `/login?error=<code>`. Codes: `invalid_state`, \
          `provider_error`, `provider_unavailable`, `email_not_verified`, `domain_not_allowed`, \
-         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
+         `signup_closed`, `account_disabled`, `link_refused`, `setup_required`, `seat_limit`, `sso_unavailable`, `sso_required`, `saml_invalid`, `saml_unsupported`. The provider is `github`, `google`, `oidc:<name>`, or `sso` (an org's provider, started through `/api/auth/sso/authorize`).",
     ))
     .securities(Some(Vec::new()))
     .parameters(Some(vec![
@@ -1435,6 +1444,55 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         &[400, 429],
     ))
     .build();
+    let saml_metadata = operation(
+        "get_saml_metadata",
+        "auth",
+        "Read an org's SAML service provider metadata",
+    )
+    .description(Some(
+        "The SP metadata document of the org's SAML provider (D-SA-12): the entity ID and the assertion consumer service URL to register at the identity provider. Public, with no session. 404 when the org has no SAML provider.",
+    ))
+    .securities(Some(Vec::new()))
+    .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+    .responses(responses(
+        "200",
+        ResponseBuilder::new()
+            .description("The SP metadata document.")
+            .content(
+                "application/samlmetadata+xml",
+                Content::new(Some(string_schema())),
+            )
+            .build(),
+        &[404],
+    ))
+    .build();
+    let saml_start = operation("get_saml_start", "auth", "Start an org's SAML login")
+        .description(Some(
+            "Starts a login through the org's SAML provider (D-SA-5, D-SA-10). The same URL is the identity provider's tile link. A missing or disabled provider redirects to `/login?error=sso_unavailable` with no cookie. Shares the per-IP bucket of 300 a minute with `/api/auth/sso/authorize`; over it is 429.",
+        ))
+        .securities(Some(Vec::new()))
+        .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+        .responses(responses(
+            "302",
+            redirect_to("To the org's identity provider, or to `/login?error=sso_unavailable`."),
+            &[429, 503],
+        ))
+        .build();
+    let saml_acs = operation("post_saml_acs", "auth", "Finish an org's SAML login")
+        .description(Some(
+            "The assertion consumer service (D-SA-10, D-SA-12). The identity provider posts the `SAMLResponse` form here, with the `RelayState` it received. The response is validated as D-SA-9 describes, and each login is single use. A failure redirects to `/login?error=saml_invalid`; a response the server does not accept, such as one with an encrypted assertion, redirects to `/login?error=saml_unsupported`. The route is exempt from the `Origin` check (D141): the pending login and its binder cookie are the check. The form is at most 256 KiB.",
+        ))
+        .securities(Some(Vec::new()))
+        .parameters(Some(vec![path_string("org_id", "Org UUID.")]))
+        .request_body(Some(form_body("SamlAcsForm")))
+        .responses(responses(
+            "302",
+            redirect_to(
+                "To the saved page, the start URL for an unsolicited response, or /login?error=<code>.",
+            ),
+            &[404, 413, 429],
+        ))
+        .build();
     let device_code = operation("post_device_code", "auth", "Start a device sign-in")
         .description(Some(
             "Issues a device code for `cetra login` or `cetra-cli init` (RFC 8628, D-AO-3). The CLI shows `user_code`, opens `verification_uri_complete` and polls `POST /api/auth/device/token` every `interval` seconds. The codes expire after `expires_in` seconds. No cookie and no `Origin` are needed. Ten codes a minute per client network (an IPv6 address counts by its /64); over that is 429.",
@@ -1548,6 +1606,18 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
             PathItem::new(HttpMethod::Post, sso_discover),
         )
         .path(
+            "/api/auth/saml/{org_id}",
+            PathItem::new(HttpMethod::Get, saml_metadata),
+        )
+        .path(
+            "/api/auth/saml/{org_id}/start",
+            PathItem::new(HttpMethod::Get, saml_start),
+        )
+        .path(
+            "/api/auth/saml/{org_id}/acs",
+            PathItem::new(HttpMethod::Post, saml_acs),
+        )
+        .path(
             "/api/auth/sso/authorize",
             PathItem::new(HttpMethod::Get, sso_authorize),
         )
@@ -1596,6 +1666,19 @@ fn auth_paths(paths: PathsBuilder) -> PathsBuilder {
         )
 }
 
+/// The form the identity provider posts to the SAML ACS (D-SA-10). Documentation only: the
+/// handler reads the form itself. The names are fixed by SAML, so they keep their case.
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+struct SamlAcsForm {
+    #[serde(rename = "SAMLResponse")]
+    #[schema(rename = "SAMLResponse")]
+    saml_response: String,
+    #[serde(rename = "RelayState")]
+    #[schema(rename = "RelayState")]
+    relay_state: Option<String>,
+}
+
 fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     let session_only = vec![SecurityRequirement::new("session", [] as [&str; 0])];
     let org_param = path_string("org", "Org UUID or slug.");
@@ -1626,6 +1709,23 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     .securities(Some(session_only.clone()))
     .parameters(Some(vec![org_param.clone()]))
     .request_body(Some(json_body("PutOrgSsoProvider")))
+    .responses(responses(
+        "200",
+        json_of::<OrgSso>("The saved SSO settings."),
+        &[400, 401, 403, 404, 409, 429],
+    ))
+    .build();
+    let put_saml = operation(
+        "put_org_saml_provider",
+        "orgs",
+        "Save the org's SAML identity provider",
+    )
+    .description(Some(
+        "Creates or updates the org's one SAML provider (D-SA-17, D-SA-18). Give exactly one source: `metadata_url` (an `https` URL, fetched now and refreshed daily), `metadata_xml` (pasted), or `idp_entity_id`, `sso_url` and `certificates` together. With none of them, only the SAML settings are saved. Changing the IdP entity ID needs `confirm_entity_id_change: true` and deletes the org's identities. The server's public URL must be `https` (D-SA-19). Needs the org SSO and SAML features (D-P-61). Owners only, session only (D-P-51).",
+    ))
+    .securities(Some(session_only.clone()))
+    .parameters(Some(vec![org_param.clone()]))
+    .request_body(Some(json_body("PutOrgSamlProvider")))
     .responses(responses(
         "200",
         json_of::<OrgSso>("The saved SSO settings."),
@@ -1734,6 +1834,10 @@ fn org_sso_paths(paths: PathsBuilder) -> PathsBuilder {
     paths
         .path("/api/v1/orgs/{org}/sso", settings)
         .path("/api/v1/orgs/{org}/sso/provider", provider)
+        .path(
+            "/api/v1/orgs/{org}/sso/saml",
+            PathItem::new(HttpMethod::Put, put_saml),
+        )
         .path(
             "/api/v1/orgs/{org}/sso/domains",
             PathItem::new(HttpMethod::Post, add_domain),
@@ -6023,6 +6127,17 @@ fn json_body(name: &str) -> utoipa::openapi::request_body::RequestBody {
         .required(Some(Required::True))
         .content(
             "application/json",
+            Content::new(Some(Ref::from_schema_name(name))),
+        )
+        .build()
+}
+
+/// `json_body` for an `application/x-www-form-urlencoded` body (the SAML ACS form).
+fn form_body(name: &str) -> utoipa::openapi::request_body::RequestBody {
+    RequestBodyBuilder::new()
+        .required(Some(Required::True))
+        .content(
+            "application/x-www-form-urlencoded",
             Content::new(Some(Ref::from_schema_name(name))),
         )
         .build()
