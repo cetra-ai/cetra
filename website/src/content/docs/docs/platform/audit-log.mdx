@@ -138,7 +138,7 @@ To verify a batch, build the same string from `t` and the raw body, compute the 
 - **Email.** When a destination has failed for 24 hours, cetra emails the owners of the org, or the instance admins for the instance destination. It sends one email for each outage. A successful delivery ends the outage.
 - **Status.** The stream card shows the last successful delivery, how many records are waiting, the last error, and when the failures started.
 - **Existing records.** A new destination sends only the records written after it is saved. Use an export for the records before that.
-- **Records lost to retention.** A record that retention deletes before it is sent is never sent. The card then shows that records were deleted before delivery. The notice stays until you update the destination.
+- **Records lost to retention.** A record that retention deletes before it is sent is never sent. The card then shows that records were deleted before delivery. The notice stays through edits and secret rotations; removing the destination and creating it again clears it.
 - **Lapses.** If the plan or the licence no longer includes `audit_log`, streaming stops. The destination is kept, and it resumes when the feature returns.
 - **Restore mode.** While the server runs in restore mode, cetra sends nothing to any destination. A restore drill does not replay records into a SIEM.
 

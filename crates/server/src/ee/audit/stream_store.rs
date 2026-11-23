@@ -264,8 +264,10 @@ pub(crate) async fn insert(
 }
 
 /// Replaces the config of destination `id` and clears its failure state, so the next pass sends
-/// at once. `updated_at` moves past the value the task may have read (plan P-6), even within one
-/// clock tick. The cursor is kept.
+/// at once. The lost-records flag is kept: it records records that are gone for good, which an
+/// edit cannot undo; only a new destination row (a fresh cursor) clears it. `updated_at` moves
+/// past the value the task may have read (plan P-6), even within one clock tick. The cursor is
+/// kept.
 pub(crate) async fn update_config(
     conn: &mut SqliteConnection,
     id: Uuid,
@@ -277,7 +279,7 @@ pub(crate) async fn update_config(
     sqlx::query(
         "UPDATE audit_stream_destinations SET url_host = ?, config_enc = ?, enabled = ?, \
          attempts = 0, next_attempt_at = 0, last_error = NULL, failing_since = NULL, \
-         alerted_at = NULL, lost_before_seq = NULL, updated_at = max(?, updated_at + 1) \
+         alerted_at = NULL, updated_at = max(?, updated_at + 1) \
          WHERE id = ?",
     )
     .bind(url_host)
@@ -719,6 +721,64 @@ mod tests {
         assert_eq!(stored.last_error, None);
         assert_eq!(stored.failing_since, None);
         assert_eq!(stored.alerted_at, None);
+    }
+
+    #[tokio::test]
+    async fn a_put_keeps_the_lost_records_flag() {
+        let (_dir, meta) = crate::meta::test_db().await;
+        let org = seed_org(&meta).await;
+        let id = Uuid::now_v7();
+        insert_destination(&meta, Some(org), id, 1)
+            .await
+            .expect("inserted");
+        let read_updated_at = read(&meta, Some(org)).await.updated_at;
+
+        // Retention deleted undelivered records, and the endpoint failed once.
+        meta.write(|conn| {
+            Box::pin(async move {
+                flag_lost(conn, Some(org), 6).await?;
+                mark_failed(
+                    conn,
+                    id,
+                    read_updated_at,
+                    1,
+                    100,
+                    "the endpoint answered 500",
+                    5,
+                )
+                .await?;
+                Ok::<(), MetaError>(())
+            })
+        })
+        .await
+        .expect("prepared");
+
+        let sealed =
+            seal(&secrets(), &id, &config("https://siem.example.com/other")).expect("seals");
+        meta.write(move |conn| {
+            Box::pin(
+                async move { update_config(conn, id, "siem.example.com", &sealed, true, 10).await },
+            )
+        })
+        .await
+        .expect("edited");
+
+        // The edit clears the failure state but not the lost-records flag.
+        let stored = read(&meta, Some(org)).await;
+        assert_eq!(stored.lost_before_seq, Some(6));
+        assert_eq!(stored.attempts, 0);
+        assert_eq!(stored.last_error, None);
+        assert_eq!(stored.failing_since, None);
+
+        // A new destination row starts unflagged, with a fresh cursor.
+        meta.write(|conn| Box::pin(async move { delete(conn, Some(org)).await }))
+            .await
+            .expect("removed");
+        let id = Uuid::now_v7();
+        insert_destination(&meta, Some(org), id, 20)
+            .await
+            .expect("inserted");
+        assert_eq!(read(&meta, Some(org)).await.lost_before_seq, None);
     }
 
     #[tokio::test]

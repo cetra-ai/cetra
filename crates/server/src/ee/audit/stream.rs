@@ -15,6 +15,7 @@ use futures::StreamExt;
 use reqwest::header::{HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::Value;
+use uuid::Uuid;
 
 use super::stream_store::{self, DestinationRow, StreamConfig};
 use crate::alerts::deliver::{self, DELIVERY_HEADER, backoff_ns};
@@ -44,7 +45,6 @@ const RESERVED_HEADERS: &[&str] = &[
     DELIVERY_HEADER,
 ];
 
-const UNREADABLE_RECORD: &str = "an audit record could not be read";
 const UNSIGNABLE: &str = "the signing secret is unusable";
 const INVALID_HEADER: &str = "the optional header is not valid";
 const RESERVED_HEADER: &str = "the optional header name is reserved";
@@ -207,12 +207,13 @@ async fn send(state: &AppState, row: &DestinationRow, now: i64) -> Result<Outcom
         Ok(records) => records,
         Err(_) => return fail(state, row, UNREADABLE_CURSOR, now).await,
     };
-    let batch = match build_batch(records) {
-        Ok(Some(batch)) => batch,
-        Ok(None) => return Ok(Outcome::Idle),
-        Err(message) => return fail(state, row, message, now).await,
+    let Some(batch) = build_batch(&row.id, records) else {
+        return Ok(Outcome::Idle);
     };
-    let headers = match headers_of(&config, row, &batch, now) {
+    // Signed with the time read as the request is built, not with the tick that started the
+    // pass: a destination sent after slower ones is not signed with a stale time.
+    let signed_at = state.clock.now_ns();
+    let headers = match headers_of(&config, row, &batch, signed_at) {
         Ok(headers) => headers,
         Err(message) => return fail(state, row, message, now).await,
     };
@@ -278,7 +279,16 @@ async fn fail(
             })
             .await?;
         if marked {
-            alert_owners(state, row, since, now).await?;
+            // The failed attempt is already recorded. A read error while the recipients are
+            // collected costs the email only: it is logged, and this pass still counts as a
+            // failure (the error names no URL, header value or secret).
+            if let Err(error) = alert_owners(state, row, since, now).await {
+                tracing::warn!(
+                    destination_id = %row.id,
+                    error = %error,
+                    "the audit stream failure email could not be prepared"
+                );
+            }
         }
     }
     tracing::info!(
@@ -309,16 +319,19 @@ async fn read_after(state: &AppState, row: &DestinationRow) -> Result<Vec<Record
 }
 
 /// The batch of `records` (already oldest first): lines until the record or byte limit, always
-/// at least one. `None` when there are no records.
-fn build_batch(records: Vec<Record>) -> Result<Option<Batch>, &'static str> {
+/// at least one. `None` when there are no records. A record whose `details` column is not valid
+/// JSON is sent with empty `details` (warned in [`line_of`]), so one bad row cannot wedge the
+/// destination's cursor.
+fn build_batch(destination_id: &Uuid, records: Vec<Record>) -> Option<Batch> {
     let mut body = Vec::new();
     let mut first = None;
     let mut last = 0;
     let mut count = 0;
     for record in records {
         let seq = record.seq;
-        let line = line_of(record)?;
-        let mut encoded = serde_json::to_vec(&line).map_err(|_| UNREADABLE_RECORD)?;
+        let line = line_of(destination_id, record);
+        // A `StreamLine` holds only strings, integers and a JSON value, so it serializes.
+        let mut encoded = serde_json::to_vec(&line).unwrap_or_default();
         encoded.push(b'\n');
         if count > 0 && body.len().saturating_add(encoded.len()) > BATCH_BYTES {
             break;
@@ -330,19 +343,19 @@ fn build_batch(records: Vec<Record>) -> Result<Option<Batch>, &'static str> {
         last = seq;
         count += 1;
     }
-    let Some(first) = first else {
-        return Ok(None);
-    };
-    Ok(Some(Batch {
+    let first = first?;
+    Some(Batch {
         body,
         first,
         last,
         records: count,
-    }))
+    })
 }
 
-/// The stream line of one record (plan E2 step 1).
-fn line_of(record: Record) -> Result<StreamLine, &'static str> {
+/// The stream line of one record (plan E2 step 1). A `details` column that is not valid JSON is
+/// sent as `{}`: the record still reaches the destination, and the cursor can move past it. The
+/// warning names the destination id and the record's `seq` only.
+fn line_of(destination_id: &Uuid, record: Record) -> StreamLine {
     let Record {
         id,
         seq,
@@ -361,9 +374,19 @@ fn line_of(record: Record) -> Result<StreamLine, &'static str> {
         ip,
         user_agent,
     } = record;
-    let details = serde_json::from_str(&details).map_err(|_| UNREADABLE_RECORD)?;
+    let details = match serde_json::from_str(&details) {
+        Ok(details) => details,
+        Err(_) => {
+            tracing::warn!(
+                destination_id = %destination_id,
+                seq,
+                "the audit record's details are not valid JSON; sending empty details"
+            );
+            Value::Object(Default::default())
+        }
+    };
     let at = DateTime::<Utc>::from_timestamp_nanos(at).to_rfc3339_opts(SecondsFormat::Millis, true);
-    Ok(StreamLine {
+    StreamLine {
         id,
         seq,
         at,
@@ -384,20 +407,20 @@ fn line_of(record: Record) -> Result<StreamLine, &'static str> {
         details,
         ip,
         user_agent,
-    })
+    }
 }
 
 /// The request headers of one batch (plan E2 step 2.3.5). The signature is over the body with
-/// the send time in seconds.
+/// `signed_at` in seconds — read when the request is built, not when the pass began.
 fn headers_of(
     config: &StreamConfig,
     row: &DestinationRow,
     batch: &Batch,
-    now: i64,
+    signed_at: i64,
 ) -> Result<Vec<(HeaderName, HeaderValue)>, &'static str> {
     let signature = sign_payload(
         &Secret::new(config.secret.clone()),
-        now / NANOS_PER_SECOND,
+        signed_at / NANOS_PER_SECOND,
         &batch.body,
     )
     .ok_or(UNSIGNABLE)?;
@@ -504,7 +527,7 @@ mod tests {
     use serde_json::{Value, json};
     use uuid::Uuid;
 
-    use super::{SIGNATURE_HEADER, deliver_once};
+    use super::{BATCH_BYTES, SIGNATURE_HEADER, deliver_once};
     use crate::alerts::deliver::DELIVERY_HEADER;
     use crate::config::ServerConfig;
     use crate::ee::audit::stream_store::{self, StreamConfig};
@@ -580,6 +603,51 @@ mod tests {
             })
             .await
             .expect("the records are written");
+    }
+
+    /// Inserts one audit record at `at` for `org` (`None`: the instance log) whose `details`
+    /// column is `details`, as given (valid JSON or not).
+    async fn insert_record_with_details(app: &TestApp, org: Option<OrgId>, details: &str) {
+        let org = org.map(|org| org.to_string());
+        let details = details.to_owned();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO audit_events (id, at, org_id, action, outcome, actor_kind, details) \
+                         VALUES (lower(hex(randomblob(16))), 1000, ?, 'instance.init_applied', \
+                         'success', 'system', ?)",
+                    )
+                    .bind(org.as_deref())
+                    .bind(details)
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("the record is written");
+    }
+
+    /// Inserts an org row directly (no members), for records of another org.
+    async fn add_org(app: &TestApp, name: &str, slug: &str) -> OrgId {
+        let org = OrgId::new_v7();
+        let (name, slug) = (name.to_owned(), slug.to_owned());
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::meta::orgs::insert_org(conn, org, &name, &slug, now)
+                        .await
+                        .map(|_| ())
+                })
+            })
+            .await
+            .expect("the org is written");
+        org
     }
 
     async fn cursor(app: &TestApp, org: Option<OrgId>) -> i64 {
@@ -726,6 +794,68 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_unreadable_record_is_sent_with_empty_details() {
+        let app = TestApp::with_config(entitled).await;
+        let seeded = app.seed().await;
+        let receiver = HookReceiver::start(vec![200]).await;
+        destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
+        // One readable record, then one whose `details` column is not valid JSON.
+        insert_record_with_details(&app, Some(seeded.org_id), r#"{"team":"core"}"#).await;
+        insert_record_with_details(&app, Some(seeded.org_id), "not json").await;
+        let unreadable = max_seq(&app).await;
+        let now = app.state.clock.now_ns();
+
+        let (result, logs) = capture_logs(deliver_once(&app.state, now)).await;
+
+        assert_eq!(result.unwrap().sent, 1);
+        let received = receiver.received();
+        assert_eq!(received.len(), 1);
+        let body = lines(&received[0].body);
+        assert_eq!(body.len(), 2);
+        assert_eq!(body[0]["details"], json!({"team": "core"}));
+        // The unreadable record is sent with empty details, and the cursor passes it.
+        assert_eq!(body[1]["seq"], json!(unreadable));
+        assert_eq!(body[1]["details"], json!({}));
+        assert_eq!(cursor(&app, Some(seeded.org_id)).await, unreadable);
+        // The warning names the destination id and the seq, never the details text.
+        assert!(logs.contains(&unreadable.to_string()), "{logs}");
+        assert!(!logs.contains("not json"), "{logs}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batches_stop_at_one_mebibyte() {
+        let app = TestApp::with_config(entitled).await;
+        let seeded = app.seed().await;
+        let receiver = HookReceiver::start(vec![200]).await;
+        destination(&app, Some(seeded.org_id), config(&receiver.url("/ingest"))).await;
+        // Two records whose lines together pass the byte cap: each batch holds one.
+        let large = format!("{{\"pad\":\"{}\"}}", "a".repeat(700 * 1024));
+        insert_record_with_details(&app, Some(seeded.org_id), &large).await;
+        insert_record_with_details(&app, Some(seeded.org_id), &large).await;
+        let now = app.state.clock.now_ns();
+
+        deliver_once(&app.state, now).await.unwrap();
+        deliver_once(&app.state, now).await.unwrap();
+
+        let received = receiver.received();
+        assert_eq!(received.len(), 2);
+        for request in &received {
+            assert_eq!(lines(&request.body).len(), 1);
+            assert!(request.body.len() <= BATCH_BYTES);
+        }
+
+        // A single record larger than the cap is still sent, alone.
+        let huge = format!("{{\"pad\":\"{}\"}}", "a".repeat(BATCH_BYTES + 2048));
+        insert_record_with_details(&app, Some(seeded.org_id), &huge).await;
+        deliver_once(&app.state, now).await.unwrap();
+        let received = receiver.received();
+        assert_eq!(received.len(), 3);
+        assert_eq!(lines(&received[2].body).len(), 1);
+        assert!(received[2].body.len() > BATCH_BYTES);
+        assert_eq!(cursor(&app, Some(seeded.org_id)).await, max_seq(&app).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_lapsed_org_is_not_streamed() {
         // No licence: the org lacks `audit_log`.
         let app = TestApp::with_config(|config| {
@@ -791,6 +921,15 @@ mod tests {
 
     async fn max_seq(app: &TestApp) -> i64 {
         sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM audit_events")
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
+    /// The highest `seq` of `org`'s records.
+    async fn max_seq_of(app: &TestApp, org: OrgId) -> i64 {
+        sqlx::query_scalar("SELECT COALESCE(MAX(seq), 0) FROM audit_events WHERE org_id = ?")
+            .bind(org.to_string())
             .fetch_one(app.state.meta.reader())
             .await
             .unwrap()
@@ -898,6 +1037,55 @@ mod tests {
         let body = lines(&received[0].body);
         assert_eq!(body.len(), 1);
         assert!(body[0]["org_id"].is_null());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn records_of_one_org_never_reach_another_orgs_destination() {
+        let app = TestApp::with_config(entitled).await;
+        let seeded = app.seed().await;
+        let other = add_org(&app, "Globex", "globex").await;
+        let acme_receiver = HookReceiver::start(vec![200]).await;
+        let globex_receiver = HookReceiver::start(vec![200]).await;
+        destination(
+            &app,
+            Some(seeded.org_id),
+            config(&acme_receiver.url("/acme")),
+        )
+        .await;
+        destination(&app, Some(other), config(&globex_receiver.url("/globex"))).await;
+        insert_records(&app, 2, Some(seeded.org_id), 1000).await;
+        insert_records(&app, 3, Some(other), 1000).await;
+        let now = app.state.clock.now_ns();
+
+        let report = deliver_once(&app.state, now).await.unwrap();
+
+        assert_eq!(report.sent, 2);
+        let acme = acme_receiver.received();
+        let globex = globex_receiver.received();
+        assert_eq!(acme.len(), 1);
+        assert_eq!(globex.len(), 1);
+        let acme_lines = lines(&acme[0].body);
+        let globex_lines = lines(&globex[0].body);
+        assert_eq!(acme_lines.len(), 2);
+        assert_eq!(globex_lines.len(), 3);
+        for line in &acme_lines {
+            assert_eq!(line["org_id"], json!(seeded.org_id.to_string()));
+        }
+        for line in &globex_lines {
+            assert_eq!(line["org_id"], json!(other.to_string()));
+        }
+        // Neither body names the other org.
+        assert!(!String::from_utf8_lossy(&acme[0].body).contains(&other.to_string()));
+        assert!(!String::from_utf8_lossy(&globex[0].body).contains(&seeded.org_id.to_string()));
+        // Each cursor moved to the last record of its own org.
+        assert_eq!(
+            cursor(&app, Some(seeded.org_id)).await,
+            max_seq_of(&app, seeded.org_id).await
+        );
+        assert_eq!(
+            cursor(&app, Some(other)).await,
+            max_seq_of(&app, other).await
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

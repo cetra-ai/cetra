@@ -656,7 +656,7 @@ mod tests {
     use crate::api::account::OrgRole;
     use crate::api::common::ProblemCode;
     use crate::test_support::hook_receiver::HookReceiver;
-    use crate::test_support::{Seeded, TestApp, TestResponse};
+    use crate::test_support::{Seeded, TestApp, TestResponse, license_key};
 
     const INSTANCE_PATH: &str = "/api/v1/admin/audit-stream";
 
@@ -827,6 +827,10 @@ mod tests {
             ),
             (
                 json!({"url": "https://siem.example.com/ingest", "header_name": "X-Cetra-Signature", "header_value": "x", "enabled": true}),
+                "header_name",
+            ),
+            (
+                json!({"url": "https://siem.example.com/ingest", "header_name": "Transfer-Encoding", "header_value": "x", "enabled": true}),
                 "header_name",
             ),
             (
@@ -1120,6 +1124,112 @@ mod tests {
             .await
             .status,
             403
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lapsed_org_cannot_read_rotate_or_test_its_stream() {
+        // No licence: GET, rotate and test answer the feature error, as PUT does (D-EA-19).
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        write_destination(&app, Some(seeded.org_id), "https://siem.example.com/ingest").await;
+        let path = org_path(&seeded);
+        let get = send(&app, Method::GET, &path, &seeded.cookie, None).await;
+        assert_eq!(get.status, 403);
+        assert_eq!(get.problem().code, ProblemCode::PlanRequired);
+        let rotate = send(
+            &app,
+            Method::POST,
+            &format!("{path}/secret"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(rotate.status, 403);
+        assert_eq!(rotate.problem().code, ProblemCode::PlanRequired);
+        let test = send(
+            &app,
+            Method::POST,
+            &format!("{path}/test"),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        assert_eq!(test.status, 403);
+        assert_eq!(test.problem().code, ProblemCode::PlanRequired);
+    }
+
+    #[tokio::test]
+    async fn the_test_route_refuses_in_restore_mode() {
+        let app = TestApp::with_config(|config| {
+            config.license_key = Some(crate::config::Secret::new(license_key(&["audit_log"])));
+            config.security.allow_private_network_egress = true;
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        // The receiver would answer, so a missing refusal would show up as a request.
+        let receiver = HookReceiver::start(vec![200]).await;
+        write_destination(&app, Some(seeded.org_id), &receiver.url("/ingest")).await;
+        let response = send(
+            &app,
+            Method::POST,
+            &format!("{}/test", org_path(&seeded)),
+            &seeded.cookie,
+            None,
+        )
+        .await;
+        crate::http::restore::tests::assert_refused(&response, "audit stream test");
+        assert!(receiver.received().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_put_keeps_the_stored_secret_and_header_value() {
+        let (app, seeded) = licensed().await;
+        let path = org_path(&seeded);
+        let created = send(
+            &app,
+            Method::PUT,
+            &path,
+            &seeded.cookie,
+            Some(&put_body(
+                Some("Authorization"),
+                Some("Splunk token-value"),
+                true,
+            )),
+        )
+        .await;
+        assert_eq!(
+            created.status,
+            201,
+            "{}",
+            String::from_utf8_lossy(&created.body)
+        );
+        let created: Value = created.json();
+        let secret = created["secret"].as_str().expect("a secret").to_owned();
+
+        // An edit to the URL that leaves the header value out.
+        let mut edited = put_body(Some("Authorization"), None, true);
+        edited["url"] = json!("https://siem2.example.com/ingest");
+        let updated = send(&app, Method::PUT, &path, &seeded.cookie, Some(&edited)).await;
+        assert_eq!(
+            updated.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&updated.body)
+        );
+
+        // The sealed config keeps the secret and the stored header value; only the URL moved.
+        let row = stream_store::destination(app.state.meta.reader(), Some(seeded.org_id))
+            .await
+            .expect("read")
+            .expect("the destination exists");
+        let stored = open(&app.state.secrets, &row.id, &row.config_enc).expect("opens");
+        assert_eq!(stored.url, "https://siem2.example.com/ingest");
+        assert_eq!(stored.secret, secret);
+        assert_eq!(
+            stored.header,
+            Some(("Authorization".to_owned(), "Splunk token-value".to_owned()))
         );
     }
 

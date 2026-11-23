@@ -320,7 +320,7 @@ Owners (`ManageAuditStream`, session only) manage the org's destination; instanc
 
 | Method & path | Notes |
 |---|---|
-| `GET /api/v1/orgs/{org}/audit-stream` | The destination as `AuditStream`: `url_host`, `header_name`, `enabled` and `status` (`last_success_at`, `last_error`, `failing_since`, `lag` in records, `lost_records`). `404` when there is none. The URL, the header value and the secret are never returned |
+| `GET /api/v1/orgs/{org}/audit-stream` | The destination as `AuditStream`: `url_host`, `header_name`, `enabled` and `status` (`last_success_at`, `last_error`, `failing_since`, `lag` in records, `lost_records`, which edits and rotations keep and only a new destination clears). `404` when there is none. The URL, the header value and the secret are never returned |
 | `PUT /api/v1/orgs/{org}/audit-stream` | Body `{url, header_name?, header_value?, enabled}`, unknown fields refused. Create answers `201` with `CreatedAuditStream` (the `stream` and the `secret`, shown once); the cursor starts at the newest record. Update answers `200` with `AuditStream`, and keeps the stored header value when `header_value` is omitted and the name is unchanged. `400 field_error` when the URL is not `https` or is over 2,048 bytes, has user info, or the header name is invalid or reserved, or the value is over 1,024 bytes or has a line break. `409` when the stored settings cannot be read (remove and create again) |
 | `DELETE /api/v1/orgs/{org}/audit-stream` | `204`, or `404` when there is none |
 | `POST /api/v1/orgs/{org}/audit-stream/secret` | Rotates the signing secret. `200` with `RotatedAuditStreamSecret` (`secret`, shown once) |
