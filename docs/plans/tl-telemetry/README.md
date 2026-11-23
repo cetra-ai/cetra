@@ -279,6 +279,8 @@ Written to `side-session-notes/…/tl-requests-for-q.md` when the design is appr
 
 ## Milestones
 
+Order: M1 and M4 first, in parallel; then M2 (after M1), M3 and M5 (after M1 and M4) and M6 (after M4), in parallel where their files allow.
+
 ### M1 — Self-monitoring: logs and errors over OTLP
 
 Delivers: the `[self_monitoring]` config (logs only: `otlp_endpoint`, `otlp_headers`, `logs`, `level`, `resource`); the registry-based `init_tracing`; the OTLP log exporter; the panic hook's ERROR event; the flush on shutdown; docs (monitoring page section with Sentry, Grafana Cloud and Collector examples; configuration reference; CHANGELOG); spec 12 and the amended decisions. Depends on nothing. Leaves out: spans (M2), anything sent to us.
@@ -289,11 +291,11 @@ Delivers: the spans of § 2, the span exporter, `self_monitoring.traces` and `tr
 
 ### M3 — `cetra debug-bundle`
 
-Delivers: the log ring buffer, the allow-list config view, the generalized admin socket and its `debug_info` command, the `cetra debug-bundle` command (running, not running, invalid config), the CLI reference, a "Reporting a bug" docs page and a GitHub issue template that asks for the bundle. Depends on M1 (the subscriber assembly). Leaves out: the heartbeat preview and telemetry state (M4).
+Delivers: the log ring buffer, the allow-list config view, the generalized admin socket and its `debug_info` command, the `cetra debug-bundle` command (running, not running, invalid config), the telemetry state and heartbeat preview, the CLI reference, a "Reporting a bug" docs page and a GitHub issue template that asks for the bundle. Depends on M1 (the subscriber assembly) and M4 (facts, switchboard, heartbeat payload).
 
 ### M4 — The switchboard and the heartbeat
 
-Delivers: `[telemetry]` (`heartbeat`, `endpoint`), `CETRA_TELEMETRY` and `DO_NOT_TRACK`, CI and debug-build detection, the instance id, the heartbeat payload, schedule and startup notice, `CETRA_TELEMETRY=off` in every packaging smoke test and the e2e script, the heartbeat preview in the debug bundle, a "Telemetry" docs page listing every field and how to turn it off, a README line, CHANGELOG with an upgrade note (a new outbound request on by default), spec 04's `instance_settings` keys, and TL-Q1/TL-Q2/TL-Q3 in the notes folder. Depends on M3 (the preview). Real delivery needs Q's relay; until then failures are silent at `debug`. Leaves out: crash reports.
+Delivers: `[telemetry]` (`heartbeat`, `endpoint`), `CETRA_TELEMETRY` and `DO_NOT_TRACK`, CI and debug-build detection, the instance id, the heartbeat payload, schedule and startup notice, `CETRA_TELEMETRY=off` in every packaging smoke test and the e2e script, a "Telemetry" docs page listing every field and how to turn it off, a README line, CHANGELOG with an upgrade note (a new outbound request on by default), spec 04's `instance_settings` keys, and TL-Q1/TL-Q2/TL-Q3 in the notes folder. Depends on nothing (runs alongside M1; its startup-notice filter edits M1's subscriber). Real delivery needs Q's relay; until then failures are silent at `debug`. Leaves out: crash reports.
 
 ### M5 — Opt-in crash reports
 
@@ -311,7 +313,7 @@ The user approved the design with each proposal below.
 2. **Heartbeat fields:** the `features` list of § 5 and `deployment` (docker, kubernetes, binary) as written.
 3. **Debug bundle and hosts:** host names, bucket names and paths are kept; the user reviews the file.
 4. **Export defaults:** exported logs at `warn`, traces at 10 %.
-5. **Milestone order:** M1, then M2–M6 as the dependencies allow; independent milestones may run in parallel.
+5. **Milestone order:** as § Milestones; independent milestones run in parallel (user: "try to parallelize").
 6. **Cloud analytics opt-out:** no account switch for now; `DNT` and `Sec-GPC` are honoured.
 
 ## Questions asked during the design (kept for the record)
