@@ -33,6 +33,7 @@ sqlx.workspace = true
 tokio.workspace = true
 axum.workspace = true
 axum-extra.workspace = true
+backtrace.workspace = true
 tower.workspace = true
 tracing.workspace = true
 serde_path_to_error.workspace = true
