@@ -1,0 +1,382 @@
+# EA M2 — Audit catalog completion
+
+**Summary.**
+- This milestone records the rest of the catalog: the project and org objects (evaluators, online rules and backfills, score definitions, alert rules and channels, LLM connections, model prices, the assistant setting, prompts, datasets, issue sources, dashboards, annotation queues) and data leaving the product (SQL runs and exports, dataset exports, MCP tool calls).
+- The remaining `target: "audit"` lines that are data work become ordinary `info` lines, so `target = "audit"` means the catalog and nothing else.
+- When it is done, no `target: "audit"` line is left outside `audit::record`.
+
+**Prerequisites.**
+- M1 is committed and green (`just check-rust` passed after its fix phase).
+- Branch `claude/ea-enterprise-admin` in `/home/sebastien/travaux/llm-observer/.claude/worktrees/ea-design`.
+- M5 may run at the same time on other files (§ Phase graph).
+
+**Read first.**
+- `docs/plans/ea-enterprise-admin/README.md` § Event catalog, § Writing, § Privacy.
+- `docs/plans/ea-enterprise-admin/01-m1-audit-recording.md`: shared rules, P-1 (record last before the success `Ok`), and the A1 API.
+- `crates/server/src/audit/mod.rs` and `crates/server/src/audit/catalog/` (the API you extend).
+- The facts file `/home/sebastien/.config/Claude-extra/side-session-notes/local_1c672712-2cc7-40e9-8d6b-d582417356b7/ea-m2-code-facts.md`: every site, its closure and its success expression. Phases cite its sections (A1–A11, B, C, D, E). Lines may have moved: locate by function name.
+
+## What it is, and what it is not
+
+**What works when it's done:**
+- Creating, changing or deleting any object listed in § Catalog writes one record, in the transaction of the change.
+- A worker pausing or resuming an online rule or an issue source writes a record with actor `system`.
+- A SQL console run or export, a dataset export, and an MCP tool call that names a project each write a record **before** any data is read. The record carries a SHA-256 of the query text, never the text.
+- Data work (dataset items, imports, adds from traces, version restores, experiments, issue edits and merges, refits, evaluator runs and tests, connection and channel tests, playground runs, assistant conversations and turns) keeps its log line, without the `audit` target.
+
+**Out of scope:**
+- reading the records (M3);
+- the stream (M4);
+- saved views, which are personal UI state;
+- agent contexts, which are ingest-side;
+- demo-org visitors' SQL runs (see P-4).
+
+## Decisions this plan relies on
+
+| ID | Summary |
+|---|---|
+| D-EA-2 | Same transaction; actions with no `meta.db` change record before they run; one record per bulk request |
+| D-EA-4 | Typed catalog; access, configuration, deletions and data leaving the product; not data edits |
+| D-EA-5 | Allow-listed details: field names, never values; never names, URLs, SQL text or payload |
+| D-EA-6 | SQL runs (SHA-256 of the text), exports and MCP tool calls are recorded before they run |
+| M1 P-1, P-2 | Record last before the success `Ok`; one catalog file per name prefix |
+
+**Plan-level choices** (detail the design leaves to the plan):
+- **P-1. Classification.** The design's rule: configuration and access are recorded, data work is not.
+  - Recorded:
+    - score definitions;
+    - backfills, which send history to a provider;
+    - manual and system pauses and resumes of online rules and issue sources (a state change of a configured object; workers record as `system`, like M1's domain lapse);
+    - prompt versions and labels.
+  - Not recorded, kept as plain `info`:
+    - experiments;
+    - issue edits, merges and refits;
+    - dataset items, imports, adds from traces and version restores;
+    - saved views;
+    - evaluator runs and tests;
+    - connection and channel tests;
+    - playground runs;
+    - assistant conversations, feedback and turns.
+
+  P6 corrects the design's "a dataset import" bulk example, which contradicts its own "Not in the catalog" list.
+- **P-2. Changed fields.** An update records `fields`: the JSON names of the request body fields that were present (`Some`), never their values. When a site already computes which fields changed (for example `changed` in `update_evaluator`), use the request's present fields anyway, for one rule everywhere.
+- **P-3. MCP hook.** Each tool that names a project records `mcp.tool_called` right after its `user_project(..)` call succeeds, before any read. That covers 9 call sites. `list_projects` names no project and is not recorded. `McpServer` gets an `audit: audit::Ctx` field built in the `mcp` handler, so records carry the PAT, IP and user agent.
+- **P-4. Demo visitors.** SQL runs by a demo-org visitor (`visitor.is_some()` in `run_sql`) are not recorded. The demo org is public, and recording anonymous visitors would only grow the table.
+- **P-5. Numbers.** Counts and versions are stored as `u32`. A wider source value is converted with `u32::try_from(v).unwrap_or(u32::MAX)`.
+
+## Versions
+
+No new dependency. `sha2` 0.11 is already a dependency of `cetra-server` (`use sha2::{Digest, Sha256}` as in `auth/secret.rs`).
+
+## Phase graph
+
+```
+B1 (catalog) ──┬── B2 (evaluation)
+               ├── B3 (alerts, connections, prices, assistant)
+               ├── B4 (prompts, datasets, experiments, issues)
+               ├── B5 (dashboards, queues, SQL, MCP)
+               └── B6 (docs)        [after B2–B5]
+```
+
+- B2 to B5 run in parallel after B1. Their **Edit** lists are disjoint.
+- M5 phases may run at the same time. M5 owns `routes/members.rs`, `routes/invites.rs`, `ee/**`, `auth/**`, `http/**` and `meta/**` (except files named here). M2 owns `audit/catalog/**` and the files below. Neither touches the other's files.
+
+**Shared rules** (in every brief): M1's shared rules, unchanged. Notably:
+- no compile, test, lint or format;
+- commit only your files with `git commit -- <files>`;
+- remove bindings that only fed a deleted line;
+- `audit::Ctx` is an extractor that never fails, so add `ctx: audit::Ctx` to a handler rather than `Extension(principal)`;
+- record inside the closure, last before the success `Ok`, never on a not-found, conflict or refused branch.
+
+---
+
+### B1 — The M2 catalog
+
+**Goal:** the new action groups and target kinds, with the M1 tests extended.
+
+**Edit:** `crates/server/src/audit/catalog/mod.rs`, new files under `crates/server/src/audit/catalog/` (one per group below), `crates/server/src/audit/mod.rs` (`TargetKind` only, plus removing `#![allow(dead_code)]` and its comment), `crates/server/src/audit/tests.rs`.
+
+**Steps:**
+
+1. Add one file per group, in the M1 style:
+   - `#[derive(Debug, Clone, PartialEq, serde::Serialize)]`;
+   - `#[serde(tag = "action", content = "details")]`;
+   - `#[serde(rename = "<group>.<name>")]` per variant;
+   - `#[serde(rename_all = "snake_case")]` on struct variants.
+
+   Add each to `catalog/mod.rs`'s `mod`/`pub(crate) use` lines, a variant of `Action` (keep alphabetical order), and an `impl From<…> for Action`.
+
+   | File / enum | Variant | Name | Fields |
+   |---|---|---|---|
+   | `evaluator.rs` `EvaluatorAction` | `Created { kind: &'static str, url_host: Option<String> }` | `evaluator.created` | `kind` from `EvaluatorKind::as_str`; `url_host` only for webhooks (the host, never the URL) |
+   | | `Updated { fields: Vec<&'static str>, url_host: Option<String> }` | `evaluator.updated` | |
+   | | `Deleted` | `evaluator.deleted` | |
+   | `online_rule.rs` `OnlineRuleAction` | `Created { evaluator_id: uuid::Uuid }` | `online_rule.created` | |
+   | | `Updated { fields: Vec<&'static str>, budget_resumed: bool }` | `online_rule.updated` | |
+   | | `Deleted` | `online_rule.deleted` | |
+   | | `Paused { reason: &'static str }` | `online_rule.paused` | the reason string the code logs today |
+   | | `Resumed { reason: &'static str }` | `online_rule.resumed` | `manual` for the resume route; the logged reason otherwise |
+   | | `BackfillStarted { backfill_id: uuid::Uuid, max_targets: u32 }` | `online_rule.backfill_started` | |
+   | `score_definition.rs` `ScoreDefinitionAction` | `Created { data_type: &'static str }` | `score_definition.created` | |
+   | | `Updated { fields: Vec<&'static str> }` | `score_definition.updated` | |
+   | | `Archived` | `score_definition.archived` | |
+   | `alert_rule.rs` `AlertRuleAction` | `Created { metric: &'static str, enabled: bool }` | `alert_rule.created` | |
+   | | `Updated { fields: Vec<&'static str> }` | `alert_rule.updated` | |
+   | | `Deleted` | `alert_rule.deleted` | |
+   | `alert_channel.rs` `AlertChannelAction` | `Created { kind: &'static str }` | `alert_channel.created` | never URL or recipients |
+   | | `Updated { fields: Vec<&'static str> }` | `alert_channel.updated` | |
+   | | `Deleted` | `alert_channel.deleted` | |
+   | `llm_connection.rs` `LlmConnectionAction` | `Created { adapter: &'static str }` | `llm_connection.created` | |
+   | | `Updated { fields: Vec<&'static str>, key_changed: bool }` | `llm_connection.updated` | |
+   | | `Deleted` | `llm_connection.deleted` | |
+   | `model_price.rs` `ModelPriceAction` | `Created` / `Updated` / `Deleted` | `model_price.created` / `.updated` / `.deleted` | scope is the event's org and optional project |
+   | `assistant.rs` `AssistantAction` | `SettingChanged { enabled: bool, connection_id: Option<uuid::Uuid> }` | `assistant.setting_changed` | never the model name |
+   | `prompt.rs` `PromptAction` | `Created` | `prompt.created` | |
+   | | `Updated { fields: Vec<&'static str> }` | `prompt.updated` | |
+   | | `Deleted` | `prompt.deleted` | |
+   | | `VersionCreated { version: u32 }` | `prompt.version_created` | |
+   | | `LabelSet { label: String, version: u32 }` | `prompt.label_set` | labels are configuration (`production`), not payload |
+   | | `LabelRemoved { label: String }` | `prompt.label_removed` | |
+   | | `ProtectedLabelsChanged { count: u32 }` | `prompt.protected_labels_changed` | |
+   | `dataset.rs` `DatasetAction` | `Created` | `dataset.created` | |
+   | | `Updated { fields: Vec<&'static str> }` | `dataset.updated` | |
+   | | `Deleted` | `dataset.deleted` | |
+   | | `ExportStarted { version: Option<u32>, format: &'static str }` | `dataset.export_started` | |
+   | `issue_source.rs` `IssueSourceAction` | `Created { kind: &'static str }` | `issue_source.created` | |
+   | | `Updated { fields: Vec<&'static str> }` | `issue_source.updated` | |
+   | | `Deleted` | `issue_source.deleted` | |
+   | | `Paused { reason: &'static str }` | `issue_source.paused` | |
+   | | `Resumed { reason: &'static str }` | `issue_source.resumed` | |
+   | `dashboard.rs` `DashboardAction` | `Created` / `Updated` / `Deleted` | `dashboard.created` / `.updated` / `.deleted` | |
+   | | `OverviewSaved { created: bool }` | `dashboard.overview_saved` | |
+   | | `OverviewReset` | `dashboard.overview_reset` | |
+   | `annotation_queue.rs` `AnnotationQueueAction` | `Created` / `Updated` / `Deleted` | `annotation_queue.created` / `.updated` / `.deleted` | not items |
+   | `sql.rs` `SqlAction` | `Run { query_sha256: String }` | `sql.run` | lowercase hex SHA-256 of the query text |
+   | | `ExportStarted { query_sha256: String, format: &'static str }` | `sql.export_started` | `csv`, `ndjson` or `parquet` |
+   | `mcp.rs` `McpAction` | `ToolCalled { tool: &'static str, query_sha256: Option<String> }` | `mcp.tool_called` | the hash only for `query_sql` |
+
+2. In `audit/mod.rs` `TargetKind`, add variants and their `as_str` spellings:
+   - `Evaluator` → `evaluator`, `OnlineRule` → `online_rule`, `ScoreDefinition` → `score_definition`;
+   - `AlertRule` → `alert_rule`, `AlertChannel` → `alert_channel`, `LlmConnection` → `llm_connection`, `ModelPrice` → `model_price`;
+   - `Prompt` → `prompt`, `Dataset` → `dataset`, `IssueSource` → `issue_source`;
+   - `Dashboard` → `dashboard`, `AnnotationQueue` → `annotation_queue`.
+
+   Update the doc comment's list.
+3. Add `pub(crate) fn sha256_hex(text: &str) -> String` to `audit/mod.rs`: lowercase hex of `Sha256::digest(text.as_bytes())`, formatted as `auth/secret.rs` `hash_token` does. If `hash_token` already returns exactly this, re-export it instead of duplicating, and say which in the report.
+4. Remove `#![allow(dead_code)]` and its comment from `audit/mod.rs`: M1 gave every item a caller.
+5. `audit/tests.rs`:
+   - extend `samples()` with one value of every new variant;
+   - extend the group-prefix mapping of `every_action_name_is_group_dot_snake` with the new groups;
+   - add `sha256_hex_matches_a_known_vector` (`"abc"` → `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`).
+
+   `details_hold_no_forbidden_field` covers the new samples unchanged. `url_host`, `query_sha256`, `key_changed` and `label` are allowed.
+
+**Done when:** committed.
+
+**Commit:** `Add the project-object and data-export audit actions`
+
+---
+
+### B2 — Evaluation objects
+
+**Goal:** evaluators, online rules, backfills, score definitions and worker pauses write records. Evaluator runs and tests lose the audit target.
+
+**Edit:** `crates/server/src/routes/evaluators.rs`, `crates/server/src/routes/online_rules.rs`, `crates/server/src/routes/backfills.rs`, `crates/server/src/routes/score_definitions.rs`, `crates/server/src/routes/eval_jobs.rs`, `crates/server/src/eval/test_run.rs`, `crates/server/src/eval/dispatch.rs`, `crates/server/src/eval/execute.rs`.
+
+**Steps** (facts § A1, A2, A6, B, C). The event for every project object is `.org(access.project.org_id).project(access.project.id).target(TargetKind::X, id)`:
+1. **Evaluators:**
+   - create: `EvaluatorAction::Created { kind, url_host: host }` on the `Updated(row)` success.
+   - update: record inside `write_update` on its `Ok(Outcome::Updated(..))` branch. Add `ctx: &audit::Ctx`, `fields: Vec<&'static str>` and `url_host: Option<String>` parameters, computed by the handler before the write.
+   - delete: record in the `store::delete_evaluator(..) == true` branch.
+   - Delete the three tracing lines.
+2. **Online rules:**
+   - create: in `insert_checked`, before `Ok(RuleWrite::Done{..})`, record `Created { evaluator_id }` (add `ctx`).
+   - update: in `update_checked`, before `Ok(RuleWrite::Done{row, budget_resumed})`, record `Updated { fields, budget_resumed }` (add `ctx` and `fields`).
+   - delete: record when `delete_rule` returned true.
+   - resume: record `Resumed { reason: "manual" }` in the `Some(row)` arm.
+   - Delete the four tracing lines, including the "online rule resumed / budget changed" line, which `budget_resumed: true` replaces.
+3. **Backfills:** in `create_checked`, on `Create::Created`, record `OnlineRuleAction::BackfillStarted { backfill_id, max_targets }`, target `(OnlineRule, rule_id)`. Delete the tracing line.
+4. **Score definitions:** create, update and archive, as in facts § A6, recording on the row-returned or true branch. Delete the three lines.
+5. **Evaluator runs and tests:** in `routes/eval_jobs.rs:~188` and `eval/test_run.rs:~318`, drop `target: "audit"`. Message and fields are unchanged.
+6. **System pauses:**
+   - `eval/execute.rs` `audit_pause`: the two callers run inside job settlement. Record `OnlineRuleAction::Paused { reason }` with `audit::Ctx::system()`, `.org(..).project(..)`, target `(OnlineRule, rule_id)`, in the transaction that sets the pause. Change `audit_pause` into a function taking `conn` and the ids, called inside that write. Read the call sites at ~1193 and ~1213 first. If the pause is not set inside a `meta.write` there, stop and report.
+   - `eval/dispatch.rs` `budget_once`: inside its write closure (after `clear_budget_pauses`), record `OnlineRuleAction::Resumed { reason: "budget_period" }` per resumed rule. Use `IssueSourceAction::Resumed { reason: "budget_period" }` per resumed source, if the closure knows the source ids. If it only knows a count, keep the issue-source line as plain `info` and report it.
+   - Delete the audit lines.
+7. **Tests:**
+   - `routes/evaluators.rs` `no_webhook_values_in_logs`:
+     - keep its secret asserts;
+     - replace the "evaluator created/updated" text asserts with rows whose details hold `url_host`;
+     - assert that the sealed values appear neither in the logs nor in `details`.
+   - `routes/online_rules.rs:~2170-2195`: assert an `online_rule.updated` row with `budget_resumed: true` after the PATCH that clears a pause, and `false` on the second.
+   - `routes/backfills.rs:~925`: an `online_rule.backfill_started` row.
+   - New:
+     - `evaluator_delete_in_use_records_nothing`;
+     - `rule_resume_is_recorded_as_manual`;
+     - `score_definition_archive_is_recorded`;
+     - `a_budget_pause_is_recorded_by_system` (in `eval/execute.rs` tests, if a pause test exists there; otherwise next to the existing pause test).
+
+**Done when:** committed.
+
+**Commit:** `Record evaluation objects and rule pauses`
+
+---
+
+### B3 — Alerts, connections, prices and the assistant setting
+
+**Goal:** alert rules and channels, LLM connections, model prices and the assistant setting write records. Tests, playground runs and assistant conversations lose the audit target.
+
+**Edit:** `crates/server/src/routes/alert_rules.rs`, `crates/server/src/routes/channels.rs`, `crates/server/src/routes/connections.rs`, `crates/server/src/routes/model_prices.rs`, `crates/server/src/prices.rs`, `crates/server/src/routes/assistant.rs`, `crates/server/src/assistant/turn.rs`, `crates/server/src/routes/playground.rs`.
+
+**Steps** (facts § A3, A4, A5, A10, B, C):
+1. **Alert rules:**
+   - create: `Created { metric, enabled }`.
+   - update: `Updated { fields }`, from `RulePatch`'s `Some` fields by their JSON names; only when `Some(row)`.
+   - delete: when true.
+   - Delete three lines.
+   - `audit_logs_hold_no_names`: keep, and also assert that the row's `details` contain neither `Secret name` nor `x-secret`.
+2. **Channels:**
+   - create: `Created { kind }`.
+   - update: in `patch_channel_on`'s `Ok(Ok(row))` branch; add `ctx` and `fields`.
+   - delete: when true.
+   - `test_channel` drops the audit target.
+   - `logs_hold_no_secrets`: also assert that no row's `details` holds the URL, recipients or `SECRET`.
+3. **LLM connections** (org scope: `.org(access.org.id).target(LlmConnection, id)`, no project):
+   - create: `Created { adapter }`.
+   - update: record right after `update_connection` returns `Some(row)`, before both returns, with `Updated { fields, key_changed: key_sent }`.
+   - delete: when it removed the row; the conflict path rolls back.
+   - `test_connection`, `test_embedding` and `after_connection_write`'s "online rule resumed" line: drop the audit target. A user-caused resume after a key change is not a separate record: the `llm_connection.updated` row covers it.
+   - `no_key_material_in_logs`: assert rows instead of the text, and that no key text is in `details`.
+4. **Model prices:**
+   - `prices::write` gets a `ctx: &audit::Ctx` parameter. Before `Ok(WriteOutcome::Done(stored))`, it records `ModelPriceAction::Created/Updated/Deleted` (from the `PriceChange` variant), `.org(org)`, `.project(p)` when `Some`, target `(ModelPrice, id)`.
+   - Its six callers in `routes/model_prices.rs` pass `&ctx`. Delete their six lines.
+   - Update the test at `~1099-1115` to rows.
+5. **Assistant setting:** `put_org_assistant`: inside the closure after `store::put_settings`, record `AssistantAction::SettingChanged { enabled, connection_id }`, `.org(org)`. Delete the line. `routes/assistant.rs`'s conversation, feedback and turn-start lines, and `assistant/turn.rs:~865`, drop the audit target.
+6. **Playground:** `routes/playground.rs:~422` drops the audit target.
+7. **Tests:**
+   - New: `channel_update_records_field_names_only`, `connection_key_change_is_flagged`, `org_price_write_is_recorded_without_project`, `assistant_setting_change_is_recorded`.
+   - The class (b) tests (`audit_logs_hold_no_title`, the playground and turn canaries) keep passing unchanged, since only the target changes.
+
+**Done when:** committed.
+
+**Commit:** `Record alert, connection, price and assistant setting changes`
+
+---
+
+### B4 — Prompts, datasets, experiments and issues
+
+**Goal:** prompts, datasets (and their exports) and issue sources write records. Dataset items, experiments and issue edits lose the audit target.
+
+**Edit:** `crates/server/src/routes/prompts.rs`, `crates/server/src/routes/datasets.rs`, `crates/server/src/routes/experiments.rs`, `crates/server/src/routes/issues.rs`, `crates/server/src/issues/worker.rs`, `crates/server/src/issues/refit.rs`.
+
+**Steps** (facts § A7, A8, A9, B, C, D2). Prompts and datasets accept API keys: `audit::Ctx` gives `Actor::ApiKey`, so nothing special is needed.
+1. **Prompts:** record in each `Written::Done` path, inside the `_tx` helpers (add `ctx: &audit::Ctx` to each):
+   - `create_tx`: `Created`;
+   - `update_prompt` (`Some(row)`): `Updated { fields }`;
+   - `delete_tx`: `Deleted`;
+   - `add_version_tx`: `VersionCreated { version }`;
+   - `set_label_tx`: `LabelSet { label, version }`;
+   - `remove_label_tx`: `LabelRemoved { label }`;
+   - `put_settings`: `ProtectedLabelsChanged { count }`.
+
+   `Written::Protected` and `Missing` record nothing. Delete seven lines. Test `~2018-2031`: assert a `prompt.created` row with `actor_kind = 'api_key'` instead of `actor=key:`.
+2. **Datasets:**
+   - create: `Created`.
+   - update: in `update_tx`'s `Some(row) => Ok(row)` arm, `Updated { fields }` (add `ctx` and `fields`).
+   - delete: when true.
+   - Delete three lines.
+   - `export_items`: add `ctx`. After `find`, `version_of` and the format are resolved, and before `Body::from_stream`, call `audit::record_alone(&state.meta, &ctx, Event::new(DatasetAction::ExportStarted { version, format }).org(..).project(..).target(Dataset, id), now)`. On error, return it (500): no export without its record.
+   - The item, import, restore and add-from-trace(s) lines (facts § B, datasets) drop the audit target. Their tests keep passing.
+   - Test `~3312-3326`: assert a `dataset.created` row with `actor_kind = 'api_key'` and no name in `details`.
+3. **Experiments:** the three lines drop the audit target.
+4. **Issues:**
+   - Issue sources create, update and delete as facts § A9, with `Created { kind }` and `Updated { fields }`.
+   - `patch_issue`, `post_issue_merge` and `post_issue_source_refit` drop the audit target.
+   - `issues/worker.rs` `apply_pause` (inside the caller's write) and `pause_connection_sources` (inside a write) record `IssueSourceAction::Paused { reason }` per source, with `Ctx::system()` (add the `conn` and ids they need).
+   - `issues/refit.rs` `budget_stop`: record `Paused { reason: "budget" }` in its write if it has one. Otherwise keep a plain info line and report it.
+5. **Tests:**
+   - New: `prompt_label_set_is_recorded_with_the_label`, `protected_prompt_write_records_nothing`, `dataset_export_is_recorded_before_streaming` (the row exists when the response headers arrive), `issue_source_pause_by_worker_is_recorded`.
+   - `issues/worker.rs:~2578`'s `assert_logs_clean` stays.
+
+**Done when:** committed.
+
+**Commit:** `Record prompt, dataset and issue source changes and dataset exports`
+
+---
+
+### B5 — Dashboards, annotation queues, SQL and MCP
+
+**Goal:** dashboards and annotation queues write records. SQL runs and exports and MCP tool calls are recorded before they run.
+
+**Edit:** `crates/server/src/routes/dashboards.rs`, `crates/server/src/routes/annotation_queues.rs`, `crates/server/src/routes/sql.rs`, `crates/server/src/mcp/mod.rs`, `crates/server/src/mcp/sql.rs`, `crates/server/src/mcp/prompts.rs`, `crates/server/src/mcp/traces.rs`, `crates/server/src/mcp/issues.rs`, `crates/server/src/mcp/tools.rs`.
+
+**Steps** (facts § A11, D1, D3):
+1. **Dashboards:**
+   - `create_dashboard`: `Created`.
+   - `update_dashboard`: `Updated` on `UpdateOutcome::Updated` only.
+   - `delete_dashboard`: `Deleted` when true. It has no principal extractor; add `ctx`.
+   - `save_overview`: `OverviewSaved { created }`.
+   - `reset_overview`: `OverviewReset` when true.
+   - All are recorded inside the closures, target `(Dashboard, id)`, replacing the plain info lines (keep none).
+2. **Annotation queues:** `create_queue` (`QueueCreate::Created`), `update_queue` (`QueueUpdate::Updated`) and `delete_queue` (true), target `(AnnotationQueue, id)`, replacing their plain info lines. Item lines are unchanged.
+3. **SQL:** in `run_sql`, add `ctx: audit::Ctx`. When `visitor.is_none()` (P-4):
+   - in `run_json`, right after `check_request(body)?`, record `SqlAction::Run { query_sha256: audit::sha256_hex(&checked.query) }`;
+   - in `start_export`, after the role check and `check_request`, record `SqlAction::ExportStarted { query_sha256, format }` (format spelled `csv` | `ndjson` | `parquet`).
+
+   Both use `audit::record_alone`, `.org(access.project.org_id).project(access.project.id)`, no target. On error, return the error: the query does not run. Pass `ctx` and `now` down as parameters. Params values are never hashed or recorded.
+4. **MCP:**
+   - `McpServer` gets a field `audit: audit::Ctx`. The `mcp` handler adds the `ctx: audit::Ctx` extractor and stores it. The PAT principal gives `Actor::User { via: Pat, credential_id }`.
+   - Add `async fn record_tool(&self, tool: &'static str, project: &ProjectAccess, query_sha256: Option<String>) -> Result<(), McpError>` to `McpServer` (use the error type the tools already return). It calls `audit::record_alone` with `McpAction::ToolCalled`.
+   - Call it right after each successful `user_project(..)`, before any read:
+     - `mcp/sql.rs` `query_sql` (with the query's hash) and `list_saved_views`;
+     - `mcp/prompts.rs` `list_prompts` and `get_prompt`;
+     - `mcp/traces.rs` `search_traces`, `get_trace` and `get_span`;
+     - `mcp/issues.rs` `list_issues`;
+     - `mcp/tools.rs` `get_schema`.
+
+     `list_projects` records nothing.
+5. **Tests:**
+   - `routes/sql.rs` `logs_carry_no_query_text`: also assert one `sql.run` row whose `query_sha256` equals `sha256_hex` of the sent query, and that the query text appears nowhere in `audit_events`. An invalid body records nothing.
+   - New:
+     - `sql_export_is_recorded_with_format`;
+     - `demo_visitor_sql_is_not_recorded` (if a demo test helper exists; else report it);
+     - `dashboard_create_update_delete_are_recorded`;
+     - `queue_create_is_recorded_items_are_not`;
+     - `mcp_query_sql_is_recorded_with_hash_and_pat` (`via = 'pat'`, `credential_id` = the PAT id);
+     - `mcp_list_projects_is_not_recorded`;
+     - `mcp_forbidden_project_records_nothing`.
+
+**Done when:** committed.
+
+**Commit:** `Record dashboards, queues, SQL runs and MCP tool calls`
+
+---
+
+### B6 — Docs
+
+**Goal:** the design and specs match M2.
+
+**Edit:** `docs/plans/ea-enterprise-admin/README.md`, `docs/spec/08-auth.md`, `docs/spec/05-query.md`, `docs/spec/09-api.md`, `CHANGELOG.md`.
+
+**Steps:**
+1. **Design** § Writing, "One request, one record": replace the example list with "(adds by filter to a queue, a batch of SCIM group members)". In § Event catalog:
+   - "Project objects" lists exactly the groups of B1;
+   - "Not in the catalog" adds experiments, issue edits, merges and refits, dataset imports, adds from traces, version restores, saved views and connection and channel tests;
+   - worker pauses and resumes are recorded with actor `system`.
+2. **Spec 08** § Audit records: one sentence naming the M2 groups, and that SQL runs, exports and MCP tool calls record a SHA-256 of the query text before running. Demo visitors are not recorded.
+3. **Spec 05:** in the SQL console section, the same sentence about the record before the run.
+4. **Spec 09:** under the MCP section, "each tool call that names a project is recorded in the audit log".
+5. **`CHANGELOG.md`:** extend M1's `Added` line with "configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, SQL runs, exports and MCP tool calls".
+
+**Done when:** committed.
+
+**Commit:** `Document the full audit catalog`
+
+---
+
+## After the phases (coordinating session)
+
+1. Review each diff against its phase.
+2. `git grep -n 'target: "audit"' -- crates/` must list only `audit/mod.rs`.
+3. Run `just check-rust` once, then a Haiku fix phase for what fails.
+4. A Sonnet code review of M1 and M2 together; a Haiku fix phase for its findings.
+5. Roadmap: "M2 implemented".
