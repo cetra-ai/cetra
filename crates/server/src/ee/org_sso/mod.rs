@@ -157,10 +157,16 @@ impl OrgSso {
                     enforced: row.enforced,
                 },
             );
+            // SA2.3 replaces this with a match on the protocol.
+            let Some(oidc) = row.oidc.as_ref() else {
+                unreadable += 1;
+                tracing::warn!(org_id = %row.org_id, "org identity provider skipped");
+                continue;
+            };
             let config = ProviderConfig {
-                issuer: row.issuer.clone(),
-                client_id: row.client_id.clone(),
-                client_secret_enc: row.client_secret_enc.clone(),
+                issuer: oidc.issuer.clone(),
+                client_id: oidc.client_id.clone(),
+                client_secret_enc: oidc.client_secret_enc.clone(),
                 display_name: row.display_name.clone(),
                 jit_role: row.jit_role,
             };
@@ -171,15 +177,15 @@ impl OrgSso {
                 continue;
             }
             let secret = secrets
-                .open(&row.client_secret_enc, store::secret_aad(&row.id))
+                .open(&oidc.client_secret_enc, store::secret_aad(&row.id))
                 .ok()
                 .and_then(|bytes| String::from_utf8(bytes).ok());
             let built = secret.and_then(|secret| {
                 self.build_provider(
                     row.org_id,
                     &row.display_name,
-                    &row.issuer,
-                    &row.client_id,
+                    &oidc.issuer,
+                    &oidc.client_id,
                     Secret::new(secret),
                 )
                 .ok()

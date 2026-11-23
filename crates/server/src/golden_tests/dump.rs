@@ -888,10 +888,14 @@ async fn sso_section(world: &World<'_>) -> Value {
         .expect("read the provider")
         .map(|row| {
             json!({
+                "protocol": row.protocol.as_str(),
                 "display_name": row.display_name,
-                "issuer": row.issuer,
-                "client_id": row.client_id,
-                "has_secret": !row.client_secret_enc.is_empty(),
+                "issuer": row.oidc.as_ref().map(|oidc| oidc.issuer.clone()),
+                "client_id": row.oidc.as_ref().map(|oidc| oidc.client_id.clone()),
+                "has_secret": row
+                    .oidc
+                    .as_ref()
+                    .is_some_and(|oidc| !oidc.client_secret_enc.is_empty()),
                 "enabled": row.enabled,
                 "enforced": row.enforced,
                 "jit_role": ser(&row.jit_role),

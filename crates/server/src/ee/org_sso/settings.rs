@@ -126,8 +126,16 @@ async fn view(state: &AppState, org: OrgId) -> Result<OrgSsoView, ApiError> {
 fn provider_view(row: ProviderRow) -> OrgSsoProvider {
     OrgSsoProvider {
         display_name: row.display_name,
-        issuer: row.issuer,
-        client_id: row.client_id,
+        issuer: row
+            .oidc
+            .as_ref()
+            .map(|oidc| oidc.issuer.clone())
+            .unwrap_or_default(),
+        client_id: row
+            .oidc
+            .as_ref()
+            .map(|oidc| oidc.client_id.clone())
+            .unwrap_or_default(),
         enabled: row.enabled,
         enforced: row.enforced,
         jit_role: row.jit_role,
@@ -175,9 +183,12 @@ async fn put_org_sso_provider(
     let input = validate(body)?;
 
     let existing = store::provider(state.meta.reader(), org).await?;
-    let changes_identity = existing
-        .as_ref()
-        .is_some_and(|row| row.issuer != input.issuer || row.client_id != input.client_id);
+    // A SAML row counts as an identity change: switching to OIDC needs a secret.
+    let changes_identity = existing.as_ref().is_some_and(|row| {
+        row.oidc
+            .as_ref()
+            .is_none_or(|oidc| oidc.issuer != input.issuer || oidc.client_id != input.client_id)
+    });
     let secret = match (&input.secret, &existing) {
         (Some(secret), _) => secret.clone(),
         (None, Some(row)) if !changes_identity => open_stored(&state, row)?,
@@ -220,9 +231,12 @@ async fn put_org_sso_provider(
         ),
         None => None,
     };
-    let renames_issuer = existing
-        .as_ref()
-        .is_some_and(|row| row.issuer != input.issuer);
+    // A switch from SAML deletes the identities too (D-SA-2).
+    let renames_issuer = existing.as_ref().is_some_and(|row| {
+        row.oidc
+            .as_ref()
+            .is_none_or(|oidc| oidc.issuer != input.issuer)
+    });
     let before = existing;
     let outcome = state
         .meta
@@ -674,10 +688,7 @@ fn unchanged(before: Option<&ProviderRow>, now: Option<&ProviderRow>) -> bool {
     match (before, now) {
         (None, None) => true,
         (Some(before), Some(now)) => {
-            before.id == now.id
-                && before.issuer == now.issuer
-                && before.client_id == now.client_id
-                && before.client_secret_enc == now.client_secret_enc
+            before.id == now.id && before.protocol == now.protocol && before.oidc == now.oidc
         }
         _ => false,
     }
@@ -730,10 +741,14 @@ fn validate(body: PutOrgSsoProvider) -> Result<Validated, ApiError> {
 
 /// The stored secret, opened. A secret that does not open is asked for again.
 fn open_stored(state: &AppState, row: &ProviderRow) -> Result<String, ApiError> {
-    state
-        .secrets
-        .open(&row.client_secret_enc, store::secret_aad(&row.id))
-        .ok()
+    row.oidc
+        .as_ref()
+        .and_then(|oidc| {
+            state
+                .secrets
+                .open(&oidc.client_secret_enc, store::secret_aad(&row.id))
+                .ok()
+        })
         .and_then(|bytes| String::from_utf8(bytes).ok())
         .ok_or_else(|| field_error("client_secret", "required"))
 }
@@ -861,7 +876,10 @@ mod tests {
         let opened = app
             .state
             .secrets
-            .open(&row.client_secret_enc, store::secret_aad(&row.id))
+            .open(
+                &row.oidc.as_ref().expect("oidc columns").client_secret_enc,
+                store::secret_aad(&row.id),
+            )
             .expect("open");
         assert_eq!(opened, CLIENT_SECRET.as_bytes());
     }
@@ -973,7 +991,10 @@ mod tests {
         let opened = app
             .state
             .secrets
-            .open(&row.client_secret_enc, store::secret_aad(&row.id))
+            .open(
+                &row.oidc.as_ref().expect("oidc columns").client_secret_enc,
+                store::secret_aad(&row.id),
+            )
             .expect("open");
         assert_eq!(opened, CLIENT_SECRET.as_bytes());
         assert_eq!(row.display_name, "Acme Entra");
@@ -1129,10 +1150,13 @@ mod tests {
         let row = |secret: Vec<u8>, issuer: &str| ProviderRow {
             id: Uuid::nil(),
             org_id: OrgId::new_v7(),
+            protocol: crate::api::org_sso::SsoProtocol::Oidc,
             display_name: "Acme".to_owned(),
-            issuer: issuer.to_owned(),
-            client_id: "c".to_owned(),
-            client_secret_enc: secret,
+            oidc: Some(super::store::OidcColumns {
+                issuer: issuer.to_owned(),
+                client_id: "c".to_owned(),
+                client_secret_enc: secret,
+            }),
             enabled: false,
             enforced: false,
             jit_role: JitRole::Viewer,

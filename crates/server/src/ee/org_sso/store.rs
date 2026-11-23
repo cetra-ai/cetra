@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Elastic-2.0
 //! Storage of org SSO providers and domains (D-P-52, D-P-54, D-P-59).
 
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 
 use cetra_core::ids::OrgId;
 use sqlx::{SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
-use crate::api::org_sso::JitRole;
+use crate::api::org_sso::{JitRole, SsoProtocol};
 use crate::crypto::Aad;
 use crate::meta::password_resets::delete_user_resets;
 use crate::meta::personal_tokens::revoke_user_tokens;
@@ -17,10 +18,10 @@ use crate::meta::{MetaError, unique_or};
 pub(crate) struct ProviderRow {
     pub(crate) id: Uuid,
     pub(crate) org_id: OrgId,
+    pub(crate) protocol: SsoProtocol,
     pub(crate) display_name: String,
-    pub(crate) issuer: String,
-    pub(crate) client_id: String,
-    pub(crate) client_secret_enc: Vec<u8>,
+    /// The OIDC columns; `None` for a SAML row (the table's CHECK keeps them NULL).
+    pub(crate) oidc: Option<OidcColumns>,
     pub(crate) enabled: bool,
     pub(crate) enforced: bool,
     pub(crate) jit_role: JitRole,
@@ -29,15 +30,33 @@ pub(crate) struct ProviderRow {
     pub(crate) updated_at: i64,
 }
 
+/// The OIDC columns of a provider row. `Debug` omits the sealed secret.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct OidcColumns {
+    pub(crate) issuer: String,
+    pub(crate) client_id: String,
+    pub(crate) client_secret_enc: Vec<u8>,
+}
+
+impl fmt::Debug for OidcColumns {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OidcColumns")
+            .field("issuer", &self.issuer)
+            .field("client_id", &self.client_id)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for ProviderRow {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderRow")
             .field("id", &self.id)
             .field("org_id", &self.org_id)
+            .field("protocol", &self.protocol)
             .field("display_name", &self.display_name)
-            .field("issuer", &self.issuer)
-            .field("client_id", &self.client_id)
+            .field("oidc", &self.oidc)
             .field("enabled", &self.enabled)
             .field("enforced", &self.enforced)
             .field("jit_role", &self.jit_role)
@@ -69,6 +88,96 @@ pub(crate) struct ProviderWrite {
     pub(crate) jit_role: JitRole,
 }
 
+/// Attribute names an owner set; `None` uses the crate's defaults for that field (D-SA-6).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SamlAttributes {
+    pub(crate) email: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) first_name: Option<String>,
+    pub(crate) last_name: Option<String>,
+}
+
+/// One `org_sso_saml` row with its certificates in `position` order. `Debug` prints counts
+/// and states only: the metadata URL, entity ID, SSO URL and certificates stay out of logs.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct SamlRow {
+    pub(crate) provider_id: Uuid,
+    pub(crate) metadata_url: Option<String>,
+    pub(crate) idp_entity_id: String,
+    pub(crate) sso_url: String,
+    pub(crate) certificates: Vec<Vec<u8>>,
+    pub(crate) attributes: SamlAttributes,
+    pub(crate) refreshed_at: Option<i64>,
+    pub(crate) refresh_checked_at: Option<i64>,
+    pub(crate) refresh_error: Option<String>,
+    pub(crate) certificates_changed_at: Option<i64>,
+}
+
+impl fmt::Debug for SamlRow {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SamlRow")
+            .field("provider_id", &self.provider_id)
+            .field("certificates", &self.certificates.len())
+            .field("attributes", &self.attributes)
+            .field("refreshed_at", &self.refreshed_at)
+            .field("refresh_checked_at", &self.refresh_checked_at)
+            .field("refresh_error", &self.refresh_error)
+            .field("certificates_changed_at", &self.certificates_changed_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What `put_saml_provider` writes. `Debug` prints counts only.
+pub(crate) struct SamlWrite {
+    pub(crate) display_name: String,
+    pub(crate) jit_role: JitRole,
+    pub(crate) metadata_url: Option<String>,
+    pub(crate) idp_entity_id: String,
+    pub(crate) sso_url: String,
+    pub(crate) certificates: Vec<Vec<u8>>,
+    pub(crate) attributes: SamlAttributes,
+    /// `Some(now)` when the metadata was just fetched from `metadata_url`.
+    pub(crate) refreshed_at: Option<i64>,
+}
+
+impl fmt::Debug for SamlWrite {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SamlWrite")
+            .field("jit_role", &self.jit_role)
+            .field("metadata_url", &self.metadata_url.is_some())
+            .field("certificates", &self.certificates.len())
+            .field("attributes", &self.attributes)
+            .field("refreshed_at", &self.refreshed_at)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What a scheduled refresh found (SA2.6). Its URL and certificates make `Debug` acceptable
+/// only because it is never logged: never pass it to a `tracing` macro.
+#[derive(Debug)]
+pub(crate) enum RefreshOutcome {
+    /// Usable metadata with the stored entity ID.
+    Fetched {
+        sso_url: String,
+        certificates: Vec<Vec<u8>>,
+    },
+    /// A failure class, stored in `refresh_error` (one of `REFRESH_ERRORS`).
+    Failed(&'static str),
+}
+
+/// The stored failure classes (`refresh_error`), snake_case. `record_refresh` starts with
+/// `debug_assert!(REFRESH_ERRORS.contains(&class))` for `Failed(class)`.
+pub(crate) const REFRESH_ERRORS: [&str; 6] = [
+    "fetch_failed",
+    "status",
+    "too_large",
+    "denied",
+    "unusable",
+    "entity_id_changed",
+];
+
 /// `AAD` of `client_secret_enc` for provider row `id` (table `org_sso_providers`).
 pub(crate) fn secret_aad(id: &Uuid) -> Aad<'_> {
     Aad {
@@ -78,7 +187,7 @@ pub(crate) fn secret_aad(id: &Uuid) -> Aad<'_> {
     }
 }
 
-const PROVIDER_BY_ORG: &str = "SELECT id, org_id, display_name, issuer, client_id, \
+const PROVIDER_BY_ORG: &str = "SELECT id, org_id, protocol, display_name, issuer, client_id, \
      client_secret_enc, enabled, enforced, jit_role, last_login_at, created_at, updated_at \
      FROM org_sso_providers WHERE org_id = ?";
 
@@ -95,10 +204,11 @@ const VERIFIED_DOMAIN: &str = "SELECT id, org_id, domain, token, verified_at, la
 struct ProviderRecord {
     id: String,
     org_id: String,
+    protocol: String,
     display_name: String,
-    issuer: String,
-    client_id: String,
-    client_secret_enc: Vec<u8>,
+    issuer: Option<String>,
+    client_id: Option<String>,
+    client_secret_enc: Option<Vec<u8>>,
     enabled: i64,
     enforced: i64,
     jit_role: String,
@@ -135,13 +245,28 @@ fn parse_flag(value: i64, column: &'static str) -> Result<bool, MetaError> {
 }
 
 fn provider_row(record: ProviderRecord) -> Result<ProviderRow, MetaError> {
+    let protocol = SsoProtocol::from_str_opt(&record.protocol)
+        .ok_or_else(|| corrupt("org_sso_providers", "protocol"))?;
+    let oidc = match protocol {
+        SsoProtocol::Oidc => Some(OidcColumns {
+            issuer: record
+                .issuer
+                .ok_or_else(|| corrupt("org_sso_providers", "issuer"))?,
+            client_id: record
+                .client_id
+                .ok_or_else(|| corrupt("org_sso_providers", "client_id"))?,
+            client_secret_enc: record
+                .client_secret_enc
+                .ok_or_else(|| corrupt("org_sso_providers", "client_secret_enc"))?,
+        }),
+        SsoProtocol::Saml => None,
+    };
     Ok(ProviderRow {
         id: parse_uuid(&record.id, "org_sso_providers", "id")?,
         org_id: OrgId::from_uuid(parse_uuid(&record.org_id, "org_sso_providers", "org_id")?),
+        protocol,
         display_name: record.display_name,
-        issuer: record.issuer,
-        client_id: record.client_id,
-        client_secret_enc: record.client_secret_enc,
+        oidc,
         enabled: parse_flag(record.enabled, "enabled")?,
         enforced: parse_flag(record.enforced, "enforced")?,
         jit_role: JitRole::from_str_opt(&record.jit_role)
@@ -203,8 +328,9 @@ pub(crate) async fn provider_tx(
 /// Returns [`MetaError`] when the query fails or a stored value is corrupt.
 pub(crate) async fn active_providers(pool: &SqlitePool) -> Result<Vec<ProviderRow>, MetaError> {
     let records: Vec<ProviderRecord> = sqlx::query_as(
-        "SELECT p.id, p.org_id, p.display_name, p.issuer, p.client_id, p.client_secret_enc, \
-                p.enabled, p.enforced, p.jit_role, p.last_login_at, p.created_at, p.updated_at \
+        "SELECT p.id, p.org_id, p.protocol, p.display_name, p.issuer, p.client_id, \
+                p.client_secret_enc, p.enabled, p.enforced, p.jit_role, p.last_login_at, \
+                p.created_at, p.updated_at \
          FROM org_sso_providers p JOIN orgs o ON o.id = p.org_id \
          WHERE o.state = 'active' ORDER BY p.org_id",
     )
@@ -213,7 +339,9 @@ pub(crate) async fn active_providers(pool: &SqlitePool) -> Result<Vec<ProviderRo
     records.into_iter().map(provider_row).collect()
 }
 
-/// Inserts (with `id`, enabled and enforced off) or updates the org's provider. On insert
+/// Inserts (with `id`, enabled and enforced off) or updates the org's OIDC provider. Over a
+/// SAML provider it switches the org to OIDC: the SAML rows are deleted and the flags reset
+/// (D-SA-2). On insert
 /// `client_secret_enc` must be `Some` (else `MetaError::Corrupt`, a caller bug). An update keeps
 /// the stored row id, so a new sealed secret must be sealed with [`secret_aad`] of the id that
 /// [`provider_tx`] returns.
@@ -228,47 +356,74 @@ pub(crate) async fn put_provider(
     write: ProviderWrite,
     now: i64,
 ) -> Result<(), MetaError> {
-    if provider_tx(&mut *conn, org).await?.is_some() {
-        sqlx::query(
-            "UPDATE org_sso_providers SET display_name = ?, issuer = ?, client_id = ?, \
-             client_secret_enc = COALESCE(?, client_secret_enc), jit_role = ?, updated_at = ?, \
-             last_login_at = CASE WHEN issuer != ? OR client_id != ? THEN NULL \
-                                  ELSE last_login_at END \
-             WHERE org_id = ?",
-        )
-        .bind(&write.display_name)
-        .bind(&write.issuer)
-        .bind(&write.client_id)
-        .bind(write.client_secret_enc)
-        .bind(write.jit_role.as_str())
-        .bind(now)
-        .bind(&write.issuer)
-        .bind(&write.client_id)
-        .bind(org.to_string())
-        .execute(&mut *conn)
-        .await?;
-        return Ok(());
+    match provider_tx(&mut *conn, org).await? {
+        Some(row) if row.protocol == SsoProtocol::Saml => {
+            // Switch from SAML: the SAML rows go, the flags and last login reset (D-SA-2).
+            let Some(secret) = write.client_secret_enc else {
+                return Err(corrupt("org_sso_providers", "client_secret_enc"));
+            };
+            sqlx::query("DELETE FROM org_sso_saml WHERE provider_id = ?")
+                .bind(row.id.to_string())
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "UPDATE org_sso_providers SET protocol = 'oidc', display_name = ?, issuer = ?, \
+                 client_id = ?, client_secret_enc = ?, jit_role = ?, enabled = 0, enforced = 0, \
+                 last_login_at = NULL, updated_at = ? WHERE org_id = ?",
+            )
+            .bind(&write.display_name)
+            .bind(&write.issuer)
+            .bind(&write.client_id)
+            .bind(secret)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(org.to_string())
+            .execute(&mut *conn)
+            .await?;
+        }
+        Some(_) => {
+            sqlx::query(
+                "UPDATE org_sso_providers SET display_name = ?, issuer = ?, client_id = ?, \
+                 client_secret_enc = COALESCE(?, client_secret_enc), jit_role = ?, updated_at = ?, \
+                 last_login_at = CASE WHEN issuer != ? OR client_id != ? THEN NULL \
+                                      ELSE last_login_at END \
+                 WHERE org_id = ?",
+            )
+            .bind(&write.display_name)
+            .bind(&write.issuer)
+            .bind(&write.client_id)
+            .bind(write.client_secret_enc)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(&write.issuer)
+            .bind(&write.client_id)
+            .bind(org.to_string())
+            .execute(&mut *conn)
+            .await?;
+        }
+        None => {
+            let Some(secret) = write.client_secret_enc else {
+                return Err(corrupt("org_sso_providers", "client_secret_enc"));
+            };
+            sqlx::query(
+                "INSERT INTO org_sso_providers \
+                 (id, org_id, protocol, display_name, issuer, client_id, client_secret_enc, \
+                  jit_role, created_at, updated_at) \
+                 VALUES (?, ?, 'oidc', ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(id.to_string())
+            .bind(org.to_string())
+            .bind(&write.display_name)
+            .bind(&write.issuer)
+            .bind(&write.client_id)
+            .bind(secret)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        }
     }
-    let Some(secret) = write.client_secret_enc else {
-        return Err(corrupt("org_sso_providers", "client_secret_enc"));
-    };
-    sqlx::query(
-        "INSERT INTO org_sso_providers \
-         (id, org_id, display_name, issuer, client_id, client_secret_enc, jit_role, \
-          created_at, updated_at) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(id.to_string())
-    .bind(org.to_string())
-    .bind(&write.display_name)
-    .bind(&write.issuer)
-    .bind(&write.client_id)
-    .bind(secret)
-    .bind(write.jit_role.as_str())
-    .bind(now)
-    .bind(now)
-    .execute(&mut *conn)
-    .await?;
     Ok(())
 }
 
@@ -354,6 +509,403 @@ pub(crate) async fn delete_identities(
 /// `org:<org>`, the `identities.provider` of the org's provider.
 pub(crate) fn identity_provider(org: OrgId) -> String {
     format!("org:{org}")
+}
+
+/// `org_sso_saml` with its provider's org, for one provider id.
+const SAML_BY_PROVIDER: &str = "SELECT s.provider_id, p.org_id, s.metadata_url, s.idp_entity_id, \
+     s.sso_url, s.email_attribute, s.name_attribute, s.first_name_attribute, \
+     s.last_name_attribute, s.refreshed_at, s.refresh_checked_at, s.refresh_error, \
+     s.certificates_changed_at FROM org_sso_saml s JOIN org_sso_providers p ON p.id = s.provider_id \
+     WHERE s.provider_id = ?";
+
+/// Every SAML row of an active org.
+const SAML_ACTIVE: &str = "SELECT s.provider_id, p.org_id, s.metadata_url, s.idp_entity_id, \
+     s.sso_url, s.email_attribute, s.name_attribute, s.first_name_attribute, \
+     s.last_name_attribute, s.refreshed_at, s.refresh_checked_at, s.refresh_error, \
+     s.certificates_changed_at FROM org_sso_saml s JOIN org_sso_providers p ON p.id = s.provider_id \
+     JOIN orgs o ON o.id = p.org_id WHERE o.state = 'active' ORDER BY s.provider_id";
+
+/// The URL-backed SAML rows of active orgs whose last refresh attempt is before a cutoff.
+const SAML_DUE: &str = "SELECT s.provider_id, p.org_id, s.metadata_url, s.idp_entity_id, \
+     s.sso_url, s.email_attribute, s.name_attribute, s.first_name_attribute, \
+     s.last_name_attribute, s.refreshed_at, s.refresh_checked_at, s.refresh_error, \
+     s.certificates_changed_at FROM org_sso_saml s JOIN org_sso_providers p ON p.id = s.provider_id \
+     JOIN orgs o ON o.id = p.org_id \
+     WHERE s.metadata_url IS NOT NULL AND COALESCE(s.refresh_checked_at, 0) < ? \
+       AND o.state = 'active' \
+     ORDER BY COALESCE(s.refresh_checked_at, 0), s.provider_id LIMIT ?";
+
+const SAML_CERTIFICATES: &str =
+    "SELECT der FROM org_sso_saml_certificates WHERE provider_id = ? ORDER BY position";
+
+/// The certificates of every SAML row of an active org, in position order per provider.
+const SAML_CERTIFICATES_ACTIVE: &str = "SELECT c.provider_id, c.der \
+     FROM org_sso_saml_certificates c JOIN org_sso_providers p ON p.id = c.provider_id \
+     JOIN orgs o ON o.id = p.org_id WHERE o.state = 'active' \
+     ORDER BY c.provider_id, c.position";
+
+#[derive(sqlx::FromRow)]
+struct SamlRecord {
+    provider_id: String,
+    org_id: String,
+    metadata_url: Option<String>,
+    idp_entity_id: String,
+    sso_url: String,
+    email_attribute: Option<String>,
+    name_attribute: Option<String>,
+    first_name_attribute: Option<String>,
+    last_name_attribute: Option<String>,
+    refreshed_at: Option<i64>,
+    refresh_checked_at: Option<i64>,
+    refresh_error: Option<String>,
+    certificates_changed_at: Option<i64>,
+}
+
+/// A SAML record with its certificates (none is corrupt) and the provider's org.
+fn saml_row(record: SamlRecord, certificates: Vec<Vec<u8>>) -> Result<(OrgId, SamlRow), MetaError> {
+    let provider_id = parse_uuid(&record.provider_id, "org_sso_saml", "provider_id")?;
+    let org_id = OrgId::from_uuid(parse_uuid(&record.org_id, "org_sso_providers", "org_id")?);
+    if certificates.is_empty() {
+        return Err(corrupt("org_sso_saml_certificates", "der"));
+    }
+    Ok((
+        org_id,
+        SamlRow {
+            provider_id,
+            metadata_url: record.metadata_url,
+            idp_entity_id: record.idp_entity_id,
+            sso_url: record.sso_url,
+            certificates,
+            attributes: SamlAttributes {
+                email: record.email_attribute,
+                display_name: record.name_attribute,
+                first_name: record.first_name_attribute,
+                last_name: record.last_name_attribute,
+            },
+            refreshed_at: record.refreshed_at,
+            refresh_checked_at: record.refresh_checked_at,
+            refresh_error: record.refresh_error,
+            certificates_changed_at: record.certificates_changed_at,
+        },
+    ))
+}
+
+/// The certificates of one SAML row, in position order.
+async fn certificate_rows(
+    conn: &mut SqliteConnection,
+    provider_id: &str,
+) -> Result<Vec<Vec<u8>>, MetaError> {
+    let rows: Vec<Vec<u8>> = sqlx::query_scalar(SAML_CERTIFICATES)
+        .bind(provider_id)
+        .fetch_all(&mut *conn)
+        .await?;
+    Ok(rows)
+}
+
+/// The SAML configuration of provider row `provider_id`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value is corrupt.
+pub(crate) async fn saml(
+    pool: &SqlitePool,
+    provider_id: Uuid,
+) -> Result<Option<SamlRow>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    saml_tx(&mut conn, provider_id).await
+}
+
+/// The SAML configuration of provider row `provider_id`, in the write transaction.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the query fails or a stored value is corrupt.
+pub(crate) async fn saml_tx(
+    conn: &mut SqliteConnection,
+    provider_id: Uuid,
+) -> Result<Option<SamlRow>, MetaError> {
+    let record: Option<SamlRecord> = sqlx::query_as(SAML_BY_PROVIDER)
+        .bind(provider_id.to_string())
+        .fetch_optional(&mut *conn)
+        .await?;
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let certificates = certificate_rows(conn, &record.provider_id).await?;
+    Ok(Some(saml_row(record, certificates)?.1))
+}
+
+/// Every SAML configuration of an active org, keyed by provider id (for `OrgSso::reload`).
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value is corrupt.
+pub(crate) async fn active_saml(pool: &SqlitePool) -> Result<HashMap<Uuid, SamlRow>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    let records: Vec<SamlRecord> = sqlx::query_as(SAML_ACTIVE).fetch_all(&mut *conn).await?;
+    let certificate_records: Vec<(String, Vec<u8>)> = sqlx::query_as(SAML_CERTIFICATES_ACTIVE)
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut certificates: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+    for (provider_id, der) in certificate_records {
+        certificates.entry(provider_id).or_default().push(der);
+    }
+    let mut rows = HashMap::new();
+    for record in records {
+        let found = certificates.remove(&record.provider_id).unwrap_or_default();
+        let (_org, row) = saml_row(record, found)?;
+        rows.insert(row.provider_id, row);
+    }
+    Ok(rows)
+}
+
+/// Updates a SAML provider's display name, JIT role and attribute names, keeping its
+/// metadata. Returns false when the org's provider is not SAML.
+///
+/// # Errors
+///
+/// Returns [`MetaError::Db`] when an update fails.
+pub(crate) async fn update_saml_settings(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    display_name: &str,
+    jit_role: JitRole,
+    attributes: &SamlAttributes,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let Some(row) = provider_tx(&mut *conn, org).await? else {
+        return Ok(false);
+    };
+    if row.protocol != SsoProtocol::Saml {
+        return Ok(false);
+    }
+    sqlx::query(
+        "UPDATE org_sso_providers SET display_name = ?, jit_role = ?, updated_at = ? \
+         WHERE org_id = ?",
+    )
+    .bind(display_name)
+    .bind(jit_role.as_str())
+    .bind(now)
+    .bind(org.to_string())
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "UPDATE org_sso_saml SET email_attribute = ?, name_attribute = ?, \
+         first_name_attribute = ?, last_name_attribute = ? WHERE provider_id = ?",
+    )
+    .bind(attributes.email.as_deref())
+    .bind(attributes.display_name.as_deref())
+    .bind(attributes.first_name.as_deref())
+    .bind(attributes.last_name.as_deref())
+    .bind(row.id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    Ok(true)
+}
+
+/// Saves a SAML provider: insert, replace, or switch from OIDC. Returns the provider row id.
+/// A switch from OIDC keeps the row id and resets the flags and the last login; a SAML
+/// replacement keeps the row id and resets the last login only when the entity ID changes.
+/// Identities are not deleted here.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a write fails or a stored row is corrupt.
+pub(crate) async fn put_saml_provider(
+    conn: &mut SqliteConnection,
+    org: OrgId,
+    new_id: Uuid,
+    write: SamlWrite,
+    now: i64,
+) -> Result<Uuid, MetaError> {
+    let id = match provider_tx(&mut *conn, org).await? {
+        None => {
+            sqlx::query(
+                "INSERT INTO org_sso_providers \
+                 (id, org_id, protocol, display_name, jit_role, created_at, updated_at) \
+                 VALUES (?, ?, 'saml', ?, ?, ?, ?)",
+            )
+            .bind(new_id.to_string())
+            .bind(org.to_string())
+            .bind(&write.display_name)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+            new_id
+        }
+        Some(row) if row.protocol == SsoProtocol::Oidc => {
+            sqlx::query(
+                "UPDATE org_sso_providers SET protocol = 'saml', issuer = NULL, client_id = NULL, \
+                 client_secret_enc = NULL, display_name = ?, jit_role = ?, enabled = 0, \
+                 enforced = 0, last_login_at = NULL, updated_at = ? WHERE org_id = ?",
+            )
+            .bind(&write.display_name)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(org.to_string())
+            .execute(&mut *conn)
+            .await?;
+            row.id
+        }
+        Some(row) => {
+            let old = saml_tx(&mut *conn, row.id)
+                .await?
+                .ok_or_else(|| corrupt("org_sso_saml", "provider_id"))?;
+            let entity_changed = old.idp_entity_id != write.idp_entity_id;
+            sqlx::query(
+                "UPDATE org_sso_providers SET display_name = ?, jit_role = ?, updated_at = ?, \
+                 last_login_at = CASE WHEN ? THEN NULL ELSE last_login_at END \
+                 WHERE org_id = ?",
+            )
+            .bind(&write.display_name)
+            .bind(write.jit_role.as_str())
+            .bind(now)
+            .bind(entity_changed)
+            .bind(org.to_string())
+            .execute(&mut *conn)
+            .await?;
+            row.id
+        }
+    };
+    sqlx::query("DELETE FROM org_sso_saml WHERE provider_id = ?")
+        .bind(id.to_string())
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query(
+        "INSERT INTO org_sso_saml \
+         (provider_id, metadata_url, idp_entity_id, sso_url, email_attribute, name_attribute, \
+          first_name_attribute, last_name_attribute, refreshed_at, refresh_checked_at, \
+          refresh_error, certificates_changed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
+    )
+    .bind(id.to_string())
+    .bind(write.metadata_url.as_deref())
+    .bind(&write.idp_entity_id)
+    .bind(&write.sso_url)
+    .bind(write.attributes.email.as_deref())
+    .bind(write.attributes.display_name.as_deref())
+    .bind(write.attributes.first_name.as_deref())
+    .bind(write.attributes.last_name.as_deref())
+    .bind(write.refreshed_at)
+    .bind(write.refreshed_at)
+    .execute(&mut *conn)
+    .await?;
+    for (position, der) in write.certificates.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO org_sso_saml_certificates (provider_id, position, der) VALUES (?, ?, ?)",
+        )
+        .bind(id.to_string())
+        .bind(i64::try_from(position).unwrap_or(i64::MAX))
+        .bind(der.as_slice())
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(id)
+}
+
+/// SAML providers of active orgs with a metadata URL whose last refresh attempt is older than
+/// `cutoff`, oldest attempt first, at most `limit`.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a query fails or a stored value is corrupt.
+pub(crate) async fn due_saml_refreshes(
+    pool: &SqlitePool,
+    cutoff: i64,
+    limit: u32,
+) -> Result<Vec<(OrgId, SamlRow)>, MetaError> {
+    let mut conn = pool.acquire().await?;
+    let records: Vec<SamlRecord> = sqlx::query_as(SAML_DUE)
+        .bind(cutoff)
+        .bind(i64::from(limit))
+        .fetch_all(&mut *conn)
+        .await?;
+    let mut due = Vec::with_capacity(records.len());
+    for record in records {
+        let certificates = certificate_rows(&mut conn, &record.provider_id).await?;
+        due.push(saml_row(record, certificates)?);
+    }
+    Ok(due)
+}
+
+/// Records a scheduled refresh. Returns whether the certificate set changed.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a write fails or a stored row is corrupt.
+pub(crate) async fn record_refresh(
+    conn: &mut SqliteConnection,
+    provider_id: Uuid,
+    outcome: RefreshOutcome,
+    now: i64,
+) -> Result<bool, MetaError> {
+    let id = provider_id.to_string();
+    match outcome {
+        RefreshOutcome::Fetched {
+            sso_url,
+            certificates,
+        } => {
+            let stored = certificate_rows(conn, &id).await?;
+            let stored_set: BTreeSet<&[u8]> = stored.iter().map(Vec::as_slice).collect();
+            let fetched_set: BTreeSet<&[u8]> = certificates.iter().map(Vec::as_slice).collect();
+            let changed = stored_set != fetched_set;
+            if changed {
+                sqlx::query("DELETE FROM org_sso_saml_certificates WHERE provider_id = ?")
+                    .bind(&id)
+                    .execute(&mut *conn)
+                    .await?;
+                for (position, der) in certificates.iter().enumerate() {
+                    sqlx::query(
+                        "INSERT INTO org_sso_saml_certificates (provider_id, position, der) \
+                         VALUES (?, ?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(i64::try_from(position).unwrap_or(i64::MAX))
+                    .bind(der.as_slice())
+                    .execute(&mut *conn)
+                    .await?;
+                }
+                sqlx::query(
+                    "UPDATE org_sso_saml SET sso_url = ?, refreshed_at = ?, refresh_checked_at = ?, \
+                     refresh_error = NULL, certificates_changed_at = ? WHERE provider_id = ?",
+                )
+                .bind(&sso_url)
+                .bind(now)
+                .bind(now)
+                .bind(now)
+                .bind(&id)
+                .execute(&mut *conn)
+                .await?;
+            } else {
+                sqlx::query(
+                    "UPDATE org_sso_saml SET sso_url = ?, refreshed_at = ?, refresh_checked_at = ?, \
+                     refresh_error = NULL WHERE provider_id = ?",
+                )
+                .bind(&sso_url)
+                .bind(now)
+                .bind(now)
+                .bind(&id)
+                .execute(&mut *conn)
+                .await?;
+            }
+            Ok(changed)
+        }
+        RefreshOutcome::Failed(class) => {
+            debug_assert!(REFRESH_ERRORS.contains(&class));
+            sqlx::query(
+                "UPDATE org_sso_saml SET refresh_error = ?, refresh_checked_at = ? \
+                 WHERE provider_id = ?",
+            )
+            .bind(class)
+            .bind(now)
+            .bind(&id)
+            .execute(&mut *conn)
+            .await?;
+            Ok(false)
+        }
+    }
 }
 
 /// The org's domains, ordered by domain.
@@ -712,9 +1264,11 @@ mod tests {
         assert_eq!(row.id, id);
         assert_eq!(row.org_id, org);
         assert_eq!(row.display_name, "Acme SSO");
-        assert_eq!(row.issuer, "https://idp.example");
-        assert_eq!(row.client_id, "acme-client");
-        assert_eq!(row.client_secret_enc, vec![0xde, 0xad, 0xbe, 0xef, 0x01]);
+        assert_eq!(row.protocol, SsoProtocol::Oidc);
+        let oidc = row.oidc.as_ref().expect("oidc columns");
+        assert_eq!(oidc.issuer, "https://idp.example");
+        assert_eq!(oidc.client_id, "acme-client");
+        assert_eq!(oidc.client_secret_enc, vec![0xde, 0xad, 0xbe, 0xef, 0x01]);
         assert!(!row.enabled && !row.enforced);
         assert_eq!(row.jit_role, JitRole::Viewer);
         assert_eq!((row.created_at, row.updated_at), (10, 10));
@@ -738,7 +1292,10 @@ mod tests {
         assert_eq!(row.id, id);
         assert_eq!(row.display_name, "Renamed");
         assert_eq!(row.jit_role, JitRole::Member);
-        assert_eq!(row.client_secret_enc, vec![0xde, 0xad, 0xbe, 0xef, 0x01]);
+        assert_eq!(
+            row.oidc.as_ref().expect("oidc columns").client_secret_enc,
+            vec![0xde, 0xad, 0xbe, 0xef, 0x01]
+        );
         assert_eq!(row.updated_at, 20);
 
         // Update with a secret replaces it.
@@ -751,7 +1308,10 @@ mod tests {
         .await
         .unwrap();
         let row = provider(db.reader(), org).await.unwrap().unwrap();
-        assert_eq!(row.client_secret_enc, vec![7, 8]);
+        assert_eq!(
+            row.oidc.as_ref().expect("oidc columns").client_secret_enc,
+            vec![7, 8]
+        );
     }
 
     #[tokio::test]
@@ -777,12 +1337,26 @@ mod tests {
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].last_login_at, Some(42));
         let opened = secrets
-            .open(&row[0].client_secret_enc, secret_aad(&row[0].id))
+            .open(
+                &row[0]
+                    .oidc
+                    .as_ref()
+                    .expect("oidc columns")
+                    .client_secret_enc,
+                secret_aad(&row[0].id),
+            )
             .expect("open");
         assert_eq!(opened, b"client-secret");
         assert!(
             secrets
-                .open(&row[0].client_secret_enc, secret_aad(&Uuid::now_v7()))
+                .open(
+                    &row[0]
+                        .oidc
+                        .as_ref()
+                        .expect("oidc columns")
+                        .client_secret_enc,
+                    secret_aad(&Uuid::now_v7())
+                )
                 .is_err(),
             "a sealed secret opens only for its own row"
         );
@@ -1068,5 +1642,453 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(session_org, None);
+    }
+
+    fn saml_write(certificates: Vec<Vec<u8>>, entity: &str) -> SamlWrite {
+        SamlWrite {
+            display_name: "Acme SAML".to_owned(),
+            jit_role: JitRole::Viewer,
+            metadata_url: None,
+            idp_entity_id: entity.to_owned(),
+            sso_url: "https://idp.example/sso".to_owned(),
+            certificates,
+            attributes: SamlAttributes {
+                email: Some("mail".to_owned()),
+                ..SamlAttributes::default()
+            },
+            refreshed_at: Some(10),
+        }
+    }
+
+    fn with_url(mut payload: SamlWrite, url: &str) -> SamlWrite {
+        payload.metadata_url = Some(url.to_owned());
+        payload
+    }
+
+    async fn put_saml(
+        db: &crate::meta::MetaDb,
+        org: OrgId,
+        certificates: Vec<Vec<u8>>,
+        entity: &'static str,
+        now: i64,
+    ) -> Uuid {
+        let payload = saml_write(certificates, entity);
+        db.write(move |conn| {
+            Box::pin(
+                async move { put_saml_provider(conn, org, Uuid::now_v7(), payload, now).await },
+            )
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn refresh(
+        db: &crate::meta::MetaDb,
+        id: Uuid,
+        outcome: RefreshOutcome,
+        now: i64,
+    ) -> bool {
+        db.write(move |conn| Box::pin(async move { record_refresh(conn, id, outcome, now).await }))
+            .await
+            .unwrap()
+    }
+
+    async fn count(db: &crate::meta::MetaDb, table: &'static str) -> i64 {
+        sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+            .fetch_one(db.reader())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_oidc_row_reads_back_with_its_protocol() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                put_provider(conn, org, Uuid::now_v7(), write(Some(vec![1])), 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let row = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(row.protocol, SsoProtocol::Oidc);
+        let oidc = row.oidc.as_ref().expect("oidc columns");
+        assert_eq!(oidc.issuer, "https://idp.example");
+        assert_eq!(oidc.client_id, "acme-client");
+        assert_eq!(oidc.client_secret_enc, vec![1]);
+        assert!(saml(db.reader(), row.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_saml_provider_round_trips() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let id = Uuid::now_v7();
+        let payload = saml_write(vec![vec![1, 1], vec![2, 2]], "https://idp.example/metadata");
+        let written = db
+            .write(move |conn| {
+                Box::pin(async move { put_saml_provider(conn, org, id, payload, 10).await })
+            })
+            .await
+            .unwrap();
+        assert_eq!(written, id);
+
+        let row = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(row.id, id);
+        assert_eq!(row.protocol, SsoProtocol::Saml);
+        assert!(row.oidc.is_none());
+        assert_eq!(row.display_name, "Acme SAML");
+        assert!(!row.enabled && !row.enforced);
+
+        let stored = saml(db.reader(), id).await.unwrap().expect("saml row");
+        assert_eq!(stored.certificates, vec![vec![1, 1], vec![2, 2]]);
+        assert_eq!(stored.idp_entity_id, "https://idp.example/metadata");
+        assert_eq!(stored.attributes.email.as_deref(), Some("mail"));
+        assert_eq!(stored.attributes.display_name, None);
+        assert_eq!(stored.refreshed_at, Some(10));
+        assert_eq!(stored.refresh_checked_at, Some(10));
+        let debug = format!("{stored:?}");
+        assert!(!debug.contains("idp.example"), "{debug}");
+    }
+
+    #[tokio::test]
+    async fn switching_oidc_to_saml_clears_the_oidc_columns_and_the_flags() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                put_provider(conn, org, Uuid::now_v7(), write(Some(vec![1])), 1).await?;
+                set_flags(conn, org, true, true, 2).await?;
+                set_last_login(conn, org, 3).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let before = provider(db.reader(), org).await.unwrap().unwrap();
+        assert!(before.enabled && before.enforced);
+        assert_eq!(before.last_login_at, Some(3));
+
+        put_saml(&db, org, vec![vec![5]], "https://idp.example/metadata", 4).await;
+
+        let after = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(after.id, before.id);
+        assert_eq!(after.protocol, SsoProtocol::Saml);
+        assert!(after.oidc.is_none());
+        assert!(!after.enabled && !after.enforced);
+        assert_eq!(after.last_login_at, None);
+    }
+
+    #[tokio::test]
+    async fn switching_saml_to_oidc_drops_the_saml_rows() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        put_saml(
+            &db,
+            org,
+            vec![vec![1], vec![2]],
+            "https://idp.example/metadata",
+            1,
+        )
+        .await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                put_provider(conn, org, Uuid::now_v7(), write(Some(vec![9])), 5).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let row = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(row.protocol, SsoProtocol::Oidc);
+        assert_eq!(row.oidc.as_ref().expect("oidc").client_secret_enc, vec![9]);
+        assert!(saml(db.reader(), row.id).await.unwrap().is_none());
+        assert_eq!(count(&db, "org_sso_saml").await, 0);
+        assert_eq!(count(&db, "org_sso_saml_certificates").await, 0);
+    }
+
+    #[tokio::test]
+    async fn an_oidc_switch_without_a_secret_is_a_caller_bug() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        put_saml(&db, org, vec![vec![1]], "https://idp.example/metadata", 1).await;
+        let result = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    put_provider(conn, org, Uuid::now_v7(), write(None), 5).await?;
+                    Ok(())
+                })
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(MetaError::Corrupt {
+                table: "org_sso_providers",
+                column: "client_secret_enc",
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn replacing_saml_with_another_entity_id_resets_last_login() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        put_saml(&db, org, vec![vec![1]], "https://idp.example/a", 1).await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                set_last_login(conn, org, 7).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        put_saml(&db, org, vec![vec![2]], "https://idp.example/a", 2).await;
+        let same = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(same.last_login_at, Some(7));
+
+        put_saml(&db, org, vec![vec![2]], "https://idp.example/b", 3).await;
+        let other = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(other.last_login_at, None);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_saml_provider_cascades() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        put_saml(
+            &db,
+            org,
+            vec![vec![1], vec![2]],
+            "https://idp.example/metadata",
+            1,
+        )
+        .await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                delete_provider(conn, org).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        assert_eq!(count(&db, "org_sso_saml").await, 0);
+        assert_eq!(count(&db, "org_sso_saml_certificates").await, 0);
+        assert_eq!(count(&db, "org_sso_providers").await, 0);
+    }
+
+    #[tokio::test]
+    async fn the_check_constraint_refuses_a_mixed_row() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let result = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "INSERT INTO org_sso_providers (id, org_id, protocol, display_name, \
+                         issuer, jit_role, created_at, updated_at) \
+                         VALUES (?, ?, 'saml', 'x', 'https://idp.example', 'viewer', 1, 1)",
+                    )
+                    .bind(Uuid::now_v7().to_string())
+                    .bind(org.to_string())
+                    .execute(&mut *conn)
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn due_refreshes_skip_pasted_metadata_and_recent_checks() {
+        let (_dir, db) = test_db().await;
+        let pasted = org_named(&db, "pasted").await;
+        let stale = org_named(&db, "stale").await;
+        let fresh = org_named(&db, "fresh").await;
+        put_saml(&db, pasted, vec![vec![1]], "https://idp.example/a", 1).await;
+        let stale_payload = with_url(
+            saml_write(vec![vec![2]], "https://idp.example/b"),
+            "https://idp.example/metadata",
+        );
+        let fresh_payload = with_url(
+            saml_write(vec![vec![3]], "https://idp.example/c"),
+            "https://idp.example/metadata",
+        );
+        db.write(move |conn| {
+            Box::pin(async move {
+                put_saml_provider(conn, stale, Uuid::now_v7(), stale_payload, 1).await?;
+                let fresh_id =
+                    put_saml_provider(conn, fresh, Uuid::now_v7(), fresh_payload, 1).await?;
+                record_refresh(conn, fresh_id, RefreshOutcome::Failed("fetch_failed"), 100).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        // Both URL rows were last checked at 10 (the pasted one never is due).
+        assert!(
+            due_saml_refreshes(db.reader(), 5, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let due = due_saml_refreshes(db.reader(), 50, 10).await.unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].0, stale);
+        assert_eq!(due[0].1.certificates, vec![vec![2]]);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_new_certificates_records_the_change() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let id = put_saml(&db, org, vec![vec![1], vec![2]], "https://idp.example/m", 1).await;
+
+        let changed = refresh(
+            &db,
+            id,
+            RefreshOutcome::Fetched {
+                sso_url: "https://idp.example/new".to_owned(),
+                certificates: vec![vec![1], vec![3]],
+            },
+            20,
+        )
+        .await;
+        assert!(changed);
+
+        let stored = saml(db.reader(), id).await.unwrap().expect("saml row");
+        assert_eq!(stored.certificates, vec![vec![1], vec![3]]);
+        assert_eq!(stored.certificates_changed_at, Some(20));
+        assert_eq!(stored.sso_url, "https://idp.example/new");
+        assert_eq!(stored.refreshed_at, Some(20));
+        assert_eq!(stored.refresh_checked_at, Some(20));
+        assert_eq!(stored.refresh_error, None);
+    }
+
+    #[tokio::test]
+    async fn a_refresh_with_the_same_set_in_another_order_is_no_change() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let id = put_saml(&db, org, vec![vec![1], vec![2]], "https://idp.example/m", 1).await;
+
+        let changed = refresh(
+            &db,
+            id,
+            RefreshOutcome::Fetched {
+                sso_url: "https://idp.example/sso".to_owned(),
+                certificates: vec![vec![2], vec![1]],
+            },
+            30,
+        )
+        .await;
+        assert!(!changed);
+
+        let stored = saml(db.reader(), id).await.unwrap().expect("saml row");
+        assert_eq!(stored.certificates, vec![vec![1], vec![2]]);
+        assert_eq!(stored.certificates_changed_at, None);
+        assert_eq!(stored.refreshed_at, Some(30));
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_keeps_the_metadata() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let id = put_saml(&db, org, vec![vec![1]], "https://idp.example/m", 1).await;
+
+        let changed = refresh(&db, id, RefreshOutcome::Failed("fetch_failed"), 40).await;
+        assert!(!changed);
+
+        let stored = saml(db.reader(), id).await.unwrap().expect("saml row");
+        assert_eq!(stored.certificates, vec![vec![1]]);
+        assert_eq!(stored.sso_url, "https://idp.example/sso");
+        assert_eq!(stored.refreshed_at, Some(10));
+        assert_eq!(stored.refresh_checked_at, Some(40));
+        assert_eq!(stored.refresh_error.as_deref(), Some("fetch_failed"));
+    }
+
+    #[tokio::test]
+    async fn active_saml_ignores_dropped_orgs() {
+        let (_dir, db) = test_db().await;
+        let kept = org_named(&db, "kept").await;
+        let dropped = org_named(&db, "dropped").await;
+        let kept_id = put_saml(&db, kept, vec![vec![1]], "https://idp.example/a", 1).await;
+        put_saml(&db, dropped, vec![vec![2]], "https://idp.example/b", 1).await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                mark_org_deleting(conn, dropped, 5).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+
+        let rows = active_saml(db.reader()).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[&kept_id].certificates, vec![vec![1]]);
+    }
+
+    #[tokio::test]
+    async fn update_saml_settings_keeps_the_metadata() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        let id = put_saml(&db, org, vec![vec![1]], "https://idp.example/m", 1).await;
+        let attributes = SamlAttributes {
+            email: Some("upn".to_owned()),
+            ..SamlAttributes::default()
+        };
+        let updated = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    update_saml_settings(conn, org, "Renamed", JitRole::Member, &attributes, 9)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(updated);
+
+        let row = provider(db.reader(), org).await.unwrap().unwrap();
+        assert_eq!(row.display_name, "Renamed");
+        assert_eq!(row.jit_role, JitRole::Member);
+        let stored = saml(db.reader(), id).await.unwrap().expect("saml row");
+        assert_eq!(stored.attributes.email.as_deref(), Some("upn"));
+        assert_eq!(stored.idp_entity_id, "https://idp.example/m");
+        assert_eq!(stored.certificates, vec![vec![1]]);
+    }
+
+    #[tokio::test]
+    async fn update_saml_settings_refuses_an_oidc_provider() {
+        let (_dir, db) = test_db().await;
+        let org = org_named(&db, "acme").await;
+        db.write(move |conn| {
+            Box::pin(async move {
+                put_provider(conn, org, Uuid::now_v7(), write(Some(vec![1])), 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        let updated = db
+            .write(move |conn| {
+                Box::pin(async move {
+                    update_saml_settings(
+                        conn,
+                        org,
+                        "Renamed",
+                        JitRole::Member,
+                        &SamlAttributes::default(),
+                        9,
+                    )
+                    .await
+                })
+            })
+            .await
+            .unwrap();
+        assert!(!updated);
     }
 }

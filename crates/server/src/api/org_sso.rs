@@ -45,6 +45,35 @@ impl JitRole {
     }
 }
 
+/// The protocol of an org's provider (D-SA-2, D-SA-17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SsoProtocol {
+    /// OpenID Connect.
+    Oidc,
+    /// SAML 2.0.
+    Saml,
+}
+
+impl SsoProtocol {
+    /// The stored text (`org_sso_providers.protocol`).
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Oidc => "oidc",
+            Self::Saml => "saml",
+        }
+    }
+
+    /// The protocol named by a stored value. `None` for anything else.
+    pub(crate) fn from_str_opt(value: &str) -> Option<Self> {
+        match value {
+            "oidc" => Some(Self::Oidc),
+            "saml" => Some(Self::Saml),
+            _ => None,
+        }
+    }
+}
+
 /// The org's identity provider. The client secret is write-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct OrgSsoProvider {
