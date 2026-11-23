@@ -40,6 +40,7 @@ use tonic::Code;
 use tonic::codec::CompressionEncoding;
 use tonic::server::NamedService;
 use tower::{Layer, Service};
+use tracing::Instrument as _;
 
 use super::otlp::partial_success;
 use super::{Accepted, CommitTarget, IngestError, Reservation, check_rate, commit_in_task};
@@ -50,6 +51,7 @@ use crate::http::AppState;
 use crate::http::access::key_only_project;
 use crate::http::error::ApiError;
 use crate::meta::projects::ProjectRow;
+use crate::observability::spans;
 use crate::telemetry::{IngestOutcome, Protocol, ingest_outcome};
 
 /// The status message of a rate refusal. The wrapper logs it at `debug`.
@@ -82,8 +84,15 @@ impl TraceService for GrpcTraces {
         request: tonic::Request<ExportTraceServiceRequest>,
     ) -> Result<tonic::Response<ExportTraceServiceResponse>, tonic::Status> {
         let started = Instant::now();
-        match export_request(&self.state, request, started).await {
-            Ok(response) => Ok(tonic::Response::new(response)),
+        let span = spans::otlp_export(spans::PROTOCOL_GRPC);
+        match export_request(&self.state, request, started)
+            .instrument(span.clone())
+            .await
+        {
+            Ok(response) => {
+                span.record(spans::OUTCOME, tracing::field::debug(IngestOutcome::ok));
+                Ok(tonic::Response::new(response))
+            }
             Err(status) => {
                 log_refusal(&status, started);
                 Err(status)
@@ -317,6 +326,7 @@ async fn export_request(
 ) -> Result<ExportTraceServiceResponse, tonic::Status> {
     let now = state.clock.now_ns();
     let (project, mut reservation) = take_admitted(&request)?;
+    tracing::Span::current().record(spans::PROJECT_ID, tracing::field::display(project.id));
     let message = request.into_inner();
     // The admission reserved the largest message; give back what the decoded one does not use.
     let size = message.encoded_len();
@@ -370,6 +380,10 @@ async fn export_request(
         u64::try_from(receipt.accepted).unwrap_or(u64::MAX),
         bytes,
     );
+    let span = tracing::Span::current();
+    span.record(spans::SPANS, spans::count(receipt.accepted));
+    span.record(spans::REJECTED, spans::count(rejected));
+    span.record(spans::BYTES, spans::count(bytes));
     tracing::info!(
         target: "ingest",
         transport = "grpc",
@@ -432,9 +446,9 @@ fn log_refusal(status: &tonic::Status, started: Instant) {
 /// Counts a refused ingest step, then converts it to its status. The outcome comes from the
 /// variant, because the status alone cannot tell `disk_full` or a rate refusal from a busy budget.
 fn refused(state: &AppState, error: IngestError) -> tonic::Status {
-    state
-        .telemetry
-        .refuse_ingest(Protocol::otlp_grpc, ingest_outcome(&error));
+    let outcome = ingest_outcome(&error);
+    state.telemetry.refuse_ingest(Protocol::otlp_grpc, outcome);
+    tracing::Span::current().record(spans::OUTCOME, tracing::field::debug(outcome));
     tonic::Status::from(error)
 }
 
@@ -525,7 +539,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::observability::otlp::receiver::{int_attribute, string_attribute};
+    use crate::observability::subscriber::capture_spans;
     use crate::test_support::{Seeded, TestApp, set_limits};
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
 
     const TRACES: &str =
         include_str!("../../../../fixtures/otlp/genai/finish-reasons-fill/input.json");
@@ -625,6 +642,35 @@ mod tests {
         let text = include_str!("../../../../fixtures/otlp/claude_code/bash-tool/input.json")
             .replace("capture-volatile-2", session);
         decode_json(text.as_bytes()).expect("fixture decodes")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_grpc_export_runs_in_a_root_otlp_export_span() {
+        let app = TestApp::new().await;
+        let seeded: Seeded = app.seed().await;
+        let ((), captured) = capture_spans(async {
+            send(&app.state, &[bearer(&seeded.ingest_key)], &traces())
+                .await
+                .expect("the export is accepted");
+        })
+        .await;
+        let exports = captured.named("otlp.export");
+        assert_eq!(exports.len(), 1, "{exports:?}");
+        let export = &exports[0];
+        assert_eq!(
+            string_attribute(&export.attributes, "protocol").as_deref(),
+            Some("grpc")
+        );
+        assert_eq!(export.kind, SpanKind::Server as i32);
+        assert!(export.parent_span_id.is_empty());
+        assert_eq!(
+            int_attribute(&export.attributes, "spans"),
+            Some(i64::try_from(span_count(&traces())).unwrap())
+        );
+        assert_eq!(
+            string_attribute(&export.attributes, "outcome").as_deref(),
+            Some("ok")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
