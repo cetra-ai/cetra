@@ -86,6 +86,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
             <Price amount={formatMoney(SELF_HOSTED.licence.priceYearly)} suffix="/ year" />
             <ul class="points bullets">
               {SELF_HOSTED.licence.features.map((feature) => <li>{feature}</li>)}
+              <li>{SELF_HOSTED.licence.support}</li>
             </ul>
             <p class="muted licence-note">Billed yearly, per licence. A 30-day trial is available from sales.</p>
             <div class="actions">
@@ -100,7 +101,7 @@ import { CONTACT_EMAIL } from "../marketing/site";
           eyebrow="Self-hosted"
           title="Everything, on your own server."
           id="self-features-title"
-          lede="Every core feature with no limits, for free. The licence adds single sign-on and project roles."
+          lede="Every core feature with no limits, for free. The licence adds single sign-on, project roles and email support."
         />
         <FeatureTable id="self-features" caption="Self-hosted cetra compared" columns={SELF_HOSTED_COLUMNS} groups={groupsFor("selfHosted")} />
       </Section>
