@@ -191,7 +191,7 @@ Track V M6 (D-V-20 to D-V-26, D-V-33 to D-V-37). One route, answered as a stream
 - **Connection status.** A run uses the connection whatever its `status`, and never marks it failing (D-V-36).
 - **Tools.** Tools are never run. A tool-mode response format forces its own tool, so the user's tools are not callable in the same run. Media and unknown parts are refused (D-V-25).
 - **Notes.** Playground traces carry no end-user id, so a delete-by-user never matches them; they go with project and trace deletions. The overview's "Evaluation cost" widget counts `cetra-eval` only.
-- **Audit and restore.** The audit log records `playground run` with ids, the outcome and the latency, never the payload. Restore mode refuses runs (D-N-25).
+- **Logs and restore.** A run is a log line, not an audit record (D-EA-4). Restore mode refuses runs (D-N-25).
 
 ### Evaluation & alerts
 
@@ -260,7 +260,7 @@ Errors use the usual problem document (§ Conventions). Issue JSON uses RFC 3339
 - **Turn limits.** Per user, 20 turns a minute and 2 at once; per org, 8 at once; per conversation, one at a time (`409`) (D-AS-15). Per turn: 16 model calls, 32 tool calls and 10 minutes; `max_tokens` 4,096 per call. A model call waits at most 10 s for its connection's slot and rate token, else the turn ends with `error` `retryable` "the LLM connection is busy" (D-AS-8). Reaching a limit stores an assistant message that names it and ends with `done` `finish_reason: "limit"`; tool calls beyond the 32nd are not run (D-AS-23). The history sent to the model is at most 100,000 estimated tokens (D-AS-15, D-AS-22).
 - **Stored messages.** The user message is stored first. Each model call stores an assistant message (its text, then its tool calls); a tool message follows its results, each followed by the draft it produced (D-AS-21). Every message of the turn carries the turn's trace id. Tool results are stored in full and stubbed by an hourly sweep after 24 hours, so a result can stay whole for up to about 25 hours: the part keeps `size_bytes`, `rows` and `stubbed: true`, and the API omits `result` (D-AS-12).
 - **Trace.** Each turn is one trace in the reserved environment `cetra-assistant`, metadata only: an `agent` root, an `llm` span per model call and a `tool` span per tool call, with no message text, arguments or results. Its spans are not units (D-AS-11, D-V-23).
-- **Audit and restore.** The audit log records `assistant turn started` and `assistant turn` with the ids, the step and tool counts and the outcome, never the payload. Restore mode refuses turns and the setting test (D-AS-16).
+- **Logs and restore.** A turn is a log line, not an audit record (D-EA-4). Restore mode refuses turns and the setting test (D-AS-16).
 
 ### Pricing & GDPR
 
@@ -309,7 +309,7 @@ Streamable HTTP at `POST /mcp`, stateless, JSON responses, implemented with the 
 | `get_span` | `project, trace_id, span_id, around?, max_chars?` | full span |
 | `list_issues` | `project, state?` (`open` default, `resolved`, `ignored` or `all`), `source?` (a source id), `limit?` (1–100, default 20), `max_chars?` | `{issues, truncated, notes}`: the issues newest first by `last_seen`, each with `id`, `title`, `kind`, `state`, `regressed`, `source_id`, `first_seen`, `last_seen`, `count_7d`, `users_7d` and `url`. The counts are over the last 7 days, through the same tally as `GET /issues` (D-IC-24). Needs `ProjectPerm::View` |
 
-`project` is a project UUID or `org-slug/project-slug`. Each result is one text item of compact JSON. Every result is capped at `max_chars` characters (default 20,000, 1,000–100,000); string attribute, metadata and resource-attribute values are cut to 200 characters; a `notes` list names every cut. `query_sql` cuts string cells at 2,000 characters; `get_trace` with `include_payloads` shows the 200-character input/output previews, and `get_span` the full payloads cut to fit `max_chars`. A call whose client disconnects is cancelled and its query dropped (rmcp ignores `notifications/cancelled` in stateless mode, so a cancel without a disconnect runs to the tool's time limit). Argument and query errors are tool results with `isError: true` and `{error: {code, message, position?}}` using the problem codes above.
+`project` is a project UUID or `org-slug/project-slug`. Each tool call that names a project is recorded in the audit log before the tool reads (D-EA-22); `list_projects` names none and is not recorded. Each result is one text item of compact JSON. Every result is capped at `max_chars` characters (default 20,000, 1,000–100,000); string attribute, metadata and resource-attribute values are cut to 200 characters; a `notes` list names every cut. `query_sql` cuts string cells at 2,000 characters; `get_trace` with `include_payloads` shows the 200-character input/output previews, and `get_span` the full payloads cut to fit `max_chars`. A call whose client disconnects is cancelled and its query dropped (rmcp ignores `notifications/cancelled` in stateless mode, so a cancel without a disconnect runs to the tool's time limit). Argument and query errors are tool results with `isError: true` and `{error: {code, message, position?}}` using the problem codes above.
 
 ## CLI (`cetra` binary)
 

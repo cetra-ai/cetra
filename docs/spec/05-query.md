@@ -96,6 +96,8 @@ Later (post-MVP): Tantivy index per partition built at compaction.
 
 `POST /api/v1/projects/{p}/sql` with `{query, params?, from?, to?, limit?, timeout_ms?}` (09).
 
+Each run and each export writes an audit record before the query runs: it holds a SHA-256 of the query text, never the text. If the record cannot be written, the query does not run. A demo visitor's run is not recorded (D-EA-6, D-EA-23).
+
 ### Sandbox
 
 1. Limits: 64 KiB and 512 operator tokens (the same operator tokens as the filter DSL; set operations `UNION`, `INTERSECT`, `EXCEPT`, `MINUS`, the keywords `AT`, `COLLATE`, `RLIKE`, `REGEXP`, `MATCH`, `MEMBER`, `OVERLAPS`, `OPERATOR`, subscripts `[`, `:`, `#` and the PostgreSQL operators `~~`, `~~*`, `!~~`, `!~~*`, `#-`, `@?`, `^@` count too); parser recursion limit 50 (D95, D-A2-1). At most 32 tables per statement: every view, CTE reference, derived table and `UNNEST` in a `FROM` or `JOIN` counts, wherever it appears, and so does every `INTERSECT` or `EXCEPT`, which runs as a join (D-A2-1).

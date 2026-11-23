@@ -9,7 +9,7 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
-- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
+- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions, configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, and data leaving the product (SQL runs, exports and MCP tool calls) are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
 
 ### Changed
 

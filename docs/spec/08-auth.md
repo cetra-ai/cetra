@@ -211,6 +211,8 @@ Records carry user, org, project, key and token ids, the client IP and the user 
 
 Unauthenticated failures write no row, only a tracing line: a failed login for an unknown email logs `account = "unknown"`, and a control-plane token that fails is refused without a record. A failed login for a known account writes at most one row per account per minute.
 
+The catalog also covers project objects (evaluators, online rules, score definitions, alert rules and channels, LLM connections, model prices, prompts, datasets, issue sources, dashboards, annotation queues and the assistant setting) and data leaving the product: SQL runs, SQL and dataset exports, and MCP tool calls that name a project. SQL runs, exports and MCP tool calls record a SHA-256 of the query text, never the text, before they run. SQL runs by demo-org visitors are not recorded (D-EA-23).
+
 The catalog of actions, and the reads and exports of the log, are in `docs/plans/ea-enterprise-admin/README.md` § Audit log (D-EA-1 to D-EA-10).
 
 ## Client IP
