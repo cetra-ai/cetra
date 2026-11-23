@@ -5,3 +5,4 @@
 pub mod panic;
 pub(crate) mod buckets;
 pub(crate) mod facts;
+pub(crate) mod switchboard;
