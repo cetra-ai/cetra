@@ -230,7 +230,8 @@ Built in order, each milestone merged to `main` when done (no feature flag). Unt
 | **M13 Voice story, trace list, issues, alerts** | The voice trace replaces research (mocks, hero shot, tab); the mock trace list applies `status`, `tags` and `name` filters; each story's issue and alert rule in the mocks (§12) | M12 | The other mock objects |
 | **M14 Prompts, dashboards, queues, assistant** | Each story's prompt and playground answer, dashboard, annotation queue and assistant conversation in the mocks (§12) | M13 | Screenshots and the site |
 | **M15 Story screenshots and switcher** | One chapter shot per story (24), the stories module with outcome captions, hero tabs and chapter chips in sync through `?story=`, lazy panels (§12) | M14 | — |
-| **M16 A page per story** | Each story shown through its own page per chapter: sessions, transcript, SQL, spans by TTFT, check and judge evaluators, an experiment, prompt versions, the dashboard editor (§13) | M15 | Lever A (a mock project per story) |
+| **M16 A mock project per story** | Three more mock projects (Code agent, Voice desk, Invoice pipeline) with traffic generated per profile; the story objects move to their projects; story shots retaken (§13) | M15 | — |
+| **M17 A page per story** | Each story shown through its own page per chapter: sessions, transcript, SQL, spans by TTFT, check and judge evaluators, an experiment, prompt versions, the dashboard editor (§13) | M16 | — |
 | **M7 Launch** | The holding page replaced by the homepage; `noindex` removed; sitemap, `robots.txt`, Open Graph images per page, canonical URLs, 404 page; Web Analytics on; final review pass on every page by the user | M2–M5 | Benchmarks (M6) |
 
 ## 11. Risks
@@ -311,9 +312,18 @@ The assistant chapter's picture is wider than today: the story's dashboard fills
 
 None.
 
-## 13. A page per story (M16)
+## 13. A project and a page per story (M16–M17)
 
-Answers of 2026-11-24 (the user): the story pictures looked alike, since every story showed the same page per chapter over the same generic data. Lever B first (D-W-26): in each chapter, each story is shown through the page that tells its pain best. The chapter text stays as it is, since each chapter names a capability and each picture is one way to see it. Lever A, one mock project per story with traffic shaped like it, may follow later.
+Answers of 2026-11-24 (the user): the story pictures looked alike, since every story showed the same page per chapter over the same generic data. Both levers (D-W-26), the user's choice:
+
+- **Lever A, first (M16): one mock project per story, with generated traffic shaped like it.** The org `acme` gets three more projects beside "Support bot": "Code agent" (`code-agent`), "Voice desk" (`voice-desk`) and "Invoice pipeline" (`invoice-pipeline`). Each has its own generated traces, with names, models, durations, costs, tags, sessions, error rate and payload text typical of its kind:
+  - coding runs are long, with many tool calls and failing tests;
+  - voice calls are short sessions of turns, with time to first token;
+  - extraction is a batch of cheap invoices with a schema check;
+  - support keeps today's data.
+
+  Each story's hand-written objects (hero trace, issue, alert, prompt, dashboard, queue, assistant chat) move to its project. The story pictures then show the story's own project and data.
+- **Lever B, then (M17): in each chapter, each story is shown through the page that tells its pain best.** The chapter text stays as it is, since each chapter names a capability and each picture is one way to see it.
 
 | Chapter | Support agent | Coding agent | Voice agent | Document extraction |
 |---|---|---|---|---|
@@ -326,6 +336,7 @@ Answers of 2026-11-24 (the user): the story pictures looked alike, since every s
 
 The assistant pictures (support and extraction) move to the dashboard editor that "Open in dashboard editor" opens: a small window on the left with the build request and the draft card, the editor on the right titled with the draft's name and its widgets rendered (the user's option 1). The plan fixes the exact pages from what the mocks can render; where a target page can't show its story, the plan says so and keeps the M15 picture.
 
-### Milestone
+### Milestones
 
-- **M16 A page per story.** The mock objects and screenshot entries for the new pages above, the switcher data (shot names, alts, captions) updated, every new picture checked. Depends on M15. Leaves out Lever A.
+- **M16 A mock project per story.** The three new projects in the mocks, a generation profile per project, the large mock serving each project its own dataset, the story objects moved to their projects, and the story screenshots retaken in their projects. Depends on M15. The support project's generated data stays as it is, so the existing tests keep passing.
+- **M17 A page per story.** The mock objects and screenshot entries for the new pages above, the switcher data (shot names, alts, captions) updated, and every new picture checked. Depends on M16.
