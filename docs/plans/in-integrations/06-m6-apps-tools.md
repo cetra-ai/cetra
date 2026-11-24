@@ -700,3 +700,50 @@ The decisions below are recorded in D-IN-26, item 11.
 6. **`unordered_spans` (scenario.json, default false).** For a program that ends its spans in any order and whose span ids change between runs (Langflow: two components run at once, and each component's span id moves with it). `json_differences` masks `spanId` and `parentSpanId` on both sides, then sorts the spans (point 5). Check-only: the fixture keeps its ids. Set in `langflow/basic-prompting`. Tests: `unordered_spans_mask_span_ids_in_the_check`, and the default still reports an id change. Documented in `docs/plans/b2-capture/README.md`.
 
 7. **Captures run with a throwaway `/root`.** Under `--map-root-user`, aigw's `envoy-gateway certgen` writes to the passwd home of uid 0 (`/root/.config`), and it ignores HOME and XDG_CONFIG_HOME. Without the fix it writes into the real home (`/home/sebastien/.config/envoy-gateway`, which earlier aigw runs created), or fails. The namespace wrappers in `just capture`, `capture-all` and `check-capture` now add `--mount` and run `mount -t tmpfs tmpfs /root` after `ip link set lo up`. Verified: the mount works, and certgen then writes inside the tmpfs. aigw's version lookup, resolved. The gateway's envoy-gateway infra runner calls func-e's `api.Run` with `EnvoyVersion` set from the default image (`envoyproxy/envoy:distroless-v1.39.1`, so 1.39.1) and no `EnvoyVersionsURL`, so the URL can't be overridden through aigw (func-e v1.6.0 `api/run.go`; aigw's binary uses no `api.EnvoyVersionsURL`). func-e does not fetch the versions list when the binary is installed: `internal/envoy/install.go` `InstallIfNeeded` stats `EnvoyVersionsDir()/<version>/bin/envoy` and skips the lookup when it exists. The fix is the layout. When ConfigHome, DataHome, StateHome and RuntimeDir are one directory, func-e is in legacy mode (`internal/run/run.go` `initOpts` and `internal/runtime/opts.go` `InitializeGlobalOpts`; `internal/globals/paths.go` `EnvoyVersionsDir`): binaries live in `$DataHome/versions`, not `envoy-versions`. The scenario placed the binary in `envoy-versions`, which the lookup never checked. It now places it in `versions/1.39.1/bin/envoy` (`ENVOY_VERSION` names the version). Checked: aigw listens with no archive request, and the case passes `--check` in the namespace. No override and no committed versions list is needed.
+
+## Amendment B — review fixes (after IN6.8's first half)
+
+A Sonnet review of M6 so far found the items below. One agent fixes them all in one commit, `Fix the M6 review's findings`.
+
+**Edit:**
+- `crates/otel/src/{context,usage}.rs`
+- `docs/spec/02-ingestion.md`
+- `tools/capture/src/run.rs`
+- `tools/capture/fetch-tools.sh`
+- `justfile`
+- `AGENTS.md`, if the capture lines change
+- `website/src/content/docs/docs/integrations/{mcp,prompt-flow}.mdx`
+- `sdks/python/pyproject.toml`, a comment only
+- this plan file
+
+1. **`livekit_provider`.** The value is a host only when one of these holds:
+   - it contains `:`;
+   - it parses as an IP address;
+   - it equals `api.openai.com`;
+   - `match_endpoint` maps it.
+
+   A matched host gives its provider and consumes the key. An unmatched IP or host:port gives no provider and consumes the key, as today. Any other value, such as `azure.ai.openai` or `aws.bedrock`, is not a host: the key is left alone, and the normal provider path reads it.
+
+   Tests: `azure.ai.openai` stays the provider; `gcp.vertex_ai` stays the provider; `127.0.0.1:1234` gives none; `api.openai.com` gives `openai`. Spec 02's LiveKit sentence changes to match.
+2. **Span order.** `json_differences` sorts spans only when `scenario.unordered_spans` is true. `check_ignores_span_order` sets it.
+3. **Span ids under `unordered_spans`.** After sorting by name, replace each `spanId` by a placeholder `span-<index>`. Replace each `parentSpanId` by its parent's placeholder, or `null` when there is no parent, through the same map. A re-parented span then still differs.
+
+   Test: `unordered_spans_still_report_a_changed_parent`.
+4. **Prompt Flow embeddings.** `scoped_usage` reads `llm.usage.*` on scope `promptflow` for `Llm` and `Embedding` spans. Add a test, and update spec 02's row.
+5. **Chromium marker.** `fetch-tools.sh` treats Chromium as installed only when `chromium-*/INSTALLATION_COMPLETE` exists, and when a copy of the browser-use `uv.lock` beside it matches. On a mismatch it reinstalls.
+6. **The namespace wrapper** becomes one private `justfile` recipe, used by `capture`, `capture-all` and `check-capture`. It must:
+   - build `cetra-capture` first, outside the namespace (`cargo build -q -p cetra-capture`);
+   - probe, in one check, that `unshare --user --map-root-user --net --mount` works, that `ip` exists and that a tmpfs can be mounted on `/root`. On failure, print the command's own stderr, then the "see AGENTS.md" line;
+   - mount the tmpfs on `/root` only when `$HOME` is not `/root` and does not start with `/root/`, and say so in a comment.
+7. **`mcp.mdx`:**
+   - The OpenInference row does not create spans. It carries the trace context to the server, so spans that the server process makes (with its own instrumentation, or with spans the user writes) join the client's trace. On `mcp<2` the MCP SDK makes no spans itself.
+   - Not backed by a fixture: say so.
+   - Whether `openinference-instrumentation-mcp` 2.1.5 runs beside `mcp>=2`: the spike saw a harmless `ValueError` and no effect. Say that, and that it is not needed there.
+8. **SDK pin comment.** Above `exclude-newer-package`, add: "Remove once openinference-instrumentation-mcp's floor is raised past a version older than 7 days."
+
+**Done when:**
+- `cargo nextest run -p cetra-otel -p cetra-capture`, with clippy and fmt;
+- `just fixtures-check`, with no `expected.json` changed;
+- `bash -n tools/capture/fetch-tools.sh`;
+- one `just capture genai/mcp-tool` through the new wrapper;
+- from `website/`: `check-terms` and `skill-references`.
