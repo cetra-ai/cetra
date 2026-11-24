@@ -75,6 +75,9 @@ const INDENT_PX = 16;
 const TOGGLE_SLOT_PX = 16;
 const TOGGLE_BOX_PX = 11;
 const TOGGLE_BOX_LEFT_PX = 2;
+// The slot is centred in an even-height row, so its top is a whole pixel; 3px down puts the
+// box's centre half a pixel below the row's middle, on the centre of the 1px elbow ticks.
+const TOGGLE_BOX_TOP_PX = 3;
 // The kind icon starts after the slot and the row's 4px gap.
 const ICON_OFFSET_PX = TOGGLE_SLOT_PX + 4;
 // A tick label past this share of the axis sits left of its gridline, so it isn't cut.
@@ -692,11 +695,17 @@ export function TreeGrid({
                     data-match={isMatch ? "true" : undefined}
                     className={cn(
                       "absolute top-0 grid w-full items-center",
-                      // Timeline rows have gridlines instead of row borders.
-                      !timeline && "border-b",
+                      // Tree rows are separated by an inset line, not a border, so the cell keeps
+                      // the row's even height and the tree lines land on whole pixels. Timeline
+                      // rows have gridlines instead.
                       selected
-                        ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
-                        : "hover:bg-muted",
+                        ? timeline
+                          ? "bg-selection shadow-[inset_2px_0_0_var(--primary)]"
+                          : "bg-selection shadow-[inset_2px_0_0_var(--primary),inset_0_-1px_0_var(--border)]"
+                        : cn(
+                            "hover:bg-muted",
+                            !timeline && "shadow-[inset_0_-1px_0_var(--border)]",
+                          ),
                       dim && "opacity-40",
                       isMatch && !selected && "bg-primary/10",
                       highlightedSpanIds?.has(span.span_id) && "live-row",
@@ -735,25 +744,13 @@ export function TreeGrid({
                             tabIndex={-1}
                             aria-expanded={!isCollapsed}
                             aria-label={isCollapsed ? "Expand" : "Collapse"}
-                            className="group inline-flex size-[16px] shrink-0 items-center"
+                            className="group inline-flex size-[16px] shrink-0 items-start text-muted-foreground hover:text-foreground"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggle(span.span_id);
                             }}
                           >
-                            <span
-                              className="relative shrink-0 rounded-[2px] border border-muted-foreground/60 text-muted-foreground group-hover:border-foreground group-hover:text-foreground"
-                              style={{
-                                width: TOGGLE_BOX_PX,
-                                height: TOGGLE_BOX_PX,
-                                marginLeft: TOGGLE_BOX_LEFT_PX,
-                              }}
-                            >
-                              <span className="absolute top-[4px] left-[2px] h-px w-[5px] bg-current" />
-                              {isCollapsed ? (
-                                <span className="absolute top-[2px] left-[4px] h-[5px] w-px bg-current" />
-                              ) : null}
-                            </span>
+                            <ToggleBox expand={isCollapsed} />
                           </button>
                         ) : (
                           <span className="inline-block size-[16px] shrink-0" />
@@ -830,6 +827,38 @@ function showsTokens(kind: Schema<"SpanKind">): boolean {
   return kind === "llm" || kind === "embedding";
 }
 
+/**
+ * The −/+ box, drawn as one SVG on whole pixels so the border and the sign can't snap apart:
+ * a 1px square border and 5px strokes through the centre of the 11px box.
+ */
+function ToggleBox({ expand }: { expand: boolean }) {
+  const mid = TOGGLE_BOX_PX / 2;
+  return (
+    <svg
+      aria-hidden="true"
+      width={TOGGLE_BOX_PX}
+      height={TOGGLE_BOX_PX}
+      viewBox={`0 0 ${TOGGLE_BOX_PX} ${TOGGLE_BOX_PX}`}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1}
+      className="shrink-0"
+      style={{ marginLeft: TOGGLE_BOX_LEFT_PX, marginTop: TOGGLE_BOX_TOP_PX }}
+    >
+      <rect
+        x={0.5}
+        y={0.5}
+        width={TOGGLE_BOX_PX - 1}
+        height={TOGGLE_BOX_PX - 1}
+        rx={2}
+        strokeOpacity={0.6}
+      />
+      <path d={`M3 ${mid}H${TOGGLE_BOX_PX - 3}`} />
+      {expand ? <path d={`M${mid} 3V${TOGGLE_BOX_PX - 3}`} /> : null}
+    </svg>
+  );
+}
+
 function markPct(ns: number, zoom: TimeWindow): number {
   return ((ns - zoom.startNs) / (zoom.endNs - zoom.startNs)) * 100;
 }
@@ -887,7 +916,10 @@ function TreeGuideLines({
       {guide.down ? (
         <span
           className="absolute bottom-0 w-px bg-border"
-          style={{ left: lineX(depth + 1), height: `calc(50% - ${TOGGLE_BOX_PX / 2}px)` }}
+          style={{
+            left: lineX(depth + 1),
+            height: `calc(50% - ${TOGGLE_BOX_TOP_PX + TOGGLE_BOX_PX - TOGGLE_SLOT_PX / 2}px)`,
+          }}
         />
       ) : null}
     </span>
