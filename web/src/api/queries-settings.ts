@@ -82,3 +82,19 @@ export function orgSsoInit(org: string) {
 export function orgSsoQuery(org: string) {
   return $api.queryOptions("get", "/api/v1/orgs/{org}/sso", orgSsoInit(org));
 }
+
+export function orgScimQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/scim", orgInit(org));
+}
+
+export function orgScimGroupsQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/scim/groups", orgInit(org));
+}
+
+/** The org's audit stream destination, or 404 when it has none. */
+export function orgAuditStreamQuery(org: string) {
+  return $api.queryOptions("get", "/api/v1/orgs/{org}/audit-stream", orgInit(org));
+}
+
+/** The instance's audit stream destination, or 404 when it has none. */
+export const adminAuditStreamQuery = $api.queryOptions("get", "/api/v1/admin/audit-stream");

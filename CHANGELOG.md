@@ -16,7 +16,15 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 
 ### Added
 
+- Audit records: sign-ins, membership, invitation, credential, SSO, licence and deletion actions, configuration changes of evaluators, rules, alerts, connections, prices, prompts, datasets, issue sources, dashboards and annotation queues, and data leaving the product (SQL runs, exports and MCP tool calls) are recorded in the metadata database with the actor, IP and user agent. Records are kept for `audit.retention_days` (default 365). Reading them comes with the enterprise audit log.
+- SCIM 2.0 user provisioning (Enterprise and the self-hosted licence): per-org tokens, Okta and Entra ID compatible Users endpoint, deprovisioning that revokes access, and members managed by the identity provider.
+- SCIM groups and role mappings to org and project roles, with Okta and Entra ID setup guides.
+- Audit log pages and API for organization admins and instance admins, with filters and CSV/NDJSON export (Enterprise and the self-hosted licence).
+- Audit log streaming to an HTTPS endpoint (Splunk, Datadog or any NDJSON receiver), signed, with retries.
 - The organization home shows a card per project with its last 24 hours (traces, error rate, LLM cost, an hourly chart with errors, the last ingest time), a cards/table switch, a search box, and this month's usage against the plan. `GET /api/v1/orgs/{org}/projects/activity` serves the cards.
+- Org owners can set up SAML 2.0 single sign-on for their org, with metadata import, automatic certificate rotation from a metadata URL, and the same domains and enforcement as OIDC (the `saml` licence feature).
+- LLM connections: **Test connection** checks the form's values before you save them, for a new connection too, and **Test embeddings** under Advanced checks an embedding model. The panel header shows when the saved values were last tested. `POST /api/v1/orgs/{org}/llm-connections/test` tests an unsaved connection, and `POST …/llm-connections/{id}/test` takes draft fields; a connection's `last_tested_at` and `last_test_ok` hold the last test of its saved values.
+- The connection form suggests common model ids for OpenAI, Anthropic and Gemini in the Default model field.
 - `cetra serve` can export its own logs to an OTLP/HTTP endpoint you choose, such as Sentry, Grafana Cloud or an OpenTelemetry Collector: set `self_monitoring.otlp_endpoint` and usually `self_monitoring.otlp_headers`. Off by default; warnings and errors are exported unless `self_monitoring.level` says otherwise. A panic is also logged as an ERROR event with its code location.
 - An anonymous heartbeat once a day to `telemetry.cetra.sh`: a random instance id, the version and
   platform, bucketed counts and which features are in use, never names, emails, hosts or exact
@@ -36,11 +44,15 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The install command is `curl -fsSL https://cetra.sh/install.sh | sh`: `cetra.sh/install.sh` redirects to the release's install script. The GitHub release URL keeps working.
 - Chart bars have slightly rounded tops; in a stack only the top segment is rounded.
 - Dark Reader and the browsers' automatic dark mode no longer darken the web UI, which has its own dark theme.
+- `PATCH /api/v1/orgs/{org}/llm-connections/{id}` no longer needs `api_key` with a new `base_url` or `adapter`: the saved key is kept.
+- The LLM connection form offers OpenAI, OpenAI-compatible, Anthropic and Gemini; a saved OpenAI connection with a base URL shows as OpenAI-compatible, and `GET /api/v1/projects/{project}/assistant` returns the connection's `base_url`. The form puts the base URL and structured output under Advanced unless the provider needs them, shows the saved key's last 4 characters, and its fields keep a readable width. The Test dialog is gone.
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 
 ### Fixed
 
+- When an org has its own single sign-on, the login page's email step links to the password form ("Sign in with a password instead"), so instance admins and members of a domain whose sign-on is not enforced can still use their password. After an org's provider refuses to sign in an instance admin, the page shows the password form.
 - The top bar's search button no longer runs its label into the `Ctrl+K` shortcut on Linux and Windows.
+- Selecting another member while the member panel is open no longer adds a second Role card.
 
 ## [0.1.0-rc.2] - 2026-11-22
 

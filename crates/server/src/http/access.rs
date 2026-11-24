@@ -63,6 +63,9 @@ pub(crate) enum Access {
         /// The scope the token must carry.
         scope: &'static str,
     },
+    /// A SCIM bearer token of an org (track EA M5). Only a SCIM token passes; every other
+    /// principal is refused. No `{org}` in the path: the token names its org.
+    Scim,
 }
 
 impl Access {
@@ -147,6 +150,9 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     routes.extend(crate::ee::project_roles::routes());
     routes.extend(crate::ee::org_sso::settings::routes());
     routes.extend(crate::ee::org_sso::login::routes());
+    routes.extend(crate::ee::org_sso::saml::routes());
+    routes.extend(crate::ee::scim::routes());
+    routes.extend(crate::ee::audit::routes());
     routes.extend(crate::routes::entitlements::routes());
     routes.extend(crate::routes::usage::routes());
     routes.extend(crate::routes::internal_members::routes());
@@ -321,7 +327,7 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
             }
             if matches!(
                 principal,
-                Principal::ApiKey { .. } | Principal::ControlPlane { .. }
+                Principal::ApiKey { .. } | Principal::ControlPlane { .. } | Principal::Scim { .. }
             ) {
                 return Err(forbidden());
             }
@@ -335,7 +341,7 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
             // the route is session-only, so a foreign key cannot probe orgs.
             if matches!(
                 principal,
-                Principal::ApiKey { .. } | Principal::ControlPlane { .. }
+                Principal::ApiKey { .. } | Principal::ControlPlane { .. } | Principal::Scim { .. }
             ) {
                 return Err(ApiError::NotFound);
             }
@@ -377,6 +383,11 @@ async fn prepare(state: AppState, access: Access, request: Request) -> Result<Re
                 && path.as_str() == parts.uri.path() => {}
             _ => return Err(forbidden()),
         },
+        Access::Scim => {
+            if !matches!(principal, Principal::Scim { .. }) {
+                return Err(forbidden());
+            }
+        }
     }
     parts.extensions.insert(principal);
     Ok(Request::from_parts(parts, body))
@@ -411,7 +422,7 @@ async fn grant_org(
 ) -> Result<(), ApiError> {
     let user = match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => user,
-        Principal::ApiKey { .. } | Principal::ControlPlane { .. } => {
+        Principal::ApiKey { .. } | Principal::ControlPlane { .. } | Principal::Scim { .. } => {
             return Err(ApiError::NotFound);
         }
     };
@@ -474,7 +485,7 @@ async fn grant_project(
             }
             grant_key_project(state, parts, *project_id, *scopes, key, perm).await
         }
-        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::NotFound),
     }
 }
 
@@ -806,7 +817,7 @@ mod tests {
     async fn echo_user(Extension(principal): Extension<Principal>) -> Json<Value> {
         let user = match principal {
             Principal::Session { user, .. } | Principal::Pat { user, .. } => user,
-            Principal::ApiKey { .. } | Principal::ControlPlane { .. } => {
+            Principal::ApiKey { .. } | Principal::ControlPlane { .. } | Principal::Scim { .. } => {
                 return Json(json!({
                     "org": null,
                     "project": null,
@@ -1820,6 +1831,139 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn scim_access_refuses_other_principals() {
+        let app = TestApp::with_route_table(vec![
+            route(Method::GET, "/t/scim", Access::Scim, get(echo_empty)),
+            route(
+                Method::GET,
+                "/t/user",
+                Access::User {
+                    session_only: false,
+                },
+                get(echo_user),
+            ),
+            route(Method::GET, "/t/pat", Access::Pat, get(echo_empty)),
+            route(
+                Method::GET,
+                "/t/orgs/{org}",
+                Access::Org {
+                    perm: OrgPerm::View,
+                    session_only: false,
+                },
+                get(echo_org),
+            ),
+            route(
+                Method::GET,
+                "/t/projects/{project}",
+                Access::Project {
+                    perm: ProjectPerm::View,
+                    session_only: false,
+                },
+                get(echo_project),
+            ),
+        ])
+        .await;
+        let people = people(&app).await;
+        let org: OrgId = people.org_id.parse().unwrap();
+        let ada = users::user_by_email(app.state.meta.reader(), "ada@example.com")
+            .await
+            .unwrap()
+            .expect("ada exists");
+        let minted = secret::new_key(KeyKind::Scim).unwrap();
+        let token = minted.plaintext.clone();
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    crate::ee::scim::store::insert_token(
+                        conn,
+                        org,
+                        "test",
+                        &minted.prefix,
+                        &minted.hash,
+                        ada.id,
+                        now,
+                    )
+                    .await?;
+                    Ok(())
+                })
+            })
+            .await
+            .unwrap();
+        let scim = format!("Bearer {token}");
+
+        let anonymous = app.request(Method::GET, "/t/scim").send().await;
+        assert_outcome(
+            &anonymous,
+            StatusCode::UNAUTHORIZED,
+            "denied-401",
+            "anonymous",
+        );
+        let allowed = app
+            .request(Method::GET, "/t/scim")
+            .header("authorization", &scim)
+            .send()
+            .await;
+        assert_outcome(&allowed, StatusCode::OK, "allowed", "scim on a scim route");
+        let session = app
+            .request(Method::GET, "/t/scim")
+            .header("cookie", &people.ada.0)
+            .send()
+            .await;
+        assert_outcome(
+            &session,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "session on a scim route",
+        );
+        let user = app
+            .request(Method::GET, "/t/user")
+            .header("authorization", &scim)
+            .send()
+            .await;
+        assert_outcome(
+            &user,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "scim on a user route",
+        );
+        let pat = app
+            .request(Method::GET, "/t/pat")
+            .header("authorization", &scim)
+            .send()
+            .await;
+        assert_outcome(
+            &pat,
+            StatusCode::FORBIDDEN,
+            "denied-403",
+            "scim on a pat route",
+        );
+        let org_route = app
+            .request(Method::GET, "/t/orgs/acme")
+            .header("authorization", &scim)
+            .send()
+            .await;
+        assert_outcome(
+            &org_route,
+            StatusCode::NOT_FOUND,
+            "denied-404",
+            "scim on an org route",
+        );
+        let project = app
+            .request(Method::GET, "/t/projects/support-bot")
+            .header("authorization", &scim)
+            .send()
+            .await;
+        assert_outcome(
+            &project,
+            StatusCode::NOT_FOUND,
+            "denied-404",
+            "scim on a project route",
+        );
+    }
+
     #[test]
     fn route_table_matches_parameters_and_openapi_security() {
         let document = crate::api::openapi::openapi();
@@ -1858,8 +2002,9 @@ mod tests {
             }
             .unwrap_or_else(|| panic!("missing {} {}", route.method, route.path));
             let expected = match route.access {
-                // Key routes are bearer-only (D-G-15).
-                Access::Key { .. } => {
+                // Key routes are bearer-only (D-G-15). SCIM routes are undocumented, so
+                // this arm is not reached for them.
+                Access::Key { .. } | Access::Scim => {
                     Some(vec![SecurityRequirement::new("bearer", [] as [&str; 0])])
                 }
                 Access::Public => Some(Vec::new()),

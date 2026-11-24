@@ -2,7 +2,7 @@
   "slug": "cetra",
   "name": "cetra",
   "url": "https://cetra.sh",
-  "checkedOn": "2026-11-20",
+  "checkedOn": "2026-11-23",
   "oneLine": "Open-source LLM observability and evaluation that runs as one binary on one machine, or in cetra Cloud.",
   "facts": {
     "selfHostStack": {
@@ -10,7 +10,7 @@
       "sources": ["/docs/get-started/run-cetra/", "/docs/self-hosting/s3/"]
     },
     "selfHostLicence": {
-      "value": "MIT core; single sign-on and project roles need a licence key (Elastic License 2.0)",
+      "value": "MIT core; single sign-on, project roles, audit logs and SCIM need a licence key (Elastic License 2.0)",
       "sources": ["/docs/platform/plans-and-licence/"]
     },
     "cloudFree": {
@@ -76,6 +76,6 @@
     }
   },
   "chooseThem": [],
-  "notes": "cetra's own facts, sourced to its docs. Sources starting with / are pages of cetra.sh. Updated 2026-11-22: prompt management and MCP rows corrected; issue detection, annotation queues, assistant and coding-agent rows added from the docs pages.",
+  "notes": "cetra's own facts, sourced to its docs. Sources starting with / are pages of cetra.sh. Updated 2026-11-22: prompt management and MCP rows corrected; issue detection, annotation queues, assistant and coding-agent rows added from the docs pages. Updated 2026-11-23: the licence row adds audit logs and SCIM, from plans-and-licence.",
   "chooseUs": []
 }

@@ -19,7 +19,7 @@ use sqlx::SqliteConnection;
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::{FieldError, PageParams, TimeParam};
 use crate::api::issues::{
@@ -29,6 +29,8 @@ use crate::api::issues::{
     UpdateIssueRequest, UpdateIssueSourceRequest,
 };
 use crate::api::online_rules::BudgetPeriod;
+use crate::audit::catalog::IssueSourceAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::eval::budget::{self, DAY_NS, day_start};
@@ -312,6 +314,7 @@ async fn create_issue_source(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateIssueSourceRequest>,
 ) -> Result<(StatusCode, error::Json<IssueSource>), ApiError> {
     let user = principal::session_user(&principal)?;
@@ -319,8 +322,9 @@ async fn create_issue_source(
     let org = access.project.org_id;
     let now = state.clock.now_ns();
     let requested_channels = body.channel_ids.clone();
-    let kind = body.kind;
+    let catalog_kind = body.kind;
     let errors = unused(source_kind(body.kind), &create_given(&body));
+    let kind = source_kind(body.kind).as_str();
     let row = created_row(body, project, user.id, now);
     validate(&state, org, project, &row, errors, now).await?;
     let channels = checked_channels(&state, project, &requested_channels).await?;
@@ -330,24 +334,27 @@ async fn create_issue_source(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { insert_checked(conn, org, row, limit, &written, now).await })
+            Box::pin(async move {
+                let written_row = insert_checked(conn, org, row, limit, &written, now).await?;
+                if let SourceWrite::Done(_) = &written_row {
+                    let event = Event::new(IssueSourceAction::Created { kind })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::IssueSource, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written_row)
+            })
         })
         .await?;
     match outcome {
         SourceWrite::Done(row) => {
-            tracing::info!(
-                target: "audit",
-                source_id = %id,
-                project_id = %project,
-                user_id = %user.id,
-                "issue source created"
-            );
             reload_score_rules(&state).await;
             state.issues_wake();
             let figures = llm_figures(&state, &row, now).await?;
             record(
                 &state,
-                &Event::IssueSourceCreated { kind },
+                &CatalogEvent::IssueSourceCreated { kind: catalog_kind },
                 &Actor::project(&principal, &access),
             );
             Ok((
@@ -365,13 +372,37 @@ async fn update_issue_source(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<UpdateIssueSourceRequest>,
 ) -> Result<error::Json<IssueSource>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
     let org = access.project.org_id;
     let now = state.clock.now_ns();
+    // The JSON names of the fields the body gave (P-2): names, never values.
+    let changed_fields: Vec<&'static str> = [
+        ("name", body.name.is_some()),
+        ("filter", body.filter.is_some()),
+        ("enabled", body.enabled.is_some()),
+        ("channel_ids", body.channel_ids.is_some()),
+        ("sample_rate", body.sample_rate.is_some()),
+        ("daily_cap", body.daily_cap.is_some()),
+        ("score_names", body.score_names.is_some()),
+        ("feedback_sources", body.feedback_sources.is_some()),
+        ("chat_connection_id", body.chat_connection_id.is_some()),
+        ("chat_model", body.chat_model.is_some()),
+        ("embed_connection_id", body.embed_connection_id.is_some()),
+        ("embed_model", body.embed_model.is_some()),
+        ("floor", body.floor.is_some()),
+        ("min_issue_size", body.min_issue_size.is_some()),
+        ("budget_usd", body.budget_usd.is_some()),
+        ("budget_period", body.budget_period.is_some()),
+        ("clear_budget", body.clear_budget),
+    ]
+    .into_iter()
+    .filter_map(|(name, given)| given.then_some(name))
+    .collect();
     let stored = store::get_source(state.meta.reader(), project, id)
         .await?
         .ok_or(ApiError::NotFound)?;
@@ -425,19 +456,23 @@ async fn update_issue_source(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                update_checked(conn, project, org, stored, row, limit, channels, now).await
+                let written =
+                    update_checked(conn, project, org, stored, row, limit, channels, now).await?;
+                if let SourceWrite::Done(_) = &written {
+                    let event = Event::new(IssueSourceAction::Updated {
+                        fields: changed_fields,
+                    })
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::IssueSource, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(written)
             })
         })
         .await?;
     match outcome {
         SourceWrite::Done(row) => {
-            tracing::info!(
-                target: "audit",
-                source_id = %id,
-                project_id = %project,
-                user_id = %user.id,
-                "issue source updated"
-            );
             reload_score_rules(&state).await;
             state.issues_wake();
             let open = store::open_counts(state.meta.reader(), project).await?;
@@ -460,26 +495,33 @@ async fn delete_issue_source(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let project = access.project.id;
-    let user_id = user.id;
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
     // The source's issues and their events go with it (schema cascade, D-IC-3).
     let went = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete_source(conn, project, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let went = store::delete_source(conn, project, id).await?;
+                if went {
+                    let event = Event::new(IssueSourceAction::Deleted)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::IssueSource, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(went)
+            })
+        })
         .await?;
     if !went {
         return Err(ApiError::NotFound);
     }
-    tracing::info!(
-        target: "audit",
-        source_id = %id,
-        project_id = %project,
-        user_id = %user_id,
-        "issue source deleted"
-    );
     reload_score_rules(&state).await;
     state.issues_wake();
     Ok(StatusCode::NO_CONTENT)
@@ -535,7 +577,6 @@ async fn post_issue_source_refit(
         })
         .await?;
     tracing::info!(
-        target: "audit",
         source_id = %id,
         project_id = %project,
         user_id = %user.id,
@@ -1245,7 +1286,6 @@ async fn patch_issue(
         IssueWrite::Done { row, changed } => {
             if changed {
                 tracing::info!(
-                    target: "audit",
                     issue_id = %id,
                     project_id = %project,
                     user_id = %user_id,
@@ -1290,7 +1330,6 @@ async fn post_issue_merge(
     match outcome {
         MergeWrite::Done(target) => {
             tracing::info!(
-                target: "audit",
                 issue_id = %id,
                 into = %into,
                 project_id = %project,
@@ -2178,6 +2217,35 @@ mod tests {
         let created = create_ok(&app, &seeded, &source_body("Errors")).await;
         let response = patch(&app, &seeded, id_of(&created), &json!({"kind": "error"})).await;
         assert_eq!(response.status, 400, "{}", text(&response));
+    }
+
+    #[tokio::test]
+    async fn issue_source_update_records_field_names() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let id = id_of(&create_ok(&app, &seeded, &source_body("Errors")).await);
+        let patched = patch(
+            &app,
+            &seeded,
+            id,
+            &json!({"name": "canary-source-name", "enabled": false}),
+        )
+        .await;
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT target_id, actor_kind, details FROM audit_events \
+             WHERE action = 'issue_source.updated'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        let (target, actor_kind, details) = &rows[0];
+        assert_eq!(target, &id.to_string());
+        assert_eq!(actor_kind, "user");
+        assert_eq!(details, r#"{"fields":["name","enabled"]}"#);
+        assert!(!details.contains("canary-source-name"), "{details}");
     }
 
     fn issues(project: ProjectId) -> String {

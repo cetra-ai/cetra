@@ -28,7 +28,7 @@ use tracing::Instrument as _;
 
 use crate::auth::Limits;
 use crate::auth::last_used::LastUsed;
-use crate::auth::principal::{ApiKeyCache, PatCache, authenticate};
+use crate::auth::principal::{ApiKeyCache, PatCache, ScimCache, authenticate};
 use crate::clock::Clock;
 use crate::config::ServerConfig;
 use crate::meta::MetaDb;
@@ -60,6 +60,10 @@ pub(crate) struct AppInner {
     pub(crate) last_used: LastUsed,
     /// Coalesced `personal_tokens.last_used_at` updates.
     pub(crate) token_last_used: LastUsed,
+    /// Successful SCIM-token lookups, cached 60 s by hash. A revoke evicts its entry.
+    pub(crate) scim_cache: ScimCache,
+    /// Coalesced `scim_tokens.last_used_at` updates.
+    pub(crate) scim_last_used: LastUsed,
     pub(crate) setup: crate::bootstrap::SetupState,
     /// Built on the first password check, so tests that never log in skip argon2.
     pub(crate) password_hasher: OnceCell<crate::auth::password::Hasher>,
@@ -199,6 +203,7 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
         .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .layer(middleware::from_fn_with_state(state.clone(), csrf::csrf))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
+        .layer(middleware::from_fn(crate::ee::scim::error::scim_errors))
         // DNT and Sec-GPC for the length of the request (D-TL-15).
         .layer(middleware::from_fn(crate::analytics::actor::privacy_signal))
         .layer(middleware::from_fn(log_request))
@@ -212,10 +217,13 @@ fn finish(state: AppState, routed: Router<AppState>, ui: Option<Router>) -> Rout
 /// Unknown API paths are `404` problems; any other path goes to the UI when there is one.
 async fn fallback(ui: Option<Router>, request: Request) -> Response {
     let path = request.uri().path();
-    let api = matches!(path, "/api" | "/v1" | "/mcp" | "/healthz" | "/readyz")
-        || path.starts_with("/api/")
+    let api = matches!(
+        path,
+        "/api" | "/v1" | "/mcp" | "/scim/v2" | "/healthz" | "/readyz"
+    ) || path.starts_with("/api/")
         || path.starts_with("/v1/")
-        || path.starts_with("/mcp/");
+        || path.starts_with("/mcp/")
+        || path.starts_with("/scim/v2/");
     match ui {
         Some(ui) if !api => match ui.oneshot(request).await {
             Ok(response) => response,

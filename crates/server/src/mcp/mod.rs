@@ -30,12 +30,14 @@ use serde_json::Value;
 use tracing::Instrument as _;
 
 use crate::analytics::actor::{Actor, Via};
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::ProblemCode;
+use crate::audit::catalog::McpAction;
+use crate::audit::{self, Event};
 use crate::auth::principal::{AuthUser, Principal};
 use crate::http::AppState;
-use crate::http::access::{Access, RouteDef};
+use crate::http::access::{Access, ProjectAccess, RouteDef};
 use crate::http::error::ApiError;
 use crate::observability::spans;
 
@@ -60,6 +62,7 @@ pub(crate) fn routes() -> Vec<RouteDef> {
 async fn mcp(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     request: Request,
 ) -> Result<Response, ApiError> {
     // The access layer admits only a PAT here (`Access::Pat`).
@@ -80,6 +83,7 @@ async fn mcp(
         user,
         request_span: tracing::Span::current(),
         opted_out: crate::analytics::actor::request_opted_out(),
+        audit: ctx,
     };
     let service = StreamableHttpService::new(
         move || Ok(server.clone()),
@@ -100,7 +104,7 @@ fn service_config() -> StreamableHttpServerConfig {
         .with_max_request_body_bytes(MCP_BODY_LIMIT)
 }
 
-/// One request's MCP server: the app and the token's user.
+/// One request's MCP server: the app, the token's user and the request's audit context.
 #[derive(Clone)]
 pub(crate) struct McpServer {
     state: AppState,
@@ -109,6 +113,27 @@ pub(crate) struct McpServer {
     request_span: tracing::Span,
     /// The request opted out of per-user analytics (captured here: rmcp runs tools in spawned tasks, outside the request's scope).
     opted_out: bool,
+    audit: audit::Ctx,
+}
+
+/// Records an MCP tool call that names a project (D-EA-22), before the tool reads any data.
+/// Does nothing when `audit` is `None`: an assistant turn's tool call is not an MCP call.
+/// `query_sha256` is set only for `query_sql`.
+pub(crate) async fn record_tool(
+    state: &AppState,
+    audit: Option<&audit::Ctx>,
+    tool: &'static str,
+    project: &ProjectAccess,
+    query_sha256: Option<String>,
+) -> Result<(), ApiError> {
+    let Some(ctx) = audit else {
+        return Ok(());
+    };
+    let event = Event::new(McpAction::ToolCalled { tool, query_sha256 })
+        .org(project.project.org_id)
+        .project(project.project.id);
+    audit::record_alone(&state.meta, ctx, event, state.clock.now_ns()).await?;
+    Ok(())
 }
 
 impl ServerHandler for McpServer {
@@ -207,39 +232,39 @@ impl McpServer {
             ),
             tools::GET_SCHEMA => (
                 tools::GET_SCHEMA,
-                tools::get_schema(&self.state, &self.user, arguments).await,
+                tools::get_schema(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             sql::QUERY_SQL => (
                 sql::QUERY_SQL,
-                sql::query_sql(&self.state, &self.user, arguments).await,
+                sql::query_sql(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             sql::LIST_SAVED_VIEWS => (
                 sql::LIST_SAVED_VIEWS,
-                sql::list_saved_views(&self.state, &self.user, arguments).await,
+                sql::list_saved_views(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             prompts::LIST_PROMPTS => (
                 prompts::LIST_PROMPTS,
-                prompts::list_prompts(&self.state, &self.user, arguments).await,
+                prompts::list_prompts(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             prompts::GET_PROMPT => (
                 prompts::GET_PROMPT,
-                prompts::get_prompt(&self.state, &self.user, arguments).await,
+                prompts::get_prompt(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             traces::SEARCH_TRACES => (
                 traces::SEARCH_TRACES,
-                traces::search_traces(&self.state, &self.user, arguments).await,
+                traces::search_traces(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             traces::GET_TRACE => (
                 traces::GET_TRACE,
-                traces::get_trace(&self.state, &self.user, arguments).await,
+                traces::get_trace(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             traces::GET_SPAN => (
                 traces::GET_SPAN,
-                traces::get_span(&self.state, &self.user, arguments).await,
+                traces::get_span(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             issues::LIST_ISSUES => (
                 issues::LIST_ISSUES,
-                issues::list_issues(&self.state, &self.user, arguments).await,
+                issues::list_issues(&self.state, &self.user, Some(&self.audit), arguments).await,
             ),
             _ => return Err(McpError::invalid_params("unknown tool", None)),
         };
@@ -250,13 +275,13 @@ impl McpServer {
 /// The catalog events of one finished tool call: `mcp.tool_called`, plus the event of the
 /// same action in the UI or API for the tools that have one (`query_sql` is a SQL console
 /// run, `get_trace` a trace read), so those count whichever client ran them.
-fn tool_events(tool: &'static str, ok: bool) -> Vec<Event> {
-    let mut events = vec![Event::McpToolCalled { tool, ok }];
+fn tool_events(tool: &'static str, ok: bool) -> Vec<CatalogEvent> {
+    let mut events = vec![CatalogEvent::McpToolCalled { tool, ok }];
     if ok && tool == sql::QUERY_SQL {
-        events.push(Event::SqlConsoleRun);
+        events.push(CatalogEvent::SqlConsoleRun);
     }
     if ok && tool == traces::GET_TRACE {
-        events.push(Event::TraceViewed);
+        events.push(CatalogEvent::TraceViewed);
     }
     events
 }
@@ -395,6 +420,7 @@ mod tests {
     use super::{INSTRUCTIONS, output};
     use super::{sql, tool_events, tools, traces};
     use crate::api::convert;
+    use crate::audit;
     use crate::auth::roles::{KeyScope, OrgRole, ProjectOverride};
     use crate::auth::secret::{self, KeyKind};
     use crate::meta::members::{add_org_member, set_project_override};
@@ -451,6 +477,83 @@ mod tests {
             .as_str()
             .expect("text content");
         serde_json::from_str(text).unwrap()
+    }
+
+    /// `(action, via, credential_id, project_id, details)` of every `mcp.*` audit row, oldest first.
+    async fn mcp_rows(
+        app: &TestApp,
+    ) -> Vec<(
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    )> {
+        sqlx::query_as(
+            "SELECT action, via, credential_id, project_id, details FROM audit_events \
+             WHERE action LIKE 'mcp.%' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_query_sql_is_recorded_with_hash_and_pat() {
+        let (app, seeded, token) = app_with_token().await;
+        let query = "SELECT 1 AS one";
+        let (is_error, body) = call(
+            &app,
+            &token,
+            "query_sql",
+            &json!({
+                "project": seeded.project.id.to_string(),
+                "query": query,
+                "from": FROM,
+                "to": TO,
+            }),
+        )
+        .await;
+        assert!(!is_error, "{body}");
+
+        let rows = mcp_rows(&app).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (action, via, credential, project, details) = &rows[0];
+        assert_eq!(action, "mcp.tool_called");
+        assert_eq!(via.as_deref(), Some("pat"));
+        let pat = token_id(&app, &token).await.to_string();
+        assert_eq!(credential.as_deref(), Some(pat.as_str()));
+        assert_eq!(
+            project.as_deref(),
+            Some(seeded.project.id.to_string().as_str())
+        );
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(
+            details,
+            json!({"tool": "query_sql", "query_sha256": audit::sha256_hex(query)})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_list_projects_is_not_recorded() {
+        let (app, _, token) = app_with_token().await;
+        let (is_error, body) = call(&app, &token, "list_projects", &json!({})).await;
+        assert!(!is_error, "{body}");
+        assert!(mcp_rows(&app).await.is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mcp_forbidden_project_records_nothing() {
+        let (app, _, token) = app_with_token().await;
+        let (is_error, body) = call(
+            &app,
+            &token,
+            "get_schema",
+            &json!({"project": Uuid::now_v7().to_string()}),
+        )
+        .await;
+        assert!(is_error, "{body}");
+        assert!(mcp_rows(&app).await.is_empty());
     }
 
     // Protocol

@@ -21,10 +21,12 @@ use tokio::sync::oneshot;
 use tracing::Instrument as _;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::ProblemCode;
 use crate::api::sql::{SqlColumnInfo, SqlQueryRequest, SqlQueryResult};
+use crate::audit::catalog::SqlAction;
+use crate::audit::{self, Event};
 use crate::auth::principal::Principal;
 use crate::auth::roles::{ProjectPerm, Role};
 use crate::config::DemoConfig;
@@ -215,6 +217,7 @@ async fn run_sql(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     visitor: Option<Extension<DemoVisitor>>,
     headers: HeaderMap,
     error::Json(body): error::Json<SqlQueryRequest>,
@@ -222,6 +225,8 @@ async fn run_sql(
     let started = Instant::now();
     let query_len = body.query.len();
     let format = negotiate(&headers);
+    // Demo visitors are not recorded (D-EA-23): they get no context.
+    let audit_ctx = visitor.is_none().then_some(&ctx);
     let Some(export) = format.export() else {
         let span = spans::query(&tracing::Span::current(), spans::QUERY_SQL);
         span.record(
@@ -229,7 +234,7 @@ async fn run_sql(
             tracing::field::display(access.project.id),
         );
         let demo = visitor.map(|_| &state.config.demo);
-        let result = run_json(&state, &access, body, demo)
+        let result = run_json(&state, &access, body, demo, audit_ctx)
             .instrument(span.clone())
             .await;
         match &result {
@@ -245,7 +250,7 @@ async fn run_sql(
         if result.is_ok() {
             record(
                 &state,
-                &Event::SqlConsoleRun,
+                &CatalogEvent::SqlConsoleRun,
                 &Actor::project(&principal, &access),
             );
         }
@@ -256,7 +261,7 @@ async fn run_sql(
         spans::PROJECT_ID,
         tracing::field::display(access.project.id),
     );
-    match start_export(&state, &access, body, format, export, started)
+    match start_export(&state, &access, body, format, export, started, audit_ctx)
         .instrument(span.clone())
         .await
     {
@@ -264,7 +269,7 @@ async fn run_sql(
             span.record(spans::OUTCOME, "ok");
             record(
                 &state,
-                &Event::SqlConsoleRun,
+                &CatalogEvent::SqlConsoleRun,
                 &Actor::project(&principal, &access),
             );
             Ok(response)
@@ -290,8 +295,18 @@ async fn run_json(
     access: &ProjectAccess,
     body: SqlQueryRequest,
     demo: Option<&DemoConfig>,
+    audit_ctx: Option<&audit::Ctx>,
 ) -> Result<SqlQueryResult, ApiError> {
     let mut checked = check_request(body)?;
+    // The record comes before any data is read; the query does not run if it cannot be written.
+    if let Some(ctx) = audit_ctx {
+        let event = Event::new(SqlAction::Run {
+            query_sha256: audit::sha256_hex(&checked.query),
+        })
+        .org(access.project.org_id)
+        .project(access.project.id);
+        audit::record_alone(&state.meta, ctx, event, state.clock.now_ns()).await?;
+    }
     if let Some(demo) = demo {
         checked.limit = checked.limit.min(demo.sql_max_rows);
         checked.timeout = checked.timeout.min(demo.sql_timeout);
@@ -343,6 +358,7 @@ async fn start_export(
     format: SqlFormat,
     export: ExportFormat,
     started: Instant,
+    audit_ctx: Option<&audit::Ctx>,
 ) -> Result<Response, ApiError> {
     // D-H-5: sessions and PATs need role member. An `sk` key has no role; the access layer
     // already required its `read` scope.
@@ -352,6 +368,17 @@ async fn start_export(
         });
     }
     let checked = check_request(body)?;
+    // The record comes before the export reads any data; it does not start if it cannot be
+    // written.
+    if let Some(ctx) = audit_ctx {
+        let event = Event::new(SqlAction::ExportStarted {
+            query_sha256: audit::sha256_hex(&checked.query),
+            format: format.label(),
+        })
+        .org(access.project.org_id)
+        .project(access.project.id);
+        audit::record_alone(&state.meta, ctx, event, state.clock.now_ns()).await?;
+    }
     let ctx = open_query_windowed(
         state,
         access.project.org_id,
@@ -1329,6 +1356,123 @@ mod tests {
         })
         .await;
         assert!(!logs.contains("sql query"), "{logs}");
+
+        // One record per valid query, carrying its hash; the invalid and empty bodies record
+        // nothing, and no query text is in the audit log.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, details FROM audit_events WHERE action = 'sql.run' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details: Vec<Value> = rows
+            .iter()
+            .map(|(_, details)| serde_json::from_str(details).unwrap())
+            .collect();
+        assert_eq!(
+            details,
+            vec![
+                json!({"query_sha256": audit::sha256_hex("SELECT 'secret_marker_text' AS s")}),
+                json!({"query_sha256": audit::sha256_hex("SELECT secret_marker_text FROM spans")}),
+            ]
+        );
+        let everything: Vec<String> = sqlx::query_scalar(
+            "SELECT COALESCE(action, '') || ' ' || COALESCE(details, '') || ' ' || \
+             COALESCE(target_id, '') FROM audit_events",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert!(
+            everything
+                .iter()
+                .all(|row| !row.contains("secret_marker_text")),
+            "{everything:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sql_export_is_recorded_with_format() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let query = "SELECT 1 AS one";
+        let response = post_as(
+            &app,
+            seeded.project.id,
+            ("cookie", &seeded.cookie),
+            Some("text/csv"),
+            &json!({"query": query}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::OK);
+
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, details FROM audit_events WHERE action LIKE 'sql.%' ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, "sql.export_started");
+        let details: Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(
+            details,
+            json!({"query_sha256": audit::sha256_hex(query), "format": "csv"})
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_audit_write_refuses_the_sql_run() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        // The record cannot be written, so the query must not run.
+        app.state
+            .meta
+            .write(|conn| {
+                Box::pin(async move {
+                    sqlx::query("DROP TABLE audit_events")
+                        .execute(&mut *conn)
+                        .await
+                        .map_err(crate::meta::MetaError::from)?;
+                    Ok::<_, crate::meta::MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = post_as(
+            &app,
+            seeded.project.id,
+            ("cookie", &seeded.cookie),
+            None,
+            &json!({"query": "SELECT 'canary-row' AS one"}),
+        )
+        .await;
+        assert_eq!(response.status, StatusCode::INTERNAL_SERVER_ERROR);
+        let body = String::from_utf8_lossy(&response.body);
+        assert!(!body.contains("canary-row"), "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn demo_visitor_sql_is_not_recorded() {
+        let w = world_with(|_demo| {}).await;
+        let visitor = signed_in(&w.app, "visitor@example.com", false).await;
+        let path = format!("/api/v1/projects/{}/sql", w.project);
+        let response = w
+            .app
+            .request(Method::POST, &path)
+            .header("cookie", &visitor.cookie)
+            .json(&json!({"query": "SELECT 1 AS one"}))
+            .send()
+            .await;
+        assert_eq!(response.status, StatusCode::OK);
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_events WHERE action LIKE 'sql.%'")
+                .fetch_one(w.app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
     }
 
     /// The example request with `limit` set.

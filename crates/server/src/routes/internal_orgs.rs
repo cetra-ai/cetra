@@ -9,6 +9,8 @@ use cetra_core::ids::OrgId;
 use crate::api::account::OrgRole;
 use crate::api::deletions::Deletion;
 use crate::api::internal::{CreateInternalOrgRequest, InternalOrg, InternalOwner};
+use crate::audit::catalog::OrgAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::Principal;
 use crate::deletion::request_org_drop;
 use crate::http::AppState;
@@ -67,9 +69,10 @@ enum Outcome {
 async fn create_org(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateInternalOrgRequest>,
 ) -> Result<(StatusCode, error::Json<InternalOrg>), ApiError> {
-    let Principal::ControlPlane { token_id, .. } = principal else {
+    let Principal::ControlPlane { .. } = principal else {
         return Err(ApiError::Unauthorized);
     };
     if body.id.get_version_num() != 7 {
@@ -133,6 +136,10 @@ async fn create_org(
                 };
                 let org = orgs::insert_org_with_derived_slug(conn, id, &name, now).await?;
                 add_org_member(conn, org.id, owner.id, OrgRole::Owner, now).await?;
+                let event = Event::new(OrgAction::Created)
+                    .org(id)
+                    .target(TargetKind::Org, id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Outcome::Created(org, revoked))
             })
         })
@@ -142,13 +149,6 @@ async fn create_org(
             for hash in revoked {
                 state.pat_cache.evict(&hash);
             }
-            tracing::info!(
-                target: "audit",
-                org_id = %org.id,
-                actor = "control_plane",
-                token_id = %token_id,
-                "org created"
-            );
             Ok((StatusCode::CREATED, error::Json(internal_org(&org))))
         }
         Outcome::Existing(org) => Ok((StatusCode::OK, error::Json(internal_org(&org)))),
@@ -169,6 +169,7 @@ fn conflict(detail: &'static str) -> ApiError {
 async fn drop_org(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Path(OrgIdPath { org_id }): error::Path<OrgIdPath>,
 ) -> Result<(StatusCode, error::Json<Deletion>), ApiError> {
     let Principal::ControlPlane { token_id, .. } = principal else {
@@ -178,7 +179,7 @@ async fn drop_org(
     if let Some(row) = org_by_id(state.meta.reader(), org).await?
         && row.state == "active"
         && let Some(deletion) =
-            request_org_drop(&state, &row, (ActorKind::ControlPlane, token_id)).await?
+            request_org_drop(&state, &row, (ActorKind::ControlPlane, token_id), &ctx).await?
     {
         return Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&deletion))));
     }
@@ -314,11 +315,25 @@ mod tests {
         let org: InternalOrg = created.json();
         assert_eq!(org.id, id);
         assert_eq!(org.slug, "acme-cloud");
-        assert!(logs.contains("org created"));
-        assert!(logs.contains("control_plane"));
         assert!(!logs.contains("new@example.com"));
         assert!(!logs.contains("New Owner"));
         assert!(!logs.contains("Acme Cloud"));
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_kind, org_id, target_id FROM audit_events \
+             WHERE action = 'org.created'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "org.created".to_owned(),
+                "control_plane".to_owned(),
+                Some(id.to_string()),
+                Some(id.to_string()),
+            )]
+        );
 
         let user = user_by_email(app.state.meta.reader(), "new@example.com")
             .await
@@ -626,7 +641,7 @@ mod tests {
                 .as_str()
                 .is_some_and(|id| Uuid::parse_str(id).is_ok())
         );
-        assert!(logs.contains("deletion requested"));
+        assert!(logs.contains("deletion.requested"));
         assert!(logs.contains("control_plane"));
         assert!(!logs.contains("doomed@example.com"));
         let deletion_id = deletion["id"].clone();

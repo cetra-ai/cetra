@@ -1,0 +1,30 @@
+---
+title: Entra ID SCIM setup
+description: Connect Microsoft Entra ID to cetra over SCIM 2.0 to provision members, push groups and map the groups to roles.
+---
+
+This page sets up an Entra ID enterprise app that provisions the members of an org in cetra and pushes the groups that set their roles. Read [SCIM provisioning](/docs/platform/scim/) first for the base URL, the token and how groups map to roles.
+
+## Before you start
+
+- SCIM is on for the org, with a token. In **Org settings**, then **Provisioning**, copy the base URL `<PUBLIC_URL>/scim/v2` and create a token. cetra shows the token once.
+- The org has a verified domain, and the users you provision have an address in it. cetra provisions by `userName`, which Entra ID fills from the user principal name (UPN).
+
+## Steps
+
+1. In the Microsoft Entra admin center, open **Enterprise applications**, then create a new application. Choose to create your own application that integrates a non-gallery app.
+2. Open the app's **Provisioning** page, and set the provisioning mode to **Automatic**.
+3. Set **Tenant URL** to `<PUBLIC_URL>/scim/v2`, and **Secret Token** to the token. Choose **Test Connection**.
+4. Keep the default attribute mappings. They map `userName` from `userPrincipalName`. cetra ignores the `emails` attribute, so an Entra ID mail address that differs from the UPN does not stop provisioning.
+5. Keep the group mapping enabled, so Entra ID pushes the groups.
+6. Set the provisioning scope to sync only assigned users and groups, and set provisioning status to **On**.
+7. Under **Users and groups**, assign the people and the groups. Entra ID creates the people in cetra, with the role their groups give, or the org's default role.
+8. In cetra, open **Org settings**, then **Provisioning**, and map each pushed group under **Role mappings**. A group with no mapping gives its members no role of their own.
+
+Entra ID pushes the groups and their members to cetra. cetra does not record group names in its logs or its audit records.
+
+## Checked against Microsoft's documentation
+
+The SCIM requests that cetra's tests replay for Entra ID follow Microsoft's public SCIM documentation. They were not checked with a run of Microsoft's own validator. If Entra ID sends a request that cetra refuses, check the response, which names the SCIM error, and report it.
+
+Entra ID's menu names can change. Use the names in Microsoft's current documentation where they differ from these steps.

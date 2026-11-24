@@ -312,7 +312,7 @@ fn viewer(principal: &Principal) -> Result<Viewer, ApiError> {
     match principal {
         Principal::Session { user, .. } | Principal::Pat { user, .. } => Ok(Viewer::User(user.id)),
         Principal::ApiKey { .. } => Ok(Viewer::Key),
-        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::NotFound),
     }
 }
 

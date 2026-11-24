@@ -174,6 +174,7 @@ async fn start(dir: &Path, extra_config: &str) -> Server {
     )
     .unwrap();
     let config = cetra_server::config::ServerConfig::load(Some(&config_path)).unwrap();
+    // Boxed as in `test_server.rs`: `bind`'s future is over the 16 KiB lint limit.
     let running = Box::pin(cetra_server::serve::bind(config, Some(cetra_ui::router())))
         .await
         .unwrap();

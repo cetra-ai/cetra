@@ -16,13 +16,15 @@ use uuid::Uuid;
 use crate::alerts::condition::normalize_condition;
 use crate::alerts::quota;
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::alerts::{
     AlertCondition, AlertDelivery, AlertEvent, AlertRule, CreateAlertRuleRequest,
     UpdateAlertRuleRequest,
 };
 use crate::api::common::{FieldError, Page, PageParams};
+use crate::audit::catalog::AlertRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -142,6 +144,7 @@ async fn create_rule(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateAlertRuleRequest>,
 ) -> Result<(StatusCode, error::Json<AlertRule>), ApiError> {
     let user_id = principal::session_user(&principal)?.id;
@@ -161,7 +164,7 @@ async fn create_rule(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                alerts::insert_rule(
+                let row = alerts::insert_rule(
                     conn,
                     NewRule {
                         project_id,
@@ -175,21 +178,22 @@ async fn create_rule(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let event = Event::new(AlertRuleAction::Created {
+                    metric: row.condition.metric.as_str(),
+                    enabled: row.enabled,
+                })
+                .org(org_id)
+                .project(project_id)
+                .target(TargetKind::AlertRule, row.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        rule_id = %row.id,
-        project_id = %project_id,
-        user_id = %user_id,
-        metric = row.condition.metric.as_str(),
-        "alert rule created"
-    );
     record(
         &state,
-        &Event::AlertRuleCreated,
+        &CatalogEvent::AlertRuleCreated,
         &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(rule_json(&row))))
@@ -210,10 +214,11 @@ async fn update_rule(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(RulePath { id }): error::Path<RulePath>,
     error::Json(body): error::Json<UpdateAlertRuleRequest>,
 ) -> Result<error::Json<AlertRule>, ApiError> {
-    let user_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let project_id = access.project.id;
     let org_id = access.project.org_id;
     let name = body.name.as_deref().map(checked_name).transpose()?;
@@ -240,23 +245,41 @@ async fn update_rule(
         cooldown_s,
         notify_while_firing: body.notify_while_firing,
     };
+    // The JSON names of the patch's `Some` fields (plan P-2): names only, never values.
+    let fields = [
+        patch.name.is_some().then_some("name"),
+        patch.condition.is_some().then_some("condition"),
+        patch.channel_ids.is_some().then_some("channel_ids"),
+        patch.enabled.is_some().then_some("enabled"),
+        patch.cooldown_s.is_some().then_some("cooldown_s"),
+        patch
+            .notify_while_firing
+            .is_some()
+            .then_some("notify_while_firing"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<&'static str>>();
     let now = state.clock.now_ns();
     let Some(row) = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { alerts::update_rule(conn, project_id, id, patch, now).await })
+            Box::pin(async move {
+                let Some(row) = alerts::update_rule(conn, project_id, id, patch, now).await? else {
+                    return Ok(None);
+                };
+                let event = Event::new(AlertRuleAction::Updated { fields })
+                    .org(org_id)
+                    .project(project_id)
+                    .target(TargetKind::AlertRule, row.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(Some(row))
+            })
         })
         .await?
     else {
         return Err(ApiError::NotFound);
     };
-    tracing::info!(
-        target: "audit",
-        rule_id = %row.id,
-        project_id = %project_id,
-        user_id = %user_id,
-        "alert rule updated"
-    );
     Ok(error::Json(rule_json(&row)))
 }
 
@@ -264,24 +287,32 @@ async fn delete_rule(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(RulePath { id }): error::Path<RulePath>,
 ) -> Result<StatusCode, ApiError> {
-    let user_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let project_id = access.project.id;
+    let org_id = access.project.org_id;
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
-        .write(move |conn| Box::pin(async move { alerts::delete_rule(conn, project_id, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let deleted = alerts::delete_rule(conn, project_id, id).await?;
+                if deleted {
+                    let event = Event::new(AlertRuleAction::Deleted)
+                        .org(org_id)
+                        .project(project_id)
+                        .target(TargetKind::AlertRule, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(deleted)
+            })
+        })
         .await?;
     if !deleted {
         return Err(ApiError::NotFound);
     }
-    tracing::info!(
-        target: "audit",
-        rule_id = %id,
-        project_id = %project_id,
-        user_id = %user_id,
-        "alert rule deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1504,6 +1535,18 @@ mod tests {
             .await;
         })
         .await;
+        let details: Vec<(String,)> =
+            sqlx::query_as("SELECT details FROM audit_events WHERE action = 'alert_rule.created'")
+                .fetch_all(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(details.len(), 1);
+        for (details,) in details {
+            assert!(
+                !details.contains("Secret name") && !details.contains("x-secret"),
+                "{details}"
+            );
+        }
     }
 
     #[tokio::test]

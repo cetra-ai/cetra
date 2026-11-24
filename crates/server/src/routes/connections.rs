@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use axum::extract::{Extension, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
@@ -16,14 +17,16 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams};
 use crate::api::connections::{
     ConnectionStatus, CreateLlmConnectionRequest, LlmAdapter, LlmConnection,
     LlmConnectionTestError, LlmConnectionTestResult, StructuredOutputMode, TestErrorClass,
-    TestLlmConnectionRequest, UpdateLlmConnectionRequest,
+    TestLlmConnectionRequest, TestUnsavedLlmConnectionRequest, UpdateLlmConnectionRequest,
 };
+use crate::audit::catalog::{LlmConnectionAction, OnlineRuleAction};
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::OrgPerm;
 use crate::crypto::{Aad, SecretBox};
@@ -43,8 +46,10 @@ use super::orgs::page_named;
 const BASE_URL_MESSAGE: &str = "base_url must be an http or https URL without credentials, fragment or query other than api-version";
 /// At most this many extra headers (D-I-4).
 const MAX_EXTRA_HEADERS: usize = 20;
-/// A PATCH that changes the host must send the key again (review 2026-11-15 #2).
-const KEY_NEEDED_FOR_HOST: &str = "api_key is required with base_url or adapter";
+/// An unsaved connection has no default model (D-I-53).
+const UNSAVED_MODEL_MESSAGE: &str = "model is required to test an unsaved connection";
+/// The refusal text of an embedding test on Anthropic (D-IC-5).
+const NO_EMBEDDINGS_MESSAGE: &str = "This provider has no embeddings API.";
 /// The prompt of a connection test's one boolean judge call (D-I-5).
 const TEST_PROMPT: &str = "Reply true.";
 
@@ -112,6 +117,16 @@ pub(crate) fn routes() -> Vec<RouteDef> {
             documented: true,
             handler: post(test_connection),
         },
+        RouteDef {
+            method: axum::http::Method::POST,
+            path: "/api/v1/orgs/{org}/llm-connections/test",
+            access: Access::Org {
+                perm: OrgPerm::ManageConnections,
+                session_only: false,
+            },
+            documented: true,
+            handler: post(test_unsaved_connection),
+        },
     ]
 }
 
@@ -152,10 +167,11 @@ async fn create_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateLlmConnectionRequest>,
 ) -> Result<(StatusCode, error::Json<LlmConnection>), ApiError> {
     let user = principal::session_user(&principal)?;
-    let adapter = body.adapter;
+    let catalog_adapter = body.adapter;
     let mut errors = Vec::new();
     check_name(&body.name, &mut errors);
     check_api_key(&body.api_key, &mut errors);
@@ -205,25 +221,28 @@ async fn create_llm_connection(
     };
     let org_id = access.org.id;
     let user_id = user.id;
+    let adapter = body.adapter.as_str();
     let now = state.clock.now_ns();
     let row = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                connections::insert_connection(conn, id, org_id, fields, Some(user_id), now).await
+                let row =
+                    connections::insert_connection(conn, id, org_id, fields, Some(user_id), now)
+                        .await?;
+                let event = Event::new(LlmConnectionAction::Created { adapter })
+                    .org(org_id)
+                    .target(TargetKind::LlmConnection, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection created"
-    );
     record(
         &state,
-        &Event::LlmConnectionCreated { adapter },
+        &CatalogEvent::LlmConnectionCreated {
+            adapter: catalog_adapter,
+        },
         &Actor::org(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(connection_json(&row)?)))
@@ -233,10 +252,11 @@ async fn update_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<UpdateLlmConnectionRequest>,
 ) -> Result<error::Json<LlmConnection>, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let mut errors = Vec::new();
     if let Some(name) = body.name.as_deref() {
         check_name(name, &mut errors);
@@ -255,16 +275,32 @@ async fn update_llm_connection(
     if let Some(headers) = body.extra_headers.as_ref() {
         check_extra_headers(headers, &mut errors);
     }
-    // A new host must not receive the saved key, as a webhook's new URL needs its secret.
-    if (body.base_url.is_some() || body.adapter.is_some()) && body.api_key.is_none() {
-        errors.push(field_error("api_key", KEY_NEEDED_FOR_HOST));
-    }
     if !errors.is_empty() {
         return Err(ApiError::BadRequest {
             detail: None,
             errors,
         });
     }
+    // The JSON names of the body's `Some` fields (plan P-2), taken before the body is
+    // destructured: names only, never values.
+    let changed_fields = [
+        body.name.is_some().then_some("name"),
+        body.adapter.is_some().then_some("adapter"),
+        body.api_key.is_some().then_some("api_key"),
+        body.base_url.is_some().then_some("base_url"),
+        body.default_model.is_some().then_some("default_model"),
+        body.structured_output
+            .is_some()
+            .then_some("structured_output"),
+        body.max_concurrency.is_some().then_some("max_concurrency"),
+        body.requests_per_minute
+            .is_some()
+            .then_some("requests_per_minute"),
+        body.extra_headers.is_some().then_some("extra_headers"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<&'static str>>();
     let UpdateLlmConnectionRequest {
         name,
         adapter,
@@ -287,9 +323,9 @@ async fn update_llm_connection(
         None => None,
     };
     let org_id = access.org.id;
-    let user_id = user.id;
     let now = state.clock.now_ns();
     let key_sent = key.is_some();
+    let headers_sent = headers.is_some();
     let updated = state
         .meta
         .write(move |conn| {
@@ -334,11 +370,27 @@ async fn update_llm_connection(
                     max_concurrency: max_concurrency.unwrap_or(row.max_concurrency),
                     requests_per_minute: requests_per_minute.unwrap_or(row.requests_per_minute),
                 };
+                // The stored test no longer describes what a test would call (D-I-54).
+                let clears_test = key_sent
+                    || headers_sent
+                    || fields.adapter != row.adapter
+                    || fields.base_url != row.base_url
+                    || fields.structured_output != row.structured_output;
+                if clears_test {
+                    connections::clear_connection_test(conn, id).await?;
+                }
                 let Some(row) =
                     connections::update_connection(conn, org_id, id, fields, now).await?
                 else {
                     return Ok(None);
                 };
+                let event = Event::new(LlmConnectionAction::Updated {
+                    fields: changed_fields,
+                    key_changed: key_sent,
+                })
+                .org(org_id)
+                .target(TargetKind::LlmConnection, id);
+                audit::record(conn, &ctx, event, now).await?;
                 if !key_sent {
                     return Ok(Some((row, Vec::new(), Vec::new(), Vec::new())));
                 }
@@ -346,6 +398,7 @@ async fn update_llm_connection(
                 // sources alike (D-I-5, D-I-14).
                 connections::set_connection_status(conn, id, "ok", None, now).await?;
                 let resumed = rules::resume_connection_pauses(conn, id, now).await?;
+                record_connection_resumes(conn, &ctx, &resumed, now).await?;
                 let sources = issues::resume_connection_pauses(conn, id).await?;
                 let using = rules::rule_ids_of_connection(conn, id).await?;
                 Ok(Some((row, resumed, using, sources)))
@@ -364,13 +417,6 @@ async fn update_llm_connection(
         &sources,
         "connection key changed",
     );
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection updated"
-    );
     Ok(error::Json(connection_json(&row)?))
 }
 
@@ -378,11 +424,12 @@ async fn delete_llm_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
 ) -> Result<StatusCode, ApiError> {
-    let user = principal::session_user(&principal)?;
+    principal::session_user(&principal)?;
     let org_id = access.org.id;
-    let user_id = user.id;
+    let now = state.clock.now_ns();
     let went = state
         .meta
         .write(move |conn| {
@@ -400,7 +447,14 @@ async fn delete_llm_connection(
                         "connection is used by evaluators or issue sources",
                     ));
                 }
-                connections::delete_connection(conn, org_id, id).await
+                let went = connections::delete_connection(conn, org_id, id).await?;
+                if went {
+                    let event = Event::new(LlmConnectionAction::Deleted)
+                        .org(org_id)
+                        .target(TargetKind::LlmConnection, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(went)
             })
         })
         .await?;
@@ -408,28 +462,57 @@ async fn delete_llm_connection(
         return Err(ApiError::NotFound);
     }
     state.connections.forget(id);
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        "llm connection deleted"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
 /// Runs one boolean judge call through the connection's decrypted key and
 /// answers whether it reached the provider (D-I-5). The judge trace is
 /// discarded: a connection belongs to no project.
+///
+/// The draft fields replace the saved values for this call only (D-I-53). A
+/// draft that differs from the saved values, or that sends a key or headers,
+/// stores nothing.
+///
+/// The answers that need no call come before the saved key is opened: an
+/// embedding test on Anthropic (D-IC-5) and a test with no model (400). A key
+/// that no longer decrypts still gets them. A result that the provider call
+/// produced is stored only while the saved connection is unchanged (D-I-54).
 async fn test_connection(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(IdPath { id }): error::Path<IdPath>,
     error::Json(body): error::Json<TestLlmConnectionRequest>,
 ) -> Result<error::Json<LlmConnectionTestResult>, ApiError> {
     refuse_outbound(&state, "connection test")?;
     let user = principal::session_user(&principal)?;
+    let TestLlmConnectionRequest {
+        model,
+        embedding_model,
+        adapter,
+        api_key,
+        base_url,
+        structured_output,
+        extra_headers,
+    } = body;
+    let draft = DraftFields {
+        adapter,
+        api_key,
+        base_url,
+        structured_output,
+        extra_headers,
+    };
+    // Body validation answers before the rate limiter, so an invalid body spends no test. The
+    // unknown id (404) and a missing model (400) come after the limiter, so they do spend one.
+    let mut errors = Vec::new();
+    draft.check(&mut errors);
+    if !errors.is_empty() {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors,
+        });
+    }
     state
         .limits
         .connection_tests
@@ -440,42 +523,206 @@ async fn test_connection(
     let row = connections::get_connection(state.meta.reader(), access.org.id, id)
         .await?
         .ok_or(ApiError::NotFound)?;
-    if let Some(embedding_model) = body
-        .embedding_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(str::to_owned)
-    {
-        return test_embedding(&state, access.org.id, user.id, row, embedding_model)
-            .await
-            .map(error::Json);
+    let is_draft = draft.differs_from(&row);
+    let anthropic = draft
+        .adapter
+        .map_or(row.adapter == LlmAdapter::Anthropic.as_str(), |adapter| {
+            adapter == LlmAdapter::Anthropic
+        });
+    let embedding_model = trimmed_model(embedding_model.as_deref());
+    // A typed model equal to the default is the default model (D-I-54).
+    let explicit = trimmed_model(model.as_deref())
+        .filter(|model| row.default_model.as_deref() != Some(model.as_str()));
+    if let Some(embedding_model) = embedding_model.clone().filter(|_| anthropic) {
+        // Refused without a call, so nothing is stored (D-IC-5).
+        let result = anthropic_embedding_refusal(embedding_model);
+        audit_test(id, access.org.id, user.id, &result, is_draft);
+        return Ok(error::Json(result));
     }
-    let explicit = body
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(str::to_owned);
-    let model = explicit
-        .clone()
-        .or_else(|| row.default_model.clone())
-        .ok_or_else(|| ApiError::BadRequest {
-            detail: None,
-            errors: vec![field_error(
-                "model",
-                "model is required when the connection has no default model",
-            )],
-        })?;
-    let connection = state
+    let call = match embedding_model {
+        Some(embedding_model) => TestCall::Embedding(embedding_model),
+        None => TestCall::Chat(
+            explicit
+                .clone()
+                .or_else(|| row.default_model.clone())
+                .ok_or_else(|| ApiError::BadRequest {
+                    detail: None,
+                    errors: vec![field_error(
+                        "model",
+                        "model is required when the connection has no default model",
+                    )],
+                })?,
+        ),
+    };
+    let saved = state
         .connections
         .get(&state.secrets, &row)
         .map_err(internal)?;
+    // The cache only ever holds saved values: a draft gets its own copy.
+    let connection: Arc<cetra_eval::JudgeConnection> = if is_draft {
+        Arc::new(draft.apply((*saved).clone())?)
+    } else {
+        saved
+    };
+    let model = match call {
+        TestCall::Embedding(embedding_model) => {
+            let result =
+                run_embedding_test(&state, access.org.id, &connection, embedding_model).await?;
+            let now = state.clock.now_ns();
+            if !is_draft {
+                if !still_saved(&state, access.org.id, id, row.updated_at).await {
+                    tracing::debug!(
+                        connection_id = %id,
+                        "connection changed during the test; result not stored"
+                    );
+                } else {
+                    if result.ok {
+                        let set_ok = row.status != "ok";
+                        match recover_connection(&state, id, set_ok, false, true, now, &ctx).await {
+                            Ok((rules, sources)) => {
+                                after_connection_write(
+                                    &state,
+                                    id,
+                                    &rules,
+                                    &rules,
+                                    &sources,
+                                    "embedding test",
+                                );
+                            }
+                            Err(error) => tracing::warn!(
+                                connection_id = %id,
+                                error_kind = meta_error_kind(&error),
+                                "could not store the connection status"
+                            ),
+                        }
+                    }
+                    record_test(&state, id, row.updated_at, result.ok, now).await;
+                }
+            }
+            audit_test(id, access.org.id, user.id, &result, is_draft);
+            return Ok(error::Json(result));
+        }
+        TestCall::Chat(model) => model,
+    };
+    let (result, pause_class) =
+        run_chat_test(&state, access.org.id, &connection, row.id, model).await?;
+    let now = state.clock.now_ns();
+    if !is_draft {
+        if !still_saved(&state, access.org.id, id, row.updated_at).await {
+            tracing::debug!(
+                connection_id = %id,
+                "connection changed during the test; result not stored"
+            );
+        } else {
+            // Best effort: the provider was called, so a failed status write must not
+            // lose the test result.
+            let status_write = if result.ok {
+                // One write sets `ok` and, on the default model, resumes the `'connection'` rule and
+                // source pauses (D-I-5, D-I-14). A typed model proves the key only.
+                let default_model = explicit.is_none();
+                recover_connection(
+                    &state,
+                    id,
+                    row.status != "ok",
+                    default_model,
+                    default_model,
+                    now,
+                    &ctx,
+                )
+                .await
+                .map(|(rules, sources)| {
+                    after_connection_write(&state, id, &rules, &rules, &sources, "connection test");
+                })
+            } else if pause_class && explicit.is_none() {
+                // Only a pause on the connection's own default model marks it failing:
+                // a 404 for a typed model name says nothing about the key.
+                let message = result
+                    .error
+                    .as_ref()
+                    .map(|error| error.message.clone())
+                    .unwrap_or_default();
+                set_status(&state, id, "failing", Some(message), now).await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = status_write {
+                // The kind only: the text can quote database state, and never carries
+                // anything the provider said.
+                tracing::warn!(
+                    connection_id = %row.id,
+                    error_kind = meta_error_kind(&error),
+                    "could not store the connection status"
+                );
+            }
+            // Only a test of the default model describes the connection (D-I-54).
+            if explicit.is_none() {
+                record_test(&state, id, row.updated_at, result.ok, now).await;
+            }
+        }
+    }
+    audit_test(id, access.org.id, user.id, &result, is_draft);
+    Ok(error::Json(result))
+}
+
+/// What a connection test calls: an embedding of the model, or a boolean judge of the chat model.
+enum TestCall {
+    Chat(String),
+    Embedding(String),
+}
+
+/// Whether the saved connection `id` still has `tested_updated_at`, the `updated_at` its test
+/// started from (D-I-54). A save during the provider call makes the result stale: it describes
+/// values that are no longer saved, so it must not set the status, the pauses or the last test. A
+/// failed reload counts as changed, and is logged by its kind.
+async fn still_saved(state: &AppState, org_id: OrgId, id: Uuid, tested_updated_at: i64) -> bool {
+    match connections::get_connection(state.meta.reader(), org_id, id).await {
+        Ok(Some(current)) => current.updated_at == tested_updated_at,
+        Ok(None) => false,
+        Err(error) => {
+            tracing::warn!(
+                connection_id = %id,
+                error_kind = meta_error_kind(&error),
+                "could not reload the connection"
+            );
+            false
+        }
+    }
+}
+
+/// The audit line of a connection test (D-I-5). It carries no payload and no key.
+fn audit_test(
+    id: Uuid,
+    org_id: OrgId,
+    user_id: Uuid,
+    result: &LlmConnectionTestResult,
+    draft: bool,
+) {
+    tracing::info!(
+        connection_id = %id,
+        org_id = %org_id,
+        user_id = %user_id,
+        ok = result.ok,
+        latency_ms = result.latency_ms,
+        draft = draft,
+        "llm connection tested"
+    );
+}
+
+/// Runs one boolean judge call of `model` through `connection`, as the connection test does
+/// (D-I-5). Answers the result and whether a pause-class failure said the key, quota or model
+/// access was refused. The judge's `connection_id` is `evaluator_id`; no row is written.
+async fn run_chat_test(
+    state: &AppState,
+    org_id: OrgId,
+    connection: &cetra_eval::JudgeConnection,
+    evaluator_id: Uuid,
+    model: String,
+) -> Result<(LlmConnectionTestResult, bool), ApiError> {
     let evaluator = cetra_eval::Evaluator {
-        id: row.id,
+        id: evaluator_id,
         name: "connection test".to_owned(),
         config: cetra_eval::EvaluatorConfig::LlmJudge(cetra_eval::JudgeConfig {
-            connection_id: row.id,
+            connection_id: evaluator_id,
             model: model.clone(),
             prompt: TEST_PROMPT.to_owned(),
             output: cetra_eval::JudgeOutput::Boolean,
@@ -498,7 +745,7 @@ async fn test_connection(
         retention_days: None,
         limits: state.config.ingest.limits(&state.config.media),
     };
-    let prices = state.ingest.prices().for_org(access.org.id);
+    let prices = state.ingest.prices().for_org(org_id);
     let bytes = crate::auth::secret::random_bytes(16).map_err(internal)?;
     let bytes = <[u8; 16]>::try_from(bytes.as_slice()).map_err(internal)?;
     let judge_trace_id = cetra_core::ids::TraceId::from_bytes(bytes).map_err(internal)?; // refuses all-zero bytes only
@@ -508,7 +755,7 @@ async fn test_connection(
         .run(cetra_eval::RunInput {
             evaluator: &evaluator,
             variables: &cetra_eval::Variables::from_map(BTreeMap::new()),
-            connection: Some(connection.as_ref()),
+            connection: Some(connection),
             webhook_secret: None,
             target: cetra_eval::EvalTarget {
                 trace_id: None,
@@ -542,130 +789,103 @@ async fn test_connection(
             message: error.to_string(),
         });
     }
-    let now = state.clock.now_ns();
-    // Best effort: the provider was called, so a failed status write must not
-    // lose the test result.
-    let status_write = if result.ok {
-        // One write sets `ok` and, on the default model, resumes the `'connection'` rule and
-        // source pauses (D-I-5, D-I-14). A typed model proves the key only.
-        let default_model = explicit.is_none();
-        recover_connection(
-            &state,
-            id,
-            row.status != "ok",
-            default_model,
-            default_model,
-            now,
-        )
-        .await
-        .map(|(rules, sources)| {
-            after_connection_write(&state, id, &rules, &rules, &sources, "connection test");
-        })
-    } else if pause_class && explicit.is_none() {
-        // Only a pause on the connection's own default model marks it failing:
-        // a 404 for a typed model name says nothing about the key.
-        let message = result
-            .error
-            .as_ref()
-            .map(|error| error.message.clone())
-            .unwrap_or_default();
-        set_status(&state, id, "failing", Some(message), now).await
-    } else {
-        Ok(())
-    };
-    if let Err(error) = status_write {
-        // The kind only: the text can quote database state, and never carries
-        // anything the provider said.
-        tracing::warn!(
-            connection_id = %row.id,
-            error_kind = meta_error_kind(&error),
-            "could not store the connection status"
-        );
+    Ok((result, pause_class))
+}
+
+/// Runs one boolean judge or embedding call through a connection that is not saved, and stores
+/// nothing (D-I-53).
+async fn test_unsaved_connection(
+    State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
+    Extension(access): Extension<OrgAccess>,
+    error::Json(body): error::Json<TestUnsavedLlmConnectionRequest>,
+) -> Result<error::Json<LlmConnectionTestResult>, ApiError> {
+    refuse_outbound(&state, "connection test")?;
+    let user = principal::session_user(&principal)?;
+    let TestUnsavedLlmConnectionRequest {
+        adapter,
+        api_key,
+        base_url,
+        structured_output,
+        extra_headers,
+        model,
+        embedding_model,
+    } = body;
+    let embedding_model = trimmed_model(embedding_model.as_deref());
+    let model = trimmed_model(model.as_deref());
+    let mut errors = Vec::new();
+    check_api_key(&api_key, &mut errors);
+    check_base_url(base_url.as_deref(), &mut errors);
+    check_extra_headers(&extra_headers, &mut errors);
+    if embedding_model.is_none() && model.is_none() {
+        errors.push(field_error("model", UNSAVED_MODEL_MESSAGE));
     }
+    if !errors.is_empty() {
+        return Err(ApiError::BadRequest {
+            detail: None,
+            errors,
+        });
+    }
+    state
+        .limits
+        .connection_tests
+        .check(&user.id, state.clock.now_ns())
+        .map_err(|retry| ApiError::RateLimited {
+            retry_after_s: retry.0.as_secs().max(1),
+        })?;
+    let base = cetra_eval::JudgeConnection {
+        adapter: eval_adapter(adapter)?,
+        base_url: None,
+        api_key: cetra_eval::Secret::new(api_key),
+        extra_headers: Vec::new(),
+        structured_output: cetra_eval::StructuredOutput::Native,
+    };
+    let connection = DraftFields {
+        adapter: None,
+        api_key: None,
+        base_url,
+        structured_output,
+        extra_headers: Some(extra_headers),
+    }
+    .apply(base)?;
+    let result = if let Some(embedding_model) = embedding_model {
+        if adapter == LlmAdapter::Anthropic {
+            anthropic_embedding_refusal(embedding_model)
+        } else {
+            run_embedding_test(&state, access.org.id, &connection, embedding_model).await?
+        }
+    } else {
+        let Some(model) = model else {
+            return Err(unsaved_model_required());
+        };
+        run_chat_test(&state, access.org.id, &connection, Uuid::nil(), model)
+            .await?
+            .0
+    };
     tracing::info!(
-        target: "audit",
-        connection_id = %row.id,
         org_id = %access.org.id,
         user_id = %user.id,
         ok = result.ok,
-        latency_ms,
-        "llm connection tested"
+        latency_ms = result.latency_ms,
+        "llm connection draft tested"
     );
     Ok(error::Json(result))
 }
 
-/// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
-/// write: the rules' when `resume_rules`, the issue sources' when `resume_sources`. Returns the
-/// resumed rules and sources. A test on a typed chat model passes neither: it proves the key works,
-/// but the pauses wait for a test on the default model (D-I-5). An embedding test resumes the
-/// sources only.
+/// Embeds `"ping"` with `model` through `connection` (D-IC-5) and answers the result. The call
+/// trace is discarded, as the judge's. Nothing is written: the caller decides what the result
+/// means for the stored connection.
 ///
 /// # Errors
 ///
-/// Returns [`MetaError`] when the write fails.
-async fn recover_connection(
-    state: &AppState,
-    id: Uuid,
-    set_ok: bool,
-    resume_rules: bool,
-    resume_sources: bool,
-    now: i64,
-) -> Result<(Vec<Uuid>, Vec<Uuid>), MetaError> {
-    state
-        .meta
-        .write(move |conn| {
-            Box::pin(async move {
-                if set_ok {
-                    connections::set_connection_status(conn, id, "ok", None, now).await?;
-                }
-                let rules = if resume_rules {
-                    rules::resume_connection_pauses(conn, id, now).await?
-                } else {
-                    Vec::new()
-                };
-                let sources = if resume_sources {
-                    issues::resume_connection_pauses(conn, id).await?
-                } else {
-                    Vec::new()
-                };
-                Ok((rules, sources))
-            })
-        })
-        .await
-}
-
-/// Embeds `"ping"` with `model` through the connection (D-IC-5) and answers whether it reached
-/// the provider. The call trace is discarded, as the judge's. An embedding test has no default
-/// model, so a failure never marks the connection `failing`; a success sets `ok` and resumes the
-/// issue sources paused for the connection.
-///
-/// # Errors
-///
-/// Returns [`ApiError`] when the connection cannot be decrypted or the status write cannot be
-/// answered; a failed provider call is an `ok: false` result, not an error.
-async fn test_embedding(
+/// Returns [`ApiError`] when the call's random trace id cannot be made; a failed provider call is
+/// an `ok: false` result, not an error.
+async fn run_embedding_test(
     state: &AppState,
     org_id: OrgId,
-    user_id: Uuid,
-    row: ConnectionRow,
+    connection: &cetra_eval::JudgeConnection,
     model: String,
 ) -> Result<LlmConnectionTestResult, ApiError> {
-    let id = row.id;
-    if row.adapter == LlmAdapter::Anthropic.as_str() {
-        return Ok(LlmConnectionTestResult {
-            ok: false,
-            model,
-            latency_ms: 0,
-            error: Some(LlmConnectionTestError {
-                class: TestErrorClass::Permanent,
-                message: "This provider has no embeddings API.".to_owned(),
-            }),
-        });
-    }
-    let connection = state
-        .connections
-        .get(&state.secrets, &row)
-        .map_err(internal)?;
     let ingest = cetra_otel::IngestContext {
         // A connection belongs to no project, and the call trace is discarded.
         project_id: cetra_core::ids::ProjectId::from_uuid(Uuid::nil()),
@@ -681,7 +901,7 @@ async fn test_embedding(
     let run = state
         .eval_runner
         .embed(cetra_eval::EmbeddingInput {
-            connection: connection.as_ref(),
+            connection,
             model: &model,
             text: "ping",
             dimensions: None,
@@ -714,32 +934,212 @@ async fn test_embedding(
             message: error.to_string(),
         });
     }
-    let now = state.clock.now_ns();
-    // Best effort, as the chat test: the provider was called, so a failed status write must not
-    // lose the result.
-    if result.ok {
-        let set_ok = row.status != "ok";
-        match recover_connection(state, id, set_ok, false, true, now).await {
-            Ok((rules, sources)) => {
-                after_connection_write(state, id, &rules, &rules, &sources, "embedding test");
-            }
-            Err(error) => tracing::warn!(
-                connection_id = %id,
-                error_kind = meta_error_kind(&error),
-                "could not store the connection status"
-            ),
+    Ok(result)
+}
+
+/// The draft fields of a connection test (D-I-53), with PATCH semantics: an absent field is the
+/// saved value.
+struct DraftFields {
+    adapter: Option<LlmAdapter>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    structured_output: Option<StructuredOutputMode>,
+    extra_headers: Option<BTreeMap<String, String>>,
+}
+
+impl DraftFields {
+    /// The checks of the connection write on the fields the draft sends. No rule ties
+    /// `base_url` or `adapter` to `api_key`: an absent key is the saved key (Q1).
+    fn check(&self, errors: &mut Vec<FieldError>) {
+        if let Some(key) = self.api_key.as_deref() {
+            check_api_key(key, errors);
+        }
+        check_base_url(self.base_url.as_deref(), errors);
+        if let Some(headers) = self.extra_headers.as_ref() {
+            check_extra_headers(headers, errors);
         }
     }
-    tracing::info!(
-        target: "audit",
-        connection_id = %id,
-        org_id = %org_id,
-        user_id = %user_id,
-        ok = result.ok,
-        latency_ms,
-        "llm connection tested"
-    );
-    Ok(result)
+
+    /// Whether a test with these fields calls something other than the saved values, or sends a
+    /// write-only value, which is never compared with the saved one.
+    fn differs_from(&self, row: &ConnectionRow) -> bool {
+        self.api_key.is_some()
+            || self.extra_headers.is_some()
+            || self
+                .adapter
+                .is_some_and(|adapter| adapter.as_str() != row.adapter)
+            || self
+                .base_url
+                .as_deref()
+                .is_some_and(|base| empty_to_none(base.trim()) != row.base_url)
+            || self
+                .structured_output
+                .is_some_and(|mode| mode.as_str() != row.structured_output)
+    }
+
+    /// The connection a test calls: `base` with each draft field replacing its value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApiError`] when a draft value is not one the call can take; `check` has
+    /// already refused those.
+    fn apply(
+        &self,
+        mut base: cetra_eval::JudgeConnection,
+    ) -> Result<cetra_eval::JudgeConnection, ApiError> {
+        if let Some(adapter) = self.adapter {
+            base.adapter = eval_adapter(adapter)?;
+        }
+        if let Some(key) = self.api_key.as_ref() {
+            base.api_key = cetra_eval::Secret::new(key.clone());
+        }
+        if let Some(value) = self.base_url.as_deref() {
+            base.base_url = parsed_base_url(value)?;
+        }
+        if let Some(mode) = self.structured_output {
+            base.structured_output = eval_structured(mode)?;
+        }
+        if let Some(headers) = self.extra_headers.as_ref() {
+            base.extra_headers = header_secrets(headers);
+        }
+        Ok(base)
+    }
+}
+
+/// The eval crate's adapter for an API adapter.
+fn eval_adapter(adapter: LlmAdapter) -> Result<cetra_eval::Adapter, ApiError> {
+    cetra_eval::Adapter::from_name(adapter.as_str()).map_err(internal)
+}
+
+/// The eval crate's mode for an API structured output mode.
+fn eval_structured(mode: StructuredOutputMode) -> Result<cetra_eval::StructuredOutput, ApiError> {
+    cetra_eval::StructuredOutput::from_name(mode.as_str()).map_err(internal)
+}
+
+/// A checked `base_url` as the call takes it: empty is the provider's default.
+fn parsed_base_url(value: &str) -> Result<Option<url::Url>, ApiError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    url::Url::parse(trimmed)
+        .map(Some)
+        .map_err(|_| ApiError::BadRequest {
+            detail: None,
+            errors: vec![field_error("base_url", BASE_URL_MESSAGE)],
+        })
+}
+
+/// Header values as the call sends them: names trimmed and lowercased, as `sealed_headers`
+/// stores them.
+fn header_secrets(headers: &BTreeMap<String, String>) -> Vec<(String, cetra_eval::Secret)> {
+    let map: BTreeMap<String, String> = headers
+        .iter()
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.clone()))
+        .collect();
+    map.into_iter()
+        .map(|(name, value)| (name, cetra_eval::Secret::new(value)))
+        .collect()
+}
+
+/// A trimmed model name; empty is absent.
+fn trimmed_model(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+}
+
+/// The 400 of an unsaved test that names no model.
+fn unsaved_model_required() -> ApiError {
+    ApiError::BadRequest {
+        detail: None,
+        errors: vec![field_error("model", UNSAVED_MODEL_MESSAGE)],
+    }
+}
+
+/// The answer of an embedding test on Anthropic, without a call (D-IC-5).
+fn anthropic_embedding_refusal(model: String) -> LlmConnectionTestResult {
+    LlmConnectionTestResult {
+        ok: false,
+        model,
+        latency_ms: 0,
+        error: Some(LlmConnectionTestError {
+            class: TestErrorClass::Permanent,
+            message: NO_EMBEDDINGS_MESSAGE.to_owned(),
+        }),
+    }
+}
+
+/// Records each online rule that a connection write resumed: one `online_rule.resumed` row per
+/// rule, reason `connection`, in the write's transaction (D-EA-21). A rule with no project is
+/// skipped.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when a lookup or the insert fails; the caller's transaction then rolls back.
+async fn record_connection_resumes(
+    conn: &mut sqlx::SqliteConnection,
+    ctx: &audit::Ctx,
+    resumed: &[Uuid],
+    now: i64,
+) -> Result<(), MetaError> {
+    for &rule in resumed {
+        let Some((org, project)) = audit::scope_of_rule(conn, rule).await? else {
+            continue;
+        };
+        let event = Event::new(OnlineRuleAction::Resumed {
+            reason: "connection",
+        })
+        .org(org)
+        .project(project)
+        .target(TargetKind::OnlineRule, rule);
+        audit::record(conn, ctx, event, now).await?;
+    }
+    Ok(())
+}
+
+/// Sets the connection's status to `ok` when `set_ok`, and clears its `'connection'` pauses, in one
+/// write: the rules' when `resume_rules`, the issue sources' when `resume_sources`. Returns the
+/// resumed rules and sources. A test on a typed chat model passes neither: it proves the key works,
+/// but the pauses wait for a test on the default model (D-I-5). An embedding test resumes the
+/// sources only.
+///
+/// # Errors
+///
+/// Returns [`MetaError`] when the write fails.
+async fn recover_connection(
+    state: &AppState,
+    id: Uuid,
+    set_ok: bool,
+    resume_rules: bool,
+    resume_sources: bool,
+    now: i64,
+    ctx: &audit::Ctx,
+) -> Result<(Vec<Uuid>, Vec<Uuid>), MetaError> {
+    let ctx = ctx.clone();
+    state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                if set_ok {
+                    connections::set_connection_status(conn, id, "ok", None, now).await?;
+                }
+                let rules = if resume_rules {
+                    rules::resume_connection_pauses(conn, id, now).await?
+                } else {
+                    Vec::new()
+                };
+                record_connection_resumes(conn, &ctx, &rules, now).await?;
+                let sources = if resume_sources {
+                    issues::resume_connection_pauses(conn, id).await?
+                } else {
+                    Vec::new()
+                };
+                Ok((rules, sources))
+            })
+        })
+        .await
 }
 
 /// After a connection write: the breakers of `reset` start over, each resumed rule is audited,
@@ -758,7 +1158,6 @@ fn after_connection_write(
     }
     for rule in resumed {
         tracing::info!(
-            target: "audit",
             rule_id = %rule,
             connection_id = %connection,
             reason,
@@ -794,6 +1193,26 @@ async fn set_status(
             })
         })
         .await
+}
+
+/// Stores a saved-values test's outcome (D-I-54). Best effort, as the status write: the provider
+/// was called, so a failed write must not lose the test result.
+async fn record_test(state: &AppState, id: Uuid, tested_updated_at: i64, ok: bool, now: i64) {
+    let written = state
+        .meta
+        .write(move |conn| {
+            Box::pin(async move {
+                connections::record_connection_test(conn, id, tested_updated_at, ok, now).await
+            })
+        })
+        .await;
+    if let Err(error) = written {
+        tracing::warn!(
+            connection_id = %id,
+            error_kind = meta_error_kind(&error),
+            "could not store the connection test"
+        );
+    }
 }
 
 /// The kind of a [`MetaError`], for logs that carry no error text.
@@ -842,6 +1261,8 @@ fn connection_json(row: &ConnectionRow) -> Result<LlmConnection, ApiError> {
         status: ConnectionStatus::from_name(&row.status).ok_or_else(|| corrupt("status"))?,
         last_error: row.last_error.clone(),
         last_error_at: row.last_error_at,
+        last_tested_at: row.last_tested_at,
+        last_test_ok: row.last_test_ok,
         created_by: row.created_by,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -1574,6 +1995,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_key_change_records_resumed_rules() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Resumed", "adapter": "openai", "api_key": "sk-test-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        let (by_connection, _by_errors) = paused_rules(&app, &seeded, id).await;
+
+        let patched = patch(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"api_key": "sk-new-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT details, target_kind, target_id FROM audit_events \
+             WHERE action = 'online_rule.resumed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (details, target_kind, target_id) = &rows[0];
+        let details: Value = serde_json::from_str(details).unwrap();
+        assert_eq!(details["reason"], json!("connection"));
+        assert_eq!(target_kind, "online_rule");
+        assert_eq!(target_id, &by_connection.to_string());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn api_key_rules() {
         let (app, cookie) = app().await;
@@ -2149,37 +2607,30 @@ mod tests {
         );
     }
 
-    /// Review 2026-11-15 #2: a new base_url or adapter took the stored key, so an org admin
-    /// could send it to a host of their choice with the connection test.
+    /// Q1 (2026-11-23): a PATCH of `base_url` or `adapter` without `api_key` keeps the saved key.
+    /// The key is sealed under the row, so the stored bytes do not change either.
     #[tokio::test(flavor = "multi_thread")]
-    async fn patch_of_the_host_needs_the_key_again() {
+    async fn patch_of_the_host_keeps_the_saved_key() {
         let (app, cookie) = app().await;
         let created = create(&app, &cookie, &body("Stored")).await;
         assert_eq!(created.status, 201, "{}", text(&created));
         let id = created_id(&created);
+        let sealed = stored_secret(&app, id).await;
+        let hint: LlmConnection = get(&app, &cookie, id).await.json();
         for change in [
-            json!({ "base_url": "https://attacker.example.com/v1" }),
+            json!({ "base_url": "https://proxy.example.com/v1" }),
             json!({ "base_url": "" }),
             json!({ "adapter": "anthropic" }),
         ] {
             let response = patch(&app, &cookie, id, &change).await;
-            assert_eq!(response.status, 400, "{change}");
-            let problem = response.problem();
-            assert_eq!(problem.errors.len(), 1, "{change}");
-            assert_eq!(problem.errors[0].field, "api_key");
-            assert_eq!(problem.errors[0].message, KEY_NEEDED_FOR_HOST);
+            assert_eq!(response.status, 200, "{change}: {}", text(&response));
+            let patched: LlmConnection = response.json();
+            assert_eq!(patched.api_key_hint, hint.api_key_hint, "{change}");
+            assert_eq!(stored_secret(&app, id).await, sealed, "{change}");
         }
         let got: LlmConnection = get(&app, &cookie, id).await.json();
         assert_eq!(got.base_url, None);
-        assert_eq!(got.adapter.as_str(), "openai");
-        let moved = patch(
-            &app,
-            &cookie,
-            id,
-            &json!({ "base_url": "https://proxy.example.com/v1", "api_key": "sk-new-0123456789abcdef" }),
-        )
-        .await;
-        assert_eq!(moved.status, 200, "{}", text(&moved));
+        assert_eq!(got.adapter.as_str(), "anthropic");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2452,9 +2903,68 @@ mod tests {
         .await;
         assert!(!logs.contains(first), "{logs}");
         assert!(!logs.contains(second), "{logs}");
-        // The capture worked: both audit events are in it.
-        assert!(logs.contains("llm connection created"), "{logs}");
-        assert!(logs.contains("llm connection updated"), "{logs}");
+        // Both audit records are in the table, and no key text is in them.
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT action, details FROM audit_events \
+             WHERE action IN ('llm_connection.created', 'llm_connection.updated') ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let actions: Vec<&str> = rows.iter().map(|(action, _)| action.as_str()).collect();
+        assert_eq!(
+            actions,
+            ["llm_connection.created", "llm_connection.updated"]
+        );
+        for (_, details) in &rows {
+            assert!(
+                !details.contains(first) && !details.contains(second),
+                "{details}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_key_change_is_flagged() {
+        let (app, cookie) = app().await;
+        let created = create(
+            &app,
+            &cookie,
+            &json!({ "name": "Flagged", "adapter": "openai", "api_key": "sk-flag-one-0123456789" }),
+        )
+        .await;
+        assert_eq!(created.status, 201);
+        let id = created_id(&created);
+        let renamed = patch(&app, &cookie, id, &json!({ "name": "Flagged 2" })).await;
+        assert_eq!(renamed.status, 200);
+        let rekeyed = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({ "api_key": "sk-flag-two-0123456789" }),
+        )
+        .await;
+        assert_eq!(rekeyed.status, 200);
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT details FROM audit_events \
+             WHERE action = 'llm_connection.updated' AND target_id = ? ORDER BY seq",
+        )
+        .bind(id.to_string())
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let details: Vec<Value> = rows
+            .iter()
+            .map(|(details,)| serde_json::from_str(details).unwrap())
+            .collect();
+        assert_eq!(details.len(), 2);
+        assert_eq!(details[0]["fields"], json!(["name"]));
+        assert_eq!(details[0]["key_changed"], json!(false));
+        assert_eq!(details[1]["fields"], json!(["api_key"]));
+        assert_eq!(details[1]["key_changed"], json!(true));
+        for (text,) in &rows {
+            assert!(!text.contains("sk-flag-"), "{text}");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2783,5 +3293,892 @@ mod tests {
         let response = test(&app, &seeded.cookie, id, &json!({})).await;
         crate::http::restore::tests::assert_refused(&response, "connection test");
         assert!(mock.requests().is_empty());
+    }
+
+    /// The last test, as the API returns it: `(last_tested_at, last_test_ok)`.
+    async fn last_test(app: &TestApp, cookie: &str, id: Uuid) -> (Option<Value>, Option<Value>) {
+        let body: Value = get(app, cookie, id).await.json();
+        (
+            body.get("last_tested_at").cloned(),
+            body.get("last_test_ok").cloned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_new_connection_has_no_last_test() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(&app, &seeded.cookie, &body("Fresh")).await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        assert_eq!(last_test(&app, &seeded.cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_saved_test_records_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_saved_test_records_a_failed_last_test() {
+        let mock = MockLlm::start(vec![Reply {
+            status: 401,
+            body: json!({
+                "error": {"message": "bad key", "type": "invalid_request_error"}
+            }),
+        }])
+        .await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(false));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_test_on_a_typed_model_records_nothing() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({"model": "other-model"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_embedding_test_records_the_last_test() {
+        let mock = MockLlm::start_with_embeddings(Vec::new(), vec![embedding(&[0.6, 0.8])]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    #[tokio::test]
+    async fn an_anthropic_embedding_refusal_records_nothing() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create(
+            &app,
+            &seeded.cookie,
+            &json!({"name": "Claude", "adapter": "anthropic", "api_key": "sk-ant-test-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(!response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(last_test(&app, &seeded.cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_key_clears_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let response = patch(
+            &app,
+            &cookie,
+            id,
+            &json!({"api_key": "sk-second-key-0123456789"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let connection: LlmConnection = response.json();
+        assert_eq!(connection.last_tested_at, None);
+        assert_eq!(connection.last_test_ok, None);
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_structured_output_clears_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let response = patch(&app, &cookie, id, &json!({"structured_output": "tool"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patch_of_the_name_or_the_same_mode_keeps_the_last_test() {
+        let mock = MockLlm::start(vec![completion(r#"{"value": true}"#)]).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        assert_eq!(
+            test(&app, &cookie, id, &json!({})).await.status,
+            200,
+            "the test"
+        );
+
+        let renamed = patch(&app, &cookie, id, &json!({"name": "Renamed"})).await;
+        assert_eq!(renamed.status, 200, "{}", text(&renamed));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
+
+        let same_mode = patch(&app, &cookie, id, &json!({"structured_output": "native"})).await;
+        assert_eq!(same_mode.status, 200, "{}", text(&same_mode));
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    /// `POST …/llm-connections/test`: a test of a connection that is not saved.
+    async fn test_unsaved(app: &TestApp, cookie: &str, body: &Value) -> TestResponse {
+        app.request(Method::POST, "/api/v1/orgs/acme/llm-connections/test")
+            .header(header::COOKIE.as_str(), cookie)
+            .json(body)
+            .send()
+            .await
+    }
+
+    /// `n` replies of a plain judge answer.
+    fn judge_replies(n: usize) -> Vec<Reply> {
+        (0..n).map(|_| completion(r#"{"value": true}"#)).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_test_uses_the_saved_key_when_api_key_is_omitted() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({ "structured_output": "tool" })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            header_value(&requests[0].0, "authorization"),
+            "Bearer sk-test-key-0123456789"
+        );
+        // A draft stores nothing.
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_test_uses_a_new_key() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        let sealed = stored_secret(&app, id).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({ "api_key": "sk-draft-key-0123456789" }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let requests = mock.requests();
+        assert_eq!(
+            header_value(&requests[0].0, "authorization"),
+            "Bearer sk-draft-key-0123456789"
+        );
+        assert_eq!(stored_secret(&app, id).await, sealed);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_draft_test_changes_no_status_pause_or_last_test() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &mock).await;
+        let (by_connection, _) = paused_rules(&app, &seeded, id).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    connections::set_connection_status(conn, id, "failing", Some("bad key"), now)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({ "structured_output": "tool" }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+
+        let got: LlmConnection = get(&app, &seeded.cookie, id).await.json();
+        assert_eq!(got.status, ConnectionStatus::Failing);
+        assert!(got.last_error.is_some());
+        assert_eq!(got.last_tested_at, None);
+        assert_eq!(
+            paused_reason_of(&app, by_connection).await.as_deref(),
+            Some(PAUSE_CONNECTION)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_draft_test_keeps_the_status() {
+        let mock = MockLlm::start(vec![Reply {
+            status: 401,
+            body: json!({
+                "error": {"message": "bad key", "type": "invalid_request_error"}
+            }),
+        }])
+        .await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({ "api_key": "sk-draft-key-0123456789" }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(!result.ok);
+        assert_eq!(
+            result.error.expect("the failure").class,
+            TestErrorClass::Pause
+        );
+
+        let got: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(got.status, ConnectionStatus::Ok);
+        assert_eq!(got.last_error, None);
+        assert_eq!(got.last_tested_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_test_with_the_saved_values_is_not_a_draft() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({ "structured_output": "native" })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(last_test(&app, &cookie, id).await.1, Some(json!(true)));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_test_with_a_new_base_url_uses_the_saved_key() {
+        let first = MockLlm::start(judge_replies(1)).await;
+        let second = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &first).await;
+
+        let response = test(&app, &cookie, id, &json!({ "base_url": second.base_url() })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+
+        let requests = second.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            header_value(&requests[0].0, "authorization"),
+            "Bearer sk-test-key-0123456789"
+        );
+        assert!(first.requests().is_empty());
+        let got: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(got.base_url.as_deref(), Some(first.base_url().as_str()));
+        assert_eq!(got.last_tested_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_patched_base_url_without_a_key_is_called_with_the_saved_key() {
+        let first = MockLlm::start(judge_replies(1)).await;
+        let second = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &first).await;
+
+        let patched = patch(&app, &cookie, id, &json!({ "base_url": second.base_url() })).await;
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        let requests = second.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            header_value(&requests[0].0, "authorization"),
+            "Bearer sk-test-key-0123456789"
+        );
+        assert!(first.requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_test_rejects_an_invalid_base_url_and_headers() {
+        let mock = MockLlm::start(judge_replies(10)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({
+                "api_key": "sk-draft-key-0123456789",
+                "base_url": "ftp://x",
+                "extra_headers": { "content-type": "x" }
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let fields: Vec<String> = response
+            .problem()
+            .errors
+            .into_iter()
+            .map(|error| error.field)
+            .collect();
+        assert!(fields.contains(&"base_url".to_owned()), "{fields:?}");
+        assert!(
+            fields.contains(&"extra_headers.content-type".to_owned()),
+            "{fields:?}"
+        );
+        assert!(mock.requests().is_empty());
+
+        // The refused body spent no test: ten valid tests still run.
+        for _ in 0..10 {
+            let response = test(&app, &cookie, id, &json!({})).await;
+            assert_eq!(response.status, 200, "{}", text(&response));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invalid_draft_for_an_unknown_id_is_400() {
+        let (app, cookie) = app().await;
+        let response = test(
+            &app,
+            &cookie,
+            Uuid::now_v7(),
+            &json!({ "base_url": "ftp://x" }),
+        )
+        .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert_eq!(response.problem().errors[0].field, "base_url");
+
+        let response = test(&app, &cookie, Uuid::now_v7(), &json!({})).await;
+        assert_eq!(response.status, 404, "{}", text(&response));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_draft_embedding_test_as_anthropic_is_refused() {
+        let mock = MockLlm::start(Vec::new()).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({
+                "adapter": "anthropic",
+                "api_key": "sk-ant-draft-0123456789",
+                "embedding_model": "e"
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(!result.ok);
+        let error = result.error.expect("a refused test carries its error");
+        assert_eq!(error.class, TestErrorClass::Permanent);
+        assert_eq!(error.message, NO_EMBEDDINGS_MESSAGE);
+        assert!(mock.requests().is_empty());
+        assert!(mock.embedding_requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsaved_test_calls_the_provider_with_the_body_values() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let response = test_unsaved(
+            &app,
+            &cookie,
+            &json!({
+                "adapter": "openai",
+                "api_key": "sk-unsaved-0123456789",
+                "base_url": mock.base_url(),
+                "model": "gpt-test",
+                "extra_headers": { "X-Extra": "one" }
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(result.ok, "{result:?}");
+        assert_eq!(result.model, "gpt-test");
+
+        let requests = mock.requests();
+        assert_eq!(requests.len(), 1);
+        let (headers, body) = &requests[0];
+        assert_eq!(
+            header_value(headers, "authorization"),
+            "Bearer sk-unsaved-0123456789"
+        );
+        assert_eq!(header_value(headers, "x-extra"), "one");
+        assert_eq!(body["model"], "gpt-test");
+
+        // Nothing was stored.
+        let listed: Value = app
+            .request(Method::GET, "/api/v1/orgs/acme/llm-connections")
+            .header(header::COOKIE.as_str(), &cookie)
+            .send()
+            .await
+            .json();
+        assert!(listed["data"].as_array().expect("a page").is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsaved_test_validates_like_create() {
+        let (app, cookie) = egress_app().await;
+        let response = test_unsaved(
+            &app,
+            &cookie,
+            &json!({
+                "adapter": "openai",
+                "api_key": "",
+                "base_url": "ftp://x",
+                "extra_headers": { "host": "x" },
+                "model": "m"
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let fields: Vec<String> = response
+            .problem()
+            .errors
+            .into_iter()
+            .map(|error| error.field)
+            .collect();
+        for field in ["api_key", "base_url", "extra_headers.host"] {
+            assert!(fields.contains(&field.to_owned()), "{fields:?}");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsaved_test_needs_a_model() {
+        let (app, cookie) = egress_app().await;
+        let response = test_unsaved(
+            &app,
+            &cookie,
+            &json!({ "adapter": "openai", "api_key": "sk-unsaved-0123456789" }),
+        )
+        .await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        let problem = response.problem();
+        assert_eq!(problem.errors[0].field, "model");
+        assert_eq!(problem.errors[0].message, UNSAVED_MODEL_MESSAGE);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsaved_embedding_test_on_anthropic_is_refused() {
+        let mock = MockLlm::start(Vec::new()).await;
+        let (app, cookie) = egress_app().await;
+        let response = test_unsaved(
+            &app,
+            &cookie,
+            &json!({
+                "adapter": "anthropic",
+                "api_key": "sk-ant-unsaved-0123456789",
+                "base_url": mock.base_url(),
+                "embedding_model": "e"
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(!result.ok);
+        assert_eq!(
+            result
+                .error
+                .expect("a refused test carries its error")
+                .message,
+            NO_EMBEDDINGS_MESSAGE
+        );
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsaved_test_to_a_private_address_is_refused_without_the_setting() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = app().await;
+        let response = test_unsaved(
+            &app,
+            &cookie,
+            &json!({
+                "adapter": "openai",
+                "api_key": "sk-unsaved-0123456789",
+                "base_url": mock.base_url(),
+                "model": "gpt-test"
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(!result.ok);
+        assert_eq!(
+            result.error.expect("the refusal").class,
+            TestErrorClass::Permanent
+        );
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn draft_and_saved_tests_share_the_rate_limit() {
+        let mock = MockLlm::start(judge_replies(10)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+        let unsaved = json!({
+            "adapter": "openai",
+            "api_key": "sk-unsaved-0123456789",
+            "base_url": mock.base_url(),
+            "model": "gpt-test",
+            "extra_headers": { "X-Extra": "one" }
+        });
+        for _ in 0..5 {
+            let response = test(&app, &cookie, id, &json!({})).await;
+            assert_eq!(response.status, 200, "{}", text(&response));
+            let response = test_unsaved(&app, &cookie, &unsaved).await;
+            assert_eq!(response.status, 200, "{}", text(&response));
+        }
+        // The manual clock does not move: the 11th test in the minute is refused.
+        let response = test_unsaved(&app, &cookie, &unsaved).await;
+        assert_eq!(response.status, 429, "{}", text(&response));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn member_cannot_test_an_unsaved_connection() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, _) = egress_app().await;
+        let org = crate::meta::orgs::org_by_slug(app.state.meta.reader(), "acme")
+            .await
+            .unwrap()
+            .expect("the seeded org");
+        let (member_id, member) = signed_in(&app, "member@example.com").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+
+        let response = test_unsaved(
+            &app,
+            &member,
+            &json!({
+                "adapter": "openai",
+                "api_key": "sk-unsaved-0123456789",
+                "base_url": mock.base_url(),
+                "model": "gpt-test"
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 403, "{}", text(&response));
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsaved_test_is_refused_in_restore_mode() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+            config.restore_mode = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let response = test_unsaved(
+            &app,
+            &seeded.cookie,
+            &json!({
+                "adapter": "openai",
+                "api_key": "sk-unsaved-0123456789",
+                "base_url": mock.base_url(),
+                "model": "gpt-test"
+            }),
+        )
+        .await;
+        crate::http::restore::tests::assert_refused(&response, "connection test");
+        assert!(mock.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_key_material_in_logs_of_draft_tests() {
+        // Private addresses, without egress: the calls are refused before any connection, so no
+        // host name reaches the transport's own trace logs.
+        let (app, cookie) = app().await;
+        let created = create(
+            &app,
+            &cookie,
+            &json!({
+                "name": "Logged",
+                "adapter": "openai",
+                "api_key": "sk-test-0123456789abcdef",
+                "base_url": "http://10.0.0.1:9/v1",
+                "default_model": "gpt-test"
+            }),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        let (_, logs) = capture_logs(async {
+            let response = test(
+                &app,
+                &cookie,
+                id,
+                &json!({
+                    "api_key": "sk-logdraft-one-01234567",
+                    "extra_headers": { "x-a": "hdr-secret-1" },
+                    "model": "m"
+                }),
+            )
+            .await;
+            assert_eq!(response.status, 200, "{}", text(&response));
+            let response = test_unsaved(
+                &app,
+                &cookie,
+                &json!({
+                    "adapter": "openai",
+                    "api_key": "sk-logdraft-two-01234567",
+                    "base_url": "http://10.0.0.2:9/v1",
+                    "extra_headers": { "x-a": "hdr-secret-2" },
+                    "model": "m"
+                }),
+            )
+            .await;
+            assert_eq!(response.status, 200, "{}", text(&response));
+        })
+        .await;
+        for secret in [
+            "sk-logdraft-one-01234567",
+            "sk-logdraft-two-01234567",
+            "hdr-secret-1",
+            "hdr-secret-2",
+            "10.0.0.2",
+        ] {
+            assert!(!logs.contains(secret), "{logs}");
+        }
+        assert!(logs.contains("llm connection tested"), "{logs}");
+        assert!(logs.contains("llm connection draft tested"), "{logs}");
+    }
+
+    /// Replaces the stored key of `id` with bytes that do not open, as a key sealed under another
+    /// secret would be. The rest of the row is unchanged.
+    async fn corrupt_stored_key(app: &TestApp, id: Uuid) {
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query("UPDATE llm_connections SET secret_enc = X'00' WHERE id = ?")
+                        .bind(id.to_string())
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok::<_, MetaError>(())
+                })
+            })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_corrupt_key_still_refuses_an_anthropic_embedding_test() {
+        let (app, cookie) = app().await;
+        let created = create(
+            &app,
+            &cookie,
+            &json!({"name": "Claude", "adapter": "anthropic", "api_key": "sk-ant-test-0123456789"}),
+        )
+        .await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        corrupt_stored_key(&app, id).await;
+
+        let response = test(&app, &cookie, id, &json!({"embedding_model": "x"})).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(!result.ok);
+        let error = result.error.expect("a refused test carries its error");
+        assert_eq!(error.class, TestErrorClass::Permanent);
+        assert_eq!(error.message, NO_EMBEDDINGS_MESSAGE);
+        assert_eq!(last_test(&app, &cookie, id).await, (None, None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_corrupt_key_still_answers_400_without_a_model() {
+        let (app, cookie) = app().await;
+        let created = create(&app, &cookie, &body("No default")).await;
+        assert_eq!(created.status, 201, "{}", text(&created));
+        let id = created_id(&created);
+        corrupt_stored_key(&app, id).await;
+
+        let response = test(&app, &cookie, id, &json!({})).await;
+        assert_eq!(response.status, 400, "{}", text(&response));
+        assert_eq!(response.problem().errors[0].field, "model");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_explicit_default_model_records_the_last_test() {
+        let mock = MockLlm::start(judge_replies(1)).await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(&app, &cookie, id, &json!({ "model": "gpt-test" })).await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        let result: LlmConnectionTestResult = response.json();
+        assert!(result.ok);
+        assert_eq!(result.model, "gpt-test");
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(true));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_result_after_a_concurrent_patch_is_not_stored() {
+        // The provider answers 401 after 300 ms; a PATCH saved meanwhile changes the row first.
+        let mock = MockLlm::start_with_delay(
+            vec![Reply {
+                status: 401,
+                body: json!({"error": {"message": "bad key", "type": "invalid_request_error"}}),
+            }],
+            Duration::from_millis(300),
+        )
+        .await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let empty = json!({});
+        let renamed = json!({ "name": "Renamed" });
+        let (response, patched) = tokio::join!(test(&app, &cookie, id, &empty), async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // The manual clock must move, or the PATCH keeps the `updated_at` the test started from.
+            app.state.clock.advance(Duration::from_secs(1));
+            patch(&app, &cookie, id, &renamed).await
+        });
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(!response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(patched.status, 200, "{}", text(&patched));
+
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert_eq!(connection.name, "Renamed");
+        assert_eq!(connection.status, ConnectionStatus::Ok);
+        assert_eq!(connection.last_error, None);
+        assert_eq!(connection.last_tested_at, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_draft_embedding_test_stores_nothing() {
+        let saved = MockLlm::start(Vec::new()).await;
+        let draft = MockLlm::start_with_embeddings(Vec::new(), vec![embedding(&[0.6, 0.8])]).await;
+        let app = TestApp::with_config(|config| {
+            config.security.allow_private_network_egress = true;
+        })
+        .await;
+        let seeded = app.seed().await;
+        let id = mocked(&app, &seeded.cookie, &saved).await;
+        let (by_connection, _) = paused_rules(&app, &seeded, id).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    connections::set_connection_status(conn, id, "failing", Some("bad key"), now)
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+
+        let response = test(
+            &app,
+            &seeded.cookie,
+            id,
+            &json!({
+                "embedding_model": "text-embedding-test",
+                "base_url": draft.base_url()
+            }),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(response.json::<LlmConnectionTestResult>().ok);
+        assert_eq!(draft.embedding_requests().len(), 1);
+        assert!(saved.requests().is_empty());
+
+        let got: LlmConnection = get(&app, &seeded.cookie, id).await.json();
+        assert_eq!(got.base_url.as_deref(), Some(saved.base_url().as_str()));
+        assert_eq!(got.status, ConnectionStatus::Failing);
+        assert!(got.last_error.is_some());
+        assert_eq!(got.last_tested_at, None);
+        assert_eq!(
+            paused_reason_of(&app, by_connection).await.as_deref(),
+            Some(PAUSE_CONNECTION)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_saved_embedding_test_records_a_failed_last_test() {
+        let mock = MockLlm::start_with_embeddings(
+            Vec::new(),
+            vec![Reply {
+                status: 401,
+                body: json!({"error": {"message": "bad key", "type": "invalid_request_error"}}),
+            }],
+        )
+        .await;
+        let (app, cookie) = egress_app().await;
+        let id = mocked(&app, &cookie, &mock).await;
+
+        let response = test(
+            &app,
+            &cookie,
+            id,
+            &json!({"embedding_model": "text-embedding-test"}),
+        )
+        .await;
+        assert_eq!(response.status, 200, "{}", text(&response));
+        assert!(!response.json::<LlmConnectionTestResult>().ok);
+        let connection: LlmConnection = get(&app, &cookie, id).await.json();
+        assert!(connection.last_tested_at.is_some());
+        assert_eq!(connection.last_test_ok, Some(false));
+        assert_eq!(connection.status, ConnectionStatus::Ok);
     }
 }

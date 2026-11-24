@@ -91,6 +91,12 @@ Object storage credentials are not settings: cetra reads the standard `AWS_ACCES
 |---|---|---|---|---|
 | `eval.workers` | | integer | `16` | Evaluation jobs this process runs at once, 1 to 256. |
 
+## `[audit]`
+
+| Key | Environment | Type | Default | Description |
+|---|---|---|---|---|
+| `audit.retention_days` | | integer | `365` | Days an audit record is kept, then deleted by an hourly task. `0` keeps records forever; otherwise 30 or more. Applies to the instance log and to every org without its own `audit_retention_days` limit, which replaces it for that org on cetra Cloud (`0` keeps that org's records forever). |
+
 ## `[issues]`
 
 | Key | Environment | Type | Default | Description |

@@ -52,19 +52,22 @@ function LoginPage() {
   const navigate = useNavigate();
   const search = Route.useSearch();
   const { data: config } = useSuspenseQuery(authConfigQuery);
-  // Email first when the server routes SSO domains and this is not the instance
-  // admins' `?password=1` path (D-P-60).
-  const emailFirst = config.sso_discovery && !search.password;
+  // The instance admins' password form: `?password=1`, or after an org provider refused to
+  // sign one in, whose message says to use the password (D-SA-22).
+  const adminForm = search.password === true || search.error === "link_refused";
+  // Email first when the server routes SSO domains and this is not the instance admins'
+  // `?password=1` or `link_refused` path (D-P-60, D-SA-22).
+  const emailFirst = config.sso_discovery && !adminForm;
   // R7 (D-S-5, D-S-6): with one provider and no password, leave for it at once, except on
   // the instance admins' form, after a failed provider login, and right after signing out.
   const only = onlyProvider(config);
   const startNow =
-    only !== undefined && !search.password && search.error === undefined && !search.signed_out;
+    only !== undefined && !adminForm && search.error === undefined && !search.signed_out;
   const startHref =
     only === undefined ? undefined : authorizeHref(only.id, { redirect: search.redirect });
-  // The password form also shows on `?password=1` when password sign-in is off: it is the
-  // instance admins' way in (D-S-4).
-  const showPassword = config.password_enabled || search.password === true;
+  // The password form also shows on the admin form (`?password=1` or `link_refused`) when
+  // password sign-in is off: it is the instance admins' way in (D-S-4, D-SA-22).
+  const showPassword = config.password_enabled || adminForm;
   // Only read while `emailFirst`, so it may start at "email" on every page load.
   const [step, setStep] = useState<"email" | "password">("email");
   const [redirecting, setRedirecting] = useState(false);
@@ -151,7 +154,7 @@ function LoginPage() {
     <AuthLayout
       title="Sign in"
       description={
-        !config.password_enabled && search.password
+        !config.password_enabled && adminForm
           ? "Password sign-in is for instance admins."
           : undefined
       }
@@ -180,29 +183,44 @@ function LoginPage() {
       <FormError message={search.error ? oauthErrorMessage(search.error) : undefined} />
       <FormSuccess message={search.signed_out ? "You're signed out." : undefined} />
       {emailFirst && step === "email" ? (
-        <form noValidate onSubmit={onDiscover} className="flex flex-col gap-4">
-          <TextField
-            id="email"
-            label="Email"
-            type="email"
-            autoComplete="email"
-            required
-            value={email}
-            onChange={setEmail}
-            disabled={discover.isPending || redirecting}
-            error={clientErrors.email}
-          />
-          <FormError
-            message={
-              discover.error
-                ? problemOf(discover.error)?.status === 429
-                  ? RATE_LIMITED
-                  : "Sign-in failed. Try again."
-                : undefined
-            }
-          />
-          <SubmitButton pending={discover.isPending || redirecting}>Continue</SubmitButton>
-        </form>
+        <>
+          <form noValidate onSubmit={onDiscover} className="flex flex-col gap-4">
+            <TextField
+              id="email"
+              label="Email"
+              type="email"
+              autoComplete="email"
+              required
+              value={email}
+              onChange={setEmail}
+              disabled={discover.isPending || redirecting}
+              error={clientErrors.email}
+            />
+            <FormError
+              message={
+                discover.error
+                  ? problemOf(discover.error)?.status === 429
+                    ? RATE_LIMITED
+                    : "Sign-in failed. Try again."
+                  : undefined
+              }
+            />
+            <SubmitButton pending={discover.isPending || redirecting}>Continue</SubmitButton>
+          </form>
+          <Link
+            to="/login"
+            search={{
+              password: true,
+              redirect: search.redirect,
+              email: email.trim() || undefined,
+            }}
+            className={AUTH_LINK_CLASS}
+          >
+            {config.password_enabled
+              ? "Sign in with a password instead"
+              : "Instance admin? Sign in with a password"}
+          </Link>
+        </>
       ) : (
         <>
           <ProviderButtons providers={config.providers} redirect={search.redirect} />
@@ -271,7 +289,7 @@ function LoginPage() {
           {!showPassword && config.providers.length === 0 ? (
             <p className="text-body">{NO_SIGN_IN_METHOD}</p>
           ) : null}
-          {!config.password_enabled && !search.password && config.providers.length > 0 ? (
+          {!config.password_enabled && !adminForm && config.providers.length > 0 ? (
             <Link
               to="/login"
               search={{ password: true, redirect: search.redirect }}

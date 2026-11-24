@@ -10,8 +10,10 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::output;
+use super::record_tool;
 use super::tools::arguments;
 use crate::alerts::message::issue_url;
+use crate::audit;
 use crate::auth::principal::AuthUser;
 use crate::auth::roles::ProjectPerm;
 use crate::eval::budget::DAY_NS;
@@ -75,10 +77,12 @@ struct McpIssue {
 pub(crate) async fn list_issues(
     state: &AppState,
     user: &AuthUser,
+    audit: Option<&audit::Ctx>,
     raw: JsonObject,
 ) -> Result<Value, ApiError> {
     let args: ListIssuesArguments = arguments(raw)?;
     let access = user_project(state, user, &args.project, ProjectPerm::View).await?;
+    record_tool(state, audit, LIST_ISSUES, &access, None).await?;
     let max_chars = output::max_chars(args.max_chars)?;
     let limit = limit_of(args.limit)?;
     let source = args

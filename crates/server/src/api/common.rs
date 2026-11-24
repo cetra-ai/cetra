@@ -176,6 +176,8 @@ pub enum ProblemCode {
     PlanLimit,
     /// The organization's plan does not include this feature.
     PlanRequired,
+    /// The member is managed by the org's identity provider (D-EA-18).
+    ScimManaged,
     /// The org's owner cannot be that user (disabled or instance admin).
     OwnerNotAllowed,
     /// The resource does not exist.
@@ -233,7 +235,7 @@ impl ProblemCode {
             | Self::OwnerNotAllowed
             | Self::TooManyTraces
             | Self::TooManyItems => 422,
-            Self::Conflict => 409,
+            Self::Conflict | Self::ScimManaged => 409,
             Self::QuotaExceeded => 402,
             Self::RateLimited => 429,
             Self::Internal => 500,
@@ -267,7 +269,7 @@ impl ProblemCode {
             | Self::OwnerNotAllowed
             | Self::TooManyTraces
             | Self::TooManyItems => "Unprocessable Content",
-            Self::Conflict => "Conflict",
+            Self::Conflict | Self::ScimManaged => "Conflict",
             Self::QuotaExceeded => "Payment Required",
             Self::RateLimited => "Too Many Requests",
             Self::Internal => "Internal Server Error",

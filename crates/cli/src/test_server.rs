@@ -49,6 +49,8 @@ impl TestServer {
         )
         .unwrap();
         let config = ServerConfig::load(Some(&config_path)).unwrap();
+        // Boxed: `bind`'s future grew past the 16 KiB lint limit once the audit and SAML work
+        // merged, and embedding it made every test that starts a server oversized with it.
         let running = Box::pin(serve::bind(config, None)).await.unwrap();
         let url = format!("http://{}", running.local_addr);
 

@@ -85,7 +85,7 @@ What we avoid: whole-object snapshots and raw args; silently ignored filters; gl
 | `outcome` | `success` \| `failure` | `failure` only for actions the catalog marks as recording failures: sign-ins of a known account and licence install. |
 | `actor_kind` | text | `user`, `api_key`, `scim_token`, `control_plane`, `cli`, `system`, `anonymous` (D-EA-3). |
 | `actor_id` | text, null | User id, key id, SCIM token id, control-plane token id; null for `system`, `cli`, `anonymous`. |
-| `via` | text, null | For `user`: `session`, `pat`, `device`; `pat` and `device` carry `credential_id`. |
+| `via` | text, null | For `user`: `session` or `pat`; `pat` carries `credential_id`. A device approval is a session action (M1). |
 | `credential_id` | text, null | The PAT id. Never a token value. |
 | `target_kind`, `target_id` | text, null | The resource acted on: `user`, `member`, `invite`, `api_key`, `pat`, `project`, `org`, `sso_provider`, `sso_domain`, `scim_token`, `scim_group`, `evaluator`, … A SCIM user operation targets the cetra user id (`user`), with the SCIM row id in `details`, so the record still resolves after the SCIM row is deleted. |
 | `details` | JSON | Typed per action, allow-listed fields only (D-EA-5). |
@@ -99,12 +99,12 @@ Indexes support the reads: `(org_id, seq)`, `(org_id, action, seq)`, `(org_id, a
 - `audit::record(tx, event)` takes the `meta.db` transaction of the change, so a change never commits without its record and a rolled-back change leaves none (D-EA-2).
 - **Actions that change nothing in `meta.db`** (sign-ins, SQL runs, exports, MCP tool calls) record in a transaction of their own, **before** the action runs. If that write fails, the action is refused. Such records carry the request's parameters, never a result: no row counts or durations, which are only known after the data has left.
 - **Work done later by a worker** (a deletion applied, retention purged, a domain lapsed) records when the worker commits it, with actor `system`.
-- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored, at most one row per account and minute with a count, and an attempt refused by the lockout (`auth/limits.rs`) is not stored. A SCIM call with a revoked or expired token is a tracing line only.
+- **Unauthenticated failures are not stored.** A failed sign-in for an unknown email, or a SCIM call with an unknown token, stays a `tracing` line only, so an anonymous client cannot grow the table. A failed sign-in for a known account is stored, at most one row per account and minute, and an attempt refused by the lockout (`auth/limits.rs`) is not stored. A SCIM call with a revoked or expired token is a tracing line only.
 - **An org-provider sign-in writes two rows** in one transaction: the instance record and the org's record (D-EA-9).
-- **One request, one record.** A bulk operation (a dataset import, adds by filter, a batch of SCIM group members) writes one record with a count, never one per item.
+- **One request, one record.** A bulk operation (adds by filter to a queue, a batch of SCIM group members) writes one record with a count, never one per item.
 - **Restore mode** (N's M3) refuses outbound calls and stops workers, not `meta.db` writes. So recording and SCIM run normally, the stream sends nothing, and the hourly audit purge is off, since it cannot be undone on a restored copy.
 - A failed audit write fails the request. The alternative, a change with no record, is what an audit log exists to prevent. This is unlike Langfuse, which never lets the audit write fail the caller.
-- After commit, the same function emits the `tracing` line with target `audit`, so operators who ship stdout keep their pipeline.
+- As its last step inside the transaction, the same function emits the `tracing` line with target `audit`, so operators who ship stdout keep their pipeline. Call sites therefore record after every check that can roll the transaction back; only a failed `COMMIT` can leave a line with no row.
 - The event is a Rust enum, one variant per catalog action, each with its typed details. The action name, the target and the `details` JSON come from the variant. Call sites cannot write free-form strings.
 
 #### Event catalog (D-EA-4)
@@ -122,12 +122,14 @@ The catalog lists every action, its scope (org or instance) and its `details` fi
   - Instance SSO enforcement changes come from configuration and are recorded at startup as `instance.config_applied` with the key names.
 - **SCIM.** Token created, rotated and revoked; user provisioned, updated, deactivated, reactivated and deleted; group created, renamed and deleted, members changed; group mapping changed; role raise refused at the seat limit; SCIM enabled and disabled.
 - **Audit.** Stream destination created, changed and deleted; export started (format and filters).
-- **Data leaving the product (D-EA-6).** SQL console run (a SHA-256 of the SQL text; never the text, which can quote payload values); SQL and table export; dataset export; MCP tool call (tool name, project). Each is recorded before it runs (§ Writing).
+- **Data leaving the product (D-EA-6).** SQL console run (a SHA-256 of the SQL text; never the text, which can quote payload values); SQL and table export; dataset export; MCP tool call that names a project (tool name, project). Each is recorded before it runs (§ Writing).
 - **Deletions.** GDPR deletion requested and applied (kind, counts; the subject's identifier never appears, as the deletion row already keeps it under its own rules).
 - **Project objects.** Evaluators, online rules, alert rules and channels, LLM connections, model prices, prompts and protected labels, datasets, annotation queues, issue sources, dashboards and the assistant setting: create, change (field names) and delete. Everything that has an `audit` tracing line today, plus the gaps the code survey found.
 - **Instance.** Setup, licence installed and refused (customer and expiry; never the key), admin user created, updated, disabled and reset link issued, org created and dropped by the control plane, control-plane user revoke, disable and delete, entitlements token accepted (plan name, token id).
 
-**Not in the catalog:** work on the data itself rather than on access or configuration: dataset item edits, scores and annotations, queue reviews, playground runs, assistant turns, evaluator executions. Their `target: "audit"` lines become ordinary `info` lines of their module, so `target = "audit"` means exactly the catalog.
+**Not in the catalog:** work on the data itself rather than on access or configuration: dataset item edits, dataset imports, adds from traces and version restores, scores and annotations, queue reviews, experiments, issue edits, merges and refits, saved views, playground runs, assistant conversations, feedback and turns, evaluator executions, connection and channel tests. Their `target: "audit"` lines become ordinary `info` lines of their module, so `target = "audit"` means exactly the catalog.
+
+Worker pauses and resumes of online rules are recorded with actor `system`. Issue-source pauses and resumes stay plain `info` lines (D-EA-21).
 
 The plans for M1 and M2 turn this list into the exact enum, with each variant's details. Every existing `target: "audit"` call site is either replaced by `audit::record` or moved to its module's target; none stays as a bare audit line.
 
@@ -152,7 +154,8 @@ The plans for M1 and M2 turn this list into the exact enum, with each variant's 
 #### Read API and UI (ee)
 
 - `GET /api/v1/orgs/{org}/audit-events`. Filters: `from`, `to`, `action` (one or several, or a group prefix like `member.`), `actor_id`, `target_id`, `project_id`, `outcome`. Paging is by cursor on `seq`, newest first, 100 per page by default and 500 at most.
-  - Each row carries `actor` and `target` objects with the resolved display fields.
+  - The cursor is an opaque string: base64url (no padding) of `{"seq": N}`. The response is `{data, next_cursor}`; `next_cursor` is null on the last page. Pass it back as `cursor` for the next page.
+  - Each row carries `actor` and `target` objects with the resolved display fields and a `status`: `present` (name and email shown), `former_member` (org log, not a member; no name or email), `deleted` (no user row, or the key, project or provider no longer exists) or `unresolved` (a kind the scope does not resolve, id only). The instance log resolves users only (D-EA-8).
   - Access: new `OrgPerm::ViewAudit` for org admins and owners, with a session or a PAT; no API key (D-EA-10).
 - `GET /api/v1/orgs/{org}/audit-events/export?format=csv|ndjson&…` streams the same filters, with no page limit, up to 1,000,000 rows per export, under the same `ViewAudit` permission. It records `audit.export_started` before streaming.
 - `GET /api/v1/admin/audit-events` and its export serve the instance log to instance admins. Instance admins never read org logs (no implicit org access, spec 08).
@@ -257,6 +260,8 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 - Mappings never grant or lower `owner`. An owner's org role stays owner while they are provisioned, whatever their groups map to. Only deprovisioning removes an owner (§ Deprovisioning).
 - **Seats.** Seats are D176's: owner, admin and member memberships plus pending invites with those roles (D-P-20); viewers are free, so a viewer create never hits the limit. A create as `member` or `admin`, or a raise from `viewer`, that would pass `max_seats` is refused for that user, who keeps their current role (a create gets `403 plan_limit`). A group change that raises several users applies to those within the limit, records `scim.role_raise_refused` for the others, and still succeeds, so one full plan does not block the IdP's whole sync.
 - **Materialised.** Every SCIM change recomputes the affected users' roles and writes `org_members` and `project_members` in the same transaction. RBAC (spec 08) is unchanged and reads only those tables.
+- **Recomputed on every change (D-EA-24, M6).** Every change that can affect a managed member's roles recomputes them in the same transaction: group membership, group deletion, mapping change, default-role change, linking and reactivation. A linked existing member is recomputed at once. This replaces M5's "SCIM never changes an existing role".
+- **Default-role change (D-EA-25, M6).** A change of `scim_default_role` recomputes the org's active managed members while SCIM is enabled. Only members with no mapped group change. Mapping and default-role recomputes run only while SCIM is enabled; turning SCIM on again recomputes nothing until the next change.
 - **SCIM-managed members.** A member is SCIM-managed while an active `scim_users` row of the org links to them.
   - Members who joined before SCIM was enabled are not managed until the IdP provisions them.
   - When it does, their roles are recomputed from their groups: an admin may be lowered, never an owner. Their manual overrides are replaced by the mapped ones.
@@ -290,7 +295,7 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | ID | Decision | Rejected alternatives |
 |---|---|---|
 | D-EA-1 | **Always record (user).** Every org and the instance record, whatever the plan. Reading, export and streaming need `audit_log`. Recording is core, reading is `ee`; amends D-P-4's wording. | Record only when entitled: history would start at purchase, and the upgrade sale loses its proof. |
-| D-EA-2 | **Same transaction, fail closed.** A record commits with its `meta.db` change. An action that changes nothing in `meta.db` (sign-in, SQL run, export, MCP call) records before it runs. A failed audit write fails the request. The `tracing` line follows the commit. Unauthenticated failures are tracing lines only; a bulk request writes one record. | Best effort after commit (Langfuse): a crash or error leaves a change with no record. Outbox and relay: needless with one SQLite file. |
+| D-EA-2 | **Same transaction, fail closed.** A record commits with its `meta.db` change. An action that changes nothing in `meta.db` (sign-in, SQL run, export, MCP call) records before it runs. A failed audit write fails the request. The `tracing` line follows the insert, as the transaction's last step. Unauthenticated failures are tracing lines only; a known account's failed sign-ins write at most one record a minute; a bulk request writes one record. | Best effort after commit (Langfuse): a crash or error leaves a change with no record. Outbox and relay: needless with one SQLite file. |
 | D-EA-3 | **Ids only, resolved on read (user).** Actor and target are ids. The API, UI and exports join the current name and email. An erased user reads as "Deleted user". | Snapshot the email (Langfuse Cloud): emails outlive erasure, and AGENTS.md forbids them. |
 | D-EA-4 | **A typed catalog.** One enum variant per action, with a dotted append-only name and typed details. It covers access, configuration, deletions and data leaving the product, not edits of the data itself. Every `target: "audit"` call site is replaced, or moved to its module's target. | Free-form strings (both competitors): unfilterable and unreviewable. Logging every mutation generically (LangWatch): it records args, which leak secrets. |
 | D-EA-5 | **Allow-listed details, no snapshots.** Changes record field names, plus old and new values only for roles, scopes, flags and limits. A test refuses secret- or email-like field names. | Whole before/after objects: leaked a private key at LangWatch (H2). |
@@ -308,7 +313,15 @@ The base URL is one for all orgs: `<public_url>/scim/v2`. The bearer token names
 | D-EA-17 | **Cloud SCIM on the cell, domains from Q (user).** The org token carries `sso_domains`, used by the cell for SCIM only. A request to track Q. | Self-hosted only at first: Enterprise cloud orgs wait. SCIM on the control plane: much new Q work, and the cell still has to apply it. |
 | D-EA-18 | **SCIM only while enabled (user).** A member is managed while an active SCIM row links to them. JIT is off, invitations to verified-domain emails are refused, and manual role changes, override changes and removals of managed members are refused (`scim_managed`). Disabling SCIM or a lapse of `scim` lifts the locks and keeps every role. | Keep both (the IdP overwrites manual changes on the next push): roles flip silently. |
 | D-EA-19 | **Lapses never widen access (user, D-P-8).** Recording continues; reads, exports and the stream stop; SCIM accepts removals and lowering changes, and refuses creates, reactivations and raises. Features `audit_log` and `scim` (`ee`; Enterprise, licence). | SCIM fully off when lapsed: IdP deprovisions would not reach cetra. |
+| D-EA-24 | **Recompute in the same transaction (M6 P-2).** Every change that can affect a managed member's roles recomputes them in its transaction: group membership, group deletion, mapping change, default-role change, linking and reactivation. A linked existing member is recomputed at once, replacing M5's "SCIM never changes an existing role". | Recompute on group changes only: a mapping or a link would leave stale roles until the next group push. |
+| D-EA-25 | **Default-role changes recompute, while SCIM is on (M6 P-3, P-6).** A change of the default role recomputes the org's active managed members. Mapping and default-role recomputes run only while SCIM is enabled; turning SCIM on again recomputes nothing. | The default role affects new members only: unmapped members would keep a role the owner has since changed. |
+| D-EA-26 | **Raises and lowerings by effective access (M6 P-5).** A change is judged by the effective project role before and after, with `none` < `viewer` < `member` < `admin`. Removing a `none` override is a raise; adding one is a lowering. A lapsed org applies lowerings and skips raises. | Rank of the stored override: the stored value does not say what access the member has. |
+| D-EA-27 | **cetra's account email is `userName` (M5 fix).** Incoming `emails` are ignored, never refused, since Entra's UPN and mail often differ. | Refuse a mismatch: Entra ID would fail to provision users whose UPN and mail differ. |
+| D-EA-28 | **An account SCIM disabled is re-enabled (M5 fix).** When the IdP creates or reactivates the user, an account that SCIM disabled is enabled again, even after the SCIM row was deleted (`scim_disabled_accounts`). An account an instance admin disabled stays refused. | Refuse every disabled account: the IdP could not reactivate a user that SCIM itself deprovisioned. |
 | D-EA-20 | **`seq` is the cursor.** `audit_events.seq` (`INTEGER PRIMARY KEY AUTOINCREMENT`, commit order under `meta.db`'s single writer) orders paging, exports and the stream. The UUIDv7 `id` is the public id. | UUIDv7 as cursor: not ordered within a millisecond and exposed to clock steps, so a stream could skip records. `at` as cursor: same problem. |
+| D-EA-21 | **Recorded beyond the list in § Event catalog.** Score definitions; backfills, which send history to a provider; prompt versions and labels (label names are configuration identifiers such as `production`, so D-EA-5 allows them); manual resumes of online rules, and worker pauses and resumes of online rules, recorded with actor `system`. Issue-source pauses and resumes stay plain `info` lines. This applies D-EA-6's rule to cases the list did not cover. | Record every data edit: D-EA-4 covers access and configuration, not data. Record no worker change: a rule paused by a breaker would leave no record of the pause. |
+| D-EA-22 | **MCP tool calls are recorded when they name a project (P-3).** The record carries the PAT, the IP, the user agent and the tool name, and is written before the tool reads; `query_sql` adds the SHA-256 of its query. `list_projects` names no project and is not recorded. MCP tools called by the in-app assistant are not recorded: only real MCP calls, over `/mcp`, are. | Record `list_projects`: a listing of the caller's own projects that would only grow the log. |
+| D-EA-23 | **SQL runs by demo-org visitors are not recorded (P-4).** The demo org is public and its visitors are anonymous, so a record would have no accountable actor and would only grow the table. | Record demo visitors: anonymous visitors on a public org would fill the table. |
 
 ## Milestones
 
@@ -318,7 +331,7 @@ Recording comes first because it is core and replaces existing code. It is split
 
 - **Delivers:**
   - the `audit_events` table (`seq` cursor) and `audit::record`, in the change's transaction or before the action;
-  - the catalog for sign-in, orgs and projects, members, invites and overrides, credentials, SSO and instance events, with those call sites replaced and the gaps filled: logout, signup, session revocation, invite revoked, overrides, org and project create and rename, licence install, and the old and new role on role changes;
+  - the catalog for sign-in, orgs and projects, members, invites and overrides, credentials, SSO, instance events and deletions, with those call sites replaced and the gaps filled: logout, signup, session revocation, invite revoked, overrides, org and project create and rename, licence install, and the old and new role on role changes;
   - IP and user agent on every request-driven record;
   - unauthenticated failures kept as tracing lines;
   - the retention key and the hourly purge, the org-drop deletion, and clearing IP and user agent on user deletion;
@@ -330,7 +343,7 @@ Recording comes first because it is core and replaces existing code. It is split
 ### M2 — Audit catalog completion
 
 - **Delivers:**
-  - the catalog for project objects, deletions and data leaving the product (SQL runs, exports, MCP tool calls, recorded before they run);
+  - the catalog for project objects and data leaving the product (SQL runs, exports, MCP tool calls, recorded before they run);
   - the catalog is one enum split into a module per group, so M2 and M5 add variants in different files;
   - one record per bulk request;
   - the remaining `target: "audit"` lines either replaced, or moved to their module's target when they are data edits.
@@ -385,7 +398,7 @@ Recording comes first because it is core and replaces existing code. It is split
   - the Groups resource;
   - group mappings to org and project roles, and their UI;
   - recomputation of roles on every change, with the seat rule for group raises;
-  - recorded Okta and Entra validator fixtures replayed in tests;
+  - Okta and Entra ID request fixtures, written from the vendors' documented request shapes and replayed in tests. They are not captured from vendor validator runs; capturing real runs is a follow-up;
   - docs pages for setting up Okta and Entra ID;
   - the CHANGELOG entry and the website rows.
 - **Depends on:** M5.

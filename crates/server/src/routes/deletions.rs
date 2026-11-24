@@ -14,13 +14,15 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::{FieldError, Page, PageParams, ProblemCode};
 use crate::api::deletions::{
     CreateDeletion, Deletion, DeletionActor, DeletionActorKind, DeletionFailure, DeletionFilter,
     DeletionKind, DeletionPreview, DeletionPreviewRequest, DeletionStatus, DropParams,
 };
+use crate::audit::catalog::DeletionAction;
+use crate::audit::{self, Ctx, Event, TargetKind};
 use crate::auth::OrgRole;
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm};
@@ -169,6 +171,7 @@ async fn drop_project(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: Ctx,
     error::Query(params): error::Query<DropParams>,
 ) -> Result<(StatusCode, error::Json<Deletion>), ApiError> {
     let user_id = principal::session_user(&principal)?.id;
@@ -208,21 +211,20 @@ async fn drop_project(
                 if !mark_project_deleting(conn, project, now).await? {
                     return Err(MetaError::Conflict("the project is already being deleted"));
                 }
-                store::insert_deletion(conn, &new).await
+                let row = store::insert_deletion(conn, &new).await?;
+                let event = Event::new(DeletionAction::Requested {
+                    kind: store::DeletionKind::Project.as_str(),
+                    follow_up_of: None,
+                })
+                .org(org)
+                .project(project)
+                .target(TargetKind::Deletion, id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
     state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        kind = store::DeletionKind::Project.as_str(),
-        org_id = %org,
-        project_id = %project,
-        actor_kind = store::ActorKind::User.as_str(),
-        actor_id = %user_id,
-        "deletion requested"
-    );
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 
@@ -233,6 +235,7 @@ async fn drop_org(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: Ctx,
     error::Query(params): error::Query<DropParams>,
 ) -> Result<(StatusCode, error::Json<Deletion>), ApiError> {
     let user_id = principal::session_user(&principal)?.id;
@@ -242,12 +245,16 @@ async fn drop_org(
             "type the organization slug to confirm",
         ));
     }
-    let row =
-        crate::deletion::request_org_drop(&state, &access.org, (store::ActorKind::User, user_id))
-            .await?
-            .ok_or(MetaError::Conflict(
-                "the organization is already being deleted",
-            ))?;
+    let row = crate::deletion::request_org_drop(
+        &state,
+        &access.org,
+        (store::ActorKind::User, user_id),
+        &ctx,
+    )
+    .await?
+    .ok_or(MetaError::Conflict(
+        "the organization is already being deleted",
+    ))?;
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
 }
 
@@ -255,6 +262,7 @@ async fn create_deletion(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: Ctx,
     error::Json(body): error::Json<CreateDeletion>,
 ) -> Result<(StatusCode, error::Json<Deletion>), ApiError> {
     let is_key = matches!(principal, Principal::ApiKey { .. });
@@ -373,25 +381,23 @@ async fn create_deletion(
                 }
                 let row = store::insert_deletion(conn, &new).await?;
                 store::insert_traces(conn, id, &scope).await?;
+                let event = Event::new(DeletionAction::Requested {
+                    kind: kind.as_str(),
+                    follow_up_of: None,
+                })
+                .org(org)
+                .project(project)
+                .target(TargetKind::Deletion, id);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(row)
             })
         })
         .await?;
 
     state.deletions.wake.notify_one();
-    tracing::info!(
-        target: "audit",
-        deletion_id = %id,
-        kind = kind.as_str(),
-        org_id = %org,
-        project_id = %project,
-        actor_kind = actor_kind.as_str(),
-        actor_id = %actor_id,
-        "deletion requested"
-    );
     record(
         &state,
-        &Event::DeletionRequested,
+        &CatalogEvent::DeletionRequested,
         &Actor::project(&principal, &access),
     );
     Ok((StatusCode::ACCEPTED, error::Json(deletion_json(&row))))
@@ -505,7 +511,7 @@ fn actor(principal: &Principal) -> Result<(store::ActorKind, Uuid), ApiError> {
             Ok((store::ActorKind::User, user.id))
         }
         Principal::ApiKey { key_id, .. } => Ok((store::ActorKind::ApiKey, *key_id)),
-        Principal::ControlPlane { .. } => Err(ApiError::NotFound),
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::NotFound),
     }
 }
 
@@ -1257,6 +1263,14 @@ mod tests {
         assert_eq!(guard.blocking(project, B.parse().unwrap(), &[], now), None);
     }
 
+    /// The `details` of every `deletion.requested` record.
+    async fn requested_details(app: &TestApp) -> Vec<String> {
+        sqlx::query_scalar("SELECT details FROM audit_events WHERE action = 'deletion.requested'")
+            .fetch_all(app.state.meta.reader())
+            .await
+            .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn request_audit_log_has_no_scope() {
         let app = TestApp::new().await;
@@ -1272,7 +1286,9 @@ mod tests {
         ))
         .await;
         assert_eq!(response.status, StatusCode::ACCEPTED);
-        assert!(logs.contains("deletion requested"));
+        let details = requested_details(&app).await;
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert!(!details[0].contains("secret-user-1"));
         assert!(!logs.contains("secret-user-1"));
     }
 
@@ -1759,7 +1775,9 @@ mod tests {
         let path = format!("/api/v1/projects/{}?confirm=secret-slug-1", secret.id);
         let (response, logs) = capture_logs(send(&app, Method::DELETE, &path, &owner, None)).await;
         assert_eq!(response.status, StatusCode::ACCEPTED);
-        assert!(logs.contains("deletion requested"));
+        let details = requested_details(&app).await;
+        assert_eq!(details.len(), 1, "{details:?}");
+        assert!(!details[0].contains("secret-slug-1"));
         assert!(!logs.contains("secret-slug-1"));
     }
 

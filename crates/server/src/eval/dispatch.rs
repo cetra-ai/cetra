@@ -17,6 +17,8 @@ use uuid::Uuid;
 use super::execute::{self, ClaimedJob};
 use super::{EvalQueue, budget, lock};
 use crate::api::evaluators::EvaluatorKind;
+use crate::audit::catalog::OnlineRuleAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::entitlements::Visibility;
 use crate::http::AppState;
 use crate::meta::MetaError;
@@ -543,17 +545,27 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
     let cleared = state
         .meta
         .write(move |conn| {
-            Box::pin(async move { online_rules::clear_budget_pauses(conn, day, month, now).await })
+            Box::pin(async move {
+                let cleared = online_rules::clear_budget_pauses(conn, day, month, now).await?;
+                for rule in &cleared {
+                    // Only rules that still exist have a scope; a deleted one records nothing.
+                    if let Some((org, project)) = audit::scope_of_rule(conn, *rule).await? {
+                        let action = OnlineRuleAction::Resumed {
+                            reason: "budget period",
+                        };
+                        let event = Event::new(action)
+                            .org(org)
+                            .project(project)
+                            .target(TargetKind::OnlineRule, *rule);
+                        audit::record(conn, &audit::Ctx::system(), event, now).await?;
+                    }
+                }
+                Ok(cleared)
+            })
         })
         .await?;
     for rule in &cleared {
         state.eval.budgets.forget(*rule);
-        tracing::info!(
-            target: "audit",
-            rule_id = %rule,
-            reason = "budget period",
-            "online rule resumed"
-        );
     }
     if !cleared.is_empty() {
         state.eval.wake();
@@ -565,12 +577,7 @@ pub(crate) async fn budget_once(state: &AppState, now: i64) -> Result<usize, Met
         })
         .await?;
     if sources > 0 {
-        tracing::info!(
-            target: "audit",
-            sources,
-            reason = "budget period",
-            "issue sources resumed"
-        );
+        tracing::info!(sources, reason = "budget period", "issue sources resumed");
         state.issues_wake();
     }
     Ok(cleared.len())
@@ -1600,6 +1607,66 @@ mod tests {
             .expect("rule");
         assert_eq!(turned_row.paused_reason, None);
         assert_eq!(today_row.paused_reason.as_deref(), Some("budget"));
+    }
+
+    #[tokio::test]
+    async fn budget_period_resume_is_recorded_by_system() {
+        let (app, seeded) = seeded_app(16).await;
+        let evaluator = check(&app, &seeded).await;
+        let turned = rule(&app, &seeded, evaluator).await;
+        let now = app.state.clock.now_ns();
+        app.state
+            .meta
+            .write(move |conn| {
+                Box::pin(async move {
+                    sqlx::query(
+                        "UPDATE online_rules SET budget_usd = 5, budget_period = 'day', \
+                         paused_reason = 'budget', paused_at = 0 WHERE id = ?",
+                    )
+                    .bind(turned.to_string())
+                    .execute(&mut *conn)
+                    .await
+                    .map_err(MetaError::from)?;
+                    Ok(())
+                })
+            })
+            .await
+            .expect("pause the rule on a turned budget day");
+
+        assert_eq!(budget_once(&app.state, now).await.expect("budget"), 1);
+
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(
+            String,
+            Option<String>,
+            Option<String>,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT actor_kind, org_id, project_id, target_kind, target_id, details \
+                 FROM audit_events WHERE action = 'online_rule.resumed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .expect("read the audit rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (actor_kind, org_id, project_id, target_kind, target_id, details) = &rows[0];
+        assert_eq!(actor_kind, "system");
+        assert_eq!(
+            project_id.as_deref(),
+            Some(seeded.project.id.to_string().as_str())
+        );
+        let project_org: String = sqlx::query_scalar("SELECT org_id FROM projects WHERE id = ?")
+            .bind(seeded.project.id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .expect("read the project's org");
+        assert_eq!(org_id.as_deref(), Some(project_org.as_str()));
+        assert_eq!(target_kind, "online_rule");
+        assert_eq!(target_id, &turned.to_string());
+        let details: Value = serde_json::from_str(details).expect("details are JSON");
+        assert_eq!(details, json!({"reason": "budget period"}));
     }
 
     #[tokio::test]

@@ -24,12 +24,20 @@ pub(crate) const MAX_RECIPIENTS: usize = 20;
 pub(crate) const MAX_URL_BYTES: usize = 2048;
 /// Longest header value, in bytes.
 pub(crate) const MAX_HEADER_VALUE_BYTES: usize = 1024;
-/// Header names the server sets itself; a channel may not set them (lower case).
+/// Header names the server or the transport sets itself; a channel may not set them (lower case).
 pub(crate) const RESERVED_HEADERS: &[&str] = &[
     "content-type",
     "content-length",
     "host",
     "user-agent",
+    "connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
     "x-cetra-signature",
     "x-cetra-delivery",
 ];

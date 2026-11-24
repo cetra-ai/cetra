@@ -9,10 +9,12 @@ use cetra_core::ids::OrgId;
 use uuid::Uuid;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::account::{CreateProjectRequest, OrgRole, Project, UpdateProjectRequest};
 use crate::api::common::{FieldError, Page, PageParams};
+use crate::audit::catalog::ProjectAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectPerm, Role};
 use crate::entitlements::{over_limit, plan_limit};
@@ -132,6 +134,7 @@ async fn create_project(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateProjectRequest>,
 ) -> Result<Response, ApiError> {
     let name = trimmed_name(&body.name)?;
@@ -169,6 +172,16 @@ async fn create_project(
                         .await
                     }
                 }?;
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(ProjectAction::Created)
+                        .org(org_id)
+                        .project(project.id)
+                        .target(TargetKind::Project, project.id),
+                    now,
+                )
+                .await?;
                 Ok(ProjectCreate::Created(project))
             })
         })
@@ -182,7 +195,7 @@ async fn create_project(
     // CreateProject requires an org admin, whose effective project role is admin.
     record(
         &state,
-        &Event::ProjectCreated,
+        &CatalogEvent::ProjectCreated,
         &Actor::org(&principal, &access),
     );
     Ok((
@@ -216,9 +229,10 @@ async fn update_project(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<UpdateProjectRequest>,
 ) -> Result<error::Json<Project>, ApiError> {
-    let actor_id = principal::session_user(&principal)?.id;
+    principal::session_user(&principal)?;
     let name = match body.name {
         None => None,
         Some(name) => Some(trimmed_name(&name)?),
@@ -239,14 +253,47 @@ async fn update_project(
         .trace_completion_timeout_s
         .map(checked_timeout)
         .transpose()?;
+    let org_id = access.project.org_id;
     let id = access.project.id;
     let role = access.role;
     let now = state.clock.now_ns();
-    let retention = retention_days;
     state
         .meta
         .write(move |conn| {
             Box::pin(async move {
+                // The old values are read in this write transaction, so each record states the
+                // change this request made. The timeout is stored in `settings`, read as
+                // `project_by_id` reads it.
+                let old: Option<(String, Option<i64>, Option<i64>)> = sqlx::query_as(
+                    "SELECT name, retention_days, \
+                     CAST(CASE WHEN json_valid(settings) AND json_type(settings) = 'object' \
+                     THEN json_extract(settings, '$.trace_completion_timeout_s') END AS INTEGER) \
+                     FROM projects WHERE id = ?",
+                )
+                .bind(id.to_string())
+                .fetch_optional(&mut *conn)
+                .await
+                .map_err(crate::meta::MetaError::from)?;
+                // No row: the update would change nothing, so there is nothing to record.
+                let Some((old_name, old_retention, old_timeout)) = old else {
+                    return Ok(());
+                };
+                let old_retention = old_retention.and_then(|days| u32::try_from(days).ok());
+                let old_timeout = old_timeout
+                    .and_then(|seconds| u32::try_from(seconds).ok())
+                    .filter(|seconds| {
+                        (COMPLETION_TIMEOUT_MIN_S..=COMPLETION_TIMEOUT_MAX_S).contains(seconds)
+                    });
+                // The old and new value of each setting the request changes (retention is
+                // `Option<Option<u32>>`, outer `None` = unchanged).
+                let name_changed = name.as_ref().is_some_and(|new| *new != old_name);
+                let retention_change = match retention_days {
+                    Some(new) if new != old_retention => Some((old_retention, new)),
+                    _ => None,
+                };
+                let timeout_change = timeout
+                    .filter(|new| Some(*new) != old_timeout)
+                    .map(|new| (old_timeout, Some(new)));
                 projects::update_project(
                     conn,
                     id,
@@ -257,19 +304,52 @@ async fn update_project(
                     },
                     now,
                 )
-                .await
+                .await?;
+                if name_changed {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(ProjectAction::Renamed)
+                            .org(org_id)
+                            .project(id)
+                            .target(TargetKind::Project, id),
+                        now,
+                    )
+                    .await?;
+                }
+                if let Some((old_days, new_days)) = retention_change {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(ProjectAction::RetentionChanged { old_days, new_days })
+                            .org(org_id)
+                            .project(id)
+                            .target(TargetKind::Project, id),
+                        now,
+                    )
+                    .await?;
+                }
+                if let Some((old_seconds, new_seconds)) = timeout_change {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(ProjectAction::CompletionTimeoutChanged {
+                            old_seconds,
+                            new_seconds,
+                        })
+                        .org(org_id)
+                        .project(id)
+                        .target(TargetKind::Project, id),
+                        now,
+                    )
+                    .await?;
+                }
+                Ok(())
             })
         })
         .await?;
-    if let Some(retention) = retention {
-        let text = retention.map_or_else(|| "none".to_owned(), |days| days.to_string());
-        tracing::info!(target: "audit", project_id = %id, actor_id = %actor_id, retention_days = %text, "retention changed");
-        if let Some(days) = retention {
-            crate::retention::apply_now(&state, id, days).await;
-        }
-    }
-    if let Some(seconds) = timeout {
-        tracing::info!(target: "audit", project_id = %id, actor_id = %actor_id, seconds, "trace completion timeout changed");
+    if let Some(Some(days)) = retention_days {
+        crate::retention::apply_now(&state, id, days).await;
     }
     let Some(project) = projects::project_by_id(state.meta.reader(), id).await? else {
         return Err(ApiError::NotFound);
@@ -372,7 +452,21 @@ mod tests {
     use crate::auth::session::start_session;
     use crate::meta::members::{add_org_member, set_project_override};
     use crate::meta::users::{NewUser, insert_user};
-    use crate::test_support::{Seeded, TestApp, capture_logs, dataset_span, set_limits};
+    use crate::test_support::{Seeded, TestApp, dataset_span, set_limits};
+
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, serde_json::Value)> {
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
+    }
 
     #[test]
     fn only_a_set_retention_needs_the_entitlement() {
@@ -910,36 +1004,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn project_create_is_recorded() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        app.request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await;
+        let created: Project = app
+            .request(Method::POST, "/api/v1/orgs/acme/projects")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Support bot" }))
+            .send()
+            .await
+            .json();
+
+        let rows = audit_rows(&app, "project.created").await;
+        assert_eq!(
+            rows,
+            vec![(Some(created.id.to_string()), serde_json::json!({}))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_over_limit_create_records_nothing() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let org: OrgMembership = app
+            .request(Method::POST, "/api/v1/orgs")
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Acme", "slug": "acme" }))
+            .send()
+            .await
+            .json();
+        let create = |name: &'static str| {
+            app.request(Method::POST, "/api/v1/orgs/acme/projects")
+                .header(header::COOKIE.as_str(), &ada)
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+        };
+        assert_eq!(create("one").await.status, 201);
+        set_limits(
+            &app,
+            org.id,
+            "2026-01-01T00:00:00Z",
+            &serde_json::json!({"max_projects": 1}),
+        );
+        assert_eq!(create("two").await.status, 403);
+
+        assert_eq!(audit_rows(&app, "project.created").await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_timeout_change_is_audited() {
         let app = TestApp::new().await;
-        let (user_id, ada) = signed_in(&app, "ada@example.com").await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
         let created = support_bot(&app, &ada).await;
         let path = format!("/api/v1/projects/{}", created.id);
 
-        let (status, logs) = capture_logs(async {
-            app.request(Method::PATCH, &path)
-                .header(header::COOKIE.as_str(), &ada)
-                .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
-                .send()
-                .await
-                .status
-        })
-        .await;
+        let status = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "trace_completion_timeout_s": 120 }))
+            .send()
+            .await
+            .status;
         assert_eq!(status, 200);
-        assert!(logs.contains("trace completion timeout changed"), "{logs}");
-        assert!(logs.contains(&user_id.to_string()), "{logs}");
+        assert_eq!(
+            audit_rows(&app, "project.completion_timeout_changed").await,
+            vec![(
+                Some(created.id.to_string()),
+                serde_json::json!({ "old_seconds": null, "new_seconds": 120 })
+            )]
+        );
 
-        let (status, logs) = capture_logs(async {
-            app.request(Method::PATCH, &path)
-                .header(header::COOKIE.as_str(), &ada)
-                .json(&serde_json::json!({ "name": "Renamed" }))
-                .send()
-                .await
-                .status
-        })
-        .await;
+        let status = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "name": "Renamed" }))
+            .send()
+            .await
+            .status;
         assert_eq!(status, 200);
-        assert!(!logs.contains("trace completion timeout changed"), "{logs}");
+        assert_eq!(audit_rows(&app, "project.renamed").await.len(), 1);
+        assert_eq!(
+            audit_rows(&app, "project.completion_timeout_changed")
+                .await
+                .len(),
+            1
+        );
+        assert!(
+            audit_rows(&app, "project.retention_changed")
+                .await
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1066,37 +1225,38 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn patch_logs_the_change() {
+    async fn patch_records_the_change() {
         let app = TestApp::new().await;
         app.state.clock.set(NOW);
         let seeded = app.seed().await;
         let path = format!("/api/v1/projects/{}", seeded.project.id);
 
-        let (status, logs) = capture_logs(async {
-            app.request(Method::PATCH, &path)
-                .header(header::COOKIE.as_str(), &seeded.cookie)
-                .json(&serde_json::json!({ "retention_days": 7 }))
-                .send()
-                .await
-                .status
-        })
-        .await;
+        let status = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&serde_json::json!({ "retention_days": 7 }))
+            .send()
+            .await
+            .status;
         assert_eq!(status, 200);
-        assert!(logs.contains("retention changed"), "{logs}");
-        assert!(logs.contains("retention_days=7"), "{logs}");
-        assert!(logs.contains("audit"), "{logs}");
+        assert_eq!(
+            audit_rows(&app, "project.retention_changed").await,
+            vec![(
+                Some(seeded.project.id.to_string()),
+                serde_json::json!({ "old_days": null, "new_days": 7 })
+            )]
+        );
 
-        let (status, logs) = capture_logs(async {
-            app.request(Method::PATCH, &path)
-                .header(header::COOKIE.as_str(), &seeded.cookie)
-                .json(&serde_json::json!({ "name": "x" }))
-                .send()
-                .await
-                .status
-        })
-        .await;
+        let status = app
+            .request(Method::PATCH, &path)
+            .header(header::COOKIE.as_str(), &seeded.cookie)
+            .json(&serde_json::json!({ "name": "x" }))
+            .send()
+            .await
+            .status;
         assert_eq!(status, 200);
-        assert!(!logs.contains("retention changed"), "{logs}");
+        assert_eq!(audit_rows(&app, "project.renamed").await.len(), 1);
+        assert_eq!(audit_rows(&app, "project.retention_changed").await.len(), 1);
     }
 
     /// Sends `PATCH retention_days: 30` to a project of org `acme`, after the org holds a

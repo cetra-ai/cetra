@@ -27,7 +27,9 @@ import { atLeast, type OrgRole } from "@/lib/roles";
 
 /** The org settings the role may open, as the sidebar and the palette list them. */
 export function visibleOrgNav(role: OrgRole | undefined) {
-  return orgSettingsNav.filter((item) => !item.ownerOnly || role === "owner");
+  return orgSettingsNav.filter(
+    (item) => (!item.ownerOnly || role === "owner") && (!item.adminOnly || atLeast(role, "admin")),
+  );
 }
 
 /** The project settings the role may open, as the sidebar and the palette list them. */

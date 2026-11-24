@@ -525,7 +525,7 @@ fn owner(principal: &Principal) -> Result<StreamOwner, ApiError> {
             Ok(StreamOwner::User(user.id))
         }
         Principal::ApiKey { key_id, .. } => Ok(StreamOwner::Key(*key_id)),
-        Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::Forbidden {
             code: ProblemCode::Forbidden,
         }),
     }

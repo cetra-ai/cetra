@@ -15,6 +15,8 @@ export const OAUTH_ERROR_CODES = [
   "seat_limit",
   "sso_unavailable",
   "sso_required",
+  "saml_invalid",
+  "saml_unsupported",
 ] as const;
 
 export type OAuthErrorCode = (typeof OAUTH_ERROR_CODES)[number];

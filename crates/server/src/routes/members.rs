@@ -1,7 +1,7 @@
 //! Org members and per-project overrides (spec 08, D139).
 #![cfg_attr(not(test), allow(dead_code))]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::extract::{Extension, State};
 use axum::http::StatusCode;
@@ -14,8 +14,11 @@ use crate::api::common::{Page, PageParams, ProblemCode};
 use crate::api::members::{
     MemberUser, OrgMember, ProjectMember, ProjectRoleOverride, UpdateOrgMemberRequest,
 };
+use crate::audit::catalog::MemberAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{self, OrgPerm, ProjectOverride, ProjectPerm, Role};
+use crate::ee::scim::store as scim_store;
 use crate::entitlements::{over_limit, plan_limit};
 use crate::http::AppState;
 use crate::http::access::{Access, OrgAccess, ProjectAccess, RouteDef};
@@ -81,6 +84,8 @@ pub(crate) enum MemberChange {
     Done,
     Missing,
     Forbidden,
+    /// The member is managed by the org's identity provider (D-EA-18).
+    ScimManaged,
 }
 
 enum RoleChange {
@@ -89,6 +94,8 @@ enum RoleChange {
     Forbidden,
     /// The org's seat limit, which the new role would exceed.
     OverLimit(u64),
+    /// The member is managed by the org's identity provider (D-EA-18).
+    ScimManaged,
 }
 
 async fn list_org_members(
@@ -97,13 +104,15 @@ async fn list_org_members(
     error::Query(params): error::Query<PageParams>,
 ) -> Result<error::Json<Page<OrgMember>>, ApiError> {
     let members = members::org_members(state.meta.reader(), access.org.id).await?;
+    let managed = scim_managed_ids(&state, access.org.id).await?;
     let rows = members
         .into_iter()
         .map(|member| {
+            let scim_managed = managed.contains(&member.user.id);
             (
                 member.user.email.clone(),
                 member.user.id.to_string(),
-                org_member(&member),
+                org_member(&member, scim_managed),
             )
         })
         .collect();
@@ -118,6 +127,7 @@ async fn update_org_member(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
     error::Json(body): error::Json<UpdateOrgMemberRequest>,
 ) -> Result<error::Json<OrgMember>, ApiError> {
@@ -127,6 +137,7 @@ async fn update_org_member(
     let role = body.role;
     let now = state.clock.now_ns();
     let limits_state = state.clone();
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -140,6 +151,9 @@ async fn update_org_member(
                 let Some(target_role) = members::org_role_tx(conn, org_id, target).await? else {
                     return Ok(RoleChange::Missing);
                 };
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(RoleChange::ScimManaged);
+                }
                 if !may_set_role(actor_role, target_role, role) {
                     return Ok(RoleChange::Forbidden);
                 }
@@ -166,6 +180,21 @@ async fn update_org_member(
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
+                // Setting the role a member already has changes nothing, so it records nothing.
+                if target_role != role {
+                    audit::record(
+                        conn,
+                        &ctx,
+                        Event::new(MemberAction::RoleChanged {
+                            old_role: roles::org_role_str(target_role),
+                            new_role: roles::org_role_str(role),
+                        })
+                        .org(org_id)
+                        .target(TargetKind::User, target),
+                        now,
+                    )
+                    .await?;
+                }
                 Ok(RoleChange::Done)
             })
         })
@@ -175,27 +204,25 @@ async fn update_org_member(
         RoleChange::Missing => return Err(ApiError::NotFound),
         RoleChange::Forbidden => return Err(forbidden()),
         RoleChange::OverLimit(limit) => return Err(plan_limit(limit, ("seat", "seats"))),
+        RoleChange::ScimManaged => return Err(ApiError::ScimManaged),
     }
-    tracing::info!(
-        target: "audit",
-        org_id = %org_id,
-        actor_id = %actor,
-        target_id = %target,
-        "member role changed"
-    );
+    let managed = scim_managed_ids(&state, org_id).await?;
     let member = find_member(&state, org_id, target).await?;
-    Ok(error::Json(org_member(&member)))
+    Ok(error::Json(org_member(&member, managed.contains(&target))))
 }
 
 async fn remove_org_member(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Path(UserPath { user: target }): error::Path<UserPath>,
 ) -> Result<StatusCode, ApiError> {
     let user = principal::session_user(&principal)?;
     let actor = user.id;
     let org_id = access.org.id;
+    let now = state.clock.now_ns();
+    let locks = crate::ee::scim::locks(&state, org_id).await?;
     let outcome = state
         .meta
         .write(move |conn| {
@@ -209,6 +236,9 @@ async fn remove_org_member(
                 if actor != target && !may_remove_other(actor_role, target_role) {
                     return Ok(MemberChange::Forbidden);
                 }
+                if locks && scim_store::is_managed_tx(conn, org_id, target).await? {
+                    return Ok(MemberChange::ScimManaged);
+                }
                 members::remove_org_member(conn, org_id, target).await?;
                 // A disabled owner does not count: the org must keep one who can act.
                 if target_role == OrgRole::Owner
@@ -216,6 +246,17 @@ async fn remove_org_member(
                 {
                     return Err(MetaError::Conflict("an org needs an owner"));
                 }
+                audit::record(
+                    conn,
+                    &ctx,
+                    Event::new(MemberAction::Removed {
+                        role: roles::org_role_str(target_role),
+                    })
+                    .org(org_id)
+                    .target(TargetKind::User, target),
+                    now,
+                )
+                .await?;
                 Ok(MemberChange::Done)
             })
         })
@@ -224,14 +265,8 @@ async fn remove_org_member(
         MemberChange::Done => {}
         MemberChange::Missing => return Err(ApiError::NotFound),
         MemberChange::Forbidden => return Err(forbidden()),
+        MemberChange::ScimManaged => return Err(ApiError::ScimManaged),
     }
-    tracing::info!(
-        target: "audit",
-        org_id = %org_id,
-        actor_id = %actor,
-        target_id = %target,
-        "member removed"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -293,12 +328,25 @@ async fn find_member(
         .ok_or(ApiError::NotFound)
 }
 
-fn org_member(member: &MemberRow) -> OrgMember {
+fn org_member(member: &MemberRow, scim_managed: bool) -> OrgMember {
     OrgMember {
         user: member_user(member),
         role: member.role,
         joined_at: member.joined_at,
+        scim_managed,
     }
+}
+
+/// The ids of the org's members that its identity provider manages (D-EA-18). Empty unless
+/// SCIM locks the org, so the list costs one query only while it does.
+async fn scim_managed_ids(
+    state: &AppState,
+    org: cetra_core::ids::OrgId,
+) -> Result<HashSet<Uuid>, ApiError> {
+    if !crate::ee::scim::locks(state, org).await? {
+        return Ok(HashSet::new());
+    }
+    Ok(scim_store::managed_user_ids(state.meta.reader(), org).await?)
 }
 
 pub(crate) fn project_member(member: &MemberRow, stored: Option<ProjectOverride>) -> ProjectMember {
@@ -413,6 +461,20 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    /// `(target_id, details)` of every audit row with `action`, oldest first.
+    async fn audit_rows(app: &TestApp, action: &str) -> Vec<(Option<String>, Value)> {
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT target_id, details FROM audit_events WHERE action = ? ORDER BY seq",
+        )
+        .bind(action)
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        rows.into_iter()
+            .map(|(target, details)| (target, serde_json::from_str(&details).unwrap()))
+            .collect()
     }
 
     async fn create_org(app: &TestApp, cookie: &str, name: &str) -> OrgMembership {
@@ -533,6 +595,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setting_the_current_role_records_nothing() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+
+        let unchanged = app
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/orgs/acme/members/{member_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .json(&serde_json::json!({ "role": "member" }))
+            .send()
+            .await;
+        assert_eq!(unchanged.status, 200);
+        assert!(audit_rows(&app, "member.role_changed").await.is_empty());
+    }
+
+    #[tokio::test]
     async fn roles_follow_the_ceiling_and_keep_an_owner() {
         let app = TestApp::new().await;
         let (ada_id, ada) = signed_in(&app, "ada@example.com").await;
@@ -559,7 +642,13 @@ mod tests {
         let promoted: OrgMember = promoted.json();
         assert_eq!(promoted.role, OrgRole::Admin);
         assert_eq!(promoted.user.email, "member@example.com");
-        assert!(logs.contains("member role changed"));
+        assert_eq!(
+            audit_rows(&app, "member.role_changed").await,
+            vec![(
+                Some(member_id.to_string()),
+                serde_json::json!({ "old_role": "member", "new_role": "admin" })
+            )]
+        );
         assert!(!logs.contains("member@example.com"));
         assert!(!logs.contains("admin@example.com"));
         let body: Value = serde_json::to_value(&promoted).unwrap();
@@ -685,6 +774,50 @@ mod tests {
             stuck.problem().detail.as_deref(),
             Some("an org needs an owner")
         );
+    }
+
+    #[tokio::test]
+    async fn removal_is_recorded_with_the_role() {
+        let app = TestApp::new().await;
+        let (_, ada) = signed_in(&app, "ada@example.com").await;
+        let (member_id, _) = signed_in(&app, "member@example.com").await;
+        let org = create_org(&app, &ada, "Acme").await;
+        add_member(&app, org.id, member_id, OrgRole::Member).await;
+
+        let removed = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{member_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(removed.status, 204);
+        assert_eq!(
+            audit_rows(&app, "member.removed").await,
+            vec![(
+                Some(member_id.to_string()),
+                serde_json::json!({ "role": "member" })
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_last_owner_removal_records_nothing() {
+        let app = TestApp::new().await;
+        let (ada_id, ada) = signed_in(&app, "ada@example.com").await;
+        create_org(&app, &ada, "Acme").await;
+
+        let refused = app
+            .request(
+                Method::DELETE,
+                &format!("/api/v1/orgs/acme/members/{ada_id}"),
+            )
+            .header(header::COOKIE.as_str(), &ada)
+            .send()
+            .await;
+        assert_eq!(refused.status, 409);
+        assert!(audit_rows(&app, "member.removed").await.is_empty());
     }
 
     /// Review 2026-11-15 #5: a disabled owner counted toward the last-owner rule, so the only

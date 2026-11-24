@@ -54,6 +54,16 @@
     "file": "static/deletion-resolving.json"
   },
   {
+    "operation_id": "create_org_scim_token",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 201,
+    "content_type": "application/json",
+    "file": "static/scim-token-created.json"
+  },
+  {
     "operation_id": "delete_org",
     "path_params": {
       "org": "acme"
@@ -70,6 +80,14 @@
     "status": 202,
     "content_type": "application/json",
     "file": "static/deletion-project.json"
+  },
+  {
+    "operation_id": "get_admin_audit_stream",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/admin-audit-stream.json"
   },
   {
     "operation_id": "get_admin_license",
@@ -393,6 +411,16 @@
     "file": "responses/org-assistant.json"
   },
   {
+    "operation_id": "get_org_audit_stream",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-audit-stream.json"
+  },
+  {
     "operation_id": "get_org_entitlements",
     "path_params": {
       "org": "acme"
@@ -401,6 +429,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/org-entitlements.json"
+  },
+  {
+    "operation_id": "get_org_scim",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-scim.json"
   },
   {
     "operation_id": "get_org_sso",
@@ -828,6 +866,14 @@
     "file": "responses/users/user-7.json"
   },
   {
+    "operation_id": "list_admin_audit_events",
+    "path_params": {},
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/admin-audit-events.json"
+  },
+  {
     "operation_id": "list_admin_users",
     "path_params": {},
     "query": {},
@@ -1107,6 +1153,16 @@
     "file": "static/online-rules.json"
   },
   {
+    "operation_id": "list_org_audit_events",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-audit-events.json"
+  },
+  {
     "operation_id": "list_org_deletions",
     "path_params": {
       "org": "acme"
@@ -1145,6 +1201,16 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/org-model-prices.json"
+  },
+  {
+    "operation_id": "list_org_scim_groups",
+    "path_params": {
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/org-scim-groups.json"
   },
   {
     "operation_id": "list_orgs",
@@ -1616,6 +1682,17 @@
     "status": 200,
     "content_type": "application/json",
     "file": "static/deletion-preview.json"
+  },
+  {
+    "operation_id": "put_org_scim_group_mapping",
+    "path_params": {
+      "id": "01900000-0000-7000-8000-000000000a01",
+      "org": "acme"
+    },
+    "query": {},
+    "status": 200,
+    "content_type": "application/json",
+    "file": "static/scim-group.json"
   },
   {
     "operation_id": "put_prompt_label",

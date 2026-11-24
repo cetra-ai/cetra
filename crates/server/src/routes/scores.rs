@@ -146,7 +146,7 @@ fn project_writer(
             "api",
         )),
         Principal::ApiKey { key_id, .. } => Ok((Writer::Api { author: *key_id }, "api")),
-        Principal::ControlPlane { .. } => Err(ApiError::Forbidden {
+        Principal::ControlPlane { .. } | Principal::Scim { .. } => Err(ApiError::Forbidden {
             code: ProblemCode::Forbidden,
         }),
     }

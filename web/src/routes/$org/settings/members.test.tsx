@@ -76,10 +76,52 @@ it("opens a member's panel from its row and writes the id to the URL", async () 
   expect(within(form).getByRole("combobox")).toHaveTextContent("Member");
 });
 
+it("managed member controls are disabled with the reason", async () => {
+  server.use(
+    http.get("/api/v1/orgs/:org/members", () =>
+      HttpResponse.json({
+        data: [
+          {
+            user: ADA,
+            role: "owner",
+            joined_at: "2026-01-01T09:00:00.000000000Z",
+            scim_managed: false,
+          },
+          {
+            user: BOB,
+            role: "member",
+            joined_at: "2026-01-02T09:00:00.000000000Z",
+            scim_managed: true,
+          },
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+
+  const { form } = await openMember("bob@example.com");
+
+  expect(within(form).getByRole("combobox")).toBeDisabled();
+  expect(within(form).getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Remove…" })).toBeDisabled();
+  expect(screen.getAllByText("Managed by your identity provider").length).toBeGreaterThan(0);
+});
+
 it("opens a member's panel from the URL", async () => {
   await renderApp(`${MEMBERS}?open=${BOB_ID}`);
 
   expect(await screen.findByRole("form", { name: "Role of bob@example.com" })).toBeInTheDocument();
+});
+
+it("switching members keeps one role card", async () => {
+  const { user } = await openMember("bob@example.com");
+  const grid = screen.getByRole("grid", { name: "Members" });
+  const row = within(grid).getByRole("row", { name: /ada@example.com/ });
+  await user.click(within(row).getByText("ada@example.com"));
+
+  const form = await screen.findByRole("form", { name: "Role of ada@example.com" });
+  expect(screen.getAllByRole("form", { name: /^Role of / })).toHaveLength(1);
+  expect(within(form).getByRole("combobox")).toHaveTextContent("Owner");
 });
 
 it("filters members by name or email", async () => {

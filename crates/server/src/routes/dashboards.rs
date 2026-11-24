@@ -23,7 +23,7 @@ use cetra_core::time_serde::parse_rfc3339;
 use cetra_storage as storage;
 
 use crate::analytics::actor::Actor;
-use crate::analytics::catalog::Event;
+use crate::analytics::catalog::Event as CatalogEvent;
 use crate::analytics::record;
 use crate::api::common::{FieldError, Page};
 use crate::api::convert;
@@ -33,6 +33,8 @@ use crate::api::dashboards::{
     WidgetQueryResponse, WidgetShape,
 };
 use crate::api::metrics::{MetricsBucket, MetricsGroupBy};
+use crate::audit::catalog::DashboardAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::ProjectPerm;
 use crate::http::AppState;
@@ -397,10 +399,12 @@ async fn create_dashboard(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<CreateDashboard>,
 ) -> Result<Response, ApiError> {
     let user = principal::session_user(&principal)?.id;
     let project = access.project.id;
+    let org = access.project.org_id;
     let mut errors = Vec::new();
     let name = checked_name(&body.name, "name", &mut errors);
     // A blank description is no description (PATCH clears with "", spec 09).
@@ -415,7 +419,7 @@ async fn create_dashboard(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::insert(
+                let row = store::insert(
                     conn,
                     NewDashboard {
                         project_id: project,
@@ -426,14 +430,19 @@ async fn create_dashboard(
                     },
                     now,
                 )
-                .await
+                .await?;
+                let event = Event::new(DashboardAction::Created)
+                    .org(org)
+                    .project(project)
+                    .target(TargetKind::Dashboard, row.info.id);
+                audit::record(conn, &ctx, event, now).await?;
+                Ok(row)
             })
         })
         .await?;
-    tracing::info!(project_id = %project, dashboard_id = %row.info.id, "dashboard created");
     record(
         &state,
-        &Event::DashboardCreated,
+        &CatalogEvent::DashboardCreated,
         &Actor::project(&principal, &access),
     );
     Ok((StatusCode::CREATED, error::Json(Dashboard::from(row))).into_response())
@@ -443,11 +452,13 @@ async fn update_dashboard(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(path): error::Path<DashboardPath>,
     error::Json(body): error::Json<UpdateDashboard>,
 ) -> Result<error::Json<Dashboard>, ApiError> {
     let user = principal::session_user(&principal)?.id;
     let project = access.project.id;
+    let org = access.project.org_id;
     let mut errors = Vec::new();
     let name = body
         .name
@@ -477,17 +488,24 @@ async fn update_dashboard(
     let outcome = state
         .meta
         .write(move |conn| {
-            Box::pin(
-                async move { store::update(conn, project, id, version, changes, user, now).await },
-            )
+            Box::pin(async move {
+                let outcome = store::update(conn, project, id, version, changes, user, now).await?;
+                if let UpdateOutcome::Updated(_) = &outcome {
+                    let event = Event::new(DashboardAction::Updated)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Dashboard, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(outcome)
+            })
         })
         .await?;
     match outcome {
         UpdateOutcome::Updated(row) => {
-            tracing::info!(project_id = %project, dashboard_id = %id, "dashboard updated");
             record(
                 &state,
-                &Event::DashboardEdited,
+                &CatalogEvent::DashboardEdited,
                 &Actor::project(&principal, &access),
             );
             Ok(error::Json(Dashboard::from(row)))
@@ -503,16 +521,30 @@ async fn update_dashboard(
 async fn delete_dashboard(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Path(path): error::Path<DashboardPath>,
 ) -> Result<StatusCode, ApiError> {
     let project = access.project.id;
+    let org = access.project.org_id;
     let id = path.id;
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
-        .write(move |conn| Box::pin(async move { store::delete(conn, project, id).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                let deleted = store::delete(conn, project, id).await?;
+                if deleted {
+                    let event = Event::new(DashboardAction::Deleted)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Dashboard, id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(deleted)
+            })
+        })
         .await?;
     if deleted {
-        tracing::info!(project_id = %project, dashboard_id = %id, "dashboard deleted");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -538,10 +570,12 @@ async fn save_overview(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<SaveOverview>,
 ) -> Result<Response, ApiError> {
     let user = principal::session_user(&principal)?.id;
     let project = access.project.id;
+    let org = access.project.org_id;
     let mut errors = Vec::new();
     check_definition(&body.definition, "definition", &mut errors);
     refuse_if_any(errors)?;
@@ -553,14 +587,22 @@ async fn save_overview(
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                store::save_overview(conn, project, expected, &body.definition, user, now).await
+                let saved =
+                    store::save_overview(conn, project, expected, &body.definition, user, now)
+                        .await?;
+                if let OverviewSave::Saved { row, created } = &saved {
+                    let event = Event::new(DashboardAction::OverviewSaved { created: *created })
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Dashboard, row.info.id);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(saved)
             })
         })
         .await?;
     match saved {
         OverviewSave::Saved { row, created } => {
-            let dashboard_id = row.info.id;
-            tracing::info!(project_id = %project, dashboard_id = %dashboard_id, "overview saved");
             let status = if created {
                 StatusCode::CREATED
             } else {
@@ -568,7 +610,7 @@ async fn save_overview(
             };
             record(
                 &state,
-                &Event::DashboardEdited,
+                &CatalogEvent::DashboardEdited,
                 &Actor::project(&principal, &access),
             );
             Ok((status, error::Json(Dashboard::from(row))).into_response())
@@ -585,15 +627,26 @@ async fn save_overview(
 async fn reset_overview(
     State(state): State<AppState>,
     Extension(access): Extension<ProjectAccess>,
+    ctx: audit::Ctx,
 ) -> Result<StatusCode, ApiError> {
     let project = access.project.id;
-    let deleted = state
+    let org = access.project.org_id;
+    let now = state.clock.now_ns();
+    state
         .meta
-        .write(move |conn| Box::pin(async move { store::reset_overview(conn, project).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                if let Some(overview) = store::reset_overview(conn, project).await? {
+                    let event = Event::new(DashboardAction::OverviewReset)
+                        .org(org)
+                        .project(project)
+                        .target(TargetKind::Dashboard, overview);
+                    audit::record(conn, &ctx, event, now).await?;
+                }
+                Ok(())
+            })
+        })
         .await?;
-    if deleted {
-        tracing::info!(project_id = %project, "overview reset");
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2014,6 +2067,56 @@ mod tests {
         let path = format!("/api/v1/projects/{}/dashboards/{}", other.id, created.id);
         let response = send(&app, Method::GET, &path, &seeded.cookie, None).await;
         assert_eq!(response.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dashboard_create_update_delete_are_recorded() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let created = create_named(&app, &seeded, "Support").await;
+        let item = format!("{}/{}", base(&seeded), created.id);
+
+        let patched = send(
+            &app,
+            Method::PATCH,
+            &item,
+            &seeded.cookie,
+            Some(json!({"version": 1, "name": "Renamed"})),
+        )
+        .await;
+        assert_eq!(patched.status, StatusCode::OK);
+        // A stale version is refused, and nothing is recorded for it.
+        let stale = send(
+            &app,
+            Method::PATCH,
+            &item,
+            &seeded.cookie,
+            Some(json!({"version": 1, "name": "Again"})),
+        )
+        .await;
+        assert_eq!(stale.status, StatusCode::CONFLICT);
+        let deleted = send(&app, Method::DELETE, &item, &seeded.cookie, None).await;
+        assert_eq!(deleted.status, StatusCode::NO_CONTENT);
+        let again = send(&app, Method::DELETE, &item, &seeded.cookie, None).await;
+        assert_eq!(again.status, StatusCode::NOT_FOUND);
+
+        let id = created.id.to_string();
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT action, target_id FROM audit_events WHERE target_kind = 'dashboard' \
+             ORDER BY seq",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        let expected: Vec<(String, Option<String>)> = [
+            "dashboard.created",
+            "dashboard.updated",
+            "dashboard.deleted",
+        ]
+        .into_iter()
+        .map(|action| (action.to_owned(), Some(id.clone())))
+        .collect();
+        assert_eq!(rows, expected);
     }
 
     async fn dashboard_count(app: &TestApp, project: ProjectId) -> i64 {

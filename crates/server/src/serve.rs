@@ -108,10 +108,15 @@ const LAST_USED_EVERY: Duration = Duration::from_secs(60);
 /// How often usage counters are written (D-G-11).
 const USAGE_EVERY: Duration = Duration::from_secs(10);
 
+/// How often each audit stream destination's due records are sent (D-EA-11).
+const AUDIT_STREAM_EVERY: Duration = Duration::from_secs(10);
+
 /// How often org SSO routing is reloaded from `meta.db` (D-P-62).
 const ORG_SSO_EVERY: Duration = Duration::from_secs(60);
 /// How often verified domains due for their daily re-proof are checked (D-P-72).
 const ORG_SSO_RECHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+/// How often SAML providers with a metadata URL are checked for their daily refresh (D-SA-11).
+const ORG_SSO_SAML_REFRESH_EVERY: Duration = Duration::from_secs(60 * 60);
 /// When dropped orgs' usage is first pruned, then how often (D-P-46).
 const USAGE_PRUNE_FIRST: Duration = Duration::from_secs(60);
 const USAGE_PRUNE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -121,6 +126,9 @@ const NOTICES_EVERY: Duration = Duration::from_secs(60);
 
 /// How often expired web sessions are deleted.
 const PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
+
+/// How often audit records older than `audit.retention_days` are deleted (D-EA-7).
+const AUDIT_PURGE_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// Why `cetra serve` stopped before it was listening, or the accept loop failed.
 #[derive(Debug, thiserror::Error)]
@@ -498,6 +506,8 @@ async fn bind_inner(config: ServerConfig, ui: Option<axum::Router>) -> Result<Ru
         pat_cache: crate::auth::principal::PatCache::new(),
         last_used: crate::auth::last_used::LastUsed::new(),
         token_last_used: crate::auth::last_used::LastUsed::tokens(),
+        scim_cache: crate::auth::principal::ScimCache::new(),
+        scim_last_used: crate::auth::last_used::LastUsed::scim_tokens(),
         setup: crate::bootstrap::SetupState::new(),
         password_hasher: tokio::sync::OnceCell::new(),
         mailer,
@@ -614,11 +624,16 @@ async fn bind_inner(config: ServerConfig, ui: Option<axum::Router>) -> Result<Ru
     let (usage_stop_tx, usage_stop_rx) = oneshot::channel();
     let usage_task = spawn_usage(state.clone(), usage_stop_rx);
     tasks.push(spawn_usage_prune(state.clone()));
-    // Usage notices send email, and the org-SSO recheck looks up DNS, which restore mode does
-    // not do (N M3, D-N-25). `spawn_org_sso` only reloads from `meta.db`, so it keeps running.
+    // Usage notices send email, the org-SSO recheck looks up DNS, the SAML metadata refresh
+    // fetches IdP metadata, and the audit purge and stream would change or emit restored
+    // records; restore mode does none of that (N M3, D-N-25). `spawn_org_sso` only
+    // reloads from `meta.db`, so it keeps running.
     if !state.config.restore_mode {
         tasks.push(spawn_notices(state.clone()));
         tasks.push(spawn_org_sso_recheck(state.clone()));
+        tasks.push(spawn_org_sso_saml_refresh(state.clone()));
+        tasks.push(spawn_audit_purge(state.clone()));
+        tasks.push(spawn_audit_stream(state.clone()));
     }
     tasks.push(spawn_org_sso(state.clone()));
     if state.config.restore_mode {
@@ -793,6 +808,43 @@ fn spawn_purge(state: AppState) -> JoinHandle<()> {
     })
 }
 
+fn spawn_audit_purge(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUDIT_PURGE_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = state.clock.now_ns();
+            let purged = crate::audit::retention::purge(&state, now).await;
+            match purged {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "purged old audit records");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "audit purge failed");
+                }
+            }
+        }
+    })
+}
+
+fn spawn_audit_stream(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(AUDIT_STREAM_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            let now = state.clock.now_ns();
+            if let Err(error) = crate::ee::audit::stream::deliver_once(&state, now).await {
+                tracing::error!(error = %error, "audit stream delivery failed");
+            }
+        }
+    })
+}
+
 fn spawn_last_used(state: AppState) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(LAST_USED_EVERY);
@@ -804,6 +856,9 @@ fn spawn_last_used(state: AppState) -> JoinHandle<()> {
                 tracing::error!(error = %error, "last_used flush failed");
             }
             if let Err(error) = state.token_last_used.flush(&state.meta).await {
+                tracing::error!(error = %error, "last_used flush failed");
+            }
+            if let Err(error) = state.scim_last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
             }
         }
@@ -894,6 +949,30 @@ fn spawn_org_sso_recheck(state: AppState) -> JoinHandle<()> {
                 ),
                 Ok(_) => {}
                 Err(error) => tracing::warn!(error = %error, "org sso domain recheck failed"),
+            }
+        }
+    })
+}
+
+fn spawn_org_sso_saml_refresh(state: AppState) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(ORG_SSO_SAML_REFRESH_EVERY);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            match crate::ee::org_sso::saml_refresh::refresh_once(&state, state.clock.now_ns()).await
+            {
+                Ok(run) if run.rotated > 0 || run.failed > 0 => tracing::info!(
+                    refreshed = run.refreshed,
+                    rotated = run.rotated,
+                    failed = run.failed,
+                    "org sso saml metadata refresh"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "org sso saml metadata refresh failed");
+                }
             }
         }
     })
@@ -1043,6 +1122,9 @@ impl Running {
                 tracing::error!(error = %error, "last_used flush failed");
             }
             if let Err(error) = state.token_last_used.flush(&state.meta).await {
+                tracing::error!(error = %error, "last_used flush failed");
+            }
+            if let Err(error) = state.scim_last_used.flush(&state.meta).await {
                 tracing::error!(error = %error, "last_used flush failed");
             }
             if let Err(error) = state.usage.flush(&state.meta).await {
@@ -1226,9 +1308,12 @@ mod tests {
             .unwrap();
     }
 
-    /// Restore mode starts four fewer loops in `Running.tasks`: the two alert loops that send
-    /// (evaluation and delivery), usage notices (email) and the org-SSO recheck (DNS). The eval
-    /// dispatcher and backfill runner live in `eval_tasks`, which is not counted here.
+    /// Restore mode starts seven fewer loops in `Running.tasks`: the two alert loops that send
+    /// (evaluation and delivery), usage notices (email), the org-SSO recheck (DNS), the SAML
+    /// metadata refresh (IdP metadata fetches), the audit purge (a restored copy keeps its
+    /// records unchanged) and the audit stream (outbound records). The eval dispatcher and
+    /// backfill runner live in `eval_tasks`, which is not counted here.
+
     #[tokio::test]
     async fn restore_mode_skips_the_sending_and_dns_loops() {
         let dir = tempfile::tempdir().unwrap();
@@ -1240,7 +1325,7 @@ mod tests {
         let restored = bind(restore, None).await.unwrap();
         let restore_tasks = restored.tasks.len();
         restored.shutdown().await.unwrap();
-        assert_eq!(normal_tasks - restore_tasks, 4);
+        assert_eq!(normal_tasks - restore_tasks, 7);
     }
 
     #[tokio::test]

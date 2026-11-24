@@ -188,7 +188,6 @@ async fn run_evaluator(
         })?;
     state.eval.wake();
     tracing::info!(
-        target: "audit",
         job_id = %job_id,
         evaluator_id = %id,
         project_id = %project,

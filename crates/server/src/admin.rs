@@ -16,6 +16,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::api::entitlements::{Feature, OrgLimits, OrgPlan};
+use crate::audit::catalog::SsoAction;
+use crate::audit::{self, Event};
 use crate::auth::AuthError;
 use crate::auth::password::{Hasher, check_policy};
 use crate::auth::reset::{ResetError, mint_reset, reset_link};
@@ -358,14 +360,17 @@ async fn org_sso_disable_in(meta: &MetaDb, org: &str) -> Result<bool, AdminError
     let changed = meta
         .write(move |conn| {
             Box::pin(async move {
-                crate::ee::org_sso::store::set_flags(conn, id, false, false, now).await
+                let changed =
+                    crate::ee::org_sso::store::set_flags(conn, id, false, false, now).await?;
+                if changed {
+                    let event = Event::new(SsoAction::Disabled).org(id);
+                    audit::record(conn, &audit::Ctx::cli(), event, now).await?;
+                }
+                Ok(changed)
             })
         })
         .await
         .map_err(map_meta)?;
-    if changed {
-        tracing::info!(target: "audit", org_id = %id, actor = "cli", "org sso disabled");
-    }
     Ok(changed)
 }
 
@@ -926,6 +931,95 @@ mod tests {
             org_sso_disable(&config, "nobody").await,
             Err(AdminError::OrgNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn org_sso_disable_turns_a_saml_provider_off() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let write = crate::ee::org_sso::store::SamlWrite {
+                    display_name: "Acme".to_owned(),
+                    jit_role: crate::api::org_sso::JitRole::Viewer,
+                    metadata_url: None,
+                    idp_entity_id: "https://idp.example".to_owned(),
+                    sso_url: "https://idp.example/sso".to_owned(),
+                    certificates: vec![
+                        cetra_saml::test_idp::TestKey::Idp
+                            .certificate()
+                            .der()
+                            .to_vec(),
+                    ],
+                    attributes: Default::default(),
+                    refreshed_at: None,
+                };
+                crate::ee::org_sso::store::put_saml_provider(conn, org, Uuid::now_v7(), write, 1)
+                    .await?;
+                crate::ee::org_sso::store::set_flags(conn, org, true, true, 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        let row = crate::ee::org_sso::store::provider(db.reader(), org)
+            .await
+            .unwrap()
+            .expect("provider kept");
+        assert!(!row.enabled && !row.enforced);
+        db.close().await;
+    }
+
+    #[tokio::test]
+    async fn break_glass_is_recorded_by_cli() {
+        let (_dir, config) = ready_config().await;
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        seed_org(&db).await;
+        let org: OrgId = ORG.parse().unwrap();
+        db.write(move |conn| {
+            Box::pin(async move {
+                let write = crate::ee::org_sso::store::ProviderWrite {
+                    display_name: "Acme".to_owned(),
+                    issuer: "https://idp.example".to_owned(),
+                    client_id: "client".to_owned(),
+                    client_secret_enc: Some(vec![1]),
+                    jit_role: crate::api::org_sso::JitRole::Viewer,
+                };
+                crate::ee::org_sso::store::put_provider(conn, org, Uuid::now_v7(), write, 1)
+                    .await?;
+                crate::ee::org_sso::store::set_flags(conn, org, true, true, 1).await?;
+                Ok(())
+            })
+        })
+        .await
+        .unwrap();
+        db.close().await;
+
+        assert!(org_sso_disable(&config, "acme").await.unwrap());
+        let db = MetaDb::open_existing(&config.data_dir).await.unwrap();
+        let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT action, actor_kind, org_id, actor_id FROM audit_events \
+             WHERE action = 'sso.disabled'",
+        )
+        .fetch_all(db.reader())
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![(
+                "sso.disabled".to_owned(),
+                "cli".to_owned(),
+                Some(ORG.to_owned()),
+                None,
+            )]
+        );
+        db.close().await;
     }
 
     #[tokio::test]

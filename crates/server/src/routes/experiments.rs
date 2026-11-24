@@ -388,7 +388,6 @@ async fn create_experiment(
     };
     let items = rows.iter().map(item_json).collect();
     tracing::info!(
-        target: "audit",
         experiment_id = %row.id,
         dataset_id = %dataset_id,
         project_id = %project,
@@ -497,7 +496,6 @@ async fn delete_experiment(
     }
     let actor = created_by(&principal);
     tracing::info!(
-        target: "audit",
         experiment_id = %id,
         project_id = %project,
         actor = %actor.as_deref().unwrap_or("-"),
@@ -759,7 +757,6 @@ async fn finish_experiment(
     if finished {
         let actor = created_by(&principal);
         tracing::info!(
-            target: "audit",
             experiment_id = %id,
             project_id = %project,
             actor = %actor.as_deref().unwrap_or("-"),

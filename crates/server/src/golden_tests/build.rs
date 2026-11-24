@@ -30,7 +30,9 @@ use crate::auth::roles::{KeyScope, ProjectOverride};
 use crate::auth::secret::hash_token;
 use crate::clock::Clock;
 use crate::crypto::{self, Aad, SecretBox};
+use crate::ee::audit::stream_store::{self, StreamConfig};
 use crate::ee::org_sso::store as sso;
+use crate::ee::scim::store::{self as scim, ScimUserFields};
 use crate::meta::{MetaDb, MetaError};
 use crate::meta::{
     agent_contexts::{self, AgentContextRow},
@@ -86,6 +88,9 @@ const DAY_NS: i64 = 86_400_000_000_000;
 const FAR_NS: i64 = 50 * 365 * DAY_NS;
 /// The replacement of every backup target in `admin_socket.jsonl` (paths differ per machine).
 pub(super) const TARGET: &str = "/golden/out";
+
+/// The golden org's SCIM token (`scim-cetra-` and 32 tail characters).
+const SCIM_TOKEN: &str = "scim-cetra-GoldenScimTokenABCDEFGHIJKLMNOPQ";
 
 /// Writes the golden scenario into `out` (must not exist): a data directory filled through the
 /// store functions, served once, and backed up through the admin socket into `out`, which also
@@ -948,6 +953,40 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     .bind(now)
     .execute(&mut *conn)
     .await?;
+    // One audit record, through `audit::record` (track EA).
+    crate::audit::record(
+        conn,
+        &crate::audit::Ctx::for_session_user(
+            owner.id,
+            Some(std::net::IpAddr::from([127, 0, 0, 1])),
+            Some("golden"),
+        ),
+        crate::audit::Event::new(crate::audit::catalog::MemberAction::RoleChanged {
+            old_role: "viewer",
+            new_role: "member",
+        })
+        .org(org.id)
+        .target(crate::audit::TargetKind::User, owner.id),
+        now,
+    )
+    .await?;
+
+    // One SIEM stream destination of the golden org (track EA M4), its config sealed to the row.
+    let stream_id = Uuid::now_v7();
+    let stream_config = StreamConfig {
+        url: "https://siem.example.com/ingest".to_owned(),
+        secret: "golden-stream-secret".to_owned(),
+        header: None,
+    };
+    stream_store::insert(
+        conn,
+        stream_id,
+        Some(org.id),
+        "siem.example.com",
+        &stream_store::seal(&secrets, &stream_id, &stream_config).expect("seal a golden secret"),
+        now,
+    )
+    .await?;
 
     // Queue rows in states the startup tasks leave alone: finished eval jobs, a failed backfill,
     // rule spend, a pending trace seen just now.
@@ -1066,6 +1105,48 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
     )
     .await?;
 
+    // SAML: a second org whose provider is saved from manual fields, with a verified domain.
+    let saml_org =
+        orgs::insert_org(conn, OrgId::new_v7(), "Golden SAML", "golden-saml", now).await?;
+    sso::put_saml_provider(
+        conn,
+        saml_org.id,
+        Uuid::now_v7(),
+        sso::SamlWrite {
+            display_name: "Golden SAML".to_owned(),
+            jit_role: JitRole::Viewer,
+            metadata_url: Some("https://idp.golden.test/metadata".to_owned()),
+            idp_entity_id: "https://idp.golden.test/metadata".to_owned(),
+            sso_url: "https://idp.golden.test/sso".to_owned(),
+            certificates: vec![
+                cetra_saml::test_idp::TestKey::Idp
+                    .certificate()
+                    .der()
+                    .to_vec(),
+            ],
+            attributes: sso::SamlAttributes {
+                email: Some("mail".to_owned()),
+                ..Default::default()
+            },
+            refreshed_at: Some(now),
+        },
+        now,
+    )
+    .await?;
+    sso::insert_domain(
+        conn,
+        &sso::DomainRow {
+            id: Uuid::now_v7(),
+            org_id: saml_org.id,
+            domain: "golden-saml.example.com".to_owned(),
+            token: "golden-saml-domain-token".to_owned(),
+            verified_at: Some(now),
+            last_checked_at: Some(now),
+            created_at: now,
+        },
+    )
+    .await?;
+
     // Datasets, one version with one item, an experiment with one result, and a model price.
     let dataset_id = Uuid::now_v7();
     datasets::insert_dataset(
@@ -1172,6 +1253,86 @@ async fn populate(conn: &mut SqliteConnection, s: &Scenario) -> Result<(), MetaE
             channel: webhook_channel,
             definition: accuracy_definition.expect("the accuracy definition is inserted"),
         },
+    )
+    .await?;
+
+    // SCIM provisioning (EA M5): the org's settings, one token, one provisioned member and one
+    // account that SCIM disabled. Fixed plaintexts, so the hashes and prefixes are computed here.
+    scim::put_org_scim(conn, org.id, true, OrgRole::Viewer, now).await?;
+    scim::insert_token(
+        conn,
+        org.id,
+        "golden okta",
+        &crate::auth::secret::display_prefix(SCIM_TOKEN),
+        &hash_token(SCIM_TOKEN),
+        owner.id,
+        now,
+    )
+    .await?;
+    let scim_member = users::insert_user(
+        conn,
+        NewUser {
+            email: "golden-scim@example.com".to_owned(),
+            name: Some("Golden SCIM".to_owned()),
+            password_hash: None,
+            email_verified_at: None,
+            email_verified_via: None,
+            is_instance_admin: false,
+        },
+        now,
+    )
+    .await?;
+    members::add_org_member(conn, org.id, scim_member.id, OrgRole::Viewer, now).await?;
+    let scim_row = scim::insert_user(
+        conn,
+        org.id,
+        scim_member.id,
+        &ScimUserFields {
+            user_name: "golden-scim@example.com".to_owned(),
+            external_id: Some("golden-external-1".to_owned()),
+            given_name: Some("Golden".to_owned()),
+            family_name: Some("SCIM".to_owned()),
+            display_name: Some("Golden SCIM".to_owned()),
+            department: None,
+            employee_number: None,
+        },
+        now,
+    )
+    .await?;
+    let disabled = users::insert_user(
+        conn,
+        NewUser {
+            email: "golden-scim-off@example.com".to_owned(),
+            name: None,
+            password_hash: None,
+            email_verified_at: None,
+            email_verified_via: None,
+            is_instance_admin: false,
+        },
+        now,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO scim_disabled_accounts (user_id, org_id, disabled_at) VALUES (?, ?, ?)",
+    )
+    .bind(disabled.id.to_string())
+    .bind(org.id.to_string())
+    .bind(now)
+    .execute(&mut *conn)
+    .await?;
+
+    // SCIM groups (EA M6): one group with the provisioned member, mapped to an org role and to
+    // one project.
+    let group = scim::insert_group(conn, org.id, "Golden group", None, now).await?;
+    scim::add_group_members_tx(conn, org.id, group.id, &[scim_row.id]).await?;
+    scim::put_mapping(
+        conn,
+        group.id,
+        &scim::GroupMapping {
+            org_role: Some(OrgRole::Member),
+            projects: vec![(p1.id, ProjectOverride::Viewer)],
+        },
+        now,
     )
     .await?;
 

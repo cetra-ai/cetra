@@ -110,7 +110,10 @@ export const SELF_HOSTED = {
     features: [
       "Single sign-on per org, with verified domains",
       "Enforce single sign-on for your domains",
+      "SAML 2.0 single sign-on",
       "Project-level roles",
+      "Audit logs, with export and a SIEM stream",
+      "SCIM provisioning from your identity provider",
     ],
     /** A service, not a gated feature (D197). */
     support: "Email support from the cetra team, with a reply within 2 business days",

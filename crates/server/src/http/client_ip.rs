@@ -17,7 +17,7 @@ use crate::http::error::ApiError;
 /// `X-Forwarded-For` from the right: the first address that is not itself
 /// trusted wins. Every entry trusted means the leftmost one. A malformed
 /// entry stops the walk and the last parsed address (or the peer) is used.
-fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
+pub(crate) fn client_ip(peer: IpAddr, headers: &HeaderMap, trusted: &[IpNet]) -> IpAddr {
     // A dual-stack listener reports an IPv4 peer as `::ffff:a.b.c.d`, which an IPv4
     // `trusted_proxies` entry does not contain.
     let peer = peer.to_canonical();

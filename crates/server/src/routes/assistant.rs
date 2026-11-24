@@ -32,6 +32,8 @@ use crate::assistant::settings::{self as assistant_settings, Resolved};
 use crate::assistant::turn::{
     PERMIT_WAIT, TURN_DEADLINE, TURN_MESSAGES_MAX, TurnEvent, TurnSetup, run_turn,
 };
+use crate::audit;
+use crate::audit::catalog::AssistantAction;
 use crate::auth::limits::{AssistantRefusal, RetryAfter};
 use crate::auth::principal::{self, Principal};
 use crate::auth::roles::{OrgPerm, ProjectPerm, Role};
@@ -318,7 +320,7 @@ async fn create_conversation(
             Box::pin(async move { store::insert_conversation(conn, id, project, user, now).await })
         })
         .await?;
-    tracing::info!(target: "audit", conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation created");
+    tracing::info!(conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation created");
     Ok((StatusCode::CREATED, error::Json(conversation_json(row)?)).into_response())
 }
 
@@ -387,7 +389,7 @@ async fn put_feedback(
         .await?;
     match outcome {
         FeedbackOutcome::Set => {
-            tracing::info!(target: "audit", conversation_id = %id, project_id = %project, user_id = %user, seq, feedback = ?body.feedback, "assistant feedback saved");
+            tracing::info!(conversation_id = %id, project_id = %project, user_id = %user, seq, feedback = ?body.feedback, "assistant feedback saved");
             Ok(StatusCode::NO_CONTENT)
         }
         FeedbackOutcome::NotFound => Err(ApiError::NotFound),
@@ -419,7 +421,7 @@ async fn update_conversation(
         })
         .await?
         .ok_or(ApiError::NotFound)?;
-    tracing::info!(target: "audit", conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation renamed");
+    tracing::info!(conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation renamed");
     Ok(error::Json(conversation_json(row)?))
 }
 
@@ -440,7 +442,7 @@ async fn delete_conversation(
         })
         .await?;
     if deleted {
-        tracing::info!(target: "audit", conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation deleted");
+        tracing::info!(conversation_id = %id, project_id = %project, user_id = %user, "assistant conversation deleted");
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::NotFound)
@@ -602,7 +604,7 @@ async fn post_turn(
     let (sse_tx, sse_rx) = mpsc::channel::<Event>(TURN_BUFFER);
     tokio::spawn(run_turn(state.clone(), setup, turn_tx, guard));
     tokio::spawn(forward_turn(turn_rx, sse_tx, timing));
-    tracing::info!(target: "audit", conversation_id = %id, project_id = %project_id, user_id = %user_id, turn_seq = user_seq, "assistant turn started");
+    tracing::info!(conversation_id = %id, project_id = %project_id, user_id = %user_id, turn_seq = user_seq, "assistant turn started");
     record(
         &state,
         &CatalogEvent::AssistantTurnSent,
@@ -731,6 +733,7 @@ fn unusable(reason: AssistantUnavailable) -> AssistantStatus {
         reason: Some(reason),
         connection_name: None,
         adapter: None,
+        base_url: None,
         model: None,
     }
 }
@@ -750,6 +753,7 @@ async fn put_org_assistant(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Extension(access): Extension<OrgAccess>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<PutAssistantSettings>,
 ) -> Result<error::Json<AssistantSettings>, ApiError> {
     let user = principal::session_user(&principal)?.id;
@@ -799,19 +803,29 @@ async fn put_org_assistant(
             return Err(test_failed(&result));
         }
     }
+    let now = state.clock.now_ns();
     let saved = AssistantSettingsRow {
         enabled: body.enabled,
         connection_id: body.connection_id,
         model,
         updated_by: Some(user),
-        updated_at: state.clock.now_ns(),
+        updated_at: now,
     };
     let to_store = saved.clone();
+    let event = audit::Event::new(AssistantAction::SettingChanged {
+        enabled: saved.enabled,
+        connection_id: saved.connection_id,
+    })
+    .org(org);
     state
         .meta
-        .write(move |conn| Box::pin(async move { store::put_settings(conn, org, &to_store).await }))
+        .write(move |conn| {
+            Box::pin(async move {
+                store::put_settings(conn, org, &to_store).await?;
+                audit::record(conn, &ctx, event, now).await
+            })
+        })
         .await?;
-    tracing::info!(target: "audit", org_id = %org, user_id = %user, enabled = saved.enabled, connection_id = ?saved.connection_id, "assistant setting saved");
     Ok(error::Json(settings_json(Some(saved))))
 }
 
@@ -857,6 +871,7 @@ async fn get_project_assistant(
             reason: None,
             connection_name: Some(connection.name),
             adapter: Some(connection.adapter),
+            base_url: connection.base_url,
             model: Some(model),
         },
     };
@@ -1672,6 +1687,24 @@ mod settings_tests {
     }
 
     #[tokio::test]
+    async fn assistant_setting_change_is_recorded() {
+        let app = TestApp::new().await;
+        let seeded = app.seed().await;
+        let response = put_settings(&app, &seeded.cookie, &json!({"enabled": false})).await;
+        assert_eq!(response.status, StatusCode::OK, "{}", text(&response));
+        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
+            "SELECT org_id, details FROM audit_events WHERE action = 'assistant.setting_changed'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, Some(seeded.org_id.to_string()));
+        let details: Value = serde_json::from_str(&rows[0].1).unwrap();
+        assert_eq!(details, json!({"enabled": false, "connection_id": null}));
+    }
+
+    #[tokio::test]
     async fn only_admins_write() {
         let app = TestApp::new().await;
         let seeded = app.seed().await;
@@ -1862,6 +1895,7 @@ mod settings_tests {
             Some(true)
         );
         assert_eq!(status["adapter"], "openai");
+        assert_eq!(status["base_url"], base);
         assert_eq!(status["model"], "gpt-test");
         assert!(status.get("reason").is_none());
     }

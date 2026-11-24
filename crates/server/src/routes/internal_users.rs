@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::api::common::ProblemCode;
 use crate::api::internal::{InternalUserDeleted, InternalUserRef};
+use crate::audit::catalog::UserAction;
+use crate::audit::{self, Event, TargetKind};
 use crate::auth::principal::Principal;
 use crate::http::AppState;
 use crate::http::access::{Access, RouteDef};
@@ -16,9 +18,7 @@ use crate::http::error::{self, ApiError, field_error};
 use crate::meta::MetaError;
 use crate::meta::identities::{identity_user, user_identities};
 use crate::meta::members::count_owners;
-use crate::meta::personal_tokens::revoke_user_tokens;
 use crate::meta::users::{self, normalize_email, user_by_email, user_by_id};
-use crate::meta::web_sessions::delete_user_sessions;
 use cetra_core::ids::OrgId;
 
 /// The internal user routes. The control plane holds a `control_plane` token with scope `users`.
@@ -48,36 +48,17 @@ pub(crate) fn routes() -> Vec<RouteDef> {
     ]
 }
 
-/// How the control plane's call found the user (logged, D-S-9).
-#[derive(Debug, Clone, Copy)]
-enum Matched {
-    Subject,
-    Email,
-}
-
-impl Matched {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Subject => "subject",
-            Self::Email => "email",
-        }
-    }
-}
-
 /// The user the call names, or `None` when there is none. The subject is looked up first,
 /// at `entitlements.control_plane_provider`. Without such an identity, the normalized email
 /// names a user only when that user has no identity at that provider: one linked under
 /// another subject is another control-plane account (D-S-9). The email is validated only
 /// when it is used, as `memberships/lookup` does. The control plane never manages an
 /// instance admin, so one is refused.
-async fn managed_user(
-    state: &AppState,
-    body: &InternalUserRef,
-) -> Result<Option<(Uuid, Matched)>, ApiError> {
+async fn managed_user(state: &AppState, body: &InternalUserRef) -> Result<Option<Uuid>, ApiError> {
     let reader = state.meta.reader();
     let provider = &state.config.entitlements.control_plane_provider;
     let found = match identity_user(reader, provider, &body.subject).await? {
-        Some(user_id) => Some((user_id, Matched::Subject)),
+        Some(user_id) => Some(user_id),
         None => {
             let email =
                 normalize_email(&body.email).map_err(|_| field_error("email", "invalid email"))?;
@@ -88,13 +69,13 @@ async fn managed_user(
                         .iter()
                         .any(|linked| linked == provider) =>
                 {
-                    Some((user.id, Matched::Email))
+                    Some(user.id)
                 }
                 _ => None,
             }
         }
     };
-    let Some((user_id, matched)) = found else {
+    let Some(user_id) = found else {
         return Ok(None);
     };
     let Some(user) = user_by_id(reader, user_id).await? else {
@@ -105,23 +86,25 @@ async fn managed_user(
             code: ProblemCode::Forbidden,
         });
     }
-    Ok(Some((user_id, matched)))
+    Ok(Some(user_id))
 }
 
-/// Ends the user's web sessions and personal tokens. Returns the revoked token hashes.
+/// Ends the user's web sessions and personal tokens, and records the change in the same
+/// transaction. Returns the revoked token hashes.
 async fn revoke_access(
     state: &AppState,
+    ctx: &audit::Ctx,
     user: Uuid,
     disable: bool,
 ) -> Result<Vec<String>, ApiError> {
     let now = state.clock.now_ns();
+    let ctx = ctx.clone();
     let hashes = state
         .meta
         .write(move |conn| {
             Box::pin(async move {
-                delete_user_sessions(conn, user, None).await?;
-                let hashes = revoke_user_tokens(conn, user, now).await?;
-                if disable {
+                let hashes = users::revoke_access_tx(conn, user, now).await?;
+                let action = if disable {
                     // An already disabled user keeps the instant it was first disabled.
                     let disabled_at: Option<i64> =
                         sqlx::query_scalar("SELECT disabled_at FROM users WHERE id = ?")
@@ -132,7 +115,12 @@ async fn revoke_access(
                     if disabled_at.is_none() {
                         users::set_disabled(conn, user, Some(now), now).await?;
                     }
-                }
+                    UserAction::Disabled
+                } else {
+                    UserAction::SessionsRevoked
+                };
+                let event = Event::new(action).target(TargetKind::User, user);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(hashes)
             })
         })
@@ -144,24 +132,17 @@ async fn revoke_access(
 async fn revoke(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<InternalUserRef>,
 ) -> Result<StatusCode, ApiError> {
-    let Principal::ControlPlane { token_id, .. } = principal else {
+    let Principal::ControlPlane { .. } = principal else {
         return Err(ApiError::Unauthorized);
     };
-    let (user, matched) = managed_user(&state, &body)
+    let user = managed_user(&state, &body)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let hashes = revoke_access(&state, user, false).await?;
+    let hashes = revoke_access(&state, &ctx, user, false).await?;
     evict(&state, &hashes);
-    tracing::info!(
-        target: "audit",
-        user_id = %user,
-        actor = "control_plane",
-        token_id = %token_id,
-        matched = matched.as_str(),
-        "user sessions revoked"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -170,24 +151,17 @@ async fn revoke(
 async fn disable(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<InternalUserRef>,
 ) -> Result<StatusCode, ApiError> {
-    let Principal::ControlPlane { token_id, .. } = principal else {
+    let Principal::ControlPlane { .. } = principal else {
         return Err(ApiError::Unauthorized);
     };
-    let (user, matched) = managed_user(&state, &body)
+    let user = managed_user(&state, &body)
         .await?
         .ok_or(ApiError::NotFound)?;
-    let hashes = revoke_access(&state, user, true).await?;
+    let hashes = revoke_access(&state, &ctx, user, true).await?;
     evict(&state, &hashes);
-    tracing::info!(
-        target: "audit",
-        user_id = %user,
-        actor = "control_plane",
-        token_id = %token_id,
-        matched = matched.as_str(),
-        "user disabled"
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -204,16 +178,18 @@ struct Deleted {
 async fn delete(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
+    ctx: audit::Ctx,
     error::Json(body): error::Json<InternalUserRef>,
 ) -> Result<error::Json<InternalUserDeleted>, ApiError> {
-    let Principal::ControlPlane { token_id, .. } = principal else {
+    let Principal::ControlPlane { .. } = principal else {
         return Err(ApiError::Unauthorized);
     };
-    let Some((user, matched)) = managed_user(&state, &body).await? else {
+    let Some(user) = managed_user(&state, &body).await? else {
         return Ok(error::Json(InternalUserDeleted {
             sole_owner_of: Vec::new(),
         }));
     };
+    let now = state.clock.now_ns();
     let deleted = state
         .meta
         .write(move |conn| {
@@ -243,6 +219,16 @@ async fn delete(
                         .fetch_all(&mut *conn)
                         .await
                         .map_err(MetaError::from)?;
+                // The audit rows the user acted in keep their id and lose ip and user agent (D-EA-3).
+                sqlx::query(
+                    "UPDATE audit_events SET ip = NULL, user_agent = NULL \
+                     WHERE (actor_kind = 'user' AND actor_id = ?1) \
+                     OR (target_kind = 'user' AND target_id = ?1)",
+                )
+                .bind(user.to_string())
+                .execute(&mut *conn)
+                .await
+                .map_err(MetaError::from)?;
                 // Rows that name the user without cascading keep the row and lose the name.
                 sqlx::query("UPDATE invites SET invited_by = NULL WHERE invited_by = ?")
                     .bind(user.to_string())
@@ -259,6 +245,11 @@ async fn delete(
                     .execute(&mut *conn)
                     .await
                     .map_err(MetaError::from)?;
+                let event = Event::new(UserAction::Deleted {
+                    sole_owner_orgs: u32::try_from(sole_owner_of.len()).unwrap_or(u32::MAX),
+                })
+                .target(TargetKind::User, user);
+                audit::record(conn, &ctx, event, now).await?;
                 Ok(Deleted {
                     sole_owner_of,
                     hashes,
@@ -267,15 +258,6 @@ async fn delete(
         })
         .await?;
     evict(&state, &deleted.hashes);
-    tracing::info!(
-        target: "audit",
-        user_id = %user,
-        actor = "control_plane",
-        token_id = %token_id,
-        sole_owner_orgs = deleted.sole_owner_of.len(),
-        matched = matched.as_str(),
-        "user deleted"
-    );
     Ok(error::Json(InternalUserDeleted {
         sole_owner_of: deleted.sole_owner_of,
     }))
@@ -617,12 +599,102 @@ mod tests {
         })
         .await;
         assert_eq!(response.status, 200);
-        assert!(logs.contains("user deleted"));
-        assert!(logs.contains("control_plane"));
-        assert!(logs.contains("matched=\"subject\""));
         assert!(!logs.contains("quiet@example.com"));
         assert!(!logs.contains("sub-quiet"));
         assert!(user_row(&app, user.id).await.is_none());
+        assert_eq!(
+            deleted_rows(&app).await,
+            vec![("control_plane".to_owned(), user.id.to_string())]
+        );
+    }
+
+    /// The `user.deleted` rows as (actor kind, target id).
+    async fn deleted_rows(app: &TestApp) -> Vec<(String, String)> {
+        sqlx::query_as(
+            "SELECT actor_kind, target_id FROM audit_events WHERE action = 'user.deleted'",
+        )
+        .fetch_all(app.state.meta.reader())
+        .await
+        .unwrap()
+    }
+
+    /// Deleting a user clears the ip and user agent of the rows they acted in or are the target
+    /// of; the rows stay.
+    #[tokio::test]
+    async fn deleting_a_user_clears_their_ip() {
+        let app = TestApp::new().await;
+        let user = linked_user(&app, "ip@example.com", "sub-ip", false).await;
+        let ip: std::net::IpAddr = "203.0.113.7".parse().unwrap();
+        start_session(
+            &app.state,
+            user.id,
+            Some("Agent/1.0"),
+            Some(ip),
+            crate::auth::session::SessionOrigin::Password,
+        )
+        .await
+        .unwrap();
+        let (login_id, before_ip, before_agent): (String, Option<String>, Option<String>) =
+            sqlx::query_as(
+                "SELECT id, ip, user_agent FROM audit_events \
+                 WHERE action = 'auth.login' AND actor_id = ? AND ip IS NOT NULL",
+            )
+            .bind(user.id.to_string())
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(before_ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(before_agent.as_deref(), Some("Agent/1.0"));
+
+        // A failed login that names the user as its target (no actor) must lose its ip too.
+        let failed_ctx = audit::Ctx {
+            actor: audit::Actor::Anonymous,
+            ip: Some("203.0.113.9".parse().unwrap()),
+            user_agent: Some("Attacker/1.0".to_owned()),
+        };
+        audit::record_login_failed(
+            &app.state.meta,
+            &failed_ctx,
+            user.id,
+            app.state.clock.now_ns(),
+        )
+        .await
+        .unwrap();
+        let (failed_id, failed_ip): (String, Option<String>) = sqlx::query_as(
+            "SELECT id, ip FROM audit_events \
+             WHERE action = 'auth.login_failed' AND target_id = ?",
+        )
+        .bind(user.id.to_string())
+        .fetch_one(app.state.meta.reader())
+        .await
+        .unwrap();
+        assert_eq!(failed_ip.as_deref(), Some("203.0.113.9"));
+
+        let deleted = post_user(&app, "delete", "users", "sub-ip", "ip@example.com").await;
+        assert_eq!(deleted.status, 200);
+
+        let (kept_id, after_ip, after_agent): (String, Option<String>, Option<String>) =
+            sqlx::query_as("SELECT id, ip, user_agent FROM audit_events WHERE id = ?")
+                .bind(&login_id)
+                .fetch_one(app.state.meta.reader())
+                .await
+                .unwrap();
+        assert_eq!(kept_id, login_id);
+        assert_eq!(after_ip, None);
+        assert_eq!(after_agent, None);
+
+        let (kept_failed_id, after_failed_ip, after_failed_agent): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = sqlx::query_as("SELECT id, ip, user_agent FROM audit_events WHERE id = ?")
+            .bind(&failed_id)
+            .fetch_one(app.state.meta.reader())
+            .await
+            .unwrap();
+        assert_eq!(kept_failed_id, failed_id);
+        assert_eq!(after_failed_ip, None);
+        assert_eq!(after_failed_agent, None);
     }
 
     #[tokio::test]
@@ -881,10 +953,12 @@ mod tests {
         })
         .await;
         assert_eq!(response.status, 200);
-        assert!(logs.contains("user deleted"));
-        assert!(logs.contains("matched=\"email\""));
         assert!(!logs.contains("quiet2@example.com"));
         assert!(!logs.contains("sub-unknown"));
         assert!(user_row(&app, user).await.is_none());
+        assert_eq!(
+            deleted_rows(&app).await,
+            vec![("control_plane".to_owned(), user.to_string())]
+        );
     }
 }

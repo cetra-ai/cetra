@@ -315,7 +315,6 @@ pub(crate) async fn run(
         }
     }
     tracing::info!(
-        target: "audit",
         evaluator_id = %evaluator_id,
         project_id = %project.id,
         user_id = %user,
