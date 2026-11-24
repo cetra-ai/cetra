@@ -1,0 +1,53 @@
+{
+  "description": "Microsoft Agent Framework .NET 1.28.0 over OpenAI 2.14.0: one agent run with one tool round, traced by UseOpenTelemetry with EnableSensitiveData on, so content lands in span attributes.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "Microsoft.Agents.AI",
+  "libraries": [
+    "Microsoft.Agents.AI",
+    "Microsoft.Agents.AI.OpenAI",
+    "OpenAI"
+  ],
+  "notes": "Agent Framework puts the agent's instance id in the invoke_agent span name, masked by volatile_name_prefixes, and in gen_ai.agent.id, masked by volatile_attributes.",
+  "volatile_name_prefixes": [
+    "invoke_agent "
+  ],
+  "volatile_attributes": [
+    "gen_ai.agent.id"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

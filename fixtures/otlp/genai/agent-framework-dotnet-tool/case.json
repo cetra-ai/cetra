@@ -1,0 +1,19 @@
+{
+  "description": "Microsoft Agent Framework .NET 1.28.0 over OpenAI 2.14.0: one agent run with one tool round, traced by UseOpenTelemetry with EnableSensitiveData on, so content lands in span attributes.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "Microsoft.Agents.AI",
+    "instrumentation_version": "1.28.0",
+    "language": "dotnet",
+    "libraries": {
+      "Microsoft.Agents.AI": "1.28.0",
+      "Microsoft.Agents.AI.OpenAI": "1.28.0",
+      "OpenAI": "2.14.0"
+    },
+    "captured_at": "2026-11-24T16:50:41Z"
+  },
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "Agent Framework puts the agent's instance id in the invoke_agent span name, masked by volatile_name_prefixes, and in gen_ai.agent.id, masked by volatile_attributes."
+}

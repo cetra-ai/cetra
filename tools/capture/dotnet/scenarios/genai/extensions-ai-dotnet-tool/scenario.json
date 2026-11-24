@@ -1,0 +1,46 @@
+{
+  "description": "Microsoft.Extensions.AI 11.0.0 over OpenAI 2.15.0: one GetResponseAsync call with one tool round, traced by UseOpenTelemetry with EnableSensitiveData on, so content lands in span attributes.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "Microsoft.Extensions.AI",
+  "libraries": [
+    "Microsoft.Extensions.AI",
+    "Microsoft.Extensions.AI.OpenAI",
+    "OpenAI"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

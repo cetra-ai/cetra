@@ -1,0 +1,46 @@
+{
+  "description": "Semantic Kernel .NET 1.82.0: one GetChatMessageContentAsync call with one tool round, traced by Semantic Kernel's GenAI diagnostics with both AppContext switches on, so the chat spans carry their content as gen_ai.* events.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "Microsoft.SemanticKernel",
+  "libraries": [
+    "Microsoft.SemanticKernel",
+    "OpenAI"
+  ],
+  "notes": "SK offers every plugin function to the model as <Plugin>-<Function> (1.82.0 has no API to register a function outside a named plugin), so the turn's tool call uses the advertised name WeatherPlugin-get_weather: with the bare get_weather SK does not resolve the call and answers a function-not-defined error instead of running it. SK resolves the prefixed name, and the tool span, gen_ai.tool.name and the echoed tool call all use the bare function name get_weather.",
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "WeatherPlugin-get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}
