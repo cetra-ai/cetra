@@ -770,7 +770,7 @@ pub(crate) fn zone_i64(bound: &[u8; 16]) -> Option<i64> {
 }
 
 /// The first eight bytes of a zone bound, as a little-endian `f64`.
-fn zone_f64(bound: &[u8; 16]) -> Option<f64> {
+pub(crate) fn zone_f64(bound: &[u8; 16]) -> Option<f64> {
     bound
         .split_first_chunk::<8>()
         .map(|(head, _)| f64::from_le_bytes(*head))

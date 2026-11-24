@@ -792,6 +792,9 @@ async fn column_statistics(
     column: usize,
     data_type: &DataType,
 ) -> DfResult<ColumnStatistics> {
+    if matches!(data_type, DataType::Float32 | DataType::Float64) {
+        return float_statistics(files, column, data_type).await;
+    }
     let mut range: Option<(i64, i64)> = None;
     let mut nulls = false;
     for file in files {
@@ -813,6 +816,50 @@ async fn column_statistics(
     let mut stats = ColumnStatistics::new_unknown()
         .with_min_value(Precision::Exact(min))
         .with_max_value(Precision::Exact(max));
+    if !nulls {
+        stats = stats.with_null_count(Precision::Exact(0));
+    }
+    Ok(stats)
+}
+
+/// The statistics of the float `column` over `files`, from the zones of its non-NaN values:
+/// inexact bounds, since a NaN sorts above every value and DataFusion answers `min` and `max`
+/// from exact bounds; they let it estimate a range filter's rows as it does on Parquet (Appian
+/// query 4 ordered its joins differently without them, and ran out of memory).
+async fn float_statistics(
+    files: &[Arc<StrataFile>],
+    column: usize,
+    data_type: &DataType,
+) -> DfResult<ColumnStatistics> {
+    let mut range: Option<(f64, f64)> = None;
+    let mut nulls = false;
+    for file in files {
+        let Some((lo, hi, has_nulls)) = file.float_range(column).await.map_err(df)? else {
+            return Ok(ColumnStatistics::new_unknown());
+        };
+        nulls |= has_nulls;
+        range = Some(match range {
+            None => (lo, hi),
+            Some((a, b)) => (a.min(lo), b.max(hi)),
+        });
+    }
+    let Some((lo, hi)) = range else {
+        return Ok(ColumnStatistics::new_unknown());
+    };
+    // A Float32 zone holds the f32 values widened, so narrowing them back is exact.
+    let (min, max) = match data_type {
+        DataType::Float32 => (
+            ScalarValue::Float32(Some(lo as f32)),
+            ScalarValue::Float32(Some(hi as f32)),
+        ),
+        _ => (
+            ScalarValue::Float64(Some(lo)),
+            ScalarValue::Float64(Some(hi)),
+        ),
+    };
+    let mut stats = ColumnStatistics::new_unknown()
+        .with_min_value(Precision::Inexact(min))
+        .with_max_value(Precision::Inexact(max));
     if !nulls {
         stats = stats.with_null_count(Precision::Exact(0));
     }
@@ -1281,6 +1328,11 @@ impl ExecutionPlan for StrataExec {
             Precision::Exact(rows)
         };
         let mut stats = Statistics::new_unknown(&self.schema).with_num_rows(rows);
+        // Rows times the fixed width of the projected columns, absent with a variable-width
+        // column, as a Parquet scan reports it: DataFusion picks a hash join's build side by
+        // bytes when both inputs have them, so without them a Strata plan can differ from
+        // Parquet's (Appian query 4 ran out of memory).
+        stats.calculate_total_byte_size(&self.schema);
         if self.column_stats.len() == stats.column_statistics.len() {
             stats.column_statistics = if filtered {
                 self.column_stats
@@ -1899,6 +1951,119 @@ mod tests {
         ::datafusion::physical_plan::statistics::StatisticsContext::new()
             .compute(plan, &StatisticsArgs::new())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn scans_report_the_bytes_of_fixed_width_projections() {
+        let table = main_table().await;
+        let state = ::datafusion::prelude::SessionContext::new().state();
+        let bytes = |names: &[&str]| {
+            let projection: Vec<usize> = names.iter().map(|n| index(&table, n)).collect();
+            let state = state.clone();
+            let table = &table;
+            async move {
+                let plan = table
+                    .scan(&state, Some(&projection), &[], None)
+                    .await
+                    .unwrap();
+                stats_of(plan.as_ref()).total_byte_size
+            }
+        };
+        // 8 bytes of Int64 and 8 of a nanosecond timestamp per row, as a Parquet scan says.
+        assert_eq!(
+            bytes(&["input_tokens", "start_time"]).await,
+            Precision::Exact(3_000 * 16)
+        );
+        assert_eq!(
+            bytes(&["input_tokens", "cost", "f32"]).await,
+            Precision::Exact(3_000 * 20)
+        );
+        // A variable-width column leaves the size unknown.
+        assert_eq!(bytes(&["input_tokens", "uid"]).await, Precision::Absent);
+
+        // With a pushed filter the size follows the estimated rows.
+        let projection = vec![index(&table, "input_tokens")];
+        let filter = col("input_tokens").gt(lit(100i64));
+        let plan = table
+            .scan(&state, Some(&projection), &[filter], None)
+            .await
+            .unwrap();
+        let stats = stats_of(plan.as_ref());
+        let (Precision::Inexact(rows), Precision::Inexact(size)) =
+            (stats.num_rows, stats.total_byte_size)
+        else {
+            panic!(
+                "estimates: {:?} {:?}",
+                stats.num_rows, stats.total_byte_size
+            )
+        };
+        assert_eq!(size, rows * 8);
+    }
+
+    #[tokio::test]
+    async fn scans_report_inexact_zone_ranges_of_float_columns() {
+        // `cost` has nulls, NaNs at rows 997 and 1,994, and else (i % 500) / 1,000; `f32` has
+        // nulls and else i / 2.
+        let table = main_table().await;
+        let state = ::datafusion::prelude::SessionContext::new().state();
+        let projection = vec![index(&table, "cost"), index(&table, "f32")];
+        let plan = table
+            .scan(&state, Some(&projection), &[], None)
+            .await
+            .unwrap();
+        let stats = stats_of(plan.as_ref());
+        let cost = &stats.column_statistics[0];
+        // The bounds leave the NaNs out, so they are not exact: `max(cost)` is NaN.
+        assert_eq!(cost.min_value, Precision::Inexact(Sv::Float64(Some(0.0))));
+        assert_eq!(cost.max_value, Precision::Inexact(Sv::Float64(Some(0.499))));
+        // Nulls make the null count unknown, as for an integer column.
+        assert_eq!(cost.null_count, Precision::Absent);
+        let f32 = &stats.column_statistics[1];
+        assert_eq!(f32.min_value, Precision::Inexact(Sv::Float32(Some(0.5))));
+        assert_eq!(
+            f32.max_value,
+            Precision::Inexact(Sv::Float32(Some(1_499.5)))
+        );
+
+        // `max` is computed, not answered from the statistics: it is the NaN.
+        let ctx = ::datafusion::prelude::SessionContext::new();
+        ctx.register_table("t", Arc::new(main_table().await))
+            .unwrap();
+        let batches = ctx
+            .sql("SELECT max(cost) FROM t")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let max = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .value(0);
+        assert!(max.is_nan(), "{max}");
+
+        // A range filter on a float column is estimated from its bounds, as on Parquet: the
+        // filter's output range is cut by the literal, and its rows are fewer than the scan's.
+        let df = ctx
+            .sql("SELECT cost FROM t WHERE cost > 0.25")
+            .await
+            .unwrap();
+        let plan = df.create_physical_plan().await.unwrap();
+        let stats = stats_of(plan.as_ref());
+        let Precision::Inexact(rows) = stats.num_rows else {
+            panic!("a filter's rows are an estimate")
+        };
+        assert!(rows < 3_000, "{rows}");
+        let Some(Sv::Float64(Some(min))) = stats.column_statistics[0].min_value.get_value() else {
+            panic!("{:?}", stats.column_statistics[0].min_value)
+        };
+        assert!(*min > 0.25, "{min}");
+        assert_eq!(
+            stats.column_statistics[0].max_value,
+            Precision::Inexact(Sv::Float64(Some(0.499)))
+        );
     }
 
     #[tokio::test]

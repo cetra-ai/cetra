@@ -34,7 +34,7 @@ use crate::payload::{
 use crate::predicate::{
     Bound, MaskSource, Predicate, bind, bound_columns, chunk_may_match, chunk_must_match, evaluate,
     int_interval, layout_of, map_key_mask, matching_codes, never_true, provable_conjuncts,
-    pruned_columns, zone_i64,
+    pruned_columns, zone_f64, zone_i64,
 };
 use crate::segment::{Kind, SegmentRef, Segments};
 use crate::shred::unshred;
@@ -1930,21 +1930,46 @@ impl StrataFile {
     /// `None` when the column is of another type or not chunked, when every row is null, or when
     /// a chunk with a valid value has no zone.
     pub async fn int_range(&self, column: usize) -> Result<Option<(i64, i64, bool)>> {
-        let field = self.field_of(column)?;
         let int = matches!(
-            field.data_type(),
+            self.field_of(column)?.data_type(),
             DataType::Int8
                 | DataType::Int16
                 | DataType::Int32
                 | DataType::Int64
                 | DataType::Timestamp(_, _)
         );
-        if !int || !is_chunked(self, column) {
+        if !int {
+            return Ok(None);
+        }
+        self.zone_range(column, zone_i64).await
+    }
+
+    /// [`Self::int_range`] for a `Float32` or `Float64` column. The zones leave NaN out, so the
+    /// bounds are those of the non-NaN values.
+    pub async fn float_range(&self, column: usize) -> Result<Option<(f64, f64, bool)>> {
+        let float = matches!(
+            self.field_of(column)?.data_type(),
+            DataType::Float32 | DataType::Float64
+        );
+        if !float {
+            return Ok(None);
+        }
+        self.zone_range(column, zone_f64).await
+    }
+
+    /// The bounds of a chunked column's zones, read by `read`, and whether a row is null;
+    /// `None` as [`Self::int_range`] says, or when a bound is unordered (a NaN).
+    async fn zone_range<T: PartialOrd + Copy>(
+        &self,
+        column: usize,
+        read: fn(&[u8; 16]) -> Option<T>,
+    ) -> Result<Option<(T, T, bool)>> {
+        if !is_chunked(self, column) {
             return Ok(None);
         }
         self.load_metadata(&[column], ScanKind::Point).await?;
         let entries = self.block_entries(column).await?;
-        let mut range: Option<(i64, i64)> = None;
+        let mut range: Option<(T, T)> = None;
         let mut nulls = false;
         for entry in entries.iter() {
             nulls |= entry.flags & (flags::HAS_NULLS | flags::ALL_NULL) != 0;
@@ -1954,12 +1979,15 @@ impl StrataFile {
             if entry.flags & flags::HAS_ZONE == 0 {
                 return Ok(None);
             }
-            let (Some(lo), Some(hi)) = (zone_i64(&entry.min), zone_i64(&entry.max)) else {
+            let (Some(lo), Some(hi)) = (read(&entry.min), read(&entry.max)) else {
                 return Ok(None);
             };
+            if lo.partial_cmp(&hi).is_none() {
+                return Ok(None);
+            }
             range = Some(match range {
                 None => (lo, hi),
-                Some((a, b)) => (a.min(lo), b.max(hi)),
+                Some((a, b)) => (if lo < a { lo } else { a }, if hi > b { hi } else { b }),
             });
         }
         Ok(range.map(|(lo, hi)| (lo, hi, nulls)))
