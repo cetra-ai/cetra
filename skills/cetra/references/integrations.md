@@ -189,6 +189,9 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Codex CLI](https://cetra.sh/docs/integrations/codex/) | — | — | `cetra agents setup codex` | captured |
 | [Gemini CLI](https://cetra.sh/docs/integrations/gemini-cli/) | — | — | `cetra agents setup gemini-cli` | captured |
 | [GitHub Copilot](https://cetra.sh/docs/integrations/copilot/) | — | — | `cetra agents setup copilot` | hand-written |
+| [Augment Code](https://cetra.sh/docs/integrations/augment-code/) | — | — | its `otel` extension's environment variables | setup only |
+| [Devin SDK](https://cetra.sh/docs/integrations/devin-sdk/) | — | — | the SDK's session tracing | setup only |
+| [Omnigent](https://cetra.sh/docs/integrations/omnigent/) | — | — | Omnigent's telemetry environment variables | setup only |
 
 - [Claude Code](https://cetra.sh/docs/integrations/claude-code/): Prompts, model calls and tools, with the Claude Agent SDK.
 - [Codex CLI](https://cetra.sh/docs/integrations/codex/): Turns and tool calls from codex exec.
