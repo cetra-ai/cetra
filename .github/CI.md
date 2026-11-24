@@ -98,14 +98,22 @@ References:
 
 ## Cache cleanup
 
-The bucket has a 100 GiB Garage quota. kache 2.0 cannot prune a remote, and
-Garage records when an object was written, not when it was last read, so two
+The bucket has a 200 GiB Garage quota. kache 2.0 cannot prune a remote, and
+Garage records when an object was written, not when it was last read, so these
 rules keep the bucket under the quota:
 
 - **PR builds expire after 2 days**: a lifecycle rule on the bucket
   (`kache-pr-expiry`) expires `kache-pr-v2/` objects 2 days after they are
   written, and incomplete multipart uploads after 1 day. Garage applies it once
   a day. An owner PR idle for longer rebuilds its own crates once.
+- **PR builds keep only the latest**: owner PRs write 35 to 45 GiB a day (each
+  commit's workspace test binaries, the `cetra` binary and the e2e tests, about
+  200 MiB each), more than the 2-day expiry can hold. A cron job on the Garage
+  host every 3 hours (`kache_prune.py prune --only-pr --delete`) deletes each
+  `kache-pr-v2/` pack that no manifest names, that is older than 3 hours and
+  that is not among the 2 newest of its crate. A PR pushed again more than 3
+  hours later rebuilds its workspace crates; dependencies come from main's
+  prefix.
 - **Main builds keep what a job still uses**: a nightly cron job on the Garage
   host (03:30, `~/kache-prune/kache_prune.py prune --delete`, log in
   `~/kache-prune/prune.log`) reads every kache manifest
@@ -120,7 +128,8 @@ rules keep the bucket under the quota:
   builds `rust-test` still used). If the manifests name fewer than 200 keys
   (missing, or a new kache manifest format), the script deletes nothing in
   `kache-v2/`. Crates named `llmobs_*` (before the D46 rename) are deleted;
-  `_manifests/` and unknown keys are never deleted.
+  `_manifests/` and unknown keys are never deleted. The nightly run also applies
+  the PR rules.
 
 The script uses its own Garage key, `kache-prune` (read, write and owner on
 `kache`, for the lifecycle rule), from `~/kache-prune/credentials.json` (mode
@@ -132,7 +141,9 @@ quota is reached`. kache-action's post step only warns (`kache sync --push exite
 with code 1`, `Failed uploads` in its job summary), so on main pushes
 `rust-test (1/4)` runs `just cache-push` first, which fails the job. It
 happened once: from 2026-11-21 to 2026-11-22 nothing was cached, and every run
-recompiled the workspace crates. If it happens again, run `inventory` and a
+recompiled the workspace crates. It happened again on 2026-11-24, when PR builds
+alone reached 64 GiB under the 2-day expiry: the quota went from 100 to 200 GiB
+and the 3-hourly PR prune was added. If it happens again, run `inventory` and a
 dry-run `prune` on the Garage host, then `prune --delete`, or raise the quota
 (`garage bucket set-quotas kache --max-size …`).
 
