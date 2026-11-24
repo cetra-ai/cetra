@@ -609,9 +609,36 @@ wheels = [
 ]
 
 [[package]]
+name = "cetra-capture-harness"
+version = "0.0.0"
+source = { editable = "../harness" }
+dependencies = [
+    { name = "cetra-sdk" },
+    { name = "httpx" },
+    { name = "httpx2" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-sdk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cetra-sdk", editable = "../../../sdks/python" },
+    { name = "httpx", specifier = "==0.28.1" },
+    { name = "httpx2", specifier = "==2.16.0" },
+    { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.45.2" },
+    { name = "opentelemetry-sdk", specifier = "==1.45.2" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = "==2.4.1" },
+    { name = "ruff", specifier = "==0.17.3" },
+]
+
+[[package]]
 name = "cetra-capture-scenarios"
 version = "0.0.0"
-source = { editable = "." }
+source = { virtual = "." }
 dependencies = [
     { name = "ag2", extra = ["openai", "tracing"] },
     { name = "agent-framework-core" },
@@ -621,6 +648,7 @@ dependencies = [
     { name = "autogen-agentchat" },
     { name = "autogen-ext", extra = ["openai"] },
     { name = "beeai-framework" },
+    { name = "cetra-capture-harness" },
     { name = "cetra-sdk" },
     { name = "cohere" },
     { name = "deepagents" },
@@ -695,6 +723,7 @@ requires-dist = [
     { name = "autogen-agentchat", specifier = "==0.7.5" },
     { name = "autogen-ext", extras = ["openai"], specifier = "==0.7.5" },
     { name = "beeai-framework", specifier = "==0.1.85" },
+    { name = "cetra-capture-harness", editable = "../harness" },
     { name = "cetra-sdk", editable = "../../../sdks/python" },
     { name = "cohere", specifier = "==7.3.1" },
     { name = "deepagents", specifier = "==0.7.32" },

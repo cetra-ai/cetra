@@ -8,6 +8,8 @@ Tools that are not part of the product. Benchmark scripts live here too.
 
 Scenarios live in `tools/capture/py/scenarios/<group>/<case>/` (uv) and `tools/capture/ts/scenarios/<group>/<case>/` (pnpm). Each directory holds `scenario.json` and the program.
 
+The Python harness that scenarios import is a uv package of its own, `tools/capture/harness` (`cetra-capture-harness`, imported as `capture_py`). `tools/capture/py` and any scenario environment under `tools/capture/envs/<env>/` depend on it by path, so the import path does not change.
+
 The recipes are in the tool; their design is in K9–K10 of [`docs/plans/b2-capture/`](../docs/plans/b2-capture/README.md):
 
 - `just capture <group>/<case>` records one scenario.

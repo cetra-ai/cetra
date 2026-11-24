@@ -554,6 +554,10 @@ capture +cases: capture-tools capture-py-sync capture-ts-sync
 capture-all: capture-tools capture-py-sync capture-ts-sync
     cargo run -q -p cetra-capture -- run --all
 
+# Install the capture harness package (tools/capture/harness)
+capture-harness-sync:
+    cd tools/capture/harness && uv sync --locked
+
 # Install the Python capture project (tools/capture/py)
 capture-py-sync:
     cd tools/capture/py && uv sync --locked
@@ -563,7 +567,8 @@ capture-ts-sync:
     pnpm --dir tools/capture/ts install --frozen-lockfile
 
 # Lint and type-check the capture scenarios, then recapture every scenario and compare (timing excluded)
-check-capture: capture-tools capture-py-sync capture-ts-sync
+check-capture: capture-tools capture-harness-sync capture-py-sync capture-ts-sync
+    cd tools/capture/harness && uv run ruff format --check && uv run ruff check && uv run mypy
     cd tools/capture/py && uv run ruff format --check && uv run ruff check && uv run mypy
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts

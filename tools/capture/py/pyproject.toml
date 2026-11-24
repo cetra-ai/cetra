@@ -83,16 +83,15 @@ dependencies = [
   "temporalio-openai-agents[openinference]==2.0.0",
   # The SDK under test, from this repository (editable), so the harness uses its runtime.
   "cetra-sdk",
+  # The capture harness, a package of its own (tools/capture/harness, module capture_py).
+  "cetra-capture-harness",
 ]
 
 [dependency-groups]
 dev = ["ruff==0.17.3", "mypy==2.4.1"]
 
-[build-system]
-requires = ["uv_build>=0.13.6,<0.14"]
-build-backend = "uv_build"
-
 [tool.uv]
+package = false
 exclude-newer = "7 days" # D74/D117: no release younger than 7 days
 # google-adk 2.14.0 was uploaded on 2026-11-07. The 7-day cutoff excludes it,
 # and 2.13.0 cannot share this project's OpenTelemetry 1.45 pin.
@@ -113,9 +112,7 @@ override-dependencies = [
 
 [tool.uv.sources]
 cetra-sdk = { path = "../../../sdks/python", editable = true }
-
-[tool.uv.build-backend]
-module-name = "capture_py"
+cetra-capture-harness = { path = "../harness", editable = true }
 
 [tool.ruff]
 target-version = "py313"
@@ -124,11 +121,13 @@ line-length = 100
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "PT", "ANN", "S", "BLE", "N"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["capture_py"]
+
 [tool.mypy]
 strict = true
 python_version = "3.13"
-files = ["src", "scenarios"]
-mypy_path = "src"
+files = ["scenarios"]
 # Every scenario entry point is main.py. mypy maps those paths to one module.
 exclude = ["main\\.py$"]
 
