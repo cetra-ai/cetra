@@ -24,7 +24,7 @@ Commands:
   query     Run a SQL query on a project
   traces    List and show traces
   projects  List the projects you can read
-  agents    Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra
+  agents    Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw) to cetra
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -647,7 +647,7 @@ Options:
 ### `cetra agents`
 
 ```text
-Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot) to cetra
+Connect coding agents (Claude Code, Codex, Gemini CLI, Copilot, Pi, Qwen Code, OpenClaw) to cetra
 
 Usage: cetra agents <COMMAND>
 
@@ -670,7 +670,14 @@ Usage: cetra agents setup [OPTIONS] --url <URL> --key <KEY> <AGENT>
 
 Arguments:
   <AGENT>
-          [possible values: claude-code, codex, gemini-cli, copilot]
+          Possible values:
+          - claude-code
+          - codex
+          - gemini-cli
+          - copilot
+          - pi:          Pi: its extension file is written by setup; no hook (D-IN-28 item 9)
+          - qwen-code:   Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7)
+          - openclaw:    OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6)
 
 Options:
       --url <URL>
@@ -691,7 +698,7 @@ Options:
           Print the merged settings files (including the key and any other settings in them) instead of writing them
 
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```
 
 #### `cetra agents remove`
@@ -703,9 +710,16 @@ Usage: cetra agents remove <AGENT>
 
 Arguments:
   <AGENT>
-          [possible values: claude-code, codex, gemini-cli, copilot]
+          Possible values:
+          - claude-code
+          - codex
+          - gemini-cli
+          - copilot
+          - pi:          Pi: its extension file is written by setup; no hook (D-IN-28 item 9)
+          - qwen-code:   Qwen Code: a Gemini CLI fork, set up like Gemini CLI (D-IN-28 item 7)
+          - openclaw:    OpenClaw: setup installs its diagnostics plugin and merges its config (D-IN-28 items 5, 6)
 
 Options:
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```
