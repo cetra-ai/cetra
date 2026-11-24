@@ -589,3 +589,86 @@ it("fails the invoice's first schema check and passes the second", () => {
   const secondDetail = dataset.spanDetail(trace.trace_id, second.span.span_id);
   expect(secondDetail?.output?.value).toMatchObject({ passed: true });
 });
+
+/** A generated trace is one that is neither trace 0 nor a showcase (M14). */
+function generatedIndices(traces: number): number[] {
+  const showcases = new Set(SHOWCASES.map((showcase) => showcase.index));
+  const indices: number[] = [];
+  for (let index = 1; index < traces; index += 1) {
+    if (!showcases.has(index)) {
+      indices.push(index);
+    }
+  }
+  return indices;
+}
+
+it("gives every generated voice trace a duration between 0.4 and 4 s", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
+  const voice = generatedIndices(2000)
+    .map((index) => dataset.traces[index])
+    .filter((trace) => trace?.tags.includes("voice"));
+  expect(voice.length).toBeGreaterThan(100);
+  for (const trace of voice) {
+    const ms = (trace?.duration_ns ?? 0) / 1_000_000;
+    expect(Number.isInteger(ms)).toBe(true);
+    expect(ms).toBeGreaterThanOrEqual(400);
+    expect(ms).toBeLessThanOrEqual(3_999);
+  }
+});
+
+it("keeps the drawn duration range of the other generated traces", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
+  const others = generatedIndices(2000)
+    .map((index) => dataset.traces[index])
+    .filter((trace) => trace && !trace.tags.includes("voice"));
+  for (const trace of others) {
+    const ms = (trace?.duration_ns ?? 0) / 1_000_000;
+    expect(ms).toBeGreaterThanOrEqual(200);
+    expect(ms).toBeLessThanOrEqual(20_199);
+  }
+  expect(others.some((trace) => (trace?.duration_ns ?? 0) / 1_000_000 > 4_000)).toBe(true);
+});
+
+it("draws the same durations as before for the traces it does not rescale", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 60 });
+  // Non-voice generated traces: [index, duration in ms] as drawn before M14.
+  const unchanged: [number, number][] = [
+    [1, 13179],
+    [2, 12086],
+    [7, 809],
+    [8, 16499],
+    [9, 3064],
+    [10, 19521],
+    [11, 16920],
+    [12, 18981],
+    [13, 17386],
+    [14, 17650],
+    [15, 12310],
+    [17, 14573],
+  ];
+  for (const [index, ms] of unchanged) {
+    expect(dataset.traces[index]?.tags.includes("voice")).toBe(false);
+    expect(dataset.traces[index]?.duration_ns).toBe(ms * 1_000_000);
+  }
+  // Voice-tagged generated traces: [index, duration in ms as drawn before M14], rescaled to 400 + (ms - 200) * 3600 / 20000.
+  const drawn: [number, number][] = [
+    [16, 5934],
+    [19, 14403],
+    [28, 4041],
+    [35, 905],
+  ];
+  for (const [index, ms] of drawn) {
+    expect(dataset.traces[index]?.tags.includes("voice")).toBe(true);
+    expect(dataset.traces[index]?.duration_ns).toBe(
+      (400 + Math.floor(((ms - 200) * 3_600) / 20_000)) * 1_000_000,
+    );
+  }
+});
+
+it("leaves trace 0 and the showcases alone", () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 60 });
+  expect(dataset.traces[0]?.duration_ns).toBe(60_000 * 1_000_000);
+  for (const showcase of SHOWCASES) {
+    expect(dataset.traces[showcase.index]?.duration_ns).toBe(showcase.spans[0].to * 1_000_000);
+  }
+});

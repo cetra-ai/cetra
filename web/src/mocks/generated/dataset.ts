@@ -25,6 +25,12 @@ const MODELS = [
   "gemini-2.5-flash",
 ] as const;
 const TAGS = ["billing", "priority", "voice", "email", "retry"] as const;
+/** Generated voice calls last 0.4 to 4 s, not the 0.2 to 20 s of the other traces (M14). */
+const VOICE_MIN_MS = 400;
+const VOICE_SPAN_MS = 3_600;
+/** The drawn duration is `200 + floor(rng() * 20_000)`: 200 to 20,199 ms. */
+const DRAWN_MIN_MS = 200;
+const DRAWN_SPAN_MS = 20_000;
 const USER_PLANS = ["free", "pro", "team"] as const;
 const USER_COUNTRIES = ["FR", "US", "DE", "JP"] as const;
 const KINDS = [
@@ -786,7 +792,7 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
   const environment = environmentOf(rng);
   const experiment = environment !== "cetra-eval" && rng() < 0.04;
   const ageMs = ageOf(rng, index);
-  const durationMs = index === 0 ? 60_000 : 200 + Math.floor(rng() * 20_000);
+  const drawnMs = index === 0 ? 60_000 : DRAWN_MIN_MS + Math.floor(rng() * DRAWN_SPAN_MS);
   const startMs = now - ageMs;
   const name = NAMES[Math.floor(rng() * NAMES.length)] ?? NAMES[0];
   const model = MODELS[Math.floor(rng() * MODELS.length)] ?? MODELS[0];
@@ -796,6 +802,11 @@ function traceSummary(seed: number, index: number, now: number): Schema<"TraceSu
     rng() < 0.5 ? `sess-${String(Math.floor(rng() * 120)).padStart(4, "0")}` : undefined;
   const user = rng() < 0.6 ? `user-${String(Math.floor(rng() * 40)).padStart(3, "0")}` : undefined;
   const tags = pickTags(rng);
+  // A voice call is shorter: rescale the drawn duration, with no new random draw. Trace 0 keeps its 60 s.
+  const durationMs =
+    index !== 0 && tags.includes("voice")
+      ? VOICE_MIN_MS + Math.floor(((drawnMs - DRAWN_MIN_MS) * VOICE_SPAN_MS) / DRAWN_SPAN_MS)
+      : drawnMs;
   const metadata: Record<string, string> = {};
   if (experiment) {
     metadata["cetra.experiment_id"] = `exp-${String(index % 12).padStart(2, "0")}`;
