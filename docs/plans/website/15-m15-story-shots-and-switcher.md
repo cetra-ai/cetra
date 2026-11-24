@@ -100,7 +100,7 @@ Variables to type in the playground (one value per variable; the template's vari
 | Chapter | Support | Coding | Voice | Extraction |
 |---|---|---|---|---|
 | Hero | See what each step of a support answer cost and how long it took. | Find the failed test run, and the fix that followed, in one trace. | Find the one slow tool call behind a reply that started 2.8 s late. | See the cheap model fail the check and the strong one fix it, with the cost of each. |
-| Trace | Every support conversation, with its cost and latency. | Failed runs first, so nothing broken hides in the traffic. | The slowest calls first, so you fix what callers feel. | Every invoice the pipeline read, with what each one cost. |
+| Trace | Every support conversation, with its cost and latency. | Only the failed runs, so nothing broken hides in the traffic. | The slowest calls first, so you fix what callers feel. | Every invoice the pipeline read, with what each one cost. |
 | Explore | Ask which answers scored low, then get a quality dashboard built for you. | Ask what failed, then get a dashboard for the coding agent built for you. | Ask which calls were slow, then get a latency dashboard built for you. | Ask which invoices needed a retry, then get a dashboard built for you. |
 | Issues | What customers ask most, grouped for you, with real examples. | The same test failure across runs becomes one issue to fix. | Slow replies grouped into one issue, with the trace that shows why. | Wrong totals grouped into one issue, before they reach your books. |
 | Evaluate | Reviewers score real answers in a queue, next to the trace. | Review the agent's patches the way you review a pull request. | Check whether each caller got what they asked for. | Check the extracted fields against the invoice, one by one. |
@@ -399,7 +399,7 @@ export const PICTURES = [
       },
       coding: {
         alt: "The trace list filtered to traces with status error: failed runs, among them a coding-agent trace, with start time, name, input, duration and cost.",
-        caption: "Failed runs first, so nothing broken hides in the traffic.",
+        caption: "Only the failed runs, so nothing broken hides in the traffic.",
       },
       voice: {
         alt: "The trace list filtered to voice traces and sorted by duration, longest first: voice-agent traces with start time, name, input, duration and cost.",
@@ -736,7 +736,7 @@ Tests (names exact):
 2. `there are seven pictures of four stories each`: `PICTURES.map(id)` equals `["hero","trace","explore","issues","evaluate","prompts","alert"]`; for each, `panelsOf(id)` has 4 entries whose `story` equals the STORIES ids in order (7 x 4 = 28 panels).
 3. `every shot is in screenshots.json and has a PNG`: for every panel, `shot` is a `name` of `screenshots.json` and `<shot>.png` exists; the 28 shot names are distinct; `shotName("hero","voice") === "marketing-trace-view-voice"` and `shotName("trace","support") === "marketing-trace-list"`.
 4. `alts are one sentence that describes the picture`: non-empty, at most 260 characters, ends with `.`, contains no `\n`, and is unique among the 28.
-5. `captions are one line`: non-empty, at most 100 characters, ends with `.`, no `\n`, unique; the four hero captions and the 24 chapter captions equal the fixed content's captions table (copy the 28 strings into the test as an `EXPECTED` table keyed `[picture][story]` and compare, so a copy-edit has to touch two places). The coding Trace caption is "Failed runs first, so nothing broken hides in the traffic."
+5. `captions are one line`: non-empty, at most 100 characters, ends with `.`, no `\n`, unique; the four hero captions and the 24 chapter captions equal the fixed content's captions table (copy the 28 strings into the test as an `EXPECTED` table keyed `[picture][story]` and compare, so a copy-edit has to touch two places). The coding Trace caption is "Only the failed runs, so nothing broken hides in the traffic."
 6. `no copy uses a banned word`: over alts, captions and labels, none matches `/\b(seamless(ly)?|blazing(ly)?|effortless(ly)?|powerful|simply|easy|just)\b/i` (the STYLE.md list), `/!/`, `/Cetra|CETRA/`, or an emoji (`/\p{Extended_Pictographic}/u`).
 7. `unknown pictures and stories throw`: `pictureById("nope")` and `shotName("hero","nope")` throw with `stories:` in the message.
 
@@ -752,7 +752,7 @@ Checks, each in a fresh page unless said:
 3. **Only visible pictures load**: record every response whose URL contains `/_astro/marketing-`; after `load` and a scroll to the page bottom in steps of 600 px with 150 ms waits, none of the URLs contains `-coding`, `-voice` or `-extraction`; the set of distinct shot names requested is a subset of the 7 support shots.
 4. **`?story=coding` on load**: `selected` is `[1,1,1,1,1,1,1]`; the 7 visible alts equal `panelsOf(p)[1].alt`; `location.search` is `?story=coding`; `history.length` is unchanged from a blank page's (1 more than before is the navigation itself; compare with the value read right after load and again after step 5).
 5. **A chapter chip switches the page**: on `/`, scroll `#ch-prompts` into view, click the tab "Voice agent" inside the picker of `#ch-prompts`'s chapter; then `selected` is `[2,...,2]`; the hero's visible alt and the prompts picture's visible alt equal the voice ones; `location.search` is `?story=voice`; `history.length` equals its value before the click; scrolling the page to the bottom requests `-voice` images and none with `-coding` or `-extraction`.
-6. **Keyboard**: focus the selected tab of the alert chapter's picker, press `ArrowRight`: `selected` is `[3,...,3]` and the URL is `?story=extraction`; press `Home`: all `[0,...]` and `?story=support`; press `End` then `ArrowRight` (wraps to 0): all `[0,...]`.
+6. **Keyboard**: focus the selected tab of the alert chapter's picker, press `ArrowLeft` (wraps from support to the last story): `selected` is `[3,...,3]` and the URL is `?story=extraction`; press `Home`: all `[0,...]` and `?story=support`; press `End` then `ArrowRight` (wraps to 0): all `[0,...]`.
 7. **Hash and other parameters survive**: load `/?utm=1&story=voice#product`; click "Coding agent" in the hero: `location.search` is `?utm=1&story=coding` and `location.hash` is `#product`.
 8. **Unknown value**: `/?story=bogus`: `selected` is all 0, `location.search` is still `?story=bogus`, no console error.
 9. **No horizontal overflow at 390 px** (viewport 390x844, mobile UA not needed): for each of `/`, `/?story=coding`, `/?story=voice`, `/?story=extraction`: `document.documentElement.scrollWidth <= window.innerWidth`, and no picker's `[role=tablist]` is wider than its parent's `clientWidth` (its own `overflow-x:auto` scrolls instead); then click each chip once in the hero and re-check the overflow.
@@ -795,3 +795,20 @@ Run from the worktree, with Node on the PATH:
 
 1. **Q0 gets a unit test** (AGENTS.md: every behaviour change comes with tests). Put `checkStorage` in its own module, `website/scripts/screenshot-storage.mjs`, exported, and import it from `screenshots.mjs`. Add `website/scripts/screenshot-storage.test.mjs`, run by the site's `node --test` setup (check how `just check-docs` finds the script tests and follow it). It covers: a missing map is fine; a valid map passes; a non-object, an empty key and a non-string value are each rejected, naming the shot. Both new files join Q0's Edit list. The scratch run that checks the storage is applied stays.
 2. **The coding trace-list alt** is corrected against the PNG in Q2 step 7.
+
+## Review fixes (2026-11-24), override the phases above
+
+- **Q0 is done** (commit 095bcee). Skip it; Q1 uses its `storage` support.
+- **Q1, readability (D-W-23).** A chapter picture is shown in a column about 715 CSS px wide, so a shot's CSS width (PNG width / 2) must be at most 900 px; aim for 760–900. Use the narrowest viewport where the page's content isn't cut, for every chapter (all four stories of a chapter share one viewport and clip, so the panels have equal heights). Report each chapter's viewport and the PNGs' widths.
+  - Assistant shot: a 900×760 viewport, the dashboard behind; the assistant window stored at the left edge (`{"x":16,"y":16,"width":480,"height":728}`, tuned so both turns and the draft card show; report the value), so phones, which crop from the left, show the window first; clip the whole viewport.
+  - Queue review, alerts and playground: narrow their viewports to fit the 900 px rule; if a page's content can't fit (for example the playground's two columns for extraction), stop and report with `QUESTION:` and the narrowest width that works.
+- **Q1, hero shots.** The all-shots run rewrites `marketing-trace-view*.png`. Keep the new PNGs, and look at each one: the hero captions and alts (in `stories.mjs`, Q2) must still be true of them.
+- **Q2, copy.** Step 7 checks the 28 captions too: each caption must be true of its picture (for example the coding alert's "in Slack": if the channel isn't visible, say "Know when the coding agent's error rate climbs." instead). Alts are one sentence describing the picture; they don't need to start with "The".
+- **Q2, design.** Add `docs/website/00-design.md` to Q2's Edit list. In §12, change the coding trace list's "`coding-agent` on top" to "only the failed traces", replace "`-research`" with "`-voice`", and keep the shot count at 28 (4 hero + 24 chapter).
+- **Q2, phones.** When the sync script selects a story in a picker the reader didn't click, it calls `tab.scrollIntoView({ inline: "nearest", block: "nearest" })` on that picker's selected tab, so the chosen chip is visible.
+- **Q2, first load.** With `?story=voice`, the support hero picture is still fetched (it is the eager one). Accepted (design §12: the first load is as today); check 4 doesn't assert otherwise.
+- **Q2, checks.**
+  - Check 3: a picture's shot name is the `/_astro/` file name cut at its first `.`.
+  - Check 4: `history.length` is the same right after load and after a switch.
+  - Check 11: compare the first tab's left edge with the tablist's content box (its left edge plus its padding), with 2 px tolerance.
+- **Q2, conventions.** Build with `pnpm --dir website exec astro build` only (never `pnpm build`). Don't export `DEFAULT_STORY` unless `StoryPicture` or the sync script uses it.
