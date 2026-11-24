@@ -92,7 +92,8 @@ D-IN-28, M7 part 1's decisions:
 5. **OpenClaw setup runs the plugin install.** `cetra agents setup openclaw` runs `openclaw plugins install --pin --accept-capabilities npm:@openclaw/diagnostics-otel@<v>`, where `<v>` is the version `openclaw --version` prints: the plugin is released with OpenClaw, under the same version. Then setup merges `~/.openclaw/openclaw.json`. This amends D-CA-10 ("setup writes settings only"); the user approved it (2026-11-24).
    - A plugin install from a local file is never used. OpenClaw grants the exporter capability only to an install from npm or ClawHub (spike § 4.1).
    - `--print` prints the install command instead of running it.
-   - `remove` undoes the config merge and leaves the plugin installed. It prints `openclaw plugins uninstall diagnostics-otel` for the user to run.
+   - `plugins.allow` is appended to only when the user already keeps the list: an absent list means every plugin may load, and only a non-empty list restricts loading (OpenClaw 2026.11.5, `docs/tools/plugin.md` in its package; its `ensurePluginAllowlisted` helper appends only to an existing array). Setup never creates the list.
+   - `remove` undoes the config merge and leaves the plugin installed. It takes back the plugin's `enabled` entry key (deleting the entry only when it is left empty) and its `plugins.allow` element when the list exists, plus the `diagnostics.otel` keys setup set. It prints `openclaw plugins uninstall diagnostics-otel` for the user to run.
 6. **OpenClaw's metrics and logs are off in setup** (`metrics: false`, `logs: false`). Qwen Code's logs and metrics are accepted and dropped (D-IN-27 item 5; D-CA-2 already does this).
 7. **Qwen Code's hook events are `SessionStart` and `UserPromptSubmit`.** Those are the events Qwen 0.28.0 fired in the spike. `BeforeAgent`, configured in the spike too, did not fire (`spikes/m7-coding-agents.md` evidence `runs/qwen-final/hooks.jsonl`). The payload has `session_id` and `cwd`, as Gemini's does. Facts from Qwen 0.28.0's bundled docs (`bundled/qc-helper/docs/`), read for this plan:
    - **Hooks** (`features/hooks.md`):
@@ -427,7 +428,7 @@ The implementer records the publish time with `npm view <pkg> time --json` and r
      - On a non-zero exit, fail with "the plugin install failed; nothing was written", before writing any config.
      - Under `--print`, print the command and run nothing.
    - **Config:** merge `<openclaw_dir>/openclaw.json` with the JSON helpers (`read_json_object`, `object_entry`, `write_settings` through `emit`):
-     - `plugins.allow`: an array; add `"diagnostics-otel"` if absent and keep the others.
+     - `plugins.allow`: appended to only when it already exists as an array (an absent list means every plugin may load, and only a non-empty list restricts loading); add `"diagnostics-otel"` if absent and keep the others.
      - `plugins.entries."diagnostics-otel".enabled = true`.
      - `diagnostics.enabled = true`.
      - `diagnostics.otel` = `{ enabled: true, endpoint: <url>, protocol: "http/protobuf", serviceName: "openclaw", traces: true, metrics: false, logs: false, captureContent: !no_content, headers: { Authorization: "Bearer <key>" } }`.
@@ -436,7 +437,7 @@ The implementer records the publish time with `npm view <pkg> time --json` and r
    - **Printed afterwards:** "Restart the OpenClaw gateway if one is running (openclaw gateway restart). One-shot runs (openclaw agent --local) pick it up now."
    - **Remove:** when `diagnostics.otel.endpoint` points at the saved URL (`points_at`):
      - Remove the keys setup set from `diagnostics.otel`.
-     - Remove `plugins.entries."diagnostics-otel"` and `"diagnostics-otel"` from `plugins.allow`.
+     - Remove `plugins.entries."diagnostics-otel".enabled`, deleting the entry only when it is left empty, and `"diagnostics-otel"` from `plugins.allow` when that list exists.
      - Print `openclaw plugins uninstall diagnostics-otel` as a suggestion.
      - Leave `diagnostics.enabled` as it is: it may predate setup.
 3. **Commands are parameters, for hermetic tests.** `openclaw::setup(args, url, paths, out, version: &dyn Fn() -> anyhow::Result<String>, install: &dyn Fn(&[&str]) -> anyhow::Result<()>)`.
@@ -448,7 +449,9 @@ The implementer records the publish time with `npm view <pkg> time --json` and r
 **Tests:**
 - `openclaw_setup_installs_the_matching_plugin_then_merges`: the fake runner records the commands; version `2026.11.5` gives the install argument `npm:@openclaw/diagnostics-otel@2026.11.5`.
 - `openclaw_setup_keeps_other_plugins_and_keys`.
-- `openclaw_setup_twice_is_idempotent`: `allow` has one entry.
+- `openclaw_setup_does_not_create_an_allow_list`; `openclaw_setup_appends_to_an_existing_allow_list`.
+- `openclaw_remove_keeps_other_plugin_entry_keys`.
+- `openclaw_setup_twice_is_idempotent`.
 - `openclaw_install_failure_writes_nothing`.
 - `openclaw_print_runs_nothing_and_writes_nothing`.
 - `openclaw_no_content_sets_capture_false`.

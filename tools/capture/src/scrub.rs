@@ -406,12 +406,15 @@ fn leaks(request: &ExportTraceServiceRequest, ctx: &ScrubContext) -> Vec<String>
 fn leak_needles(ctx: &ScrubContext) -> Vec<String> {
     // localhost alone is not a leak: tool descriptions mention it (Qwen's shell tool says
     // `php -S localhost:8000`); the mock and the receiver are always reached with their port.
+    // The percent-encoded forms catch a URL-encoded header value, as OTLP headers are written.
     let mut needles = vec![
         "127.0.0.1".to_owned(),
         ctx.mock_host.clone(),
         format!("{}:{}", ctx.mock_host, ctx.mock_port),
         format!("localhost:{}", ctx.mock_port),
         format!("localhost:{}", ctx.receiver_port),
+        format!("localhost%3A{}", ctx.mock_port),
+        format!("localhost%3A{}", ctx.receiver_port),
         "[::1]".to_owned(),
         format!(":{}", ctx.mock_port),
         format!(":{}", ctx.receiver_port),
@@ -806,6 +809,28 @@ mod tests {
                     spans: vec![Span {
                         name: "chat".to_owned(),
                         attributes: vec![string_attr("server.address", "localhost:40123/v1")],
+                        ..Span::default()
+                    }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        };
+        let error = scrub(&mut request, &ctx()).unwrap_err();
+        assert!(matches!(error, CaptureError::Leak { .. }), "{error}");
+    }
+
+    #[test]
+    fn percent_encoded_localhost_with_the_mock_port_is_a_leak() {
+        let mut request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "chat".to_owned(),
+                        attributes: vec![string_attr(
+                            "http.request.header.authorization",
+                            "Bearer http://localhost%3A40123/v1/chat/completions",
+                        )],
                         ..Span::default()
                     }],
                     ..ScopeSpans::default()

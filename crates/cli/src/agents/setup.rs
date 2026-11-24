@@ -78,6 +78,16 @@ pub(crate) fn setup(args: &SetupArgs, paths: &Paths, out: &mut dyn Write) -> any
         )?,
     }
     if let Some(file) = agents_file {
+        // Saving replaces the server and key every agent's `remove` compares against; a warning
+        // first, never the key itself.
+        if let Some(existing) = AgentsFile::load(&paths.agents_file())?
+            && (existing.url != file.url || existing.key != file.key)
+        {
+            writeln!(
+                out,
+                "agents.toml already holds another server or key; `cetra agents remove` for agents set up with it will no longer recognise their settings."
+            )?;
+        }
         file.save(&paths.agents_file())?;
     }
     Ok(())
@@ -1399,5 +1409,36 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(error, "--url must start with http:// or https://");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_warns_when_agents_toml_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        run_setup(&setup_args(Agent::ClaudeCode), &paths);
+        // The same server and key again: no warning.
+        let rerun = run_setup(&setup_args(Agent::ClaudeCode), &paths);
+        assert!(!rerun.contains("agents.toml already holds"), "{rerun}");
+        // Another server, then another key: the warning, and never the key itself.
+        let mut args = setup_args(Agent::ClaudeCode);
+        args.url = "https://other.example.com".to_owned();
+        let out = run_setup(&args, &paths);
+        assert!(
+            out.contains(
+                "agents.toml already holds another server or key; `cetra agents remove` for agents set up with it will no longer recognise their settings."
+            ),
+            "{out}"
+        );
+        let mut args = setup_args(Agent::ClaudeCode);
+        args.key = Token::from_str("sk-cetra-other").unwrap();
+        let out = run_setup(&args, &paths);
+        assert!(
+            out.contains("agents.toml already holds another server or key"),
+            "{out}"
+        );
+        assert!(!out.contains("sk-cetra-other"), "{out}");
+        let saved = AgentsFile::load(&paths.agents_file()).unwrap().unwrap();
+        assert_eq!(saved.key, "sk-cetra-other");
     }
 }

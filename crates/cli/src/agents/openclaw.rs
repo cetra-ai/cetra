@@ -102,15 +102,19 @@ fn otel_section(root: &Map<String, Value>) -> Option<&Value> {
 
 /// Sets the plugin's allow-list entry, its enabled entry, `diagnostics.enabled` and each
 /// `diagnostics.otel` key setup owns. Other entries and keys keep their place.
+///
+/// `plugins.allow` is appended to only when the user already keeps one: OpenClaw loads every
+/// plugin while the list is absent (a non-empty list restricts loading to it), and OpenClaw's
+/// own installer appends only to an existing list too. Setup never creates the list.
 fn merge(root: &mut Map<String, Value>, url: &str, args: &SetupArgs) -> anyhow::Result<()> {
     let plugins = object_entry(root, "plugins")?;
-    let allow = plugins
-        .entry("allow")
-        .or_insert_with(|| Value::Array(Vec::new()))
-        .as_array_mut()
-        .context("the plugins.allow setting is not an array")?;
-    if !allow.iter().any(|name| name.as_str() == Some(PLUGIN)) {
-        allow.push(json!(PLUGIN));
+    if let Some(allow) = plugins.get_mut("allow") {
+        let allow = allow
+            .as_array_mut()
+            .context("the plugins.allow setting is not an array")?;
+        if !allow.iter().any(|name| name.as_str() == Some(PLUGIN)) {
+            allow.push(json!(PLUGIN));
+        }
     }
     let entries = object_entry(plugins, "entries")?;
     object_entry(entries, PLUGIN)?.insert("enabled".to_owned(), Value::Bool(true));
@@ -150,8 +154,9 @@ fn prune_empty(map: &mut Map<String, Value>, key: &str) {
     }
 }
 
-/// Undoes `merge`: the `diagnostics.otel` keys it set, the plugin's allow-list entry and its
-/// `entries` object. `diagnostics.enabled` stays, since it may predate setup.
+/// Undoes `merge`: the `diagnostics.otel` keys it set, the plugin's `enabled` entry and its
+/// allow-list element. An entry keeps the keys setup did not set (its `config`, say), and is
+/// removed only when it is left empty. `diagnostics.enabled` stays, since it may predate setup.
 fn unmerge(root: &mut Map<String, Value>) {
     if let Some(diagnostics) = root.get_mut("diagnostics").and_then(Value::as_object_mut) {
         if let Some(otel) = diagnostics.get_mut("otel").and_then(Value::as_object_mut) {
@@ -165,8 +170,13 @@ fn unmerge(root: &mut Map<String, Value>) {
         if let Some(allow) = plugins.get_mut("allow").and_then(Value::as_array_mut) {
             allow.retain(|name| name.as_str() != Some(PLUGIN));
         }
-        if let Some(entries) = plugins.get_mut("entries").and_then(Value::as_object_mut) {
-            entries.remove(PLUGIN);
+        if let Some(entries) = plugins.get_mut("entries").and_then(Value::as_object_mut)
+            && let Some(entry) = entries.get_mut(PLUGIN).and_then(Value::as_object_mut)
+        {
+            entry.remove("enabled");
+            if entry.is_empty() {
+                entries.remove(PLUGIN);
+            }
         }
         prune_empty(plugins, "entries");
         prune_empty(plugins, "allow");
@@ -358,7 +368,7 @@ mod tests {
             ]]
         );
         let config = json_at(&config_path(&paths));
-        assert_eq!(config["plugins"]["allow"], json!(["diagnostics-otel"]));
+        assert!(config["plugins"].get("allow").is_none());
         assert_eq!(
             config["plugins"]["entries"]["diagnostics-otel"]["enabled"],
             true
@@ -427,7 +437,77 @@ mod tests {
         assert_eq!(fs::read(config_path(&paths)).unwrap(), first);
         assert!(!output.contains("wrote"), "{output}");
         let config = json_at(&config_path(&paths));
-        assert_eq!(config["plugins"]["allow"].as_array().unwrap().len(), 1);
+        assert!(config["plugins"].get("allow").is_none());
+    }
+
+    #[test]
+    fn openclaw_setup_does_not_create_an_allow_list() {
+        // Without a list, OpenClaw loads every plugin, so the enabled entry is all it needs.
+        let dir = tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        run_setup(&openclaw_args(false, false), &paths, true)
+            .0
+            .unwrap();
+        let config = json_at(&config_path(&paths));
+        assert_eq!(
+            config["plugins"],
+            json!({"entries": {"diagnostics-otel": {"enabled": true}}})
+        );
+    }
+
+    #[test]
+    fn openclaw_setup_appends_to_an_existing_allow_list() {
+        // A list the user keeps restricts loading to it, empty or not: the plugin joins it.
+        for existing in [json!([]), json!(["other"])] {
+            let dir = tempdir().unwrap();
+            let paths = paths_under(dir.path());
+            let config = config_path(&paths);
+            fs::create_dir_all(config.parent().unwrap()).unwrap();
+            fs::write(
+                &config,
+                serde_json::to_string(&json!({"plugins": {"allow": existing}})).unwrap(),
+            )
+            .unwrap();
+            run_setup(&openclaw_args(false, false), &paths, true)
+                .0
+                .unwrap();
+            let mut expected = existing.as_array().unwrap().clone();
+            expected.push(json!(PLUGIN));
+            assert_eq!(json_at(&config)["plugins"]["allow"], Value::Array(expected));
+        }
+    }
+
+    #[test]
+    fn openclaw_remove_keeps_other_plugin_entry_keys() {
+        let dir = tempdir().unwrap();
+        let paths = paths_under(dir.path());
+        write_file(
+            &config_path(&paths),
+            r#"{"plugins": {"entries": {"diagnostics-otel": {"config": {"verbose": true}}}}}
+"#,
+        );
+        run_setup(&openclaw_args(false, false), &paths, true)
+            .0
+            .unwrap();
+        save_agents(&paths, URL);
+        let after_setup = json_at(&config_path(&paths));
+        assert_eq!(
+            after_setup["plugins"]["entries"]["diagnostics-otel"]["enabled"],
+            true
+        );
+        assert_eq!(
+            after_setup["plugins"]["entries"]["diagnostics-otel"]["config"]["verbose"],
+            true
+        );
+        run_remove(&paths);
+        // `diagnostics.enabled` stays: it may predate setup.
+        assert_eq!(
+            json_at(&config_path(&paths)),
+            json!({
+                "plugins": {"entries": {"diagnostics-otel": {"config": {"verbose": true}}}},
+                "diagnostics": {"enabled": true}
+            })
+        );
     }
 
     #[test]

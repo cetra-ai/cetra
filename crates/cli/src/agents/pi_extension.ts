@@ -57,17 +57,19 @@ const text = (content: any): string =>
         .join("\n");
 
 // A pi message as an OpenAI chat message, the shape gen_ai.input.messages and
-// gen_ai.output.messages take. Roles other than these are skipped (null).
+// gen_ai.output.messages take. The content is a string or an array of parts. Roles other
+// than these are skipped (null).
 export function toOpenAI(message: any): any {
   if (!message || typeof message.role !== "string") return null;
   if (message.role === "assistant") {
     const out: any = { role: "assistant", content: text(message.content) };
-    const thinking = (message.content ?? [])
+    const parts: any[] = Array.isArray(message.content) ? message.content : [];
+    const thinking = parts
       .filter((p: any) => p?.type === "thinking")
       .map((p: any) => p.thinking)
       .join("\n");
     if (thinking) out.reasoning_content = thinking;
-    const calls = (message.content ?? [])
+    const calls = parts
       .filter((p: any) => p?.type === "toolCall")
       .map((p: any) => ({
         id: p.id,
@@ -186,7 +188,10 @@ export default function cetraPi(pi: any): void {
       ? []
       : [{ key: "gen_ai.response.finish_reasons", value: { arrayValue: { values: [{ stringValue: value }] } } }];
   };
+  // Ends the run. A tool that started and never ended is dropped, not emitted, so unfinished
+  // tools never pile up across runs.
   const closeRun = (): void => {
+    tools.clear();
     if (!run) return;
     record(
       "invoke_agent",
@@ -248,7 +253,8 @@ export default function cetraPi(pi: any): void {
         ...finish(m.stopReason),
       ];
       if (capture) {
-        attrs.push(json("gen_ai.input.messages", inputMessages.map(toOpenAI).filter(Boolean)));
+        const messages: any[] = Array.isArray(inputMessages) ? inputMessages : [];
+        attrs.push(json("gen_ai.input.messages", messages.map(toOpenAI).filter(Boolean)));
         attrs.push(json("gen_ai.output.messages", [toOpenAI(m)].filter(Boolean)));
       }
       record(
@@ -298,9 +304,10 @@ export default function cetraPi(pi: any): void {
   );
   pi.on(
     "agent_end",
-    guard(async () => {
+    guard(() => {
+      // Not awaited: pi goes on at once, and the POST finishes in the background.
       closeRun();
-      await flush();
+      void flush();
     }),
   );
   pi.on(

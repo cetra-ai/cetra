@@ -31,7 +31,7 @@ export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 
 4. Open a new shell so that the lines load, and run pi as usual. Its traces then go to cetra.
 
-The third line turns on the prompts and the answers. Setup prints it only without `--no-content`.
+The third line turns on the prompts and the answers. Setup prints it only without `--no-content`. With `--no-content`, setup prints `unset OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT` instead, and asks you to remove the content line from your profile if an earlier setup added it.
 
 ## What setup writes
 

@@ -43,7 +43,7 @@ Second, it merges `~/.openclaw/openclaw.json`. It keeps every other key and plug
 
 | Key | Value |
 |---|---|
-| `plugins.allow` | includes `diagnostics-otel` |
+| `plugins.allow` | appends `diagnostics-otel` when you already keep this list; setup never creates it |
 | `plugins.entries.diagnostics-otel.enabled` | `true` |
 | `diagnostics.enabled` | `true` |
 | `diagnostics.otel.enabled` | `true` |
@@ -96,7 +96,10 @@ API-equivalent cost is what the same tokens would cost at API prices. If you use
 
 - Tested with OpenClaw 2026.11.5. The captured run used `openclaw agent --local`. A run through the gateway was not captured.
 - Setup installs the plugin from npm. A plugin installed from a local file exports nothing, because OpenClaw grants the exporter permission only to plugins installed from npm or ClawHub.
-- The gateway also adds spans for its own startup and RPC calls. cetra drops them.
+- Each `cetra agents setup openclaw` runs the plugin install again, which needs network access.
+- `cetra agents setup openclaw` reads `openclaw.json` as strict JSON; a file with comments or trailing commas is refused, and nothing is written. OpenClaw itself parses the file as JSON5.
+- OpenClaw can relocate its state and config with `OPENCLAW_STATE_DIR` (or `OPENCLAW_HOME`, or `OPENCLAW_CONFIG_PATH` for the file itself); setup writes `~/.openclaw/openclaw.json` and does not follow them.
+- cetra drops the gateway's RPC spans (`openclaw.gateway.rpc.*`), `openclaw.diagnostic.phase`, `openclaw.context.assembled` and the per-turn `openclaw.model.usage` total. The gateway route was not captured.
 - OpenClaw sends no repository, branch or person, and its spans carry no session id.
 
 ## Next

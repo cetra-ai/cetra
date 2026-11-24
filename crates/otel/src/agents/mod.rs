@@ -355,13 +355,16 @@ pub(crate) fn payload(
         Some(CodingAgent::ClaudeCode) => {
             claude_code::payload(span_name, bag, events, assembled, warnings);
         }
+        Some(CodingAgent::GeminiCli) => gemini_cli::payload(span_name, bag, assembled, warnings),
+        // The generic GenAI reading reads their messages.
         Some(
-            CodingAgent::GeminiCli
-            | CodingAgent::QwenCode
+            CodingAgent::QwenCode
             | CodingAgent::Pi
-            | CodingAgent::OpenClaw,
-        ) => gemini_cli::payload(span_name, bag, assembled, warnings),
-        Some(CodingAgent::Codex | CodingAgent::Copilot) | None => {}
+            | CodingAgent::OpenClaw
+            | CodingAgent::Codex
+            | CodingAgent::Copilot,
+        )
+        | None => {}
     }
 }
 

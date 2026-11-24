@@ -478,7 +478,7 @@ The fixture format is defined in `fixtures/otlp/README.md` (D66). Each case is a
 | Langfuse SDK (Python, 5.x) | drop-in client | — | — | the SDK's own observations |
 | Laminar (Python) | client | — | — | the SDK's own spans |
 | Google ADK | — | — | native model calls | native agent spans |
-| Coding agents (§ Coding agents) | Codex CLI (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
+| Coding agents (§ Coding agents) | Codex CLI (captured), Qwen Code (captured), Pi (captured), OpenClaw (captured) | Claude Code (captured) | Gemini CLI (captured) | Copilot (hand-written) |
 
 OpenAI client to OpenRouter and Novita: OpenInference through cetra's SDK, and OpenLLMetry (D-IN-19).
 

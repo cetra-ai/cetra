@@ -71,7 +71,16 @@ fn setup_in(args: &SetupArgs, url: &str, dir: &Path, out: &mut dyn Write) -> any
         "export OTEL_EXPORTER_OTLP_HEADERS={}",
         shell_quote(Path::new(&headers))
     )?;
-    if !args.no_content {
+    if args.no_content {
+        writeln!(
+            out,
+            "unset OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"
+        )?;
+        writeln!(
+            out,
+            "Remove the content line from your profile if an earlier setup added it."
+        )?;
+    } else {
         writeln!(
             out,
             "export OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true"
@@ -179,13 +188,21 @@ mod tests {
     }
 
     #[test]
-    fn pi_setup_no_content_omits_the_content_line() {
+    fn pi_setup_no_content_prints_unset() {
         let dir = tempdir().unwrap();
         let mut args = pi_args();
         args.no_content = true;
         let out = run_setup(&args, dir.path());
         assert!(out.contains("export OTEL_EXPORTER_OTLP_HEADERS="));
-        assert!(!out.contains("CAPTURE_MESSAGE_CONTENT"));
+        assert!(
+            out.contains("unset OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Remove the content line from your profile if an earlier setup added it."),
+            "{out}"
+        );
+        assert!(!out.contains("CAPTURE_MESSAGE_CONTENT=true"), "{out}");
     }
 
     #[test]
