@@ -108,6 +108,45 @@
     "clip": "aside[aria-label=\"Trace\"]"
   },
   {
+    "name": "marketing-trace-view-coding",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "viewport": { "width": 1920, "height": 530 },
+    "actions": [
+      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=coding-agent" },
+      { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
+  },
+  {
+    "name": "marketing-trace-view-research",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "viewport": { "width": 1920, "height": 530 },
+    "actions": [
+      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=research-agent" },
+      { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
+  },
+  {
+    "name": "marketing-trace-view-extraction",
+    "path": "/acme/support-bot/traces",
+    "waitFor": "100 loaded",
+    "theme": "dark",
+    "viewport": { "width": 1920, "height": 530 },
+    "actions": [
+      { "click": "div[role=\"grid\"][aria-label=\"Traces\"] >> text=extract-invoice" },
+      { "click": "aside[aria-label=\"Trace\"] button:has-text(\"Timeline\")" }
+    ],
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
+  },
+  {
     "name": "marketing-trace-list",
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
