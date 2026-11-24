@@ -1,7 +1,9 @@
 //! Price table and span cost.
 //!
-//! Spec 02 § Cost computation, D82 and D109. Reported cost wins outright.
-//! Otherwise an `llm` or `embedding` span is priced from the matching row.
+//! Spec 02 § Cost computation, D82 and D109. Reported cost wins outright,
+//! except a reported total of exactly 0 on a span with tokens, which counts as
+//! no report (D-IN-26 item 14). Otherwise an `llm` or `embedding` span is
+//! priced from the matching row.
 
 use std::sync::Arc;
 
@@ -272,13 +274,22 @@ pub(crate) fn apply(
         return Priced::default();
     }
     if let Some(reported) = reported_cost(bag, warnings) {
-        return Priced {
-            input: reported.input,
-            output: reported.output,
-            total: reported.total,
-            source: Some(CostSource::Reported),
-            provider: None,
-        };
+        // A reported total of exactly 0 on a span with tokens counts as no
+        // report (Q2 (a), D-IN-26 item 14), for every source: OpenLIT writes
+        // `gen_ai.usage.cost = 0` when its price table has no row. The keys are
+        // consumed as today and their values ignored, so zero input and output
+        // parts follow the same rule, and the price table prices the span.
+        let tokens = charge.usage.input_tokens.is_some_and(|count| count > 0)
+            || charge.usage.output_tokens.is_some_and(|count| count > 0);
+        if reported.total != Some(0.0) || !tokens {
+            return Priced {
+                input: reported.input,
+                output: reported.output,
+                total: reported.total,
+                source: Some(CostSource::Reported),
+                provider: None,
+            };
+        }
     }
     let Some(model) = charge.model else {
         return none();
@@ -1496,6 +1507,126 @@ mod tests {
             assert_eq!(priced.total, total, "{key}");
             assert_eq!(bag.state(key), Some(Use::Consumed), "{key}");
         }
+    }
+
+    #[test]
+    fn a_zero_reported_cost_with_tokens_is_priced_instead() {
+        use crate::bag::Use;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value;
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+
+        fn double_attr(key: &str, value: f64) -> KeyValue {
+            KeyValue {
+                key: key.to_owned(),
+                value: Some(AnyValue {
+                    value: Some(Value::DoubleValue(value)),
+                }),
+                key_strindex: 0,
+            }
+        }
+
+        // 9 USD per 1M input tokens: the table's figure for 1M tokens is 9.
+        let prices = table(vec![row("gpt-4o-mini", PriceScope::Builtin, None, 0, 9.0)]);
+        fn run(
+            prices: &PriceTable,
+            model: &str,
+            usage: &Usage,
+            attrs: &[KeyValue],
+            keys: &[&str],
+        ) -> (Priced, Vec<Option<Use>>) {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(attrs, &mut warnings);
+            let priced = apply(
+                &mut bag,
+                &Charge {
+                    kind: SpanKind::Llm,
+                    provider: None,
+                    model: Some(model),
+                    request_model: None,
+                    start_time: 0,
+                    usage,
+                },
+                prices,
+                &mut warnings,
+            );
+            let states = keys.iter().map(|key| bag.state(key)).collect();
+            (priced, states)
+        }
+
+        // OpenLIT's zero (Q2 (a), D-IN-26 item 14): a reported total of
+        // exactly 0 with tokens is no report; the span is priced and the key
+        // is consumed as today.
+        let (priced, states) = run(
+            &prices,
+            "gpt-4o-mini",
+            &usage_input(1_000_000),
+            &[double_attr("gen_ai.usage.cost", 0.0)],
+            &["gen_ai.usage.cost"],
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(9.0));
+        assert_eq!(priced.total, Some(9.0));
+        assert_eq!(states, vec![Some(Use::Consumed)]);
+
+        // Without tokens the zero stays reported, including when both counts
+        // are present but zero.
+        for usage in [
+            Usage::default(),
+            Usage {
+                input_tokens: Some(0),
+                output_tokens: Some(0),
+                ..Usage::default()
+            },
+        ] {
+            let (priced, _) = run(
+                &prices,
+                "gpt-4o-mini",
+                &usage,
+                &[double_attr("gen_ai.usage.cost", 0.0)],
+                &[],
+            );
+            assert_eq!(priced.source, Some(CostSource::Reported));
+            assert_eq!(priced.total, Some(0.0));
+        }
+
+        // A non-zero reported cost still wins outright.
+        let (priced, _) = run(
+            &prices,
+            "gpt-4o-mini",
+            &usage_input(1_000_000),
+            &[double_attr("gen_ai.usage.cost", 1.5e-5)],
+            &[],
+        );
+        assert_eq!(priced.source, Some(CostSource::Reported));
+        assert_eq!(priced.total, Some(1.5e-5));
+
+        // A zero with tokens and an unpriced model is a miss, never $0.
+        let (priced, _) = run(
+            &prices,
+            "unknown-model",
+            &usage_input(1_000_000),
+            &[double_attr("gen_ai.usage.cost", 0.0)],
+            &[],
+        );
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.total, None);
+
+        // Zero input and output parts (no total key) sum to a zero total and
+        // follow the same rule.
+        let (priced, states) = run(
+            &prices,
+            "gpt-4o-mini",
+            &usage_input(1_000_000),
+            &[
+                double_attr("gen_ai.usage.input_cost", 0.0),
+                double_attr("gen_ai.usage.output_cost", 0.0),
+            ],
+            &["gen_ai.usage.input_cost", "gen_ai.usage.output_cost"],
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(9.0));
+        assert_eq!(priced.total, Some(9.0));
+        assert_eq!(states, vec![Some(Use::Consumed), Some(Use::Consumed)]);
     }
 
     #[test]

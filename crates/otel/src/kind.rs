@@ -94,6 +94,12 @@ pub(crate) fn span_kind(
 /// operation when `gen_ai.operation.name` did not (the rows above run first, so
 /// reaching this function means it did not decide); a Promptfoo grader span
 /// carries `gen_ai.evaluation.name`.
+///
+/// The vector databases decide here too (Q1 (a), D-IN-26): an OpenLIT
+/// `vectordb` span is a `retriever` when it reads (`db.operation.name`
+/// `get`, `query` or `search`, lowercased; Chroma writes them in caps) and a
+/// plain `span` otherwise, and OpenLLMetry's vector instrumentors name their
+/// read operations, so those span names decide. Writes stay `span`.
 fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Option<SpanKind> {
     // Pipecat's conversation and turn spans (D-IN-5) name no operation.
     if scope_name == "pipecat.turn" && matches!(span_name, "conversation" | "turn") {
@@ -155,7 +161,26 @@ fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Opti
     // OpenLIT (R-OL-1, D-IN-26 item 11): Browser Use 0.x writes its agent and
     // step spans with a non-standard `gen_ai.operation.name` (`run`, `step`) and
     // the operation in `gen_ai.operation.type`. Unit-tested only.
+    //
+    // OpenLIT's vector spans (Q1 (a), D-IN-26): `gen_ai.operation.name` is
+    // `vectordb`, which no row maps, and `db.operation.name` names the
+    // operation. Only a read is a `retriever`; writes stay plain spans. The
+    // keys are peeked, not consumed: `db.operation.name` stays in
+    // `attributes`.
     if scope_name.starts_with("openlit.instrumentation.") {
+        if bag.get("gen_ai.operation.name").and_then(as_str) == Some("vectordb") {
+            let reads = bag
+                .get("db.operation.name")
+                .and_then(as_str)
+                .is_some_and(|text| {
+                    matches!(&*text.to_ascii_lowercase(), "get" | "query" | "search")
+                });
+            return Some(if reads {
+                SpanKind::Retriever
+            } else {
+                SpanKind::Span
+            });
+        }
         return decide(bag, "gen_ai.operation.type", |text| {
             Some(match text {
                 "invoke_agent" => SpanKind::Agent,
@@ -163,6 +188,9 @@ fn scope_gated(bag: &mut AttrBag<'_>, span_name: &str, scope_name: &str) -> Opti
                 _ => return None,
             })
         });
+    }
+    if let Some(kind) = openllmetry_vector(span_name, scope_name) {
+        return Some(kind);
     }
     // Promptfoo (R4, D-IN-26 item 11): the grader span of an assertion. Its
     // `chat` child is decided by its operation name and keeps the tokens. The
@@ -223,6 +251,38 @@ fn livekit(span_name: &str, scope_name: &str) -> Option<SpanKind> {
         "llm_request_run" | "start_agent_activity" => SpanKind::Span,
         _ => return None,
     })
+}
+
+/// The OpenLLMetry vector-database rows (R2, Q1 (a), D-IN-26), on the scopes
+/// `opentelemetry.instrumentation.{chromadb,qdrant,milvus,pinecone,weaviate}`:
+/// the read operations are `retriever`, recognized by span name because Qdrant
+/// and Pinecone write no `db.operation`. Every other name decides nothing, so
+/// writes stay plain spans. The Pinecone and Weaviate rows are unit-tested
+/// only (D-IN-26 item 11). Consumes nothing.
+fn openllmetry_vector(span_name: &str, scope_name: &str) -> Option<SpanKind> {
+    let reads = match scope_name {
+        "opentelemetry.instrumentation.chromadb" => {
+            matches!(span_name, "chroma.query" | "chroma.get")
+        }
+        "opentelemetry.instrumentation.qdrant" => {
+            matches!(
+                span_name,
+                "qdrant.query_points" | "qdrant.search" | "qdrant.scroll"
+            )
+        }
+        "opentelemetry.instrumentation.milvus" => {
+            matches!(span_name, "milvus.search" | "milvus.query" | "milvus.get")
+        }
+        "opentelemetry.instrumentation.pinecone" => {
+            matches!(span_name, "pinecone.query" | "pinecone.fetch")
+        }
+        "opentelemetry.instrumentation.weaviate" => {
+            span_name.starts_with("db.weaviate.collections.query.")
+                || span_name.starts_with("db.weaviate.gql.query.")
+        }
+        _ => return None,
+    };
+    reads.then_some(SpanKind::Retriever)
 }
 
 /// Mastra's own span-type row (M1, D-IN-5): the steps around a model call.
@@ -696,6 +756,152 @@ mod tests {
             string_attr("gen_ai.operation.type", "invoke_agent"),
         ];
         assert_eq!(kind_in("browser_use", &attrs), SpanKind::Span);
+    }
+
+    #[test]
+    fn openlit_vectordb_spans_are_retrievers_on_reads_only() {
+        // Q1 (a), D-IN-26: only a read is a `retriever`; Chroma writes
+        // `db.operation.name` in caps (`GET`, `INSERT`, `DELETE`). The keys are
+        // peeked, not consumed.
+        for (op, kind) in [
+            ("get", SpanKind::Retriever),
+            ("GET", SpanKind::Retriever),
+            ("query", SpanKind::Retriever),
+            ("Query", SpanKind::Retriever),
+            ("search", SpanKind::Retriever),
+            ("SEARCH", SpanKind::Retriever),
+            ("insert", SpanKind::Span),
+            ("UPSERT", SpanKind::Span),
+            ("delete", SpanKind::Span),
+            ("create_collection", SpanKind::Span),
+        ] {
+            let attrs = [
+                string_attr("gen_ai.operation.name", "vectordb"),
+                string_attr("db.operation.name", op),
+            ];
+            let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+            assert_eq!(
+                span_kind(&mut bag, "GET docs", "openlit.instrumentation.chroma", &[]),
+                kind,
+                "{op}"
+            );
+            assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
+            assert_eq!(bag.state("db.operation.name"), Some(Use::Unread));
+        }
+        // Qdrant and Milvus write no `db.operation.name`: a plain span.
+        let attrs = [string_attr("gen_ai.operation.name", "vectordb")];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(
+                &mut bag,
+                "UPSERT unknown",
+                "openlit.instrumentation.qdrant",
+                &[]
+            ),
+            SpanKind::Span
+        );
+        // Another operation name still leaves the `gen_ai.operation.type` row
+        // to decide (R-OL-1).
+        let attrs = [
+            string_attr("gen_ai.operation.name", "run"),
+            string_attr("gen_ai.operation.type", "invoke_agent"),
+        ];
+        assert_eq!(
+            kind_in("openlit.instrumentation.browser_use", &attrs),
+            SpanKind::Agent
+        );
+        // Another scope reads neither key.
+        let attrs = [
+            string_attr("gen_ai.operation.name", "vectordb"),
+            string_attr("db.operation.name", "get"),
+        ];
+        let mut bag = AttrBag::new(&attrs, &mut Warnings::default());
+        assert_eq!(
+            span_kind(&mut bag, "GET docs", "openlit", &[]),
+            SpanKind::Span
+        );
+        assert_eq!(bag.state("gen_ai.operation.name"), Some(Use::Unread));
+        assert_eq!(kind_in("other.scope", &attrs), SpanKind::Span);
+    }
+
+    #[test]
+    fn openllmetry_vector_read_names_are_retrievers_on_their_scopes_only() {
+        // R2, Q1 (a), D-IN-26. The Pinecone and Weaviate rows are unit-tested
+        // only (D-IN-26 item 11).
+        for (scope, name) in [
+            ("opentelemetry.instrumentation.chromadb", "chroma.query"),
+            ("opentelemetry.instrumentation.chromadb", "chroma.get"),
+            (
+                "opentelemetry.instrumentation.qdrant",
+                "qdrant.query_points",
+            ),
+            ("opentelemetry.instrumentation.qdrant", "qdrant.search"),
+            ("opentelemetry.instrumentation.qdrant", "qdrant.scroll"),
+            ("opentelemetry.instrumentation.milvus", "milvus.search"),
+            ("opentelemetry.instrumentation.milvus", "milvus.query"),
+            ("opentelemetry.instrumentation.milvus", "milvus.get"),
+            ("opentelemetry.instrumentation.pinecone", "pinecone.query"),
+            ("opentelemetry.instrumentation.pinecone", "pinecone.fetch"),
+            (
+                "opentelemetry.instrumentation.weaviate",
+                "db.weaviate.collections.query.fetch_objects",
+            ),
+            (
+                "opentelemetry.instrumentation.weaviate",
+                "db.weaviate.collections.query.near_text",
+            ),
+            (
+                "opentelemetry.instrumentation.weaviate",
+                "db.weaviate.gql.query.get.do",
+            ),
+        ] {
+            assert_eq!(kind_named(name, scope, &[]), SpanKind::Retriever, "{name}");
+        }
+        // Writes and the other names decide nothing: the fallback gives
+        // `span`.
+        for (scope, name) in [
+            ("opentelemetry.instrumentation.chromadb", "chroma.add"),
+            ("opentelemetry.instrumentation.chromadb", "chroma.delete"),
+            ("opentelemetry.instrumentation.qdrant", "qdrant.upsert"),
+            ("opentelemetry.instrumentation.milvus", "milvus.insert"),
+            ("opentelemetry.instrumentation.milvus", "milvus.upsert"),
+            ("opentelemetry.instrumentation.milvus", "milvus.delete"),
+            (
+                "opentelemetry.instrumentation.milvus",
+                "milvus.create_collection",
+            ),
+            ("opentelemetry.instrumentation.pinecone", "pinecone.upsert"),
+            ("opentelemetry.instrumentation.pinecone", "pinecone.delete"),
+            (
+                "opentelemetry.instrumentation.weaviate",
+                "db.weaviate.collections.get",
+            ),
+            (
+                "opentelemetry.instrumentation.weaviate",
+                "db.weaviate.collections.data.insert",
+            ),
+        ] {
+            assert_eq!(kind_named(name, scope, &[]), SpanKind::Span, "{name}");
+        }
+        // A read name on another scope, and on another
+        // `opentelemetry.instrumentation.*` scope, decides nothing.
+        assert_eq!(
+            kind_named("chroma.query", "other.scope", &[]),
+            SpanKind::Span
+        );
+        assert_eq!(
+            kind_named("chroma.query", "opentelemetry.instrumentation.openai", &[]),
+            SpanKind::Span
+        );
+        // A Weaviate name that only starts like the read prefixes is not one.
+        assert_eq!(
+            kind_named(
+                "db.weaviate.collections.queryx.get",
+                "opentelemetry.instrumentation.weaviate",
+                &[]
+            ),
+            SpanKind::Span
+        );
     }
 
     #[test]
