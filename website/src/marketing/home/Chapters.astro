@@ -1,13 +1,7 @@
 ---
-import marketingAlerts from "../../assets/screenshots/marketing-alerts.png";
-import marketingAssistant from "../../assets/screenshots/marketing-assistant.png";
-import marketingIssue from "../../assets/screenshots/marketing-issue.png";
-import marketingPlayground from "../../assets/screenshots/marketing-playground.png";
-import marketingQueueReview from "../../assets/screenshots/marketing-queue-review.png";
-import marketingTraceList from "../../assets/screenshots/marketing-trace-list.png";
 import Chapter from "../components/Chapter.astro";
-import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
+import StoryPicture from "../components/StoryPicture.astro";
 ---
 
 <Section tone="raised" id="product" labelledby="ch-trace">
@@ -19,7 +13,7 @@ import Section from "../components/Section.astro";
     lede="Send OpenTelemetry from any framework or SDK. Every LLM call, tool and retrieval lands in one tree, with tokens, cost and latency."
     features={["Sessions and users", "Cost per call and per model", "Live view while traces arrive", "Images and files in the payload"]}
   >
-    <Frame src={marketingTraceList} alt="The trace list: a histogram of traces over time, and rows with start time, name, input and output." label="Traces" fade />
+    <StoryPicture picture="trace" align="start" fade />
   </Chapter>
 </Section>
 
@@ -33,7 +27,7 @@ import Section from "../components/Section.astro";
     lede="Filter by anything, search the text of prompts and outputs, write SQL, or ask the built-in assistant in plain words."
     features={["Errors, slow and expensive in one click", "Full-text search", "A SQL console over your traces", "An assistant that drafts filters, SQL and dashboards, on your own LLM connection"]}
   >
-    <Frame src={marketingAssistant} alt="The assistant answering which traces failed in the last day, with the filter it drafted." label="Assistant" fade={false} />
+    <StoryPicture picture="explore" align="end" fade={false} />
   </Chapter>
 </Section>
 
@@ -46,7 +40,7 @@ import Section from "../components/Section.astro";
     lede="cetra groups recurring errors, bad scores and unhappy users into issues. Fix the cause once instead of reading traces one by one."
     features={["Errors grouped by fingerprint, with no LLM call", "Bad scores and feedback clustered by meaning", "A fixed issue that comes back reopens", "Alert on it, queue it for review or turn it into a dataset"]}
   >
-    <Frame src={marketingIssue} alt="An issue page: its state and actions, a daily chart of occurrences, example traces and its history." label="Issues" fade={false} />
+    <StoryPicture picture="issues" align="start" fade={false} />
   </Chapter>
 </Section>
 
@@ -60,7 +54,7 @@ import Section from "../components/Section.astro";
     lede="Score production traffic with LLM judges and checks, send traces to annotation queues for human review, and turn real traces into datasets and experiments."
     features={["LLM judges with sampling and a cost cap", "Checks: JSON, regex, schema, contains", "Annotation queues for human review", "Datasets and experiments from the SDKs"]}
   >
-    <Frame src={marketingQueueReview} alt="An annotation queue's review form: the progress, the instructions and the score fields." label="Annotation queue" fade={false} />
+    <StoryPicture picture="evaluate" align="end" fade={false} />
   </Chapter>
 </Section>
 
@@ -73,7 +67,7 @@ import Section from "../components/Section.astro";
     lede="Version your prompts in cetra and point a label such as production at the one to serve. Your app fetches it through the SDK, with a cache and a fallback. Try changes in the playground first."
     features={["Versions and labels", "SDK fetch with a cache and a fallback", "Up to four models side by side in the playground", "Cost, latency and scores per prompt version"]}
   >
-    <Frame src={marketingPlayground} alt="The playground with a prompt version's messages and variables, and a model's answer with its tokens, cost and latency." label="Playground" fade={false} />
+    <StoryPicture picture="prompts" align="start" fade={false} />
   </Chapter>
 </Section>
 
@@ -87,6 +81,6 @@ import Section from "../components/Section.astro";
     lede="Get told when the error rate, the cost, the latency, a score or an issue crosses your line, in Slack, by email or on a webhook."
     features={["Error rate", "Cost over a window", "p95 latency", "Judge score under a threshold", "Occurrences of an issue"]}
   >
-    <Frame src={marketingAlerts} alt="The alerts page with its alert rules, three of them firing, and the recent alert events." label="Alerts" fade={false} />
+    <StoryPicture picture="alert" align="end" fade={false} />
   </Chapter>
 </Section>
