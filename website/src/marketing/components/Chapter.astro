@@ -56,6 +56,12 @@ const { eyebrow, title, lede, features, id, bare = false, flip = false } = Astro
     .chapter--flip .text {
       order: 2;
     }
+    .visual :global(.frame) {
+      margin-inline: 0 auto;
+    }
+    .chapter--flip .visual :global(.frame) {
+      margin-inline: auto 0;
+    }
   }
   h2 {
     font-size: var(--text-2xl);
