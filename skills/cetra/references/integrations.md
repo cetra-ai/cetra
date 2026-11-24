@@ -159,10 +159,10 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [LiveKit Agents](https://cetra.sh/docs/integrations/livekit-agents/) | ✓ | — | LiveKit's own OpenTelemetry spans | captured |
 | [LobeChat](https://cetra.sh/docs/integrations/lobechat/) | — | — | LobeChat's telemetry variables | setup only |
 | [MCP](https://cetra.sh/docs/integrations/mcp/) | ✓ | — | the MCP SDK's own OpenTelemetry spans | captured |
-| [n8n](https://cetra.sh/docs/integrations/n8n/) | — | ✓ | n8n's OpenTelemetry export | captured |
+| [n8n](https://cetra.sh/docs/integrations/n8n/) | — | — | n8n's OpenTelemetry export | captured |
 | [Pipecat](https://cetra.sh/docs/integrations/pipecat/) | ✓ | — | Pipecat's built-in tracing | captured |
 | [Prompt Flow](https://cetra.sh/docs/integrations/prompt-flow/) | ✓ | — | Prompt Flow's own OpenTelemetry setup | captured |
-| [Promptfoo](https://cetra.sh/docs/integrations/promptfoo/) | — | ✓ | Promptfoo's own OpenTelemetry export | captured |
+| [Promptfoo](https://cetra.sh/docs/integrations/promptfoo/) | — | — | Promptfoo's own OpenTelemetry export | captured |
 | [Stagehand](https://cetra.sh/docs/integrations/stagehand/) | — | ✓ | the `telemetry` option of the Stagehand SDK | setup only |
 
 - [Browser Use](https://cetra.sh/docs/integrations/browser-use/): Browser agent runs, model calls and tools.
