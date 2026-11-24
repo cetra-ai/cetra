@@ -163,6 +163,29 @@ function traceSummary(
   };
 }
 
+function stepSummary(
+  traceId: string,
+  spanId: string,
+  name: string,
+  kind: Schema<"SpanKind">,
+  overrides: Partial<Schema<"SpanSummary">> = {},
+): Schema<"SpanSummary"> {
+  return {
+    trace_id: traceId,
+    span_id: spanId,
+    parent_span_id: "b1000000000000ff",
+    name,
+    span_kind: kind,
+    start_time: NOW,
+    end_time: NOW,
+    duration_ns: 350_000_000,
+    status: "ok",
+    tags: [],
+    metadata: {},
+    ...overrides,
+  };
+}
+
 const ERROR_SESSION: Schema<"SessionSummary"> = {
   session_id: "sess-errors",
   start_time: NOW,
@@ -229,6 +252,11 @@ function scoreBadge(text: string) {
     element?.textContent === text && element.children.length > 0;
 }
 
+/** The error session's steps: one tool call on the first turn, so its chip shows. */
+const ERROR_SESSION_STEPS: Schema<"SpanSummary">[] = [
+  stepSummary(OK_TRACE, "b1000000000000f1", "get_order_status", "tool"),
+];
+
 function serveErrorSession() {
   server.use(
     http.get("/api/v1/projects/:project/sessions/:sessionId", () =>
@@ -237,6 +265,9 @@ function serveErrorSession() {
         turns: ERROR_SESSION_TURNS,
         truncated: false,
       }),
+    ),
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: ERROR_SESSION_STEPS, next_cursor: null }),
     ),
   );
 }
@@ -266,7 +297,7 @@ it("shows a turn as chat bubbles, and the payload switch only in details", async
   expect(within(conversation).getByText("Where is my order?")).toBeInTheDocument();
   const items = within(conversation).getAllByRole("listitem");
   expect(items.map((item) => item.textContent)).toEqual(["check the tracking page", "wait a day"]);
-  expect(within(conversation).getByText("1 tool calls")).toBeInTheDocument();
+  expect(await within(conversation).findByText("get_order_status")).toBeInTheDocument();
   expect(within(conversation).getByText('{"error":"payment timeout"}')).toBeInTheDocument();
   expect(within(conversation).queryByText("Pretty")).not.toBeInTheDocument();
 
@@ -286,6 +317,164 @@ it("shows a turn as chat bubbles, and the payload switch only in details", async
   await user.click(await screen.findByRole("menuitem", { name: "Hide details" }));
   expect(within(conversation).queryByText("Pretty")).not.toBeInTheDocument();
   expect(within(conversation).getByText('{"error":"payment timeout"}')).toBeInTheDocument();
+});
+
+it("shows a turn's tool calls as chips", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  expect(await within(conversation).findByText("get_order_status")).toBeInTheDocument();
+  expect(within(conversation).queryByText("chat claude-sonnet-4-5")).not.toBeInTheDocument();
+});
+
+it("expands a turn's steps in start order and opens a step in the trace pane", async () => {
+  const { router, user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const chevrons = await within(conversation).findAllByRole("button", { name: "Show steps" });
+  const first = chevrons[0];
+  if (!first) {
+    throw new Error("missing first turn's Show steps");
+  }
+  await user.click(first);
+  const steps = await within(conversation).findByRole("list", { name: "Steps" });
+  // KindIcon's aria-label starts each accessible name, so the order is checked on the text.
+  const rows = within(steps).getAllByRole("button");
+  expect(rows.map((row) => row.textContent ?? "")).toEqual([
+    expect.stringContaining("chat"),
+    expect.stringContaining("get_order_status"),
+    expect.stringContaining("chat"),
+  ]);
+
+  await user.click(within(steps).getByRole("button", { name: /get_order_status/ }));
+  expect(router.state.location.search).toMatchObject({ trace: TRACE });
+  const grid = await screen.findByRole("grid", { name: "Trace" });
+  expect(within(grid).getByRole("row", { name: /get_order_status/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+});
+
+it("shows a one-line input preview under each expanded step", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({
+        data: [
+          stepSummary(TRACE, "b1000000000000f1", "chat claude-sonnet-4-5", "llm", {
+            start_time: "2026-01-01T10:00:00.100000000Z",
+          }),
+          stepSummary(TRACE, "b1000000000000f2", "get_order_status", "tool", {
+            start_time: "2026-01-01T10:00:01.950000000Z",
+            input_preview: '{\n  "order": 1234\n}',
+          }),
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  const { user } = await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const chevrons = await within(conversation).findAllByRole("button", { name: "Show steps" });
+  const first = chevrons[0];
+  if (!first) {
+    throw new Error("missing first turn's Show steps");
+  }
+  await user.click(first);
+  const steps = await within(conversation).findByRole("list", { name: "Steps" });
+  const rows = within(steps).getAllByRole("button");
+  const llm = rows[0];
+  if (!llm) {
+    throw new Error("missing llm step");
+  }
+  const tool = rows[1];
+  if (!tool) {
+    throw new Error("missing tool step");
+  }
+  expect(within(steps).getByText('{ "order": 1234 }')).toHaveAttribute(
+    "title",
+    '{ "order": 1234 }',
+  );
+  // The step without an input preview keeps its single line.
+  expect(llm.children).toHaveLength(1);
+  expect(tool.children).toHaveLength(2);
+});
+
+it("shows the gap since the previous turn", async () => {
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const turns = within(conversation).getAllByRole("button", { name: /support-agent/ });
+  const first = turns[0];
+  if (!first) {
+    throw new Error("missing first turn");
+  }
+  const second = turns[1];
+  if (!second) {
+    throw new Error("missing second turn");
+  }
+  expect(within(second).getByText("+5m 00s")).toBeInTheDocument();
+  expect(within(first).queryByText(/^\+/)).not.toBeInTheDocument();
+});
+
+it("marks a failed step in red with its error", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({
+        data: [
+          stepSummary(TRACE, "b1000000000000f1", "get_order_status", "tool", {
+            status: "error",
+            status_message: "payment gateway timeout",
+          }),
+        ],
+        next_cursor: null,
+      }),
+    ),
+  );
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  const conversation = await screen.findByRole("region", { name: "Conversation" });
+  const message = await within(conversation).findByText("payment gateway timeout");
+  const chip = message.parentElement;
+  expect(chip).toHaveClass("border-status-error/40", "text-status-error");
+});
+
+it("says when the steps could not load", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ message: "boom" }, { status: 500 }),
+    ),
+  );
+  let answered = false;
+  const onResponse = ({ request }: { request: Request }) => {
+    if (new URL(request.url).pathname.endsWith("/spans")) {
+      answered = true;
+    }
+  };
+  server.events.on("response:mocked", onResponse);
+  try {
+    await renderApp("/acme/support-bot/sessions/sess-001");
+    const conversation = await screen.findByRole("region", { name: "Conversation" });
+    await waitFor(() => {
+      expect(answered).toBe(true);
+    });
+    expect(
+      within(conversation).queryByRole("button", { name: "Show steps" }),
+    ).not.toBeInTheDocument();
+    expect(within(conversation).queryByText("get_order_status")).not.toBeInTheDocument();
+  } finally {
+    server.events.removeListener("response:mocked", onResponse);
+  }
+});
+
+it("says when some steps are not shown", async () => {
+  server.use(
+    http.get("/api/v1/projects/:project/spans", () =>
+      HttpResponse.json({ data: [], next_cursor: "cursor" }),
+    ),
+  );
+  await renderApp("/acme/support-bot/sessions/sess-001");
+  await screen.findByRole("region", { name: "Conversation" });
+  expect(
+    await screen.findByText(
+      "Some steps are not shown: this session has more than 5 000 steps per 100 turns.",
+    ),
+  ).toBeInTheDocument();
 });
 
 it("marks a failed turn and caps a long bubble", async () => {
