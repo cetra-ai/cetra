@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
-import { trace } from "@opentelemetry/api";
 import { openInferenceMiddleware } from "@arizeai/openinference-tanstack-ai";
+import { trace } from "@opentelemetry/api";
 import { chat, toolDefinition } from "@tanstack/ai";
 import { openaiText } from "@tanstack/ai-openai";
 import { z } from "zod";

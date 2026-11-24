@@ -59,7 +59,9 @@ async function main(): Promise<void> {
     const flue = await start({ agents: [Demo], env: { ...process.env }, providers: [] });
     try {
       const agent = init(Demo, { id: "capture-flue-1" });
-      const receipt = await agent.dispatch("Read hello.txt with the read_file tool and say what it says.");
+      const receipt = await agent.dispatch(
+        "Read hello.txt with the read_file tool and say what it says.",
+      );
       const reply = await agent.read(receipt);
       if (reply.text.length === 0) {
         throw new Error("the run produced no text");

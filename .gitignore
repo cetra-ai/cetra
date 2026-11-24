@@ -27,6 +27,11 @@ tools/capture/java/**/target/
 tools/capture/dotnet/**/bin/
 tools/capture/dotnet/**/obj/
 
+# The eve capture's dev-server state and staged node_modules link (IN9.2e)
+tools/capture/ts/scenarios/genai/eve-agent-tool/.eve/
+tools/capture/ts/scenarios/genai/eve-agent-tool/node_modules
+tools/capture/ts/scenarios/genai/eve-agent-tool/work/
+
 website/.astro/
 website/src/generated/
 website/src/content/docs/docs/help/changelog.md
