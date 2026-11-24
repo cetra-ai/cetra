@@ -1,0 +1,46 @@
+{
+  "description": "Quarkus LangChain4j 1.15.1 on Quarkus 3.40.1.2: one AI service call with one tool round, traced by quarkus-opentelemetry with the four include-* content switches on.",
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "instrumentation": "quarkus-langchain4j-core",
+  "libraries": [
+    "quarkus-langchain4j-core",
+    "quarkus-langchain4j-openai",
+    "quarkus-core"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_capture_1",
+            "name": "get_weather",
+            "arguments": {
+              "city": "Lyon"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "It is sunny in Lyon."
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12
+      }
+    }
+  ]
+}

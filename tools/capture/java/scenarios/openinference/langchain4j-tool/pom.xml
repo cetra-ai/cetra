@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>cetra.capture</groupId>
+    <artifactId>capture-reactor</artifactId>
+    <version>0.0.0</version>
+    <relativePath>../../../pom.xml</relativePath>
+  </parent>
+  <artifactId>openinference-langchain4j-tool</artifactId>
+  <packaging>jar</packaging>
+
+  <!-- LangChain4j 1.23.0 with OpenInference Java's model listener only (the oi-model
+       mode of spikes/m8-files/java/langchain4j; the AiService listeners and
+       langchain4j-observation are dropped, IN8.3). The alpha BOM provides the
+       api-incubator classes OpenInference's dependencies need (spikes/m8-java.md § 5.2). -->
+  <properties>
+    <langchain4j.version>1.23.0</langchain4j.version>
+    <openinference-langchain4j.version>0.1.9</openinference-langchain4j.version>
+    <opentelemetry.version>1.68.0</opentelemetry.version>
+    <opentelemetry-alpha.version>1.68.0-alpha</opentelemetry-alpha.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>io.opentelemetry</groupId>
+        <artifactId>opentelemetry-bom</artifactId>
+        <version>${opentelemetry.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>io.opentelemetry</groupId>
+        <artifactId>opentelemetry-bom-alpha</artifactId>
+        <version>${opentelemetry-alpha.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>cetra.capture</groupId>
+      <artifactId>harness</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j</artifactId>
+      <version>${langchain4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>dev.langchain4j</groupId>
+      <artifactId>langchain4j-open-ai</artifactId>
+      <version>${langchain4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.arize</groupId>
+      <artifactId>openinference-instrumentation-langchain4j</artifactId>
+      <version>${openinference-langchain4j.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-sdk-extension-autoconfigure</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-exporter-otlp</artifactId>
+    </dependency>
+  </dependencies>
+  <build>
+    <resources>
+      <resource>
+        <filtering>true</filtering>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>capture-versions.properties</include>
+        </includes>
+      </resource>
+      <resource>
+        <filtering>false</filtering>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>capture-versions.properties</exclude>
+        </excludes>
+      </resource>
+    </resources>
+  </build>
+</project>

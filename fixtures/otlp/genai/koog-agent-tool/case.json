@@ -1,0 +1,18 @@
+{
+  "description": "Koog 1.3.0 AIAgent with one simple tool, traced by Koog's OpenTelemetry feature with a synchronous span processor and verbose content.",
+  "origin": "captured",
+  "source": {
+    "instrumentation": "agents-features-opentelemetry-jvm",
+    "instrumentation_version": "1.3.0",
+    "language": "java",
+    "libraries": {
+      "agents-features-opentelemetry-jvm": "1.3.0",
+      "koog-agents-jvm": "1.3.0"
+    },
+    "captured_at": "2026-11-24T16:34:54Z"
+  },
+  "spec_refs": [
+    "02 § Mapping tables / Input / output"
+  ],
+  "notes": "Koog puts random ids in span names (create_agent <session-uuid>, invoke_agent <uuid>), masked by volatile_name_prefixes, and in four attribute keys, masked by volatile_attributes: gen_ai.agent.id is a session UUID, gen_ai.conversation.id a conversation UUID, koog.event.id a per-span event UUID, and koog.node.output embeds the model response's wall-clock metaInfo.timestamp on the two LLM nodes (the key is masked everywhere, so the deterministic node passthroughs are masked too)."
+}

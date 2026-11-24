@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>cetra.capture</groupId>
+    <artifactId>capture-reactor</artifactId>
+    <version>0.0.0</version>
+    <relativePath>../../../pom.xml</relativePath>
+  </parent>
+  <artifactId>genai-spring-ai-boot-tool</artifactId>
+  <packaging>jar</packaging>
+
+  <!-- Spring AI 2.0.2 on Spring Boot 4.1.2 (Micrometer route), from
+       spikes/m8-files/followup/boot-ai. The Boot and Spring AI BOMs are imported
+       here, not spring-boot-starter-parent (IN8.3). -->
+  <properties>
+    <spring-boot.version>4.1.2</spring-boot.version>
+    <spring-ai.version>2.0.2</spring-ai.version>
+  </properties>
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring-boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.springframework.ai</groupId>
+        <artifactId>spring-ai-bom</artifactId>
+        <version>${spring-ai.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+  <dependencies>
+    <dependency>
+      <groupId>cetra.capture</groupId>
+      <artifactId>harness</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-opentelemetry</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.ai</groupId>
+      <artifactId>spring-ai-starter-model-openai</artifactId>
+      <version>${spring-ai.version}</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <resources>
+      <resource>
+        <filtering>true</filtering>
+        <directory>src/main/resources</directory>
+        <includes>
+          <include>capture-versions.properties</include>
+        </includes>
+      </resource>
+      <resource>
+        <filtering>false</filtering>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>capture-versions.properties</exclude>
+        </excludes>
+      </resource>
+    </resources>
+  </build>
+</project>

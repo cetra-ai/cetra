@@ -1,0 +1,267 @@
+{
+  "spans": [
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "d44f3f1422126604",
+      "name": "spring_ai chat_client",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.000000000Z",
+      "end_time": "2025-12-31T23:59:50.669000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "operation": "framework",
+      "attributes": {
+        "gen_ai.operation.name": "framework",
+        "gen_ai.system": "spring_ai",
+        "spring.ai.chat.client.advisors": "[\"Tool Calling Advisor\", \"call\"]",
+        "spring.ai.chat.client.stream": "false",
+        "spring.ai.chat.client.tool.names": "[\"get_weather\"]",
+        "spring.ai.kind": "chat_client"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "22ed9cd3f693c11b",
+      "parent_span_id": "d44f3f1422126604",
+      "name": "tool _calling ",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.015000000Z",
+      "end_time": "2025-12-31T23:59:50.669000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "operation": "framework",
+      "attributes": {
+        "gen_ai.operation.name": "framework",
+        "gen_ai.system": "spring_ai",
+        "spring.ai.advisor.name": "Tool Calling Advisor",
+        "spring.ai.advisor.order": "-2147483348",
+        "spring.ai.kind": "advisor"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "147f61f81298113d",
+      "parent_span_id": "22ed9cd3f693c11b",
+      "name": "call",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.016000000Z",
+      "end_time": "2025-12-31T23:59:50.578000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "operation": "framework",
+      "attributes": {
+        "gen_ai.operation.name": "framework",
+        "gen_ai.system": "spring_ai",
+        "spring.ai.advisor.name": "call",
+        "spring.ai.advisor.order": "2147483647",
+        "spring.ai.kind": "advisor"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "852ab170100275e4",
+      "parent_span_id": "147f61f81298113d",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.063000000Z",
+      "end_time": "2025-12-31T23:59:50.577000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 82,
+      "output_tokens": 17,
+      "cache_read_tokens": 0,
+      "total_tokens": 99,
+      "cost_input": 0.000082,
+      "cost_output": 0.000068,
+      "cost_total": 0.00015000000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"TOOL_CALLS\"]",
+        "gen_ai.response.id": "chatcmpl-capture-1",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "82",
+        "gen_ai.usage.output_tokens": "17",
+        "gen_ai.usage.total_tokens": "99",
+        "spring.ai.model.request.tool.names": "[\"get_weather\"]"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "3e2caf9c378ed96b",
+      "parent_span_id": "22ed9cd3f693c11b",
+      "name": "execute_tool get_weather",
+      "span_kind": "tool",
+      "start_time": "2025-12-31T23:59:50.581000000Z",
+      "end_time": "2025-12-31T23:59:50.594000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "operation": "execute_tool",
+      "attributes": {
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.system": "spring_ai",
+        "spring.ai.kind": "tool_call",
+        "spring.ai.tool.call.id": "call_capture_1",
+        "spring.ai.tool.definition.description": "Get the current weather for a city",
+        "spring.ai.tool.definition.name": "get_weather",
+        "spring.ai.tool.definition.schema": "{\n  \"$schema\" : \"https://json-schema.org/draft/2020-12/schema\",\n  \"type\" : \"object\",\n  \"properties\" : {\n    \"city\" : {\n      \"type\" : \"string\",\n      \"description\" : \"City name\"\n    }\n  },\n  \"required\" : [ \"city\" ],\n  \"additionalProperties\" : false\n}",
+        "spring.ai.tool.type": "function"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "9d14de6379a0be94",
+      "parent_span_id": "22ed9cd3f693c11b",
+      "name": "call",
+      "span_kind": "span",
+      "start_time": "2025-12-31T23:59:50.595000000Z",
+      "end_time": "2025-12-31T23:59:50.668000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "operation": "framework",
+      "attributes": {
+        "gen_ai.operation.name": "framework",
+        "gen_ai.system": "spring_ai",
+        "spring.ai.advisor.name": "call",
+        "spring.ai.advisor.order": "2147483647",
+        "spring.ai.kind": "advisor"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    },
+    {
+      "project_id": "01900000-0000-7000-8000-000000000001",
+      "trace_id": "7db458315f124a3590ea84ac3cc61e5d",
+      "span_id": "757490d0ec344b79",
+      "parent_span_id": "9d14de6379a0be94",
+      "name": "chat gpt-4o-mini",
+      "span_kind": "llm",
+      "start_time": "2025-12-31T23:59:50.598000000Z",
+      "end_time": "2025-12-31T23:59:50.668000000Z",
+      "status": "ok",
+      "service_name": "capture-app",
+      "provider": "openai",
+      "request_model": "gpt-4o-mini",
+      "response_model": "gpt-4o-mini",
+      "operation": "chat",
+      "input_tokens": 131,
+      "output_tokens": 12,
+      "cache_read_tokens": 0,
+      "total_tokens": 143,
+      "cost_input": 0.000131,
+      "cost_output": 0.000048,
+      "cost_total": 0.00017900000000000001,
+      "cost_source": "computed",
+      "attributes": {
+        "gen_ai.operation.name": "chat",
+        "gen_ai.request.model": "gpt-4o-mini",
+        "gen_ai.response.finish_reasons": "[\"STOP\"]",
+        "gen_ai.response.id": "chatcmpl-capture-2",
+        "gen_ai.response.model": "gpt-4o-mini",
+        "gen_ai.system": "openai",
+        "gen_ai.usage.cache_read.input_tokens": "0",
+        "gen_ai.usage.input_tokens": "131",
+        "gen_ai.usage.output_tokens": "12",
+        "gen_ai.usage.total_tokens": "143",
+        "spring.ai.model.request.tool.names": "[\"get_weather\"]"
+      },
+      "resource_attributes": {
+        "telemetry.sdk.language": "java",
+        "telemetry.sdk.name": "opentelemetry",
+        "telemetry.sdk.version": "1.62.0"
+      },
+      "scope_name": "org.springframework.boot",
+      "scope_version": "4.1.2",
+      "conventions": [
+        "genai"
+      ],
+      "ingest_time": "2026-01-01T00:00:00.000000000Z",
+      "schema_version": 2
+    }
+  ],
+  "media": [],
+  "rejected_spans": 0
+}

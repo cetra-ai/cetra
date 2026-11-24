@@ -14,6 +14,11 @@
        spring-boot-starter-parent. -->
   <modules>
     <module>harness</module>
+    <module>scenarios/genai/spring-ai-boot-tool</module>
+    <module>scenarios/openinference/spring-ai-tool</module>
+    <module>scenarios/openinference/langchain4j-tool</module>
+    <module>scenarios/genai/quarkus-langchain4j-tool</module>
+    <module>scenarios/genai/koog-agent-tool</module>
   </modules>
 
   <properties>
