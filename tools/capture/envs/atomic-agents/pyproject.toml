@@ -46,3 +46,18 @@ python_version = "3.13"
 files = ["scenarios"]
 # Every scenario entry point is main.py. mypy maps those paths to one module.
 exclude = ["main\\.py$"]
+
+# atomic_agents ships no py.typed marker: its classes are Any.
+[[tool.mypy.overrides]]
+module = "atomic_agents"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "atomic_agents.*"
+ignore_missing_imports = true
+
+# BaseIOSchema and BaseTool are Any-typed (atomic_agents ships no types): the
+# schemas and the tool subclass them.
+[[tool.mypy.overrides]]
+module = "atomic_agents_agent"
+disallow_subclassing_any = false
