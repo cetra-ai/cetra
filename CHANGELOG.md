@@ -23,6 +23,8 @@ with an `### Upgrade notes` section (https://cetra.sh/docs/self-hosting/upgrade/
 - The Python and TypeScript SDKs send `User-Agent: cetra-sdk-python/<version>` and `cetra-sdk-js/<version>` on their requests; Python's trace exporter adds it after the OpenTelemetry exporter's own value.
 - Strands time to first token is read in milliseconds; framework names written as the provider (Strands, Microsoft Agent Framework, AutoGen, Spring AI) are skipped; Microsoft Agent Framework workflow steps and Mirascope trace spans are chain spans.
 - LiteLLM Proxy's and Bifrost's own cost figures are read as the reported cost; Bifrost's server root span is a chain, not a second LLM call; `gen_ai.operation.name` values `embedding` and `aembedding` (LiteLLM's call types) give the embedding kind.
+- OpenLLMetry completions without a role are read as assistant messages; a `function_call` is a tool call.
+- Bifrost's server root span carries plain text instead of messages in its message fields; cetra stores it as text and records no normalize error.
 
 ### Fixed
 

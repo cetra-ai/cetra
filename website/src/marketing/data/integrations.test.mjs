@@ -11,6 +11,7 @@ test("parses the real page", () => {
   assert.ok(items.length >= 1);
   assert.deepEqual(groups(items), [
     "Providers",
+    "Gateways",
     "Frameworks",
     "Coding agents",
     "Instrumentation libraries",

@@ -69,6 +69,26 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="Vertex AI" description="Gemini on Vertex AI." href="/docs/integrations/vertex-ai/" />
 </CardGrid>
 
+## Gateways
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [Bifrost](/docs/integrations/bifrost/) | — | — | the gateway's `otel` plugin | captured |
+| [Cloudflare AI Gateway](/docs/integrations/cloudflare-ai-gateway/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Envoy AI Gateway](/docs/integrations/envoy-ai-gateway/) | — | — | the gateway's OpenTelemetry environment | captured |
+| [Helicone](/docs/integrations/helicone/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Kong AI Gateway](/docs/integrations/kong/) | — | — | the `opentelemetry` plugin | setup only |
+| [LiteLLM Proxy](/docs/integrations/litellm-proxy/) | ✓ | — | the proxy's `otel` callback | captured |
+| [Portkey](/docs/integrations/portkey/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [TrueFoundry](/docs/integrations/truefoundry/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Vercel AI Gateway](/docs/integrations/vercel-ai-gateway/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+
+<CardGrid>
+  <LinkCard title="Bifrost" description="Chain and LLM spans per call, with the reported cost." href="/docs/integrations/bifrost/" />
+  <LinkCard title="Envoy AI Gateway" description="One LLM span per call, priced from the table." href="/docs/integrations/envoy-ai-gateway/" />
+  <LinkCard title="LiteLLM Proxy" description="Routed calls with the cost the proxy computes." href="/docs/integrations/litellm-proxy/" />
+</CardGrid>
+
 ## Frameworks
 
 | Integration | Python | TypeScript | How | Tested against |
@@ -99,7 +119,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Semantic Kernel](/docs/integrations/semantic-kernel/) | ✓ | — | Semantic Kernel's own OpenTelemetry spans | captured |
 | [smolagents](/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
 | [Strands Agents](/docs/integrations/strands/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
-| [Temporal](/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | setup only |
+| [Temporal](/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
 
@@ -129,6 +149,7 @@ Use this page to find how to connect your framework, provider or instrumentation
   <LinkCard title="Semantic Kernel" description="Agents, plugin functions and model calls." href="/docs/integrations/semantic-kernel/" />
   <LinkCard title="smolagents" description="Agent steps, model calls and tools." href="/docs/integrations/smolagents/" />
   <LinkCard title="Strands Agents" description="Event loop cycles, model calls and tools." href="/docs/integrations/strands/" />
+  <LinkCard title="Temporal" description="Agent workflows on Temporal, with their model calls." href="/docs/integrations/temporal/" />
   <LinkCard title="Vercel AI SDK" description="Versions 4 to 7." href="/docs/integrations/vercel-ai-sdk/" />
   <LinkCard title="VoltAgent" description="Agent runs, model calls and tools, with the session." href="/docs/integrations/voltagent/" />
 </CardGrid>

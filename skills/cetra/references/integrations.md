@@ -66,6 +66,24 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Together AI](https://cetra.sh/docs/integrations/together/): Together SDK and the OpenAI client.
 - [Vertex AI](https://cetra.sh/docs/integrations/vertex-ai/): Gemini on Vertex AI.
 
+## Gateways
+
+| Integration | Python | TypeScript | How | Tested against |
+|---|---|---|---|---|
+| [Bifrost](https://cetra.sh/docs/integrations/bifrost/) | — | — | the gateway's `otel` plugin | captured |
+| [Cloudflare AI Gateway](https://cetra.sh/docs/integrations/cloudflare-ai-gateway/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Envoy AI Gateway](https://cetra.sh/docs/integrations/envoy-ai-gateway/) | — | — | the gateway's OpenTelemetry environment | captured |
+| [Helicone](https://cetra.sh/docs/integrations/helicone/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Kong AI Gateway](https://cetra.sh/docs/integrations/kong/) | — | — | the `opentelemetry` plugin | setup only |
+| [LiteLLM Proxy](https://cetra.sh/docs/integrations/litellm-proxy/) | ✓ | — | the proxy's `otel` callback | captured |
+| [Portkey](https://cetra.sh/docs/integrations/portkey/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [TrueFoundry](https://cetra.sh/docs/integrations/truefoundry/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+| [Vercel AI Gateway](https://cetra.sh/docs/integrations/vercel-ai-gateway/) | ✓ | ✓ | OpenAI client with the gateway's base URL | setup only |
+
+- [Bifrost](https://cetra.sh/docs/integrations/bifrost/): Chain and LLM spans per call, with the reported cost.
+- [Envoy AI Gateway](https://cetra.sh/docs/integrations/envoy-ai-gateway/): One LLM span per call, priced from the table.
+- [LiteLLM Proxy](https://cetra.sh/docs/integrations/litellm-proxy/): Routed calls with the cost the proxy computes.
+
 ## Frameworks
 
 | Integration | Python | TypeScript | How | Tested against |
@@ -96,7 +114,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 | [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/) | ✓ | — | Semantic Kernel's own OpenTelemetry spans | captured |
 | [smolagents](https://cetra.sh/docs/integrations/smolagents/) | ✓ | — | `instrument=["smolagents"]` | captured |
 | [Strands Agents](https://cetra.sh/docs/integrations/strands/) | ✓ | — | Strands' own OpenTelemetry spans | captured |
-| [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | setup only |
+| [Temporal](https://cetra.sh/docs/integrations/temporal/) | ✓ | — | Temporal's OpenAI Agents plugin | captured |
 | [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/) | — | ✓ | `aiTelemetry()` | captured |
 | [VoltAgent](https://cetra.sh/docs/integrations/voltagent/) | — | ✓ | VoltAgent's own OpenTelemetry spans | captured |
 
@@ -125,6 +143,7 @@ Use this page to find how to connect your framework, provider or instrumentation
 - [Semantic Kernel](https://cetra.sh/docs/integrations/semantic-kernel/): Agents, plugin functions and model calls.
 - [smolagents](https://cetra.sh/docs/integrations/smolagents/): Agent steps, model calls and tools.
 - [Strands Agents](https://cetra.sh/docs/integrations/strands/): Event loop cycles, model calls and tools.
+- [Temporal](https://cetra.sh/docs/integrations/temporal/): Agent workflows on Temporal, with their model calls.
 - [Vercel AI SDK](https://cetra.sh/docs/integrations/vercel-ai-sdk/): Versions 4 to 7.
 - [VoltAgent](https://cetra.sh/docs/integrations/voltagent/): Agent runs, model calls and tools, with the session.
 

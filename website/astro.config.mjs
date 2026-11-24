@@ -241,6 +241,24 @@ export default defineConfig({
                   ],
                 },
                 {
+                  label: "Gateways",
+                  collapsed: true,
+                  items: [
+                    { label: "Bifrost", link: "/docs/integrations/bifrost/" },
+                    {
+                      label: "Cloudflare AI Gateway",
+                      link: "/docs/integrations/cloudflare-ai-gateway/",
+                    },
+                    { label: "Envoy AI Gateway", link: "/docs/integrations/envoy-ai-gateway/" },
+                    { label: "Helicone", link: "/docs/integrations/helicone/" },
+                    { label: "Kong AI Gateway", link: "/docs/integrations/kong/" },
+                    { label: "LiteLLM Proxy", link: "/docs/integrations/litellm-proxy/" },
+                    { label: "Portkey", link: "/docs/integrations/portkey/" },
+                    { label: "TrueFoundry", link: "/docs/integrations/truefoundry/" },
+                    { label: "Vercel AI Gateway", link: "/docs/integrations/vercel-ai-gateway/" },
+                  ],
+                },
+                {
                   label: "Frameworks",
                   items: [
                     { label: "AG2", link: "/docs/integrations/ag2/" },
