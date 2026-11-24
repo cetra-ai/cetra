@@ -33,7 +33,8 @@ Some frameworks write their own keys under their instrumentation scope. cetra re
 - [LiveKit Agents](/docs/integrations/livekit-agents/) (scope `livekit-agents`): the `lk.pii.*` keys set the content, and a host in the provider names the endpoint.
 - [Pipecat](/docs/integrations/pipecat/) (scopes starting with `pipecat`): `input` and `output` set the content, and `conversation.id` sets the session on the turn spans.
 - [Promptfoo](/docs/integrations/promptfoo/) (scope `promptfoo.providers`): `gen_ai.evaluation.name` marks a grader span as an evaluator.
-- OpenLIT (scopes starting with `openlit.instrumentation.`): `gen_ai.operation.type` sets the kind when the operation name is not a standard one.
+- [OpenLIT](/docs/integrations/openlit/) (scopes starting with `openlit.instrumentation.`): `gen_ai.operation.type` sets the kind when the operation name is not a standard one, and on a vector span `db.operation.name` marks the reads as retrievers.
+- [Vector databases](/docs/integrations/vector-databases/): OpenLLMetry's Chroma, Qdrant, Milvus, Pinecone and Weaviate instrumentors (scopes `opentelemetry.instrumentation.chromadb`, `.qdrant`, `.milvus`, `.pinecone`, `.weaviate`) set the kind by span name, and the read names are retrievers.
 
 ## Precedence
 

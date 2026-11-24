@@ -24,7 +24,7 @@ Some sources count differently, for example when a library reports the cache sep
 
 Each span shows where its cost came from:
 
-- **Reported.** Your code, your instrumentation or a gateway such as LiteLLM Proxy or Bifrost sent a cost, and cetra keeps it. It never replaces it with a price table figure.
+- **Reported.** Your code, your instrumentation or a gateway such as LiteLLM Proxy or Bifrost sent a cost, and cetra keeps it. It never replaces it with a price table figure. One total counts as no report: exactly 0 on a span that counts tokens, whatever sent it, is priced from the table. OpenLIT writes a cost of 0 when its own price table has no row for the model.
 - **Computed.** cetra multiplied the token counts by a price.
 - **None.** cetra found no price, or the span has no token counts.
 

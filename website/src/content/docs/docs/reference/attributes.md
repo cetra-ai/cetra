@@ -125,6 +125,7 @@ Read on spans that VoltAgent writes: spans with a `voltagent.*` attribute, or wh
 |---|---|
 | `traceloop.span.kind` | Span kind |
 | `llm.request.type` | Span kind |
+| span name, on the vector scopes | Span kind `retriever` for the read names, on the scopes `opentelemetry.instrumentation.chromadb`, `.qdrant`, `.milvus`, `.pinecone` and `.weaviate`: `chroma.query`, `chroma.get`, `qdrant.query_points`, `qdrant.search`, `qdrant.scroll`, `milvus.search`, `milvus.query`, `milvus.get`, `pinecone.query`, `pinecone.fetch`, and Weaviate names starting `db.weaviate.collections.query.` or `db.weaviate.gql.query.`. Every other name on them gives `span` |
 | `gen_ai.prompt.N.*` | Input messages |
 | `gen_ai.completion.N.*` | Output messages |
 | `traceloop.entity.input`, `traceloop.entity.output` | Input and output when there are no messages |
@@ -250,6 +251,7 @@ Read on spans of scopes starting with `openlit.instrumentation.`, which OpenLIT 
 | Attribute | Feeds |
 |---|---|
 | `gen_ai.operation.type` | Span kind, when `gen_ai.operation.name` is not a standard operation: `invoke_agent` gives `agent`, and `execute_task` gives `chain` |
+| `db.operation.name` | Span kind on a vector span (`gen_ai.operation.name` `vectordb`): `get`, `query` or `search`, lowercased, gives `retriever`; any other value, and a missing key, give `span`. The key is peeked, not consumed |
 
 The provider `browser_use`, which OpenLIT writes for Browser Use, is a framework name. cetra never reads it as a provider.
 
