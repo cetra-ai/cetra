@@ -758,10 +758,17 @@ fn prepare_refuses_unmarked_dirs() {
 
 #[test]
 fn proc_status_parses() {
-    let excerpt = "Name:\tcetra\nVmPeak:\t 900000 kB\nVmRSS:\t  123456 kB\nVmHWM:\t  200000 kB\nThreads:\t42\n";
+    let excerpt = "Name:\tcetra\nVmPeak:\t 900000 kB\nVmHWM:\t  200000 kB\nVmRSS:\t  123456 kB\n\
+                   RssAnon:\t  100000 kB\nRssFile:\t   23000 kB\nRssShmem:\t     456 kB\nThreads:\t42\n";
     assert_eq!(
         sample::parse_status(excerpt),
-        (123_456 * 1024, 200_000 * 1024, 42)
+        sample::ProcStatus {
+            rss_bytes: 123_456 * 1024,
+            hwm_bytes: 200_000 * 1024,
+            rss_anon_bytes: 100_000 * 1024,
+            rss_file_bytes: 23_000 * 1024,
+            threads: 42,
+        }
     );
 }
 

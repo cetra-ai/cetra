@@ -194,6 +194,8 @@ def main(argv: list[str] | None = None) -> None:
         [
             ("RSS", xs, values(samples, "rss_bytes", GIB)),
             ("high-water mark", xs, values(samples, "hwm_bytes", GIB)),
+            ("anonymous", xs, values(samples, "rss_anon_bytes", GIB)),
+            ("file-backed", xs, values(samples, "rss_file_bytes", GIB)),
         ],
     )
     draw(
