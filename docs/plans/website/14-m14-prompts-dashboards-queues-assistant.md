@@ -511,6 +511,7 @@ Each prompt's shown version is its latest (write-patch 3, voice-reply 4, extract
    - `versionsOf(story)`: every version, newest first.
    - `labelEventsOf(story)`: newest first, one event per version: `{ label: "production", to_version: n, at: v.at }` plus `from_version: n - 1` when `n > 1` (omit the key for version 1).
 2. Export `storyPromptHandlers: HttpHandler[]`, in this order (a more specific route before a less specific one, as `fallbackHandlers` does):
+   Every route below except the list first does `const story = storyPrompt(params.prompt); if (story === undefined) return undefined;`, so non-story prompts fall through to the fixtures and the manifest.
    1. `GET ${PROJECT}/prompts/:prompt/metrics`: `storyPrompt(params.prompt)` undefined returns `undefined`; else read `from`/`to` from the URL like `fallbacks.ts` does (`to` default `new Date().toISOString()`, `from` default `to`) and answer `HttpResponse.json(metricsOf(<versions newest first as numbers>, from, to))`. This needs `export` on `metricsOf` in `fallbacks.ts` (its signature `(versions: number[], from: string, to: string)` is unchanged).
    2. `GET ${PROJECT}/prompts/:prompt/versions/:version`: story missing, or `Number(params.version)` not an integer in `1..latest`, returns `undefined`; else `HttpResponse.json(versionOf(...))`.
    3. `GET ${PROJECT}/prompts/:prompt/versions`: `{ data: versionsOf(story), next_cursor: null }`.
@@ -670,7 +671,7 @@ Each prompt's shown version is its latest (write-patch 3, voice-reply 4, extract
 - `"records one label event per version, newest first"`: `label-events` of `extract-invoice` has 5 entries, `to_version` 5 down to 1, the last without `from_version`, the first with `from_version` 4.
 - `"answers prompt metrics for any window, newest version first"`: `/prompts/write-patch/metrics?from=…&to=…` returns the window and versions `[3, 2, 1]`.
 - `"leaves an unknown prompt, a version out of range and the fixture prompts to other handlers"`: `/prompts/nope` 404; `/prompts/write-patch/versions/4` 404; `/prompts/write-patch/versions/0` 404; `/prompts/support-reply` has `name` `support-reply` (the manifest answers it).
-- `"gives every story prompt an id of its own"`: ids are unique and equal `01900000-0000-7000-8000-000000570702`, `…703`, `…704`; every version's `created_at` is before `2026-01-01T11:00:00Z` and the versions' dates increase.
+- `"gives every story prompt an id of its own"`: ids are unique and equal `01900000-0000-7000-8000-000000570702`, `…703`, `…704`; every version's `created_at` is before `2026-11-19T12:00:00Z` and the versions' dates increase.
 
 `web/src/mocks/playground.test.ts` (setup: `server.use(...playgroundHandlers)`; helper `run(body)` that `POST`s `${location.origin}/api/v1/projects/acme%2Fsupport-bot/playground/runs` with `JSON.stringify(body)` and returns the frames parsed from `await response.text()`: split on `"\n\n"`, each block `event: <name>\ndata: <json>`; run the cases of one test with `Promise.all` since a run streams for about 750 ms; real timers):
 - `"keeps today's answer for a run with no source, an unknown prompt or an unreadable body"`: bodies `{}`, `{ source: { prompt: { name: "summarize", version: 1 } } }`, and a raw non-JSON body each stream the text "Thanks for your message. A support agent will reply within one business day." and `done` with usage input 42 and output 18, cost 0.0004, latency 900, ttft 300; `start.trace_id` is `0190a1b2c3d4e5f60718293a4b5c6d7e`.
@@ -1900,7 +1901,7 @@ No other file. P5 runs on the plan's branch after P0 to P4 are merged (at least 
 
 1. **`support-reply` keeps its fixture labels** (`latest` and `staging` on v2). No override: the picture doesn't need `production`.
 2. **Measure labels may differ between P2's dashboards and P4's draft cards.** The cards show titles only, and the titles, ids, layouts and filters agree. That is accepted.
-3. **The cold review's points (2026-11-25), settled:**
+3. **The cold review's points (2026-11-24), settled:**
    - P1: every route that looks up a story prompt (`prompts/:prompt`, its versions, version, label events, metrics) returns `undefined` when `storyPrompt()` is undefined, so other prompts fall through to the fixtures and the manifest.
    - P4: the step-3 helper is `turnSummaryOf`, distinct from step 5's `summaryOf(detail)`.
    - P4: the search rows' extra trace ids and the coding answer's "One" are illustrative and accepted.
