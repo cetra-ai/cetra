@@ -67,6 +67,14 @@ fetch "$tools_dir/aigw/1.2.1/aigw" \
 fetch "$tools_dir/envoy/1.39.1/envoy" \
     "https://github.com/envoyproxy/envoy/releases/download/v1.39.1/envoy-1.39.1-linux-x86_64" \
     "002c6e1c69ed0fa0ea381887247cadadfaec9481375fa8d8d2b1731eeabf40b8"
+fetch "$tools_dir/opencode-v2/2.3.0/opencode" \
+    "https://github.com/anomalyco/opencode/releases/download/v2.3.0/opencode-linux-x64.tar.gz" \
+    "fc0f81522aceeabac47693d88389efa2bc517ce74c2c38fd6967819fcc6e4d3b" \
+    "opencode"
+fetch "$tools_dir/goose/1.59.2/goose" \
+    "https://github.com/aaif-goose/goose/releases/download/v1.59.2/goose-x86_64-unknown-linux-gnu.tar.gz" \
+    "c63cf82953e968d84b7542eb38a621dfdb5050b967728ed363517be5cdc666ea" \
+    "./goose"
 
 # The LiteLLM Proxy environment: its own uv project (litellm[proxy] cannot share
 # tools/capture/py; its mcp and rich pins conflict with the frameworks there),
@@ -115,9 +123,35 @@ else
     cp -- "$repo_root/tools/capture/langflow/uv.lock" "$langflow_lock_copy"
 fi
 
+# Hermes Agent (IN7.9): its setup.py refuses to build a wheel outside a Nix build, so it cannot
+# be a dependency of a uv project of ours. It is installed the way the spike ran it: cloned at
+# the tag and synced from its own committed uv.lock (which pins its transitive versions, not our
+# 7-day rule), with the hermes-otel plugin installed by commit into that environment.
+hermes_env="$tools_dir/hermes/0.23.2"
+hermes_src="$tools_dir/hermes/src-0.23.2"
+if [ -e "$hermes_env/.complete" ]; then
+    echo "capture-tools: hermes 0.23.2 already present"
+else
+    echo "capture-tools: installing hermes 0.23.2"
+    # A failed attempt leaves no .complete marker, so nothing of it is kept.
+    rm -rf -- "$hermes_src" "$hermes_env"
+    mkdir -p -- "$tools_dir/hermes"
+    git clone --depth 1 --branch v0.23.2 https://github.com/NousResearch/hermes-agent "$hermes_src"
+    hermes_commit="$(git -C "$hermes_src" rev-parse HEAD)"
+    if [ "$hermes_commit" != "ae2a81ccc00e9b7c06301523e5bb09608397149c" ]; then
+        echo "capture-tools: hermes v0.23.2 is $hermes_commit, expected ae2a81ccc00e9b7c06301523e5bb09608397149c" >&2
+        exit 1
+    fi
+    UV_PROJECT_ENVIRONMENT="$hermes_env" uv sync --frozen --project "$hermes_src"
+    uv pip install --python "$hermes_env/bin/python" "hermes-otel @ git+https://github.com/briancaffey/hermes-otel@32554cf76c8dbeb8d382eaff9007112abf3f7b2c"
+    touch "$hermes_env/.complete"
+fi
+
 pnpm_tool n8n 2.48.4 n8n/bin/n8n
 pnpm_tool promptfoo 0.125.1 promptfoo/package.json
 pnpm_tool openclaw 2026.11.5 openclaw/package.json
+pnpm_tool opencode 1.19.6 opencode-ai/package.json
+pnpm_tool oh-my-pi 18.22.0 @oh-my-pi/pi-coding-agent/package.json
 
 # The OpenClaw diagnostics exporter (IN7.0), installed into a staged home so the capture never
 # writes to the operator's ~/.openclaw. Skipped when the staged home already lists the plugin.
