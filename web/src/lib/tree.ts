@@ -224,8 +224,8 @@ export function ancestorsOf(spans: readonly { depth: number }[], index: number):
 
 // Rough widths of a name cell's parts at the grid's font size.
 const NAME_CHAR_PX = 7;
-// The toggle gutter, the kind icon, a gap and the right padding.
-const NAME_BASE_PX = 20 + 14 + 4 + 8;
+// The margin, the toggle slot, a gap, the kind icon, a gap and the right padding.
+const NAME_BASE_PX = 4 + 16 + 4 + 14 + 4 + 8;
 const NAME_INDENT_PX = 16;
 const NAME_ERROR_DOT_PX = 12;
 const NAME_DETACHED_BADGE_PX = 64;

@@ -7,7 +7,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "cn";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { Minus, Plus } from "lucide-react";
 import {
   type KeyboardEvent,
   type ReactNode,
@@ -66,11 +66,14 @@ const TREE_COLUMNS = "minmax(160px, 1fr) 72px 64px 72px";
 const TIMELINE_MIN_PX = 160;
 // Timeline rows are 4px shorter than the density's, so the bars sit close together.
 const TIMELINE_ROW_INSET_PX = 4;
-// The expand toggles sit in a 20px gutter at the cell's left edge, so the tree lines run
-// from icon to icon without crossing them. Each depth indents 16px; a kind icon is 14px wide.
-const GUTTER_PX = 20;
+// Tree layout: a 4px margin, then 16px per depth. Each row starts with a 16px toggle slot
+// holding a 10px −/+ box centred in it; the tree lines run from a box's edges, never through it.
+const INDENT_BASE_PX = 4;
 const INDENT_PX = 16;
-const ICON_PX = 14;
+const TOGGLE_SLOT_PX = 16;
+const TOGGLE_BOX_PX = 10;
+// The kind icon starts after the slot and the row's 4px gap.
+const ICON_OFFSET_PX = TOGGLE_SLOT_PX + 4;
 // A tick label past this share of the axis sits left of its gridline, so it isn't cut.
 const TICK_FLIP_PCT = 85;
 const NAME_MIN_PX = 140;
@@ -685,10 +688,12 @@ export function TreeGrid({
                     }}
                   >
                     <div role="gridcell" className="relative h-full min-w-0">
-                      {guide ? <TreeGuideLines guide={guide} depth={row.depth} /> : null}
+                      {guide ? (
+                        <TreeGuideLines guide={guide} depth={row.depth} expandable={expandable} />
+                      ) : null}
                       <div
                         className="flex h-full min-w-0 items-center gap-1 pr-2"
-                        style={{ paddingLeft: GUTTER_PX + row.depth * INDENT_PX }}
+                        style={{ paddingLeft: INDENT_BASE_PX + row.depth * INDENT_PX }}
                       >
                         {expandable ? (
                           <button
@@ -696,19 +701,26 @@ export function TreeGrid({
                             tabIndex={-1}
                             aria-expanded={!isCollapsed}
                             aria-label={isCollapsed ? "Expand" : "Collapse"}
-                            className="absolute top-1/2 left-0.5 inline-flex size-4 -translate-y-1/2 items-center justify-center text-muted-foreground hover:text-foreground"
+                            className="group inline-flex size-4 shrink-0 items-center justify-center"
                             onClick={(event) => {
                               event.stopPropagation();
                               toggle(span.span_id);
                             }}
                           >
-                            {isCollapsed ? (
-                              <ChevronRight className="size-3" />
-                            ) : (
-                              <ChevronDown className="size-3" />
-                            )}
+                            <span
+                              className="inline-flex items-center justify-center rounded-[2px] border border-muted-foreground/60 text-muted-foreground group-hover:border-foreground group-hover:text-foreground"
+                              style={{ width: TOGGLE_BOX_PX, height: TOGGLE_BOX_PX }}
+                            >
+                              {isCollapsed ? (
+                                <Plus className="size-2" strokeWidth={3} />
+                              ) : (
+                                <Minus className="size-2" strokeWidth={3} />
+                              )}
+                            </span>
                           </button>
-                        ) : null}
+                        ) : (
+                          <span className="inline-block size-4 shrink-0" />
+                        )}
                         <KindIcon kind={span.span_kind} />
                         <span className="min-w-0 truncate">{highlightName(span.name, query)}</span>
                         {span.status === "error" ? <StatusDot status="error" /> : null}
@@ -781,15 +793,27 @@ function markPct(ns: number, zoom: TimeWindow): number {
 }
 
 /**
- * The elbow lines in a row's indent: each level's line runs down from its parent's icon.
+ * The elbow lines in a row's indent: each level's line runs down from its parent's −/+ box.
  * ├ and a tick for a child with later siblings, a rounded └ for the last child, a full line
- * for each ancestor level that continues, and a line down from an expanded parent's icon.
+ * for each ancestor level that continues, and a line down from an expanded parent's box.
  */
-function TreeGuideLines({ guide, depth }: { guide: TreeGuide; depth: number }) {
-  const lineX = (level: number) => GUTTER_PX + (level - 1) * INDENT_PX + ICON_PX / 2;
+function TreeGuideLines({
+  guide,
+  depth,
+  expandable,
+}: {
+  guide: TreeGuide;
+  depth: number;
+  /** The row has a −/+ box, collapsed or not. */
+  expandable: boolean;
+}) {
+  const slotX = (level: number) => INDENT_BASE_PX + level * INDENT_PX;
+  const lineX = (level: number) => slotX(level - 1) + TOGGLE_SLOT_PX / 2;
   const elbowX = lineX(depth);
-  // The tick stops 2px before this row's icon.
-  const tickEnd = GUTTER_PX + depth * INDENT_PX - 2;
+  // The tick ends at this row's box, or, for a leaf, runs through the empty slot to its icon.
+  const tickEnd = expandable
+    ? slotX(depth) + (TOGGLE_SLOT_PX - TOGGLE_BOX_PX) / 2
+    : slotX(depth) + ICON_OFFSET_PX - 2;
   return (
     <span aria-hidden="true" data-guide={guideShape(guide)} className="pointer-events-none">
       {guide.through.map((through, offset) =>
@@ -819,8 +843,8 @@ function TreeGuideLines({ guide, depth }: { guide: TreeGuide; depth: number }) {
       ) : null}
       {guide.down ? (
         <span
-          className="absolute bottom-0 h-[calc(50%-9px)] w-px bg-border"
-          style={{ left: lineX(depth + 1) }}
+          className="absolute bottom-0 w-px bg-border"
+          style={{ left: lineX(depth + 1), height: `calc(50% - ${TOGGLE_BOX_PX / 2}px)` }}
         />
       ) : null}
     </span>
