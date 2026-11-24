@@ -469,3 +469,22 @@ The main session:
 - runs a Sonnet review;
 - has a GLM agent fix the findings;
 - pushes to PR #242.
+
+## Amendment A — IN5.2b: OpenLLMetry completions without a role
+
+IN5.2 found that LiteLLM's tool turn (`gen_ai.completion.0.function_call.{name,arguments}`, no `gen_ai.completion.0.role`) makes the OpenLLMetry reader record `cetra.normalize_error = messages:openllmetry:output`, although GenAI wins the output. The fix is in the OpenLLMetry reader, not in error recording.
+
+**Goal:** an indexed `gen_ai.completion.N` message without `role` is an assistant message, and its `function_call` object is a tool call.
+
+**Edit:** `crates/otel/src/conventions/openllmetry.rs` (and the converter it calls for indexed messages, if the change belongs there: name it in the report), `docs/spec/02-ingestion.md` (the OpenLLMetry row of § Input/output).
+
+**Steps.**
+1. In the OpenLLMetry output path only (`gen_ai.completion.`), a rebuilt message with no `role` gets `role = "assistant"`. Prompts (`gen_ai.prompt.`) keep today's rule (no role → raw JSON and an error; the test `a_prompt_without_a_role_is_raw_json_and_an_error_code` stays).
+2. A completion message's `function_call` object `{name, arguments}` becomes one `Part::ToolCall { id: None, name, arguments: parse_tool_arguments(arguments), extra: Map::new() }`, after any text part. If `name` is missing or not a string, the message is a conversion failure as today.
+3. Spec 02: one sentence in the OpenLLMetry row.
+
+**Tests:** completion without role → assistant; completion with `function_call` → tool call; the LiteLLM span (both conventions, GenAI empty assistant output + `function_call` keys) has no `cetra.normalize_error`; prompt without role still errors.
+
+**Done when:** `cargo nextest run -p cetra-otel`, clippy, fmt pass; no `expected.json` changed (if one changes, stop and report).
+
+**Commit:** `Read OpenLLMetry completions without a role`
