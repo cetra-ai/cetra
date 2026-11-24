@@ -173,6 +173,15 @@ fn span_messages(ctx: &mut ReadContext<'_, '_>, key: &str) -> Option<(Payload, b
         return None;
     }
     let value = ctx.bag.take_payload(key)?;
+    // D-IN-25 item 11: Bifrost's server root span repeats its `chat` child's
+    // content as a bare string under the message keys: the last user text, a
+    // tool result or the answer. On that scope, a value that is not a JSON
+    // array is the field's plain value (rule 10), and nothing failed.
+    if ctx.scope == "bifrost"
+        && !decode_json_text(value, ctx.warnings).is_some_and(|json| json.is_array())
+    {
+        return Some((non_message_payload(value, ctx.warnings), false));
+    }
     Some(genai_messages(value, ctx.warnings))
 }
 
@@ -665,14 +674,14 @@ mod tests {
     }
 
     /// Reads the span and keeps the bag, so a test can check how each key was used.
-    fn read_span_with_bag(attrs: &[KeyValue]) -> (Io, AttrBag<'_>) {
+    fn read_span_with_bag<'a>(scope: &str, attrs: &'a [KeyValue]) -> (Io, AttrBag<'a>) {
         let mut warnings = Warnings::default();
         let mut bag = AttrBag::new(attrs, &mut warnings);
         let io = read(&mut ReadContext {
             bag: &mut bag,
             events: &[],
             kind: SpanKind::Llm,
-            scope: "",
+            scope,
             conventions: &[],
             warnings: &mut warnings,
         });
@@ -695,7 +704,7 @@ mod tests {
             string_attr(LITELLM_CALL_NAME, "get_weather"),
             string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
         ];
-        let (io, bag) = read_span_with_bag(&attrs);
+        let (io, bag) = read_span_with_bag("", &attrs);
         let Payload::Messages(messages) = io.output.expect("output") else {
             panic!("output is messages");
         };
@@ -716,7 +725,7 @@ mod tests {
             ),
             string_attr(LITELLM_CALL_NAME, "get_weather"),
         ];
-        let (io, bag) = read_span_with_bag(&attrs);
+        let (io, bag) = read_span_with_bag("", &attrs);
         let Payload::Messages(messages) = io.output.expect("output") else {
             panic!("output is messages");
         };
@@ -737,7 +746,7 @@ mod tests {
             string_attr(LITELLM_CALL_NAME, "get_weather"),
             string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
         ];
-        let (io, bag) = read_span_with_bag(&attrs);
+        let (io, bag) = read_span_with_bag("", &attrs);
         let Payload::Messages(messages) = io.output.expect("output") else {
             panic!("output is messages");
         };
@@ -757,7 +766,7 @@ mod tests {
             string_attr(LITELLM_CALL_NAME, ""),
             string_attr(LITELLM_CALL_ARGUMENTS, r#"{"city":"Paris"}"#),
         ];
-        let (io, bag) = read_span_with_bag(&attrs);
+        let (io, bag) = read_span_with_bag("", &attrs);
         let Payload::Messages(messages) = io.output.expect("output") else {
             panic!("output is messages");
         };
@@ -777,7 +786,7 @@ mod tests {
                 string_attr("gen_ai.output.messages", output),
                 string_attr(LITELLM_CALL_NAME, "get_weather"),
             ];
-            let (io, bag) = read_span_with_bag(&attrs);
+            let (io, bag) = read_span_with_bag("", &attrs);
             let Payload::Messages(messages) = io.output.expect("output") else {
                 panic!("output is messages");
             };
@@ -787,6 +796,60 @@ mod tests {
     }
 
     const TRACER: &str = "strands.telemetry.tracer";
+
+    #[test]
+    fn bifrost_root_span_text_is_the_fields_plain_value() {
+        // D-IN-25 item 11: on scope `bifrost`, a message key that is not a
+        // JSON array is the field's plain value, and nothing failed.
+        let attrs = [
+            string_attr("gen_ai.input.messages", "What is the weather in Paris?"),
+            string_attr(
+                "gen_ai.output.messages",
+                r#"{"temperature_c":18,"conditions":"sunny"}"#,
+            ),
+        ];
+        let (io, bag) = read_span_with_bag("bifrost", &attrs);
+        assert_eq!(
+            io.input,
+            Some(Payload::Text("What is the weather in Paris?".to_owned()))
+        );
+        assert_eq!(
+            io.output,
+            Some(Payload::Json(
+                json!({"temperature_c": 18, "conditions": "sunny"})
+            ))
+        );
+        assert!(io.errors.is_empty());
+        assert_eq!(bag.state("gen_ai.input.messages"), Some(Use::Payload));
+        assert_eq!(bag.state("gen_ai.output.messages"), Some(Use::Payload));
+
+        // A message array still goes through the converter.
+        let attrs = [string_attr(
+            "gen_ai.output.messages",
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"It is 18C and sunny."}]}]"#,
+        )];
+        let (io, _) = read_span_with_bag("bifrost", &attrs);
+        let Payload::Messages(messages) = io.output.expect("output") else {
+            panic!("output is messages");
+        };
+        assert_eq!(
+            messages_to_json(&messages),
+            r#"[{"role":"assistant","parts":[{"type":"text","content":"It is 18C and sunny."}]}]"#
+        );
+        assert!(io.errors.is_empty());
+
+        // The same plain text in another scope is still a conversion failure.
+        let attrs = [string_attr(
+            "gen_ai.input.messages",
+            "What is the weather in Paris?",
+        )];
+        let (io, _) = read_span_with_bag("", &attrs);
+        assert_eq!(
+            io.input,
+            Some(Payload::Text("What is the weather in Paris?".to_owned()))
+        );
+        assert_eq!(io.errors, ["messages:genai:input"]);
+    }
 
     #[test]
     fn details_events_read_each_key_from_the_first_event_that_carries_it() {
