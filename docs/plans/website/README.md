@@ -15,7 +15,7 @@ The design is `docs/website/00-design.md`. It has twelve milestones, M1–M12, e
 | M9 Pricing feature table | [`09-m9-pricing-matrix.md`](09-m9-pricing-matrix.md) | done (X1–X2) |
 | M10 Focused screenshots | [`10-m10-focused-shots.md`](10-m10-focused-shots.md) | done (Z1–Z2) |
 | M11 Showcase trace | [`11-m11-showcase-trace.md`](11-m11-showcase-trace.md) | done (T1–T2) |
-| M12 Hero scenarios | [`12-m12-hero-scenarios.md`](12-m12-hero-scenarios.md) | planned (E1–E3) |
+| M12 Hero scenarios | [`12-m12-hero-scenarios.md`](12-m12-hero-scenarios.md) | done (E1–E3) |
 
 ## Branches
 

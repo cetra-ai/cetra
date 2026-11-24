@@ -1,10 +1,49 @@
 ---
 import traceView from "../../assets/screenshots/marketing-trace-view.png";
+import traceCoding from "../../assets/screenshots/marketing-trace-view-coding.png";
+import traceExtraction from "../../assets/screenshots/marketing-trace-view-extraction.png";
+import traceResearch from "../../assets/screenshots/marketing-trace-view-research.png";
 import Button from "../components/Button.astro";
 import CopyCommand from "../components/CopyCommand.astro";
 import Frame from "../components/Frame.astro";
 import Section from "../components/Section.astro";
+import Tabs from "../components/Tabs.astro";
 import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
+
+const SCENARIOS = [
+  {
+    tab: "Support agent",
+    src: traceView,
+    label: "Traces · Support bot",
+    alt: "The cetra trace view: a support agent's run, with its span tree, timeline, models, tokens and costs, and the root span's input and output.",
+    caption:
+      "Retrieval, two tools in parallel, a PII check and an LLM judge, with the cost of every call.",
+  },
+  {
+    tab: "Coding agent",
+    src: traceCoding,
+    label: "Traces · Code agent",
+    alt: "The cetra trace view: a coding agent's run, where the first test run fails and the second passes after a fix, with its timeline, models, tokens and costs.",
+    caption:
+      "The first test run fails. The agent reads the error, fixes the test, and the second run passes.",
+  },
+  {
+    tab: "Research agent",
+    src: traceResearch,
+    label: "Traces · Research",
+    alt: "The cetra trace view: a research agent's run, with five web searches and two page reads in parallel, then one long call that writes a cited answer.",
+    caption:
+      "Five searches and two page reads run in parallel, then one long call writes the cited answer.",
+  },
+  {
+    tab: "Document extraction",
+    src: traceExtraction,
+    label: "Traces · Document pipeline",
+    alt: "The cetra trace view: an invoice extraction pipeline, where a small model's answer fails the schema check and a larger model reads the invoice again.",
+    caption:
+      "A small model reads the invoice. The schema check catches a wrong total, so a larger model reads it again.",
+  },
+];
 ---
 
 <Section tone="ink" pad="lg" id="top" labelledby="hero-title">
@@ -22,7 +61,14 @@ import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
       <CopyCommand id="hero-install" commands={INSTALL_COMMANDS} note="What does this run?" noteHref="/docs/self-hosting/install/" />
     </div>
     <div class="visual">
-      <Frame src={traceView} alt="The cetra trace view: a support agent's run, with its span tree, timeline, models, tokens and costs, and the root span's input and output." label="Traces · Support bot" fade={false} eager />
+      <Tabs id="hero-scenarios" label="Example traces" labels={SCENARIOS.map((scenario) => scenario.tab)}>
+        {SCENARIOS.map((scenario, i) => (
+          <div data-tab-panel hidden={i !== 0}>
+            <Frame src={scenario.src} alt={scenario.alt} label={scenario.label} fade={false} eager={i === 0} />
+            <p class="caption">{scenario.caption}</p>
+          </div>
+        ))}
+      </Tabs>
     </div>
   </div>
 </Section>
@@ -66,5 +112,16 @@ import { CLOUD, DEMO_URL, INSTALL_COMMANDS } from "../site";
   }
   .visual {
     margin-top: var(--space-8);
+  }
+  .visual :global(.tablist) {
+    justify-content: safe center;
+    border-bottom: 0;
+    margin-bottom: var(--space-4);
+  }
+  .caption {
+    margin-top: var(--space-3);
+    text-align: center;
+    font-size: var(--text-sm);
+    color: var(--fg-muted);
   }
 </style>
