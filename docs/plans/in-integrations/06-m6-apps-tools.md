@@ -668,3 +668,29 @@ Setup-only pages follow M5's setup-only pages. Every `python`, `ts` or `js` fenc
 ## After the last phase
 
 `just check`, a Sonnet code review, a GLM agent for the fixes, then a push to PR #242.
+
+## Amendment A — captures run offline; the receiver answers HEAD
+
+IN6.7 found three problems:
+- **Promptfoo:** with `PROMPTFOO_DISABLE_TELEMETRY=1` it still POSTs a `feature_used: telemetry disabled` event to `r.promptfoo.app`.
+- **Langflow:** 1.13.2 always fetches `https://pypi.org/pypi/langflow/json` at start-up. No switch turns it off.
+- **n8n:** 2.48.4 probes `HEAD <endpoint>/v1/traces` before exporting.
+
+The decisions below are recorded in D-IN-26, item 11.
+
+1. **Every capture runs in a private network namespace with only loopback,** on Linux. The recipes `just capture`, `just capture-all` and `just check-capture` run `cetra-capture` under `unshare --user --map-root-user --net`. The runner, mock, receiver and program then share one namespace, and nothing reaches the internet.
+   - Loopback must be up inside the namespace. If `unshare` does not bring it up, the recipe runs `ip link set lo up` first. Verify which is needed, and name it.
+   - Set `UV_OFFLINE=1`, so `uv run --frozen` never tries the index.
+   - Tool installs (`just capture-tools`) stay outside the namespace.
+   - A host without unprivileged user namespaces fails with a clear message. Captures are not in CI.
+   - `AGENTS.md`'s capture lines say so.
+   - Check that every existing case still passes `run --all --check` inside the namespace: `real_host_*` clients route to the mock and need no network. Any case that fails is a stop-and-report.
+2. **The receiver answers `HEAD` on `/v1/traces`, `/v1/metrics` and `/v1/logs`** with 200 and an empty body. It records no error. Test: `a_head_probe_is_answered`.
+3. **Langflow:** inside the namespace, its PyPI check fails with a connection error, which `build_version_notice` suppresses. Verify that, then run the case. Set `LANGFLOW_MODELS_DEV_REFRESH=false`.
+4. **Promptfoo:** recapture inside the namespace. The case has three `span` spans (the test case and two provider wrappers), not one.
+
+**IN6.7's Edit list gains:**
+- `justfile` (the capture recipes);
+- `tools/capture/src/receiver.rs`;
+- `AGENTS.md`;
+- this plan file.
