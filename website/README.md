@@ -49,7 +49,8 @@ The UI screenshots under `src/assets/screenshots/` are generated from the web UI
 - Run `just docs-screenshots` in a pull request that changes a screen shown in the docs, and commit the new PNGs. A reviewer checks the PNG diff. Name shots to rewrite only those: `just docs-screenshots trace-view sessions`.
 - The first time, install the browser: `pnpm --dir website exec playwright install chromium`. CI never downloads a browser.
 - A shot with `"theme": "dark"` is taken in the UI's dark theme; the marketing pages use the `marketing-*` shots.
-- To add a shot, add an entry to `screenshots.json` (`name`, `path`, `waitFor`, and optionally `actions` and `waitAfter`), run the recipe, and show the PNG on its page with `<Image>`. `just check-docs` fails when a listed shot has no PNG or a PNG has no entry.
+- To add a shot, add an entry to `screenshots.json` (`name`, `path`, `waitFor`, and optionally `actions`, `waitAfter`, `now`, `theme`, `viewport` and `clip`), run the recipe, and show the PNG on its page with `<Image>`. `just check-docs` fails when a listed shot has no PNG or a PNG has no entry.
+- A marketing shot shows one panel, readable at its size on the page: `viewport` (`{ "width", "height" }`) sets that shot's window, and `clip` (a CSS selector) captures only the first element it matches (D-W-23).
 
 ## Deployment
 

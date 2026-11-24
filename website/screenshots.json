@@ -99,21 +99,28 @@
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
     "theme": "dark",
+    "viewport": { "width": 1200, "height": 760 },
     "actions": [{ "click": "text=How can I export my traces to a CSV file?" }],
-    "waitAfter": "Input / Output"
+    "waitAfter": "Input / Output",
+    "clip": "aside[aria-label=\"Trace\"]"
   },
   {
     "name": "marketing-trace-list",
     "path": "/acme/support-bot/traces",
     "waitFor": "100 loaded",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 800, "height": 640 },
+    "actions": [{ "click": "button[aria-pressed]:has-text(\"Filters\")" }],
+    "clip": "main"
   },
   {
     "name": "marketing-alerts",
     "path": "/acme/support-bot/alerts",
     "waitFor": "High error rate",
     "now": "2026-01-01T11:00:00Z",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 800, "height": 400 },
+    "clip": "main"
   },
   {
     "name": "marketing-assistant",
@@ -128,7 +135,9 @@
       { "click": "button[aria-label=\"Send\"]" }
     ],
     "waitAfter": "Open in traces",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 1200, "height": 760 },
+    "clip": "[data-testid=\"assistant-window\"]"
   },
   {
     "name": "marketing-playground",
@@ -137,20 +146,26 @@
     "now": "2026-01-01T11:00:00Z",
     "actions": [{ "click": "button:has-text('Run all')" }],
     "waitAfter": "Open trace",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 800, "height": 640 },
+    "clip": "main"
   },
   {
     "name": "marketing-queue-review",
     "path": "/acme/support-bot/annotation-queues/01900000-0000-7000-8000-000000000a01/review/01900000-0000-7000-8000-000000000a11",
     "waitFor": "Complete and next",
     "now": "2026-01-01T11:00:00Z",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 1200, "height": 430 },
+    "clip": "section[aria-label=\"Review\"]"
   },
   {
     "name": "marketing-issue",
     "path": "/acme/support-bot/issues/01900000-0000-7000-8000-000000001c01",
     "waitFor": "ValueError: could not parse the reply",
     "now": "2026-01-03T20:00:00Z",
-    "theme": "dark"
+    "theme": "dark",
+    "viewport": { "width": 800, "height": 600 },
+    "clip": "main"
   }
 ]

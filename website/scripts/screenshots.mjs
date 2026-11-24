@@ -59,6 +59,8 @@ async function startServer() {
 
 async function shoot(context, shot) {
   const page = await context.newPage();
+  // A marketing shot sets its own window size; the docs' shots keep the context's 1440×900.
+  if (shot.viewport) await page.setViewportSize(shot.viewport);
   try {
     // Each shot starts from empty storage (no "Recent" items from an earlier shot). The docs show
     // the light theme; a marketing shot sets `"theme": "dark"`, the UI's default.
@@ -95,7 +97,10 @@ async function shoot(context, shot) {
       }
     });
     const path = join(OUT, `${shot.name}.png`);
-    await page.screenshot({ path, fullPage: false, animations: "disabled", caret: "hide" });
+    const options = { path, animations: "disabled", caret: "hide" };
+    // `clip` captures one element (the panel a section talks about) instead of the window.
+    if (shot.clip) await page.locator(shot.clip).first().screenshot(options);
+    else await page.screenshot({ ...options, fullPage: false });
     console.log(`wrote ${path}`);
   } finally {
     await page.close();
