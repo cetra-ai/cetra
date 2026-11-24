@@ -62,6 +62,7 @@ Each `@trace` function is one `span`, and each chat call inside a traced functio
 - The decorated function that starts the flow is a `span`, with its inputs and its output as JSON text.
 - Each chat call is an `llm` span, with the provider, the response model, the token counts and the cost, which cetra computes from its price table. Its input and output are the messages, including the tool call in the answer.
 - A decorated tool function is a `span`, with its arguments and its result.
+- An embedding call is an `embedding` span with its token counts. No fixture covers it.
 
 ## Limits
 

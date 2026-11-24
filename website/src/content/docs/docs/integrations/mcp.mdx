@@ -98,7 +98,7 @@ import cetra
 cetra.init(instrument=["mcp"])
 ```
 
-The `mcp` instrument in `cetra-sdk` installs with `pip install "cetra-sdk[mcp]"`. It creates no spans. It passes the trace context through MCP messages, so a server's spans join the client's trace. MCP 1.x has no tracing of its own, so the instrument is for MCP 1.x. MCP 2.x passes the context itself, and the instrument is not needed there.
+The `mcp` instrument in `cetra-sdk` installs with `pip install "cetra-sdk[mcp]"`. It uses OpenInference's MCP instrumentation, `openinference-instrumentation-mcp` 2.1.5. It creates no spans. It carries the trace context to the server, so spans that the server process makes, with its own instrumentation or with spans you write, join the client's trace. On `mcp<2` the MCP SDK makes no spans itself. On `mcp>=2` the SDK passes the context itself, and the instrument is not needed. In a spike with `mcp>=2` the instrument logged a harmless `ValueError` and had no effect. No fixture backs the instrument: the fixture above was captured without it.
 
 ## What you get
 

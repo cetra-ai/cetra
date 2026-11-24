@@ -528,8 +528,9 @@ struct Counted {
 }
 
 /// V4 (D-IN-6): `llm.usage.*` on `llm` spans of the `voltagent` convention.
-/// R-PF-2: the same keys on `llm` spans of scope `promptflow`, where Prompt
-/// Flow writes them (its `llm.usage.total_tokens` is already a TOTAL source).
+/// R-PF-2: the same keys on `llm` and `embedding` spans of scope `promptflow`,
+/// where Prompt Flow writes them (its `llm.usage.total_tokens` is already a
+/// TOTAL source).
 ///
 /// Not rows in the tables above: OpenInference and OpenLLMetry use the `llm.`
 /// namespace too, so only a `voltagent` or `promptflow` span reads these keys
@@ -543,8 +544,12 @@ fn scoped_usage(
     conventions: &[Convention],
     warnings: &mut Warnings,
 ) -> ScopedUsage {
-    let scoped = conventions.contains(&Convention::Voltagent) || scope_name == "promptflow";
-    if kind != SpanKind::Llm || !scoped {
+    let scoped = match kind {
+        SpanKind::Llm => conventions.contains(&Convention::Voltagent) || scope_name == "promptflow",
+        SpanKind::Embedding => scope_name == "promptflow",
+        _ => false,
+    };
+    if !scoped {
         return ScopedUsage::default();
     }
     ScopedUsage {
@@ -1430,6 +1435,29 @@ mod tests {
             bag.state("llm.usage.completion_tokens"),
             Some(Use::Consumed)
         );
+    }
+
+    #[test]
+    fn prompt_flow_counts_read_llm_and_embedding_spans() {
+        let attrs = [int_attr("llm.usage.prompt_tokens", 7)];
+        for (kind, scope, filled) in [
+            (SpanKind::Llm, "promptflow", true),
+            (SpanKind::Embedding, "promptflow", true),
+            (SpanKind::Embedding, "", false),
+            (SpanKind::Chain, "promptflow", false),
+        ] {
+            let mut warnings = Warnings::default();
+            let mut bag = AttrBag::new(&attrs, &mut warnings);
+            let counts = usage(&mut bag, kind, None, scope, &[], &mut warnings);
+            let key = "llm.usage.prompt_tokens";
+            if filled {
+                assert_eq!(counts.input_tokens, Some(7), "{kind:?} {scope}");
+                assert_eq!(bag.state(key), Some(Use::Consumed), "{kind:?} {scope}");
+            } else {
+                assert_eq!(counts, Usage::default(), "{kind:?} {scope}");
+                assert_eq!(bag.state(key), Some(Use::Unread), "{kind:?} {scope}");
+            }
+        }
     }
 
     #[test]

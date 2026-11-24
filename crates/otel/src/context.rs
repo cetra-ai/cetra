@@ -357,26 +357,30 @@ fn provider(
 }
 
 /// R-LK-1 (D-IN-5, D-IN-2): on scope `livekit-agents`, a `gen_ai.provider.name`
-/// that contains `.` or `:` is a host (LiveKit writes the netloc of its base
-/// URL). The key is consumed and the host goes through the endpoint table:
-/// `api.openai.com` is `openai`, other hosts their mapped provider. An unmapped
-/// host gives no provider, and no later source is read. `None` when the rule
-/// does not apply. No row is added to [`ENDPOINT_PROVIDERS`].
+/// is a host (LiveKit writes the netloc of its base URL) when it contains `:`,
+/// parses as an IP address, or the endpoint table maps it (`api.openai.com`
+/// is mapped to `openai`). The key is consumed. A mapped host gives its
+/// provider; an unmapped host or IP gives no provider, and no later source is
+/// read. Any other value (`azure.ai.openai`, `gcp.vertex_ai`) is not a host:
+/// `None`, the key is left alone and the normal provider rules read it. No row
+/// is added to [`ENDPOINT_PROVIDERS`].
 fn livekit_provider(bag: &mut AttrBag<'_>, scope_name: &str) -> Option<Option<String>> {
     if scope_name != "livekit-agents" {
         return None;
     }
-    let text = bag
-        .get("gen_ai.provider.name")
-        .and_then(as_str)
-        .filter(|text| text.contains(['.', ':']))?;
+    let text = bag.get("gen_ai.provider.name").and_then(as_str)?;
     let host = host_of(text);
-    bag.take("gen_ai.provider.name");
     let mapped = match host.as_deref() {
         Some("api.openai.com") => Some("openai"),
         Some(host) => match_endpoint(host),
         None => None,
     };
+    let is_host =
+        text.contains(':') || text.trim().parse::<std::net::IpAddr>().is_ok() || mapped.is_some();
+    if !is_host {
+        return None;
+    }
+    bag.take("gen_ai.provider.name");
     Some(mapped.map(str::to_owned))
 }
 
@@ -2011,6 +2015,32 @@ mod tests {
 
         // The endpoint table itself is unchanged (D-IN-2).
         assert_eq!(match_endpoint("api.openai.com"), None);
+    }
+
+    #[test]
+    fn livekit_values_that_are_not_hosts_keep_their_provider() {
+        // A dotted provider name that no host rule matches is not a host: the
+        // key is left to the normal provider rules.
+        for name in ["azure.ai.openai", "gcp.vertex_ai"] {
+            let attrs = [string_attr("gen_ai.provider.name", name)];
+            let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+            assert_eq!(fields.provider.as_deref(), Some(name), "{name}");
+            assert_eq!(
+                bag.state("gen_ai.provider.name"),
+                Some(Use::Consumed),
+                "{name}"
+            );
+        }
+
+        // An IP address is a host: unmapped, so no provider, and consumed.
+        let attrs = [
+            string_attr("gen_ai.provider.name", "127.0.0.1"),
+            string_attr("gen_ai.system", "anthropic"),
+        ];
+        let (fields, bag) = filled_in_scope("livekit-agents", &attrs);
+        assert_eq!(fields.provider, None);
+        assert_eq!(bag.state("gen_ai.provider.name"), Some(Use::Consumed));
+        assert_eq!(bag.state("gen_ai.system"), Some(Use::Unread));
     }
 
     #[test]

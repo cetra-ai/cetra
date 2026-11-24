@@ -550,13 +550,27 @@ capture-tools:
 # Runs in a network namespace with only loopback (D-IN-26 item 11): no capture reaches the internet.
 # /root is a throwaway tmpfs inside it, where envoy-gateway's certgen writes (aigw, Amendment A point 7).
 capture +cases: capture-tools capture-py-sync capture-ts-sync
-    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
-    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh {{cases}}
+    {{just_executable()}} _capture-namespace {{cases}}
+
+# The capture run in a private network namespace (Amendment B point 6). Builds cetra-capture outside
+# the namespace, probes that the namespace works (its own stderr is printed on failure), then runs
+# `cetra-capture run ARGS` inside it with loopback up.
+[private]
+_capture-namespace +args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -q -p cetra-capture
+    unshare --user --map-root-user --net --mount sh -c 'command -v ip >/dev/null && ip link set lo up && mount -t tmpfs tmpfs /root' || { echo "captures need unprivileged user namespaces, ip (iproute2) and a tmpfs mount on /root: see AGENTS.md" >&2; exit 1; }
+    # /root is a throwaway tmpfs: envoy-gateway's certgen writes to the passwd home of uid 0, which
+    # is /root whatever HOME says (Amendment A point 7). It is not mounted when HOME is /root or
+    # inside it, because the mount would hide HOME.
+    mount_root=''
+    case "${HOME:-}" in /root|/root/*) ;; *) mount_root='mount -t tmpfs tmpfs /root && ' ;; esac
+    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c "ip link set lo up && ${mount_root}exec cargo run -q -p cetra-capture -- run \"\$@\"" sh {{args}}
 
 # Recapture every scenario
 capture-all: capture-tools capture-py-sync capture-ts-sync
-    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
-    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh --all
+    {{just_executable()}} _capture-namespace --all
 
 # Install the capture harness package (tools/capture/harness)
 capture-harness-sync:
@@ -577,8 +591,7 @@ check-capture: capture-tools capture-harness-sync capture-py-sync capture-ts-syn
     for env in tools/capture/envs/*/; do [ -d "${env}scenarios" ] || continue; (cd "$env" && uv run --locked ruff format --check && uv run --locked ruff check && uv run --locked mypy) || exit 1; done
     pnpm --dir tools/capture/ts run typecheck
     pnpm exec biome check tools/capture/ts
-    unshare --user --map-root-user --net --mount true 2>/dev/null || { echo "captures need unprivileged user namespaces (unshare --user --net): see AGENTS.md" >&2; exit 1; }
-    UV_OFFLINE=1 CARGO_NET_OFFLINE=true unshare --user --map-root-user --net --mount sh -c 'ip link set lo up && mount -t tmpfs tmpfs /root && exec cargo run -q -p cetra-capture -- run "$@"' sh --all --check
+    {{just_executable()}} _capture-namespace --all --check
 
 # Packaging and release (track N, docs/plans/n-packaging/)
 

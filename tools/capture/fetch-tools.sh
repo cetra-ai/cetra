@@ -134,12 +134,18 @@ for env_dir in "$repo_root"/tools/capture/envs/*/; do
 done
 
 # Chromium for Browser Use (IN6.1): the browser-use environment's pinned playwright installs it into
-# target/capture-tools/playwright (the binary is pinned by that lock, not checksummed). Skipped when a
-# chromium-* directory is already there.
+# target/capture-tools/playwright (the binary is pinned by that lock, not checksummed). Installed
+# only when a chromium-*/INSTALLATION_COMPLETE marker exists and a copy of the browser-use uv.lock,
+# kept beside it, matches the committed lock; a mismatch reinstalls.
 playwright_dir="$tools_dir/playwright"
-if compgen -G "$playwright_dir/chromium-*" >/dev/null; then
+browser_use_lock="$repo_root/tools/capture/envs/browser-use/uv.lock"
+browser_use_lock_copy="$playwright_dir/uv.lock"
+if compgen -G "$playwright_dir/chromium-*/INSTALLATION_COMPLETE" >/dev/null &&
+    cmp -s "$browser_use_lock" "$browser_use_lock_copy"; then
     echo "capture-tools: chromium already present"
 else
     echo "capture-tools: installing chromium for browser-use"
     PLAYWRIGHT_BROWSERS_PATH="$playwright_dir" uv run --project "$repo_root/tools/capture/envs/browser-use" --frozen playwright install chromium
+    mkdir -p -- "$playwright_dir"
+    cp -- "$browser_use_lock" "$browser_use_lock_copy"
 fi

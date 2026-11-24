@@ -88,6 +88,7 @@ module-name = "cetra"
 [tool.uv]
 # openinference-instrumentation-mcp 2.1.6 was uploaded on 2026-11-19, after the 7-day cutoff
 # (2026-11-17). The newest upload before it is 2.1.5 (uploaded 2026-11-16).
+# Remove once openinference-instrumentation-mcp's floor is raised past a version older than 7 days.
 exclude-newer-package = { openinference-instrumentation-mcp = "2026-11-17T00:00:00Z" }
 
 [dependency-groups]
