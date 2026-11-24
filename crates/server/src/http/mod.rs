@@ -144,6 +144,12 @@ impl AppState {
             Err(arc) => Err(Self(arc)),
         }
     }
+
+    /// How many handles to the state are alive. Tests wait for spawned work to drop its clones.
+    #[cfg(test)]
+    pub(crate) fn handle_count(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
 }
 
 impl std::ops::Deref for AppState {
