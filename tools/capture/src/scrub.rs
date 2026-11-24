@@ -404,11 +404,14 @@ fn leaks(request: &ExportTraceServiceRequest, ctx: &ScrubContext) -> Vec<String>
 }
 
 fn leak_needles(ctx: &ScrubContext) -> Vec<String> {
+    // localhost alone is not a leak: tool descriptions mention it (Qwen's shell tool says
+    // `php -S localhost:8000`); the mock and the receiver are always reached with their port.
     let mut needles = vec![
         "127.0.0.1".to_owned(),
         ctx.mock_host.clone(),
         format!("{}:{}", ctx.mock_host, ctx.mock_port),
-        "localhost".to_owned(),
+        format!("localhost:{}", ctx.mock_port),
+        format!("localhost:{}", ctx.receiver_port),
         "[::1]".to_owned(),
         format!(":{}", ctx.mock_port),
         format!(":{}", ctx.receiver_port),
@@ -793,6 +796,50 @@ mod tests {
         };
         let error = scrub(&mut leftover, &ctx).unwrap_err();
         assert!(matches!(error, CaptureError::Leak { .. }), "{error}");
+    }
+
+    #[test]
+    fn localhost_with_the_mock_port_is_a_leak() {
+        let mut request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "chat".to_owned(),
+                        attributes: vec![string_attr("server.address", "localhost:40123/v1")],
+                        ..Span::default()
+                    }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        };
+        let error = scrub(&mut request, &ctx()).unwrap_err();
+        assert!(matches!(error, CaptureError::Leak { .. }), "{error}");
+    }
+
+    #[test]
+    fn localhost_in_static_text_is_not_a_leak() {
+        let mut request = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        name: "tool".to_owned(),
+                        attributes: vec![string_attr(
+                            "gen_ai.tool.description",
+                            "use php -S localhost:8000 to serve the folder",
+                        )],
+                        ..Span::default()
+                    }],
+                    ..ScopeSpans::default()
+                }],
+                ..ResourceSpans::default()
+            }],
+        };
+        scrub(&mut request, &ctx()).unwrap();
+        assert_eq!(
+            text_of(&request.resource_spans[0].scope_spans[0].spans[0].attributes[0]),
+            "use php -S localhost:8000 to serve the folder"
+        );
     }
 
     #[test]

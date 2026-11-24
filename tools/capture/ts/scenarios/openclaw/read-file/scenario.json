@@ -1,0 +1,59 @@
+{
+  "description": "OpenClaw 2026.11.5 in --local mode with its diagnostics-otel plugin: one read of hello.txt, then the answer; traces with content.",
+  "spec_refs": ["02 § Coding agents"],
+  "notes": "The plugin is installed from npm into the staged home (IN7.0), so the exporter capability is granted; the case uses the --local run, not the gateway. openclaw.model.usage is a per-turn total of the model calls and is dropped by cetra. openclaw.context.assembled is dropped too. OpenClaw puts the run's date into the user message and a timestamp and idempotency key into openclaw.content.input_messages, and the output message list carries the provider's response fields; these values differ between runs, so the five attributes are timing attributes: the check ignores their values and they are not rewritten. openclaw.model_call.time_to_first_byte_ms is measured. The tool-call id is the mock's and stable, so nothing is volatile.",
+  "instrumentation": "openclaw",
+  "libraries": ["openclaw"],
+  "timing_attributes": [
+    "gen_ai.input.messages",
+    "input.value",
+    "openclaw.content.input_messages",
+    "openclaw.content.output_messages",
+    "openclaw.model_call.time_to_first_byte_ms"
+  ],
+  "volatile_attributes": [],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": null,
+        "reasoning": null,
+        "tool_calls": [
+          {
+            "id": "call_openclaw_read_1",
+            "name": "read",
+            "arguments": {
+              "path": "hello.txt"
+            }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": {
+        "input": 82,
+        "output": 17,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini",
+      "message": {
+        "text": "hello.txt says: hello from cetra.",
+        "reasoning": null,
+        "tool_calls": []
+      },
+      "finish": "stop",
+      "usage": {
+        "input": 131,
+        "output": 12,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0
+      }
+    }
+  ]
+}

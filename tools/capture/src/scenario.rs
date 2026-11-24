@@ -31,6 +31,9 @@ pub const GROUPS: &[&str] = &[
     "claude_code",
     "codex",
     "gemini_cli",
+    "qwen_code",
+    "pi",
+    "openclaw",
     "voltagent",
     "edge",
     "n8n",
@@ -1369,7 +1372,14 @@ mod tests {
 
     #[test]
     fn case_path_accepts_the_coding_agent_groups() {
-        for group in ["claude_code", "codex", "gemini_cli"] {
+        for group in [
+            "claude_code",
+            "codex",
+            "gemini_cli",
+            "qwen_code",
+            "pi",
+            "openclaw",
+        ] {
             let text = format!("{group}/x");
             let path: CasePath = text.parse().expect(&text);
             assert_eq!(path.to_string(), text);
