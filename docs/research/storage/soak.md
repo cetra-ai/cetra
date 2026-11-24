@@ -43,6 +43,8 @@ Growth rules are enforced only when `hours ≥ max(warmup_hours, (retention_days
 | id | date | commit | machine | store | hours | rate | result | data |
 |---|---|---|---|---|---|---|---|---|
 | `20261122-vm-48h` | 2026-11-22 | 041b2b1 + #214 | VM, 12 vCPUs, virtual disk | local | 48 | 1,000 | fail: `rss_growth`, `rss_max`, `ingest_rate` | [`soak/20261122-vm-48h/`](soak/20261122-vm-48h/) |
+| `20261124-vm-noq-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, no queries | fail: `rss_max`, `ingest_rate` (0.9885 at worst) | [`soak/20261124-vm-noq-12h/`](soak/20261124-vm-noq-12h/) |
+| `20261124-vm-q-12h` | 2026-11-24 | b0e5710 | VM, 12 vCPUs, virtual disk | local | 12 | 1,000, 1 query/s | fail: `rss_max`, `ingest_rate` | [`soak/20261124-vm-q-12h/`](soak/20261124-vm-q-12h/) |
 
 The VM run is a dry run on a virtual disk, on a shared VM: its numbers are not publishable bare-metal numbers and back no claim.
 
@@ -105,10 +107,57 @@ The disk budget for the run was about 150 GB at peak. With `retention_days` 0, a
 
 - **What it shows.**
   - **RSS grows over two days (M7-2).** It goes up in steps, at about 10 h, 12.5 h, 16 h and 36 h, and does not come back down when retention halves the data. The steps at 12.5 h and 36 h both fall around 22:30 UTC, when the day's partitions are near their largest. The memtable stays under 314 MiB, the WAL under 200 MiB, and local mode has no read cache, so the growth is outside the storage's own budgets. Not located yet.
-  - **Ingest falls behind as the retained data grows (M7-4).** The hourly ratio follows the objects on disk: it falls through each day, jumps back after each retention drop, and falls again. CPU and the metrics query's p95 follow the same saw-tooth. There is no backpressure and fsync is not slow, so the driver itself does not get enough time. Queries run on the same 8-worker runtime as ingest, which suggests query load (scans grow with the retained data) takes time from ingest; a run with `CETRA_SOAK_QPS=0` would confirm it.
+  - **Ingest falls behind as the retained data grows (M7-4).** The hourly ratio follows the objects on disk: it falls through each day, jumps back after each retention drop, and falls again. CPU and the metrics query's p95 follow the same saw-tooth. There is no backpressure and fsync is not slow, so the driver itself does not get enough time. Queries run on the same 8-worker runtime as ingest, which suggests query load (scans grow with the retained data) takes time from ingest. The 12 h runs with and without queries confirmed it (§ 20261124).
   - Compaction, day closes, retention, deletions, orphans, the oracle and the settle all held for 48 h with realistic payloads, after the M7-1 fix.
 - **Caveats.** A shared VM on a virtual disk, so latencies and the ingest ratio are lower bounds for bare metal. The rate is 1,000 spans/s, half the default, for the disk budget (§ The VM dry run). Local store only.
 - **Deviations from the plan.** The rate (1,000 instead of 2,000 spans/s) and the duration (48 h instead of 24 h), set by the coordinating session for the disk budget and the growth rules. `events.jsonl.gz` is the scrubbed log, gzipped (246 KiB). The 53 `compaction job failed` warnings in `summary.json` are all `error = "stopped"`, logged within one second at 10:13:19 when the end of the run stopped compaction mid-rewrite; none happened during the run.
+
+## 20261124: queries on and off, 12 h each
+
+Two 12 h runs side by side, to tell what the 48 h run's ingest lag (M7-4) and RSS growth (M7-2) come from. They differ only in the queries: `20261124-vm-noq-12h` (A) runs none (`CETRA_SOAK_QPS=0`), `20261124-vm-q-12h` (B) runs 1 query/s as the 48 h run did.
+
+- **Machine.** The same VM as `20261122-vm-48h`.
+- **Code.** A `git archive` of b0e5710: the 48 h run's code plus the RSS split (`rss_anon_bytes`, `rss_file_bytes` in the samples) and `CETRA_SOAK_QPS=0`.
+- **Command.** Two `systemd-run --user` units, each with `MemoryMax=16G` and `LimitNOFILE=65536`, started together on 2026-11-24 at about 11:38 UTC and ended at 23:52 UTC (44,008 s, settle included): `CETRA_SOAK_HOURS=12 CETRA_SOAK_RATE=1000 CETRA_SOAK_RETENTION_DAYS=0 CETRA_SOAK_QPS=0|1 CETRA_SOAK_LABEL=vm-noq|vm-q … just soak`. The growth rules are reported, not enforced, at 12 h.
+- **Result.** Both fail `rss_max` and `ingest_rate` only; the other 26 rules pass or are reported. A's `ingest_rate` fails in three windows, at 0.9898, 0.9885 and 0.9885; B's fails in every window after the second hour.
+
+| hour | A ingest | B ingest | A CPU, cores | B CPU, cores | A RSS, GB | B RSS, GB |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.997 | 0.992 | 0.55 | 0.76 | 6.88 | 7.57 |
+| 2 | 0.997 | 0.981 | 0.55 | 1.04 | 6.96 | 9.99 |
+| 4 | 0.996 | 0.967 | 0.57 | 1.25 | 8.14 | 12.36 |
+| 6 | 0.996 | 0.961 | 0.61 | 1.33 | 8.57 | 12.47 |
+| 8 | 0.991 | 0.946 | 0.68 | 1.55 | 8.73 | 12.53 |
+| 10 | 0.989 | 0.932 | 0.73 | 1.73 | 9.02 | 12.43 |
+| 12 | 0.993 | 0.932 | 0.65 | 1.67 | 8.78 | 12.83 |
+
+The ingest ratio is appended / target spans in each hour, CPU the process's per hour, RSS at the end of the hour. In both runs anonymous memory is all but the whole RSS: file-backed memory stays at 0.06 GB (A) and 0.07 GB (B).
+
+| series | A max | B max |
+|---|---:|---:|
+| RSS, GiB | 8.59 | 12.12 |
+| WAL, MiB | 212.5 | 188.5 |
+| memtable, MiB | 342.7 | 267.8 |
+| spans L0 files | 32 | 36 |
+| oldest L0 file, s | 411.8 | 477.4 |
+| objects, GiB | 39.32 | 38.64 |
+
+  - B's queries, p95 of the per-minute p95s: list 814 ms, filter 905 ms, detail 134 ms, sessions 654 ms, metrics 1,519 ms (max 2,699 ms), scores 186 ms. 38.7 k queries, no error; 1 query/s was asked, about 0.9/s ran (one task runs them one after another).
+  - Deletions: 84 registered and applied in each run. Lag p95 1,020 s in both.
+  - End of run: A shut down in 2.4 s, B in 12.6 s; both reopened in under 0.5 s and settled in 3 passes. B's 56 `compaction job failed` warnings are all `error = "stopped"`, at 23:39:09–10 when the end of the run stopped compaction.
+- **Plots.**
+
+![A memory](soak/20261124-vm-noq-12h/plots/memory.png)
+![B memory](soak/20261124-vm-q-12h/plots/memory.png)
+![A ingest](soak/20261124-vm-noq-12h/plots/ingest.png)
+![B ingest](soak/20261124-vm-q-12h/plots/ingest.png)
+![B queries](soak/20261124-vm-q-12h/plots/queries.png)
+
+- **What it shows.**
+  - **The queries cause most of the ingest lag (M7-4).** Without queries, ingest stays at 0.99 or above for 7 h and bottoms at 0.988; with 1 query/s it falls to 0.93 by 10 h, as in the 48 h run (0.944 at 9 h). B's CPU stays under 2 of 12 cores, and neither run hit backpressure, so ingest does not lack CPU: the paced appends wait on something the queries hold or occupy, such as the shared runtime's workers or a lock on the append path. A's small decline (0.997 → 0.988) also follows the retained data, and some of it may be B's load on the shared disk.
+  - **RSS is heap, and the queries add about 4 GB of it (M7-2).** File-backed memory is under 0.1 GB, so the growth is allocations, not mapped files or page cache. Without queries RSS climbs 6.9 → 9.0 GB over 12 h; with queries it reaches 12.4 GB by 4 h and then stays between 12.4 and 12.8 GB. B's plateau looks like a high-water mark the allocator keeps (the query pool and its peak), not a leak; A's slow climb is ingest and compaction alone.
+- **Caveats.** A and B ran at the same time on one VM, so each one's ingest and latencies include the other's load on the 12 vCPUs and the disk; the difference between them is what the queries add, not two clean baselines. 12 h runs do not enforce the growth rules.
+- **Deviations from the plan.** None beyond the coordinating session's: these A/B runs were added after the 48 h run to locate M7-2 and M7-4.
 
 ## Claims
 
