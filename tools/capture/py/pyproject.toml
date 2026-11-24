@@ -83,6 +83,11 @@ dependencies = [
   "temporalio-openai-agents[openinference]==2.0.0",
   # The SDK under test, from this repository (editable), so the harness uses its runtime.
   "cetra-sdk",
+  # Pipecat (M6 captures A, docs/plans/in-integrations/spikes/m6-apps.md § 5): the newest upload at
+  # the 7-day cutoff. Prompt Flow (envs/promptflow) and LiveKit (envs/livekit) have their own
+  # environments (D-IN-26 item 1): promptflow conflicts with guardrails-ai (pydash), and
+  # livekit-agents with beeai (json-repair).
+  "pipecat-ai[openai]==1.16.0",
   # The capture harness, a package of its own (tools/capture/harness, module capture_py).
   "cetra-capture-harness",
 ]
@@ -187,3 +192,8 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "PIL.*"
 follow_imports = "skip"
+
+# Pipecat 1.16's stop_when_done is unannotated: the scenario only has to run.
+[[tool.mypy.overrides]]
+module = "pipecat_openai_pipeline"
+disallow_untyped_calls = false

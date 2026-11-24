@@ -1,0 +1,44 @@
+{
+  "description": "Pipecat's aggregator pipeline with OpenAILLMService, one registered function and built-in tracing (conversation and turn spans).",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage",
+    "02 § Normalization rules"
+  ],
+  "notes": "Pipecat 1.16.0 with its built-in tracing (enable_tracing=True, conversation_id). setup_tracing sets the global provider with an OTLP exporter that reads the runner's environment. The pipeline is user aggregator, OpenAILLMService on the mock, and assistant aggregator, with one get_weather function. LLMRunFrame starts the first model call; the function result starts the second. The tool-call turn has no output, and the function call has no span of its own. PipelineTask and WorkerRunner are Pipecat 1.16's names; the deprecated PipelineRunner is not used. No audio services run, so no STT or TTS spans appear.",
+  "instrumentation": "pipecat-ai",
+  "libraries": [
+    "pipecat-ai",
+    "openai",
+    "opentelemetry-sdk"
+  ],
+  "timing_attributes": [
+    "turn.duration_seconds"
+  ],
+  "turns": [
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_weather_1",
+            "name": "get_weather",
+            "arguments": { "city": "Paris" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.chat",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "It is 18 °C and sunny in Paris." },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    }
+  ]
+}

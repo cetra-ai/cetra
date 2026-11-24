@@ -114,6 +114,7 @@ D-IN-26, M6's decisions:
      - the capture project's `[tool.ruff]` (with `known-first-party = ["capture_py"]`) and `[tool.mypy]`, and a `dev` group pinning `ruff` and `mypy` at `tools/capture/py`'s versions.
    - The lint trio runs in `tools/capture/harness`, in `tools/capture/py` and in each environment.
    - An environment is used when a case's packages cannot share the capture project's lock (spike findings: OpenLIT needs `openai<3`, mcp 2 conflicts with semantic-kernel).
+   - IN6.5 made two: `envs/promptflow` (promptflow-tracing needs opentelemetry-sdk<1.39, so that environment overrides the OpenTelemetry set to 1.38.0 and pins azure-monitor-opentelemetry-exporter to 1.0.0b45, the newest release whose OpenTelemetry requirement takes 1.38 and which promptflow-devkit's OTLP path imports) and `envs/livekit` (livekit-agents needs json-repair 0.63, beeai-framework needs below 0.61).
 2. **Tool environments** (servers and CLIs the scenario launches; M5's pattern) are fetched by `just capture-tools` into `target/capture-tools/<name>/<version>/`:
    - **n8n and Promptfoo:** npm packages from `tools/capture/n8n/` and `tools/capture/promptfoo/`. Each holds a `package.json`, a `pnpm-workspace.yaml` (the shape of `tools/capture/ts`'s: `packages: []`, `minimumReleaseAge`, `allowBuilds`) and a `pnpm-lock.yaml`. They install with `pnpm install --frozen-lockfile --dir <project> --modules-dir <target dir>/node_modules`.
    - **Langflow:** a uv project `tools/capture/langflow/`, like `litellm-proxy`.
@@ -144,8 +145,8 @@ Every version is the newest upload on or before the 7-day cutoff of the day the 
 | `n8n` (npm) | 2.48.4 | `tools/capture/n8n/` |
 | `promptfoo` (npm) | 0.125.1 | `tools/capture/promptfoo/` |
 | `langflow` | 1.13.2 | `tools/capture/langflow/` |
-| `promptflow-tracing`, `promptflow-devkit` | 1.18.5 | capture project, or its own environment if the lock conflicts |
-| `livekit-agents`, `livekit-plugins-openai` | 1.8.12 | the same |
+| `promptflow-tracing`, `promptflow-devkit` | 1.18.5 | `envs/promptflow` (OpenTelemetry 1.38.0 overrides; `azure-monitor-opentelemetry-exporter` 1.0.0b45, D-IN-26 item 1) |
+| `livekit-agents`, `livekit-plugins-openai` | 1.8.12 | `envs/livekit` (the capture project's lock refuses it: json-repair, D-IN-26 item 1) |
 | `pipecat-ai[openai]` | 1.16.0 | the same |
 | `browser-use` | 1.0.6 | `envs/browser-use` |
 | `playwright` | 1.65.2, an explicit pin (newest upload before the cutoff, 2026-11-14; browser-use 1.0.6 does not lock it); locked by `uv.lock`, not checksummed | `envs/browser-use` (Chromium, item 10) |

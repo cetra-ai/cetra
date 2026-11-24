@@ -71,6 +71,28 @@ def real_host_client() -> httpx2.Client:
     return httpx2.Client(transport=RealHostTransport())
 
 
+class RealHostAsyncTransport(httpx2.AsyncBaseTransport):
+    """``RealHostTransport`` for async clients (LiveKit's OpenAI plugin, M6 captures A, D-IN-3)."""
+
+    def __init__(self) -> None:
+        self._mock = httpx2.URL(mock_url())
+        self._inner = httpx2.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx2.Request) -> httpx2.Response:
+        request.url = request.url.copy_with(
+            scheme=self._mock.scheme, host=self._mock.host, port=self._mock.port
+        )
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def real_host_async_client() -> httpx2.AsyncClient:
+    """An ``httpx2.AsyncClient`` whose requests reach the mock under their real host."""
+    return httpx2.AsyncClient(transport=RealHostAsyncTransport())
+
+
 class RealHostHttpxTransport(httpx.BaseTransport):
     """``RealHostTransport`` for SDKs built on ``httpx`` rather than ``httpx2`` (D-IN-3)."""
 
