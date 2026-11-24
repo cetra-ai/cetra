@@ -162,10 +162,13 @@ async fn soak() {
         Arc::clone(&shared),
         stop_rx.clone(),
     )));
-    tasks.push(tokio::spawn(driver::queries(
-        Arc::clone(&shared),
-        stop_rx.clone(),
-    )));
+    for task in 0..shared.config.query_tasks as u64 {
+        tasks.push(tokio::spawn(driver::queries(
+            Arc::clone(&shared),
+            stop_rx.clone(),
+            task,
+        )));
+    }
     tasks.push(tokio::spawn(driver::oracle(
         Arc::clone(&shared),
         stop_rx.clone(),
@@ -712,6 +715,7 @@ fn config_defaults() {
     assert_eq!(config.rate, 2_000);
     assert_eq!(config.projects, 4);
     assert_eq!(config.qps, 1.0);
+    assert_eq!(config.query_tasks, 1);
     assert_eq!(config.retention_days, 0);
     assert_eq!(config.sample_secs, 60);
     assert_eq!(config.warmup_hours, 2.4);
@@ -744,6 +748,26 @@ fn a_zero_qps_is_accepted_and_a_negative_one_refused() {
     assert_eq!(SoakConfig::from_lookup(with_qps("0")).unwrap().qps, 0.0);
     assert!(SoakConfig::from_lookup(with_qps("-1")).is_err());
     assert!(SoakConfig::from_lookup(with_qps("inf")).is_err());
+}
+
+#[test]
+fn query_tasks_are_between_1_and_16() {
+    let with_tasks = |tasks: &'static str| {
+        move |name: &str| match name {
+            "CETRA_SOAK_DIR" => Some("/home/tester/soak".to_owned()),
+            "CETRA_SOAK_OUT" => Some("/home/tester/soak-out".to_owned()),
+            "CETRA_SOAK_QUERY_TASKS" => Some(tasks.to_owned()),
+            _ => None,
+        }
+    };
+    assert_eq!(
+        SoakConfig::from_lookup(with_tasks("4"))
+            .unwrap()
+            .query_tasks,
+        4
+    );
+    assert!(SoakConfig::from_lookup(with_tasks("0")).is_err());
+    assert!(SoakConfig::from_lookup(with_tasks("17")).is_err());
 }
 
 #[test]
