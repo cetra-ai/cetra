@@ -831,3 +831,14 @@ Run from the worktree, with Node on the PATH:
 - **Queue review.** The shots clip only the review form (`section[aria-label="Review"]`), as before M15; the trace pane is left out.
 - **Playground.** 960×640 for all four, so the extraction run's second model name shows whole (CSS 921 px, an accepted exception to the 900 px rule).
 - **Alerts.** 900×900, with the rule panel in its bottom layout; the list's "Last evaluated" column is cut, which is accepted.
+
+## Changes after the code review
+
+- **The assistant shots** use a 1,024×1,000 viewport, the window stored at `{"x":16,"y":16,"width":560,"height":968}`, and `clipRect` `{"x":0,"y":0,"width":900,"height":1000}` (taller than first planned, so the coding chat's first question shows).
+- **The trace lists** use `cols=start,name,duration,cost`. The app's column widths still cut long values (start times, some costs); that is the UI's, not the shots'.
+- **Captions changed against their pictures** in Q2 step 7, as listed in its commit (4caee2f):
+  - the support queue caption no longer says "next to the trace";
+  - the voice hero says 3.1 s;
+  - the extraction hero and trace-list captions describe what the pictures show.
+- **The switcher has no committed browser test**: its 68 Playwright checks ran from a scratch script. Accepted for the marketing page; `check-marketing` and the node tests guard the data.
+- **Known limit:** generated traces carry generic names (`billing-lookup`, `draft-reply`…), so a story's trace list shows its hero trace among generic rows, not a list of `voice-agent` traces.
