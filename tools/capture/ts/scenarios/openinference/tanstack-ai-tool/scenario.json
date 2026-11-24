@@ -1,0 +1,42 @@
+{
+  "description": "TanStack AI chat with one tool call, traced by OpenInference's TanStack AI middleware.",
+  "spec_refs": [
+    "02 § Convention detection",
+    "02 § Mapping tables / Span kind",
+    "02 § Mapping tables / Input / output",
+    "02 § Mapping tables / Model, provider, usage"
+  ],
+  "notes": "@tanstack/ai 1.5.0 with the OpenAI adapter @tanstack/ai-openai 1.1.1, traced by OpenInference's middleware @arizeai/openinference-tanstack-ai 0.3.5. Only openInferenceMiddleware is on the chat call; TanStack's own otelMiddleware is not. The adapter calls the Responses API at the mock, streamed. The tool is read_file(path), a server tool that reads the file from the working directory. The mock answers the first model call with the tool call and the second with text. Expected: ai.chat (agent), ai.llm 1 (llm, tokens 82/17, cost computed), ai.tool read_file (tool, with arguments and result) and ai.llm 2 (llm, tokens 131/12, cost computed). The root carries no token counts, so nothing is counted twice. Volatile: tanstack.ai.request.id, tanstack.ai.stream.id and the iteration events' tanstack.ai.message.id are TanStack's timestamp-and-random ids. Timing: tanstack.ai.duration_ms and tanstack.ai.tool.duration_ms are measured durations. No telemetry leaves the process: the mock is the only host.",
+  "instrumentation": "@arizeai/openinference-tanstack-ai",
+  "libraries": ["@arizeai/openinference-tanstack-ai", "@tanstack/ai", "@tanstack/ai-openai"],
+  "timing_attributes": ["tanstack.ai.duration_ms", "tanstack.ai.tool.duration_ms"],
+  "volatile_attributes": [
+    "tanstack.ai.request.id",
+    "tanstack.ai.stream.id",
+    "tanstack.ai.message.id"
+  ],
+  "turns": [
+    {
+      "api": "openai.responses",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": {
+        "tool_calls": [
+          {
+            "id": "call_read_file_1",
+            "name": "read_file",
+            "arguments": { "path": "hello.txt" }
+          }
+        ]
+      },
+      "finish": "tool_calls",
+      "usage": { "input": 82, "output": 17 }
+    },
+    {
+      "api": "openai.responses",
+      "model": "gpt-4o-mini-2024-07-18",
+      "message": { "text": "hello.txt says: hello from cetra" },
+      "finish": "stop",
+      "usage": { "input": 131, "output": 12 }
+    }
+  ]
+}
