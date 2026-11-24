@@ -43,6 +43,9 @@ it("counts an issue's occurrences the same way in the issue and its days", () =>
   const dataset = createDataset({ seed: 1, now: NOW, traces: 2000 });
   for (const issue of STORY_ISSUES) {
     const detail = storyIssue(dataset, issue);
+    if (detail === undefined) {
+      throw new Error(`story issue ${issue.id} matches no trace`);
+    }
     const { days, examples } = storyOccurrences(dataset, issue);
     expect(detail.count).toBe(days.reduce((sum, day) => sum + day.count, 0));
     for (const day of days) {
@@ -76,6 +79,25 @@ it("lists the story rules with their state and a fired event for the firing ones
       WINDOW_MS[rule.condition.window],
     );
   }
+});
+
+it("leaves out a story issue that matches no trace", async () => {
+  const dataset = createDataset({ seed: 1, now: NOW, traces: 3 });
+  const unmatched = STORY_ISSUES.filter((issue) => storyIssue(dataset, issue) === undefined);
+  const matched = STORY_ISSUES.filter((issue) => storyIssue(dataset, issue) !== undefined);
+  expect(unmatched.length).toBeGreaterThan(0);
+  for (const issue of unmatched) {
+    expect(storyOccurrences(dataset, issue).examples).toEqual([]);
+  }
+
+  server.use(...storyHandlers(dataset));
+  const response = await fetch(`${PROJECT}/issues`);
+  expect(response.status).toBe(200);
+  const issues = (await response.json()) as Schema<"IssuePage">;
+  expect(issues.data.map((issue) => issue.id)).toEqual([
+    ...matched.map((issue) => issue.id),
+    "01900000-0000-7000-8000-000000001c01",
+  ]);
 });
 
 it("serves the story issues and rules before the fixtures, and lets other ids fall through", async () => {

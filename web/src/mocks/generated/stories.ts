@@ -268,7 +268,8 @@ export function storyOccurrences(dataset: Dataset, issue: StoryIssue): Schema<"I
   return { days, examples };
 }
 
-export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue"> {
+/** The issue, or undefined when no trace of the dataset matches it. */
+export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue"> | undefined {
   const { matched } = occurrenceTraces(dataset, issue);
   const oldestFirst = [...matched].sort(
     (left, right) => Date.parse(left.start_time) - Date.parse(right.start_time),
@@ -276,7 +277,7 @@ export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue">
   const oldest = oldestFirst[0];
   const newest = oldestFirst[oldestFirst.length - 1];
   if (oldest === undefined || newest === undefined) {
-    throw new Error(`story issue ${issue.id} has no traces; the dataset is too small`);
+    return undefined;
   }
   return {
     id: issue.id,
@@ -299,10 +300,15 @@ export function storyIssue(dataset: Dataset, issue: StoryIssue): Schema<"Issue">
   };
 }
 
-export function storyIssueEvents(dataset: Dataset, issue: StoryIssue): Schema<"IssueEventPage"> {
-  return {
-    data: [{ id: issue.eventId, kind: "created", at: storyIssue(dataset, issue).first_seen }],
-  };
+export function storyIssueEvents(
+  dataset: Dataset,
+  issue: StoryIssue,
+): Schema<"IssueEventPage"> | undefined {
+  const detail = storyIssue(dataset, issue);
+  if (detail === undefined) {
+    return undefined;
+  }
+  return { data: [{ id: issue.eventId, kind: "created", at: detail.first_seen }] };
 }
 
 export function storyAlertRule(dataset: Dataset, rule: StoryRule): Schema<"AlertRule"> {
@@ -360,8 +366,9 @@ function idParam(value: string | readonly string[] | undefined): string {
 }
 
 /**
- * The story issues and rules, before the fixtures. A handler that returns undefined lets the
- * request fall through to the fixtures' handlers.
+ * The story issues and rules, before the fixtures. A story issue that matches no trace is not
+ * served at all. A handler that returns undefined lets the request fall through to the
+ * fixtures' handlers.
  */
 export function storyHandlers(dataset: Dataset): HttpHandler[] {
   const issueById = (id: string) => STORY_ISSUES.find((issue) => issue.id === id);
@@ -369,21 +376,31 @@ export function storyHandlers(dataset: Dataset): HttpHandler[] {
   return [
     http.get(`${PROJECT}/issues`, () =>
       HttpResponse.json({
-        data: [...STORY_ISSUES.map((issue) => storyIssue(dataset, issue)), ...issuesFixture.data],
+        data: [
+          ...STORY_ISSUES.flatMap((issue) => {
+            const detail = storyIssue(dataset, issue);
+            return detail === undefined ? [] : [detail];
+          }),
+          ...issuesFixture.data,
+        ],
         next_cursor: null,
       }),
     ),
     http.get(`${PROJECT}/issues/:id`, ({ params }) => {
       const issue = issueById(idParam(params.id));
-      return issue ? HttpResponse.json(storyIssue(dataset, issue)) : undefined;
+      const detail = issue ? storyIssue(dataset, issue) : undefined;
+      return detail ? HttpResponse.json(detail) : undefined;
     }),
     http.get(`${PROJECT}/issues/:id/occurrences`, ({ params }) => {
       const issue = issueById(idParam(params.id));
-      return issue ? HttpResponse.json(storyOccurrences(dataset, issue)) : undefined;
+      return issue && storyIssue(dataset, issue)
+        ? HttpResponse.json(storyOccurrences(dataset, issue))
+        : undefined;
     }),
     http.get(`${PROJECT}/issues/:id/events`, ({ params }) => {
       const issue = issueById(idParam(params.id));
-      return issue ? HttpResponse.json(storyIssueEvents(dataset, issue)) : undefined;
+      const events = issue ? storyIssueEvents(dataset, issue) : undefined;
+      return events ? HttpResponse.json(events) : undefined;
     }),
     http.get(`${PROJECT}/alert-rules`, () =>
       HttpResponse.json({
