@@ -98,6 +98,8 @@ When a span has no reported cost, cetra looks for a price for its model and prov
 
 Gateways (OpenRouter, Vercel AI Gateway, Helicone, Portkey, Cloudflare AI Gateway) are the exception: when no row of the gateway matches a model named `vendor/name`, the price of the model's publisher applies, without the gateway's fees.
 
+A model named with a provider prefix, such as `openai/gpt-4o-mini` from LiteLLM-style clients, is priced as `gpt-4o-mini` by that provider when no row matches the full name. This applies only when the span names no provider or the same one, so a reseller's own price is never replaced by the publisher's.
+
 Embedding spans use the input price only.
 
 If no price matches, the cost is empty and the UI shows a dash. cetra never shows zero for an unknown cost. A span whose token counts are missing also has no cost.

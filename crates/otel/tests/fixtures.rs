@@ -900,8 +900,22 @@ fn pick_price<'a>(
     matches.first().copied()
 }
 
-/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13).
+/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13), then its prefix rule
+/// (D-IN-33).
 fn pick_price_or_publisher<'a>(
+    rows: &'a [PriceRow],
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<&'a PriceRow> {
+    pick_direct(rows, model, provider, start_time).or_else(|| {
+        let (provider, name) = cetra_otel::prefix_candidate(provider, model)?;
+        pick_direct(rows, name, Some(&provider), start_time)
+    })
+}
+
+/// `pick_price`, then the gateway fallback of `cost.rs` (D-IN-13).
+fn pick_direct<'a>(
     rows: &'a [PriceRow],
     model: &str,
     provider: Option<&str>,

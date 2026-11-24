@@ -68,11 +68,15 @@
         "everos",
         "memory"
       ],
+      "provider": "openai",
       "request_model": "openai/gpt-4o-mini",
       "input_tokens": 262,
       "output_tokens": 24,
       "total_tokens": 286,
-      "cost_source": "none",
+      "cost_input": 0.000262,
+      "cost_output": 0.000096,
+      "cost_total": 0.00035800000000000003,
+      "cost_source": "computed",
       "attributes": {
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.usage.input_tokens": "262",
@@ -117,11 +121,15 @@
         "memcell_id": "capture-volatile-3",
         "project_id": "default"
       },
+      "provider": "openai",
       "request_model": "openai/gpt-4o-mini",
       "input_tokens": 524,
       "output_tokens": 48,
       "total_tokens": 572,
-      "cost_source": "none",
+      "cost_input": 0.000524,
+      "cost_output": 0.000192,
+      "cost_total": 0.0007160000000000001,
+      "cost_source": "computed",
       "attributes": {
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.usage.input_tokens": "524",
@@ -174,11 +182,15 @@
       "metadata": {
         "memcell_id": "capture-volatile-3"
       },
+      "provider": "openai",
       "request_model": "openai/gpt-4o-mini",
       "input_tokens": 524,
       "output_tokens": 48,
       "total_tokens": 572,
-      "cost_source": "none",
+      "cost_input": 0.000524,
+      "cost_output": 0.000192,
+      "cost_total": 0.0007160000000000001,
+      "cost_source": "computed",
       "attributes": {
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.usage.input_tokens": "524",
@@ -305,11 +317,15 @@
         "everos",
         "memory"
       ],
+      "provider": "openai",
       "request_model": "openai/gpt-4o-mini",
       "input_tokens": 262,
       "output_tokens": 24,
       "total_tokens": 286,
-      "cost_source": "none",
+      "cost_input": 0.000262,
+      "cost_output": 0.000096,
+      "cost_total": 0.00035800000000000003,
+      "cost_source": "computed",
       "attributes": {
         "gen_ai.request.model": "openai/gpt-4o-mini",
         "gen_ai.usage.input_tokens": "262",

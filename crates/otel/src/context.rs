@@ -603,7 +603,9 @@ fn string_field(
     first_string(bag, resource, sources).map(|resolved| resolved.value)
 }
 
-fn canonical_provider(value: &str, from_vercel: bool) -> String {
+/// `value` after rule 12: lowercased, then mapped through the alias table. Cost also maps a
+/// model's `prefix/` with it (D-IN-33).
+pub(crate) fn canonical_provider(value: &str, from_vercel: bool) -> String {
     let lower = value.to_lowercase();
     if lower.starts_with("vertex_ai-") {
         return "gcp.vertex_ai".to_owned();

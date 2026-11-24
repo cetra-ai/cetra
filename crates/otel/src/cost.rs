@@ -13,6 +13,7 @@ use regex::{Regex, RegexBuilder, RegexSet, RegexSetBuilder};
 use serde::{Deserialize, Serialize};
 
 use crate::bag::AttrBag;
+use crate::context::canonical_provider;
 use crate::error::PriceError;
 use crate::usage::Usage;
 use crate::value::{InvalidNumber, as_f64};
@@ -489,9 +490,46 @@ fn first_number(
     (present, found)
 }
 
-/// The row that prices `model` for `provider` at `start_time`. When no row of the gateway
-/// `provider` matches, a gateway span falls back to its model publisher's rows (D-IN-13).
+/// The row that prices `model` for `provider` at `start_time`. When no row matches and `model`
+/// is `prefix/name`, the prefix names a provider (rule 12's aliases): `name` is looked up for
+/// that provider, on a span that names no provider or the same one (D-IN-33). A span of another
+/// provider is never priced this way, so a reseller's or gateway's own rows are never bypassed.
 fn lookup<'a>(
+    prices: &'a PriceTable,
+    model: &str,
+    provider: Option<&str>,
+    start_time: i64,
+) -> Option<&'a PriceRow> {
+    direct_lookup(prices, model, provider, start_time).or_else(|| {
+        let (provider, name) = prefix_candidate(provider, model)?;
+        direct_lookup(prices, name, Some(&provider), start_time)
+    })
+}
+
+/// For a model `prefix/name`, the (provider, name) pair the prefix rule retries (D-IN-33, spec 02
+/// § Cost computation step 2): the prefix after rule 12 when the span names no provider, the
+/// span's own provider when it is the same one. `None` for a span of another provider, a model
+/// without `/`, or an empty prefix or name.
+#[must_use]
+pub fn prefix_candidate<'m>(provider: Option<&str>, model: &'m str) -> Option<(String, &'m str)> {
+    let (prefix, name) = model.split_once('/')?;
+    if prefix.is_empty() || name.is_empty() {
+        return None;
+    }
+    let named = canonical_provider(prefix, false);
+    match provider {
+        None => Some((named, name)),
+        Some(span) if same_provider(&named, span) || same_provider(span, &named) => {
+            Some((span.to_owned(), name))
+        }
+        Some(_) => None,
+    }
+}
+
+/// The row that prices `model` for `provider` at `start_time`, without the prefix rule. When no
+/// row of the gateway `provider` matches, a gateway span falls back to its model publisher's rows
+/// (D-IN-13).
+fn direct_lookup<'a>(
     prices: &'a PriceTable,
     model: &str,
     provider: Option<&str>,
@@ -1382,6 +1420,163 @@ mod tests {
         assert!(
             prices
                 .price_for("openai/gpt-4o-mini", Some("novita"), 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_prefixed_model_without_provider_is_priced_by_the_prefix_provider() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        let priced = priced_of(&prices, "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn a_prefix_alias_is_mapped_through_rule_12() {
+        let prices = table(vec![
+            row(
+                "gemini-2.0-flash",
+                PriceScope::Builtin,
+                Some("gcp.gemini"),
+                0,
+                1.0,
+            ),
+            row(
+                &exact_pattern("anthropic.claude-3-haiku"),
+                PriceScope::Builtin,
+                Some("aws.bedrock"),
+                0,
+                2.0,
+            ),
+        ]);
+        let priced = priced_of(&prices, "gemini/gemini-2.0-flash", 1_000_000);
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.provider.as_deref(), Some("gcp.gemini"));
+        let priced = priced_of(&prices, "bedrock/anthropic.claude-3-haiku", 1_000_000);
+        assert_eq!(priced.input, Some(2.0));
+        assert_eq!(priced.provider.as_deref(), Some("aws.bedrock"));
+        let priced = priced_of(&prices, "GEMINI/gemini-2.0-flash", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+    }
+
+    #[test]
+    fn a_prefixed_model_with_the_same_provider_is_priced() {
+        let prices = table(vec![
+            row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 1.0),
+            row(
+                "gemini-2.0-flash",
+                PriceScope::Builtin,
+                Some("gcp.gemini"),
+                0,
+                3.0,
+            ),
+        ]);
+        let priced = priced_with(&prices, Some("openai"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.provider, None);
+        let priced = priced_with(
+            &prices,
+            Some("gcp.gen_ai"),
+            "gemini/gemini-2.0-flash",
+            1_000_000,
+        );
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(3.0));
+    }
+
+    #[test]
+    fn a_prefixed_model_of_another_provider_is_never_stripped() {
+        let prices = table(vec![
+            row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 1.0),
+            row("gpt-oss-120b", PriceScope::Builtin, Some("openai"), 0, 1.0),
+        ]);
+        let priced = priced_with(&prices, Some("groq"), "openai/gpt-oss-120b", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.input, None);
+        let priced = priced_with(&prices, Some("novita"), "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::None));
+        assert_eq!(priced.input, None);
+    }
+
+    #[test]
+    fn a_providers_own_vendor_model_row_wins_over_the_prefix_rule() {
+        let prices = table(vec![
+            row("gpt-4o-mini", PriceScope::Builtin, Some("openai"), 0, 1.0),
+            row(
+                &exact_pattern("openai/gpt-4o-mini"),
+                PriceScope::Builtin,
+                Some("vercel_ai_gateway"),
+                0,
+                9.0,
+            ),
+        ]);
+        let priced = priced_with(
+            &prices,
+            Some("vercel_ai_gateway"),
+            "openai/gpt-4o-mini",
+            1_000_000,
+        );
+        assert_eq!(priced.input, Some(9.0));
+        // The gateway's `/` row never prices a span without a provider; the prefix rule does.
+        let priced = priced_of(&prices, "openai/gpt-4o-mini", 1_000_000);
+        assert_eq!(priced.input, Some(1.0));
+        assert_eq!(priced.provider.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn an_unknown_or_empty_prefix_finds_no_row() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        assert!(lookup(&prices, "meta-llama/gpt-4o-mini", None, 0).is_none());
+        assert!(lookup(&prices, "/gpt-4o-mini", None, 0).is_none());
+        assert!(lookup(&prices, "openai/", None, 0).is_none());
+    }
+
+    #[test]
+    fn a_nested_gateway_prefix_reaches_the_publisher() {
+        let prices = table(vec![row(
+            "gpt-4o",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            2.0,
+        )]);
+        let priced = priced_of(&prices, "openrouter/openai/gpt-4o", 1_000_000);
+        assert_eq!(priced.source, Some(CostSource::Computed));
+        assert_eq!(priced.input, Some(2.0));
+    }
+
+    #[test]
+    fn price_for_applies_the_prefix_rule() {
+        let prices = table(vec![row(
+            "gpt-4o-mini",
+            PriceScope::Builtin,
+            Some("openai"),
+            0,
+            1.0,
+        )]);
+        let matched = prices
+            .price_for("openai/gpt-4o-mini", None, 0)
+            .expect("the prefix names the openai row's provider");
+        assert_eq!(matched.provider.as_deref(), Some("openai"));
+        assert!(
+            prices
+                .price_for("openai/gpt-4o-mini", Some("groq"), 0)
                 .is_none()
         );
     }

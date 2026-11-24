@@ -32,7 +32,7 @@ pub mod fuzz_entry;
 pub use agents::{AgentContext, AgentContexts, canonical_repository};
 pub use cost::{
     PriceRow, PriceScope, PriceTable, PriceTier, builtin_price_rows, exact_pattern,
-    publisher_candidates,
+    prefix_candidate, publisher_candidates,
 };
 pub use decode::{decode_json, decode_protobuf};
 pub use error::{DecodeError, JsonErrorCategory, PriceError};

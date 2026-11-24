@@ -41,8 +41,8 @@ Replace `<SK_CETRA_KEY>` with your `sk-cetra-…` API key. See [Send OpenTelemet
 Each API call is one trace:
 
 - a `span` named `everos.memory.add` or `everos.memory.flush`, with the session id;
-- an `llm` span named `everos.memcell.boundary` for each boundary-detection model call, with the request model and the token counts;
-- `llm` spans named `everos.extract` and `everos.extract.summary` for the episode and summary extraction calls, whose token counts sum every attempt the call took;
+- an `llm` span named `everos.memcell.boundary` for each boundary-detection model call, with the request model, the token counts and the cost computed from cetra's price table;
+- `llm` spans named `everos.extract` and `everos.extract.summary` for the episode and summary extraction calls, whose token counts sum every attempt the call took, with the cost computed from cetra's price table;
 - a `retriever` span named `everos.memory.search`, with the user id and, when content capture is on, the query as its input and the result counts as its output, with `everos.search.recall` and `everos.search.rank` under it for the recall and ranking phases;
 - an `embedding` span named `everos.embedding`, with the model, the input tokens and the cost computed from cetra's price table;
 - an `agent` span for each offline-memory strategy run, named `everos.ome.<strategy>`.
@@ -53,7 +53,6 @@ A model call that fails keeps its span, with an error status and an exception ev
 
 - Without the `otel` extra nothing is exported. See [Install](#install).
 - Content is off by default: set `EVEROS_OBSERVABILITY__CAPTURE_CONTENT=true` for input and output previews.
-- EverOS names its chat model the LiteLLM way, `provider/model` as in `openai/gpt-4o-mini`. cetra does not price a prefixed model name, so the `llm` spans carry no cost. The embedding model name carries no prefix and is priced.
 - The fixture's mock model answers one fixed reply that only the boundary call accepts, so the extraction spans in it show the error path. A real model answers the extraction calls and they succeed.
 - The fixture was captured with `everos[otel]` 1.7.0, one user message and a hybrid search.
 - If a field is missing, look at the span's **Attributes** tab and compare it with [Span attributes](/docs/reference/attributes/).

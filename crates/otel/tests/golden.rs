@@ -313,20 +313,13 @@ fn costs_match(path: &str, actual: &Value, expected: &Value) -> bool {
 /// table does price must still be priced.
 const COST_NONE_CASES: &[(&str, &str)] = &[("hermes_agent", "read-file")];
 
-/// Captured cases and the one model of theirs that may carry cost source `none`: its name
-/// carries a prefix no snapshot row has (EverOS's LiteLLM-style `openai/`), so those spans
-/// are unpriced on purpose (IN9.6, D-IN-31). Every other span of the case keeps the normal
-/// assertion.
-const COST_NONE_MODELS: &[(&str, &str, &str)] = &[("genai", "everos-memory", "openai/gpt-4o-mini")];
-
 /// Every captured `llm` or `embedding` span with a model and token counts is priced by
 /// the embedded snapshot, the table the server uses. The golden suite prices with
 /// `prices.json`, which has one row per test model, so it cannot see a provider that
 /// no snapshot row carries (D-B1-11). Hand-written cases use invented models and are
 /// not checked here. The cases in [`COST_NONE_CASES`] are checked the other way: a span
 /// the snapshot has no row for must carry cost source `none`, and one it prices must
-/// still carry a computed cost; the models in [`COST_NONE_MODELS`] are checked the same
-/// way, span by span.
+/// still carry a computed cost.
 #[test]
 fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
     let loaded = load_all_cases();
@@ -393,16 +386,10 @@ fn captured_llm_spans_are_priced_by_the_builtin_snapshot() {
                     Some(CostSource::Computed | CostSource::Reported)
                 );
             let model = candidates.first().copied();
-            let none_model = COST_NONE_MODELS.iter().any(|entry| {
-                (case.group.as_str(), case.name.as_str()) == (entry.0, entry.1)
-                    && candidates.contains(&entry.2)
-            });
-            if expects_none || none_model {
-                // Hermes's `custom` provider names the endpoint, not a vendor, and
-                // EverOS's `openai/gpt-4o-mini` carries a LiteLLM-style prefix no row
-                // has, so the spans those describe carry cost source `none` on purpose
-                // (IN7.13, D-IN-29; IN9.6, D-IN-31); a span a row does price (EverOS's
-                // embedding model) must still be priced.
+            if expects_none {
+                // Hermes's `custom` provider names the endpoint, not a vendor, so the
+                // spans it describes carry cost source `none` on purpose (IN7.13, D-IN-29);
+                // a span a row does price must still be priced.
                 checked += 1;
                 let row = candidates.iter().find_map(|model| {
                     prices.price_for(model, span.provider.as_deref(), span.start_time)
