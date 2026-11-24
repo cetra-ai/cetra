@@ -685,7 +685,13 @@ fn check_cost(label: &str, span: &Span, rows: &[PriceRow], failures: &mut Vec<St
     match span.cost_source {
         Some(CostSource::Computed) => check_computed(label, span, rows, failures),
         Some(CostSource::None) => {
-            let priced = matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
+            // A span with no token counts at all is exempt: D-B1-7 (cost.rs,
+            // "no token count at all is unknown usage, not a free call") keeps
+            // it `none` even when a price row matches, as on the Agent Spec
+            // fixture's spans, whose instrumentation writes no counts.
+            let tokenless = span.input_tokens.is_none() && span.output_tokens.is_none();
+            let priced =
+                !tokenless && matches!(span.span_kind, SpanKind::Llm | SpanKind::Embedding);
             let matched = price_models(span).into_iter().any(|model| {
                 rows.iter().any(|row| {
                     let Ok(pattern) = compile_anchored(&row.match_pattern) else {
