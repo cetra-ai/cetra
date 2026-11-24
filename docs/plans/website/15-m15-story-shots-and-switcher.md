@@ -823,3 +823,11 @@ Run from the worktree, with Node on the PATH:
 - **Q2, conventions.** Build with `pnpm --dir website exec astro build` only (never `pnpm build`). Drop `DEFAULT_STORY` from the module; step 5's test 1 asserts `STORIES[0].id === "support"` instead.
 - **Q2, URL on load.** Loading with `?story=` may rewrite the URL through `replaceState` (same parameters and hash, no new history entry); that is accepted, whatever the plan said about not rewriting it.
 - **Q2, copy changes.** Any caption or alt changed in step 7 is changed in `stories.mjs` and in test 5's `EXPECTED` table together.
+
+## Changes during implementation (Q1)
+
+- **Assistant shots.** The floating window exists only at 1,024 px or wider; below that the assistant is a full-width sheet that ignores the stored rect. The shots use a 1,024×900 viewport, the window stored at the left edge, and a new optional `clipRect` entry field (`{x, y, width, height}` in CSS px, validated by `checkClipRect` in `website/scripts/screenshot-storage.mjs`, documented in `website/README.md`) cropping to 900×900. They show the window and part of the dashboard behind it.
+- **Trace lists.** `cols=start,name,duration,tokens,cost`; the input column is dropped so every column fits in 900 px.
+- **Queue review.** The shots clip only the review form (`section[aria-label="Review"]`), as before M15; the trace pane is left out.
+- **Playground.** 960×640 for all four, so the extraction run's second model name shows whole (CSS 921 px, an accepted exception to the 900 px rule).
+- **Alerts.** 900×900, with the rule panel in its bottom layout; the list's "Last evaluated" column is cut, which is accepted.
