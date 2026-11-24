@@ -105,7 +105,7 @@ website/                          (one Astro project, one Cloudflare Pages proje
   - **JetBrains Mono** for code and for eyebrows/labels (the app's mono).
 
   All three load from the site, with fallbacks.
-- **Product (Linear):** screenshots in window frames that bleed off the edge of their band. Every product chapter repeats one layout: title, one line and a small feature list beside the UI scene, alternating sides. Each scene is a crop of the one panel its chapter talks about, never the whole app, and is shown no larger than its CSS size (§9.10.2, D-W-23).
+- **Product (Linear):** screenshots in window frames. Every product chapter repeats one layout: title, one line and a small feature list beside the UI scene, alternating sides. Each scene is a crop of the one panel its chapter talks about, never the whole app, and is shown no larger than its CSS size (§9.10.2, D-W-23).
 - **Motion:** little of it. One orchestrated hero moment (the trace tree filling in), tab switches, copy feedback. Everything readable at rest, and `prefers-reduced-motion` respected. No scroll-triggered content that can render blank (an anti-pattern in `research.md` §6).
 - **Mobile:** every section stacks to one column; scenes become scrollable crops.
 
