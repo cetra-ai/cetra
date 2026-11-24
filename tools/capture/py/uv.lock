@@ -800,6 +800,8 @@ requires-dist = [
     { name = "openinference-instrumentation-litellm", marker = "extra == 'litellm'", specifier = ">=0.1.53" },
     { name = "openinference-instrumentation-llama-index", marker = "extra == 'all'", specifier = ">=4.7.1" },
     { name = "openinference-instrumentation-llama-index", marker = "extra == 'llama-index'", specifier = ">=4.7.1" },
+    { name = "openinference-instrumentation-mcp", marker = "extra == 'all'", specifier = ">=2.1.5" },
+    { name = "openinference-instrumentation-mcp", marker = "extra == 'mcp'", specifier = ">=2.1.5" },
     { name = "openinference-instrumentation-mistralai", marker = "extra == 'all'", specifier = ">=2.3.5" },
     { name = "openinference-instrumentation-mistralai", marker = "extra == 'mistralai'", specifier = ">=2.3.5" },
     { name = "openinference-instrumentation-ollama", marker = "extra == 'all'", specifier = ">=0.1.20" },
@@ -817,7 +819,7 @@ requires-dist = [
     { name = "opentelemetry-sdk", specifier = ">=1.45.2,<2" },
     { name = "requests", specifier = ">=2.32" },
 ]
-provides-extras = ["openai", "anthropic", "langchain", "llama-index", "litellm", "google-genai", "bedrock", "openai-agents", "crewai", "dspy", "groq", "mistralai", "cohere", "ollama", "together", "instructor", "agno", "smolagents", "haystack", "beeai", "all"]
+provides-extras = ["openai", "anthropic", "langchain", "llama-index", "litellm", "google-genai", "bedrock", "openai-agents", "crewai", "dspy", "groq", "mistralai", "cohere", "ollama", "together", "instructor", "agno", "smolagents", "haystack", "beeai", "mcp", "all"]
 
 [package.metadata.requires-dev]
 dev = [

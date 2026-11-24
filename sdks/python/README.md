@@ -39,6 +39,7 @@ Auto-instrumentation is optional, one extra per library:
 | `smolagents` | `cetra-sdk[smolagents]` |
 | `haystack` | `cetra-sdk[haystack]` |
 | `beeai` | `cetra-sdk[beeai]` |
+| `mcp` | `cetra-sdk[mcp]` |
 | `autogen-agentchat` | `pip install openinference-instrumentation-autogen-agentchat` |
 
 The `instructor` and `beeai` distributions do not support every Python

@@ -161,6 +161,12 @@ REGISTRY: dict[str, Instrumentor] = {
             cls="BeeAIInstrumentor",
         ),
         Instrumentor(
+            name="mcp",
+            extra="mcp",
+            module="openinference.instrumentation.mcp",
+            cls="MCPInstrumentor",
+        ),
+        Instrumentor(
             name="autogen-agentchat",
             extra=None,
             module="openinference.instrumentation.autogen_agentchat",
