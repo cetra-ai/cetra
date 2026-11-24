@@ -1,0 +1,63 @@
+---
+title: Harbor and Terminal-Bench
+description: "Export Harbor agent trials as OTLP protobuf files and POST them to cetra. Setup only: the export and the upload were not run."
+---
+
+Harbor exports each agent trial as OpenTelemetry spans in protobuf files, and you send those files to cetra. This page is setup only: the export and the upload were not run.
+
+## Install
+
+Install Harbor and its exporter. Harbor needs Python 3.12 or later.
+
+```bash
+pip install harbor harbor-atif2otel
+```
+
+Harbor does not depend on `harbor-atif2otel`, so install it separately. The export command stops with an error that names it if it is missing.
+
+## Export
+
+Export the trials of a run to one protobuf file per trial:
+
+```bash
+harbor trace export --path <TRIAL_DIR_OR_ROOT> --format otel --encoding pb --output traces/
+```
+
+- `--path` takes one trial directory, or a root directory that holds trials. Trials are searched for recursively by default.
+- `--output` takes a directory with `--encoding pb`. Each trial with an `agent/trajectory.json` file becomes `traces/<trial-name>.pb`. Trials without one are skipped.
+- The command is hidden from `harbor --help`. `harbor trace export --help` shows it.
+
+Each `.pb` file is an OTLP `ExportTraceServiceRequest`, so the file is the request body for cetra's `/v1/traces` endpoint.
+
+## Send
+
+Post each file with the bearer header. Replace `<HOST>` with the host cetra runs on, and `<SK_CETRA_KEY>` with your `sk-cetra-…` API key.
+
+```bash
+for file in traces/*.pb; do
+  curl --data-binary "@$file" \
+    -H 'Content-Type: application/x-protobuf' \
+    -H 'Authorization: Bearer <SK_CETRA_KEY>' \
+    http://<HOST>:8080/v1/traces
+done
+```
+
+This step was not run.
+
+## What you get
+
+For each trial, the converter writes one root `agent` span, an `llm` span for each agent step, and a `tool` span for each tool call. The spans carry OpenInference attributes, which cetra reads. The spike read these spans from the converter's JSON output for a trial fixture; it did not run the protobuf export.
+
+## Limits
+
+- Not run: no trial was run, and neither the export nor the upload was tried. Running a trial needs Docker, according to the spike's reading of Harbor's documentation.
+- The converter's JSON output writes enum names, which cetra rejects. This page uses protobuf, which writes integer enums.
+- The `--endpoint` option uploads through MLflow's protocol, not generic OTLP. This page does not use it.
+- The root span carries the run's totals. It is an `agent` span, so it adds nothing to the token sums.
+- A trace's ID comes from the trial directory's name, so exporting the same trial again gives the same trace ID.
+- Harbor comes from the Terminal-Bench authors. This page covers Harbor's trial export. It does not check Terminal-Bench runs.
+
+## Next
+
+- [Send OpenTelemetry](/docs/get-started/opentelemetry/): the endpoint and the headers cetra expects.
+- [Traces](/docs/tracing/traces/): read the trace as a tree and a timeline.
